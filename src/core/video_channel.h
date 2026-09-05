@@ -33,6 +33,7 @@
 #include <boost/signals2.hpp>
 
 #include <functional>
+#include <memory>
 
 namespace caspar { namespace core {
 
@@ -66,6 +67,12 @@ struct route
     std::wstring                                                      name;
 };
 
+/// The per-tick state callback. Carries the snapshot as a shared immutable object
+/// rather than by value: the state map is rebuilt every frame and copying it per
+/// subscriber was pure waste, and a pointer is what lets a subscriber hold the frame it
+/// was handed while the next one is being built.
+using video_channel_tick_t = std::function<void(const std::shared_ptr<const core::monitor::state>&)>;
+
 class video_channel final
 {
     video_channel(const video_channel&);
@@ -76,7 +83,7 @@ class video_channel final
                            const video_format_desc&                  format_desc,
                            color_space                               default_color_space,
                            std::unique_ptr<image_mixer>              image_mixer,
-                           std::function<void(core::monitor::state)> on_tick,
+                           video_channel_tick_t                      on_tick,
                            color_transfer                            default_color_transfer = color_transfer::sdr,
                            bool                                      auto_color_convert     = true,
                            int                                       auto_tone_map          = 0,
@@ -87,7 +94,18 @@ class video_channel final
                            bool                                      working_space_composite = false);
     ~video_channel();
 
+    /// A copy of the last published snapshot. Kept for `INFO`, which wants a value.
     core::monitor::state state() const;
+
+    /// The last published snapshot, without copying it.
+    ///
+    /// `state()` returns a copy of a `flat_map` whose vectors each heap-allocate, and it
+    /// used to read a member the tick thread was concurrently overwriting -- fine while
+    /// the only reader was `INFO` (rare, and on the same thread as nothing else), and a
+    /// real data race the moment anything polls. The snapshot is now published as an
+    /// immutable object under an atomic, so a reader takes a pointer and the writer never
+    /// mutates what a reader can see.
+    std::shared_ptr<const core::monitor::state> state_snapshot() const;
 
     const std::shared_ptr<core::stage>& stage() const;
     std::shared_ptr<core::stage>&       stage();

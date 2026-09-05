@@ -37,6 +37,9 @@
 #include "mixer/mixer.h"
 #include "producer/stage.h"
 
+#include <atomic>
+#include <memory>
+
 #include <common/diagnostics/graph.h>
 #include <common/executor.h>
 #include <common/timer.h>
@@ -60,7 +63,9 @@ bool operator<(const route_id& a, const route_id& b)
 
 struct video_channel::impl final
 {
-    monitor::state state_;
+    // Published once per tick and never mutated afterwards, so a reader on any thread
+    // takes the pointer and reads a consistent frame. See video_channel::state_snapshot.
+    std::atomic<std::shared_ptr<const monitor::state>> state_{std::make_shared<const monitor::state>()};
 
     const channel_info channel_info_;
 
@@ -124,7 +129,7 @@ struct video_channel::impl final
     tick_phases tick_published_;
     bool        tick_published_valid_ = false;
 
-    std::function<void(core::monitor::state)> tick_;
+    video_channel_tick_t tick_;
 
     std::map<route_id, std::weak_ptr<core::route>> routes_;
     std::mutex                                     routes_mutex_;
@@ -161,7 +166,7 @@ struct video_channel::impl final
          const core::video_format_desc&            format_desc,
          color_space                               default_color_space,
          std::unique_ptr<image_mixer>              image_mixer,
-         std::function<void(core::monitor::state)> tick,
+         video_channel_tick_t                      tick,
          color_transfer                            default_color_transfer = color_transfer::sdr,
          bool                                      auto_color_convert     = true,
          int                                       auto_tone_map          = 0,
@@ -351,10 +356,20 @@ struct video_channel::impl final
                                                 stage_frames.format_desc.field_count,
                                             stage_frames.format_desc.framerate.denominator()};
                     state["format"]      = stage_frames.format_desc.name;
-                    state_               = state;
+
+                    // The channel's own frame number, so a subscriber can say WHICH frame a
+                    // value belongs to and a client can correlate a change with a frame it
+                    // saw. The counter has always existed; it was never published.
+                    state["frame"]       = frame_counter_;
+
+                    // Move rather than copy: this is the only writer, and nothing reads
+                    // `state` after this point. The previous `state_ = state` deep-copied
+                    // every key and vector on every tick of every channel.
+                    auto snapshot = std::make_shared<const monitor::state>(std::move(state));
+                    state_.store(snapshot, std::memory_order_release);
 
                     caspar::timer osc_timer;
-                    tick_(state_);
+                    tick_(snapshot);
                     const auto osc_elapsed = osc_timer.elapsed();
                     graph_->set_value("osc-time", osc_elapsed * stage_frames.format_desc.hz * 0.5);
                     // Folded into the window a tick late, by construction: it is not
@@ -453,7 +468,7 @@ video_channel::video_channel(int                                       index,
                              const core::video_format_desc&            format_desc,
                              color_space                               default_color_space,
                              std::unique_ptr<image_mixer>              image_mixer,
-                             std::function<void(core::monitor::state)> tick,
+                             video_channel_tick_t                     tick,
                              color_transfer                            default_color_transfer,
                              bool                                      auto_color_convert,
                              int                                       auto_tone_map,
@@ -475,7 +490,15 @@ output&                             video_channel::output() { return impl_->outp
 spl::shared_ptr<frame_factory>      video_channel::frame_factory() { return impl_->image_mixer_; }
 int                                 video_channel::index() const { return impl_->index(); }
 channel_info         video_channel::get_channel_info() const { return impl_->get_channel_info(); };
-core::monitor::state video_channel::state() const { return impl_->state_; }
+core::monitor::state video_channel::state() const
+{
+    return *impl_->state_.load(std::memory_order_acquire);
+}
+
+std::shared_ptr<const core::monitor::state> video_channel::state_snapshot() const
+{
+    return impl_->state_.load(std::memory_order_acquire);
+}
 
 std::shared_ptr<route> video_channel::route(int index, route_mode mode, bool raw) { return impl_->route(index, mode, raw); }
 

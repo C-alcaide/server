@@ -533,9 +533,10 @@ struct server::impl
                                                 default_color_space,
                                                 accelerator_.create_image_mixer(
                                                     channel_id, depth, gpu_index, gpu_index_explicit, render_format),
-                                                [channel_id, weak_client](core::monitor::state channel_state) {
+                                                [channel_id, weak_client](
+                                                    const std::shared_ptr<const core::monitor::state>& channel_state) {
                                                     monitor::state state;
-                                                    state[""]["channel"][channel_id] = channel_state;
+                                                    state[""]["channel"][channel_id] = *channel_state;
                                                     auto client                      = weak_client.lock();
                                                     if (client) {
                                                         client->send(std::move(state));
