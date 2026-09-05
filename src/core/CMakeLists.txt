@@ -41,6 +41,8 @@ set(SOURCES
 		frame/mesh_loader.cpp
 		frame/write_frame.cpp
 
+		stage/stage_math.cpp
+
 		mixer/audio/audio_mixer.cpp
 		mixer/image/blend_modes.cpp
 		mixer/mixer.cpp
@@ -104,6 +106,9 @@ set(HEADERS
 		producer/layer.h
 		producer/stage.h
 
+		stage/stage_model.h
+		stage/stage_math.h
+
 		fwd.h
 		module_dependencies.h
 		StdAfx.h
@@ -148,6 +153,7 @@ source_group(sources\\frame frame/*)
 source_group(sources\\mixer mixer/*)
 source_group(sources\\mixer\\audio mixer/audio/*)
 source_group(sources\\mixer\\image mixer/image/*)
+source_group(sources\\stage stage/*)
 source_group(sources\\producer\\color producer/color/*)
 source_group(sources\\producer\\route producer/route/*)
 source_group(sources\\producer\\transition producer/transition/*)

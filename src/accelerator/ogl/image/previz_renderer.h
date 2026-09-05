@@ -34,34 +34,10 @@ class texture;
 
 /// Callback invoked when auto-projection recomputes a screen's frustum.
 /// Receives the full computed screen_projection (angles + fov + curve geometry).
-struct screen_projection;
+/// The struct itself is `core::screen_projection`, re-exported by `previz_scene.h`.
 using projection_apply_fn =
     std::function<void(int channel, const screen_projection&)>;
 
-/// Computed projection for one screen.
-struct screen_projection
-{
-    float yaw_deg   = 0.0f;
-    float pitch_deg = 0.0f;
-    float roll_deg  = 0.0f;
-    float fov_deg   = 60.0f;
-    // Derived curved-screen compensation geometry.
-    int   curve_type      = 0;     // 0=flat,1=cylinder,2=sphere,3=fisheye
-    float screen_arc_deg  = 0.0f;  // horizontal arc subtended by the screen
-    float screen_arc_v_deg = 0.0f; // vertical arc (0 = cylinder)
-    float eye_distance    = 1.0f;  // viewer distance / screen radius (k)
-    // ── ICVFX inner/outer frustum ──────────────────────────────────────
-    bool  icvfx_enable    = false; // inner-frustum blend active for this screen
-    float inner_yaw_deg   = 0.0f;  // inner (camera-eye) view orientation
-    float inner_pitch_deg = 0.0f;
-    float inner_roll_deg  = 0.0f;
-    float inner_fov_deg   = 60.0f;
-    float inner_eye_distance = 1.0f;
-    // Camera-frustum mask quad in output NDC (-1..+1): 0=UL,1=UR,2=LR,3=LL
-    float icvfx_q[8]      = {-1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f};
-    float icvfx_feather   = 0.05f; // mask edge feather (NDC units)
-    float icvfx_outer_dim = 1.0f;  // outer-region brightness multiplier (0..1)
-};
 
 class previz_renderer
 {

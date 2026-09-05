@@ -28,6 +28,8 @@
 
 #include <cstdint>
 
+#include <core/stage/stage_model.h>
+
 namespace caspar { namespace core {
 class texture;
 }}
@@ -59,41 +61,19 @@ struct previz_mesh
     bool   gpu_dirty = true;
 };
 
-// ---- Previz camera --------------------------------------------------------
+// ---- Camera and screen: re-exported from core --------------------------------
+//
+// `previz_camera`, `screen_meta` and `screen_projection` are plain data with no GL in them, and
+// they now live in `core/stage/stage_model.h` so that `core` can describe a stage and the
+// projection maths can be tested without a display. Nothing about their layout changed.
+//
+// These three `using` declarations are what keeps that a non-event for callers: every existing
+// `ogl::screen_meta` -- in `AMCPCommandsImpl.cpp`, in `modules/tracking`, in this directory --
+// still names the same type.
 
-struct previz_camera
-{
-    float x = 0.0f, y = 1.5f, z = 5.0f; // position (metres)
-    float yaw = 0.0f, pitch = 0.0f, roll = 0.0f; // rotation (degrees)
-    float fov = 60.0f;     // vertical field of view (degrees)
-    float near_clip = 0.1f;
-    float far_clip = 100.0f;
-};
-
-// ---- Procedural screen metadata -------------------------------------------
-
-struct screen_meta
-{
-    std::string name;
-    float width_m  = 1.0f;
-    float height_m = 1.0f;
-    float radius_m = 0.0f;   // 0 = flat
-    float arc_deg  = 0.0f;
-    float arc_v_deg = 0.0f;  // vertical arc (0 = single-curved cylinder)
-    float pos_x = 0.0f, pos_y = 0.0f, pos_z = 0.0f;
-    float rot_yaw = 0.0f, rot_pitch = 0.0f, rot_roll = 0.0f;
-    int   res_w = 0;          // 0 = not set (use channel default)
-    int   res_h = 0;
-    int   channel = -1;       // mapped channel (-1 = unmapped)
-    // Eye-point model for curve compensation & FOV:
-    //   eye_mode 0 = CAMERA → eye follows the production virtual camera (in-camera VFX)
-    //   eye_mode 1 = FIXED  → eye sits at a fixed audience design position (design_eye)
-    int   eye_mode = 0;
-    float design_eye_x = 0.0f, design_eye_y = 1.5f, design_eye_z = 3.0f;
-    // ICVFX inner/outer frustum: when true, auto-projection computes a
-    // camera-eye inner frustum + feathered camera-frustum mask for this screen.
-    bool  icvfx_enable = false;
-};
+using core::previz_camera;
+using core::screen_meta;
+using core::screen_projection;
 
 // ---- Previz scene (all meshes + camera + mappings) ------------------------
 
