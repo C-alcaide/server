@@ -12,6 +12,7 @@ project (protocol_http)
 
 set(SOURCES
 		api_action.cpp
+		api_auth.cpp
 		api_events.cpp
 		api_status.cpp
 		api_tree.cpp
@@ -24,6 +25,7 @@ set(SOURCES
 
 set(HEADERS
 		api_action.h
+		api_auth.h
 		api_events.h
 		api_status.h
 		api_context.h

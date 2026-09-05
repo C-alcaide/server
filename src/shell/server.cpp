@@ -803,17 +803,22 @@ struct server::impl
                     CASPAR_THROW_EXCEPTION(user_error()
                                            << msg_info(L"Invalid <extent>, must be state or mixer: " + cfg.extent));
 
-                // `auth=password` is refused rather than ignored. Accepting a mode that is
-                // not implemented would leave an operator who deliberately configured
-                // authentication with a wide-open port and nothing in the log to say so --
-                // which is strictly worse than the same port with `off` written in the
-                // config, because there the operator knows.
-                if (cfg.auth != L"off") {
-                    CASPAR_LOG(fatal) << L"[http-api] <auth>" << cfg.auth
-                                      << L"</auth> is not implemented in this build. Only 'off' is accepted; "
-                                         L"do not expose this port off-segment.";
-                    CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Unsupported <auth> mode: " + cfg.auth));
+                if (cfg.auth != L"off" && cfg.auth != L"password")
+                    CASPAR_THROW_EXCEPTION(user_error()
+                                           << msg_info(L"Invalid <auth>, must be off or password: " + cfg.auth));
+
+                // A password mode with no password is refused rather than silently letting
+                // everyone in: an operator who wrote `<auth>password</auth>` and left
+                // `<password>` empty has asked for authentication, and starting anyway
+                // would give them a wide-open port they believe is closed.
+                if (cfg.auth == L"password" && cfg.password.empty()) {
+                    CASPAR_LOG(fatal) << L"[http-api] <auth>password</auth> with an empty <password>.";
+                    CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"<auth>password</auth> needs a <password>"));
                 }
+
+                if (cfg.auth == L"off")
+                    CASPAR_LOG(warning) << L"[http-api] No authentication. Do not bind this port to an interface "
+                                           L"reachable off-segment.";
 
                 // A lookup rather than the channel vector itself: `protocol_http` links
                 // core and common only, and taking `amcp::channel_context` would put the

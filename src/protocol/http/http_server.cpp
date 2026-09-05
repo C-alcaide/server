@@ -12,6 +12,7 @@
 #include "http_server.h"
 
 #include "api_action.h"
+#include "api_auth.h"
 #include "api_events.h"
 #include "api_status.h"
 #include "api_tree.h"
@@ -138,6 +139,7 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
     std::string                              server_name_;
 
     tcp::acceptor acceptor_;
+    auth_state    auth_;
 
     // Every request body runs here, never on an `io_context` thread. See the header.
     executor api_executor_{L"http-api"};
@@ -164,6 +166,7 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         , context_(std::move(context))
         , server_name_(u8(config_.name))
         , acceptor_(*io_context_)
+        , auth_(config_)
     {
         const auto address = config_.host.empty() ? asio::ip::make_address("0.0.0.0")
                                                   : asio::ip::make_address(u8(config_.host));
@@ -372,11 +375,25 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
                     const std::string& path,
                     const std::string& query,
                     const std::string& body,
-                    const std::string& peer)
+                    const std::string& peer,
+                    const std::string& authorization)
     {
+        // Before anything else, and on every request. `/v1/auth` is the one endpoint that
+        // has to be reachable without an answer, because it is where the question comes
+        // from -- and it reveals only a random challenge and a salt the client is meant to
+        // have.
+        if (path == "/v1/auth")
+            return auth_.issue_challenge();
+
+        if (!auth_.check(authorization))
+            return api_reply::fail(api_code::unauthorized,
+                                   "GET /v1/auth for a challenge, then answer on every request");
+
         // `?HOST_INFO` is OSCQuery's capability probe and is answered on ANY path, which is
         // what the spec says and what makes it usable as a liveness check without knowing
-        // the address space first.
+        // the address space first. It sits BELOW the authentication check on purpose: with
+        // `<auth>password</auth>` configured, an unauthenticated client learns nothing at
+        // all, not even the server's name.
         if (query == "HOST_INFO")
             return api_reply::ok_with(host_info(config_, count_subscriptions()));
 
@@ -474,6 +491,21 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         const auto target = split_target(std::string(req->target()));
 
         if (websocket::is_upgrade(*req)) {
+            // The event socket is on the same port and carries the same state, so it takes
+            // the same answer -- in the upgrade request's own `Authorization` header, which
+            // is the only chance a WebSocket handshake gives.
+            if (!auth_.check(std::string(req->operator[](bhttp::field::authorization)))) {
+                auto reply   = api_reply::fail(api_code::unauthorized,
+                                               "GET /v1/auth for a challenge, then answer on the upgrade request");
+                auto body    = json::serialize(json::value(envelope(reply, server_name_)));
+                const auto v = req->version();
+                asio::post(stream->get_executor(), [self, stream, buffer, body = std::move(body), v]() mutable {
+                    self->write(
+                        stream, buffer, bhttp::status::unauthorized, std::move(body), bhttp::verb::get, false, v);
+                });
+                return;
+            }
+
             if (target.path != "/v1/events") {
                 // An upgrade on any other path is answered as an ordinary request, so a
                 // client that mistyped the path gets `unknown_path` and its message rather
@@ -500,6 +532,7 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         const auto keep    = req->keep_alive();
         const auto ver     = req->version();
         const auto reqbody = req->body();
+        const auto authorization = std::string(req->operator[](bhttp::field::authorization));
 
         std::string peer;
         try {
@@ -510,10 +543,11 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
 
         // Off the io_context thread from here. Nothing below touches the socket until the
         // reply is posted back onto its strand.
-        api_executor_.begin_invoke([self, stream, buffer, target, method, keep, ver, reqbody, peer]() {
+        api_executor_.begin_invoke(
+            [self, stream, buffer, target, method, keep, ver, reqbody, peer, authorization]() {
             api_reply reply;
             try {
-                reply = self->route(method, target.path, target.query, reqbody, peer);
+                reply = self->route(method, target.path, target.query, reqbody, peer, authorization);
             } catch (...) {
                 CASPAR_LOG_CURRENT_EXCEPTION();
                 reply = api_reply::fail(api_code::internal, "unhandled exception building the reply");

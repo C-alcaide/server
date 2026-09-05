@@ -30,7 +30,7 @@ any of it**.
 | `<http>` controller, `<port> <host> <name> <extent> <max-prefixes>` | implemented | the `http` branch of `setup_controllers`, `server.cpp` |
 | Live mixer values, published sparsely by the tick | implemented | `publish_layer_transform` in `stage.cpp` |
 | `MIXER {ch}-{layer} FIELD {name} [values]` -- every registry field over AMCP | implemented | `mixer_field_command` in `AMCPCommandsImpl.cpp` |
-| `<auth>password</auth>` | **refused at startup**, with a fatal log | same branch — see §3 |
+| `<auth>password</auth>` -- challenge/response, SHA-256 | implemented | `auth_state` in `api_auth.cpp`, `sha256` in `common/sha256.h` |
 | `PUT /v1/value/.../mixer/{field}` -- validated, with `duration` and `tween` | implemented | `write_value` in `api_value.cpp` |
 | `op`: `set`, `toggle`, `add`, `cas` -- one closure on the stage executor | implemented | same |
 | `POST /v1/action/.../{verb}` -- transport, clear; clip loads delegated to AMCP | implemented | `run_action` in `api_action.cpp` |
@@ -90,7 +90,7 @@ Add an `<http>` block beside the `<tcp>` one. Every default below is the literal
 | `<port>` | `5254` | Not 5253 — that is the OSC predefined-client port in the shipped example config, and the collision would surface only as OSC packets arriving at an HTTP listener. |
 | `<host>` | `0.0.0.0` | Bind address. |
 | `<name>` | the machine's hostname | Names this server in every reply, and is `HOST_INFO.NAME`. A client attached to two servers tells them apart by this. |
-| `<auth>` | `off` | `password` is refused at startup in this build. |
+| `<auth>` | `off` | `password` turns on the handshake below. It needs a `<password>` and refuses to start without one. |
 | `<extent>` | `mixer` | `state` exposes only what the tick published. `mixer` also describes every mixer parameter of every existing layer — which is what a generated control surface needs, and what most of the tree's size is. |
 | `<max-prefixes>` | `32` | Per-connection subscription prefixes. Reserved for `/v1/events`. |
 
@@ -265,6 +265,42 @@ Two limits, both deliberate:
   breaking the guarantee. `POST` it to `/v1/action` first, then batch the rest.
 * **`queue` is accepted and echoed, and there is one queue.** The field is reserved now so a client
   written today does not have to change when independent queues arrive.
+
+### Authentication
+
+With `<auth>password</auth>` the password never crosses the wire. Ask for a challenge, answer it
+on the same request you want to make:
+
+```
+GET /v1/auth
+→ {"auth":"password","salt":"0486...","challenge":"6a80...","expires_s":30,
+   "algorithm":"Authorization: Caspar <challenge>:<sha256(sha256(password+salt)+challenge)>, hex, lower case"}
+
+GET /v1/tree
+Authorization: Caspar 6a80...:9f3c...
+```
+
+* **The client echoes the challenge it is answering.** That is what lets a WRONG answer consume
+  the challenge, so a guess costs a round trip to `/v1/auth` rather than nothing.
+* **A challenge is single-use**, right or wrong, and expires after 30 s. A correct answer cannot
+  be replayed.
+* **The salt is per server RUN.** A captured exchange is worthless against the next start.
+* **The WebSocket takes the same answer**, in the upgrade request's own `Authorization` header --
+  the only chance a WebSocket handshake gives.
+* **`?HOST_INFO` is behind it too.** An unauthenticated client learns nothing, not even the
+  server's name.
+
+**What this buys, and what it does not.** It stops the password being shouted on a studio LAN.
+It is not confidentiality -- every request and every event after the handshake is cleartext -- and
+it is not a password store: `<password>` is plain text in the config, so anyone who can read the
+config has the password whatever this does. There is no key stretching, deliberately: stretching
+a secret that is stored in the clear beside it protects nothing. **This is not a substitute for
+keeping the port off any interface you do not control.**
+
+SHA-256 is vendored (`src/common/sha256.h`) because the tree links no crypto library on either
+platform, and adding one -- or a `#ifdef` between Windows CNG and libcrypto -- for a single hash
+in a single handshake is a worse trade than 150 lines with the standard's own test vectors in the
+header.
 
 ### The same fields over AMCP
 
@@ -480,10 +516,18 @@ skipped rather than queued. Skipping is safe precisely because the diff is again
 the collect that does run carries everything the skipped one would have. Without the guards, four
 channels at 25 fps queue a hundred tasks a second whether or not the previous ones have run.
 
-**`auth=password` is refused at startup rather than ignored.** Accepting a mode that is not
-implemented would leave an operator who deliberately configured authentication with a wide-open
-port and nothing in the log to say so — strictly worse than the same port with `off` written in the
-config, because there the operator knows. Off by default is acceptable; silently absent is not.
+**A mode that cannot work is refused at startup, in both directions.** `<auth>password</auth>`
+with an empty `<password>` fails to start rather than letting everyone in: an operator who wrote
+that has asked for authentication, and starting anyway hands them a wide-open port they believe
+is closed. And `<auth>off</auth>` now logs a warning naming the risk, because "no authentication"
+is a decision worth seeing in the log of a server someone else configured.
+
+**The client names the challenge it answers, which the first version did not.** Without it the
+server has to try every live challenge in turn -- workable, and it means a wrong answer cannot be
+attributed to a challenge and therefore cannot consume one. Measured on that version: a corrupted
+answer was rejected and the correct answer to the same challenge was still accepted afterwards, so
+a challenge could be guessed at for its whole 30-second life. Echoing the challenge makes one
+attempt per challenge, right or wrong.
 
 **Request handling runs on its own executor, not on the shared `io_context`.** Accept, read and
 write use the shell's `io_context` — the same shape `AsyncEventServer` uses for AMCP. Every request
@@ -532,6 +576,8 @@ and Linux and leaves both bootstraps untouched.
 | scheduling refusals | **none -- checked by hand** | a frame in the past, `at_frame` and `in_frames` together, and an invalid op in a scheduled batch: each refused before anything was queued, and the value read back unchanged | 2026-09-05 |
 | `MIXER FIELD` reaches every field, and both facades agree | **none -- checked by hand** | inventory 177 rows; scalar, vec2, boolean, enum-by-name and enum-by-ordinal all set and read back; `MIXER 1-10 FIELD opacity 0.37` read back 0.37 through `MIXER FIELD`, through the old `MIXER OPACITY`, **and** through `/v1/value`; out-of-range, read-only, unknown field and short arity each refused with the value unchanged; a 50-frame tween settled at 0.0 | 2026-09-05 |
 | **the frame path is unchanged** | `conformance` + `grading`, **both mixers** | conformance **100/100 within 1.0 LSB** on opengl and on vulkan; grading **48/48 inside their gate** on both | 2026-09-05 |
+| authentication | **none -- checked by hand** | no header, a replayed answer, a corrupted answer, the wrong password, a malformed header and an unauthenticated WebSocket upgrade: **all six 401**. A correct answer: 200. **A corrupted answer consumed its challenge**, so the correct answer to that same challenge was then refused -- which is the property, and the first version failed it | 2026-09-05 |
+| the vendored SHA-256 is SHA-256 | **none -- implicitly, by the handshake** | the client hashes with Python's `hashlib` and the server with `common/sha256.h`; the handshake succeeds, which it cannot if the two disagree on a single bit | 2026-09-05 |
 | KEYFRAMES still round-trips | **none -- checked by hand** | `KEYFRAMES 1-10 SET`/`GET` with `opacity`, `rgb_r_gamma`, `proj_yaw` and `blur_type`: exact, including `proj_yaw` 90 on the wire and radians in the struct. The frozen-name check passes at 193 | 2026-09-05 |
 
 **What these numbers do not cover, and it is most of it.** They were taken by hand from one server
@@ -570,9 +616,9 @@ being true. Specifically:
    protocol.
 6. **No `sleep_frames`.** A batch is one instant; a sequence with waits inside it needs independent
    queues, which is the same deferral as `queue`.
-7. **No authentication.** `<auth>password</auth>` is refused at startup. Until it exists this port
-   must not be bound to an interface reachable off-segment -- and that applies to the WebSocket
-   too, which is the same port.
+7. **Authentication is a handshake, not a channel.** Everything after it is cleartext, and the
+   password is plain text in the config. It protects against listening, not against reading the
+   config, and it is not a reason to expose the port off-segment.
 8. **A subscription is not resumable.** A dropped socket loses the per-connection diff, so a client
    must re-subscribe and take the full set again. There is no session id to resume, deliberately.
 9. **`throttle_ms` is per message, not per path.** A subscription covering a busy prefix and a
