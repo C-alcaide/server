@@ -2,7 +2,7 @@
 
 > **State:** partial
 > **Modules:** `src/protocol/http`, `src/core/frame/transform_fields.h`
-> **Commands:** none — this is a protocol-layer feature, like the OSC client
+> **Commands:** 1 fork-specific AMCP command — `MIXER FIELD`, the registry's own projection onto AMCP
 > **Coverage:** **none**
 
 An HTTP interface that exposes what the server publishes as an **addressable, self-describing
@@ -29,6 +29,7 @@ any of it**.
 | The field registry behind the descriptors | implemented | `core::fields::all()`, `transform_fields.cpp` |
 | `<http>` controller, `<port> <host> <name> <extent> <max-prefixes>` | implemented | the `http` branch of `setup_controllers`, `server.cpp` |
 | Live mixer values, published sparsely by the tick | implemented | `publish_layer_transform` in `stage.cpp` |
+| `MIXER {ch}-{layer} FIELD {name} [values]` -- every registry field over AMCP | implemented | `mixer_field_command` in `AMCPCommandsImpl.cpp` |
 | `<auth>password</auth>` | **refused at startup**, with a fatal log | same branch — see §3 |
 | `PUT /v1/value/.../mixer/{field}` -- validated, with `duration` and `tween` | implemented | `write_value` in `api_value.cpp` |
 | `op`: `set`, `toggle`, `add`, `cas` -- one closure on the stage executor | implemented | same |
@@ -265,6 +266,30 @@ Two limits, both deliberate:
 * **`queue` is accepted and echoed, and there is one queue.** The field is reserved now so a client
   written today does not have to change when independent queues arrive.
 
+### The same fields over AMCP
+
+`MIXER FIELD` is the registry projected onto AMCP, so a client already speaking AMCP reaches
+every parameter this API describes -- and a field added to the registry is settable, readable and
+animatable with no handler written for it.
+
+```
+MIXER 1-10 FIELD                            → the whole inventory, 177 rows
+MIXER 1-10 FIELD opacity                    → 0.37
+MIXER 1-10 FIELD opacity 0.37               → 202 MIXER OK
+MIXER 1-10 FIELD opacity 0.0 50 easeoutsine → the same duration/tween every MIXER command takes
+MIXER 1-10 FIELD fill_translation 0.1 0.2   → a vector field, one value per component
+MIXER 1-10 FIELD blend_mode screen          → an enumeration by name
+MIXER 1-10 FIELD blend_mode 5               → ...or by ordinal; reads back as `add`
+```
+
+The inventory line is `name arity rw|r [min..max]`, so a client with no documentation at all can
+discover the surface from the protocol it is already speaking.
+
+**It validates against the same descriptor the API reports**, so `MIXER FIELD
+chroma_min_brightness 5` and the equivalent `PUT` fail identically, and neither can drift from
+what the tree advertises. The existing ninety `MIXER` handlers are untouched -- see section 3 for
+why they were not rewritten.
+
 ### Scheduling a batch on a frame
 
 `at_frame` names a frame from **this server's own `/channel/{n}/frame`**; `in_frames` counts from
@@ -377,6 +402,27 @@ when the transform CHANGES, and write the cached keys into the state on every ti
 §4 and in `CHANGELOG.md`; the projection block was moved onto the same rule, which is a cadence
 change for existing OSC consumers and is why it has a `CHANGELOG.md` entry of its own.
 
+**`MIXER FIELD` rather than rewriting the ninety existing handlers.** The plan for this branch
+said to re-point every `MIXER` command at `fields::find`/`set`, making AMCP a projection of the
+registry. It is not what happened, for two reasons. The handlers are not getters and setters:
+`MIXER BLUR` takes a radius, a type NAME, an angle and a centre and derives `blur.enable` from the
+radius; `MIXER CHROMA` carries a legacy positional form beside a modern one; `MIXER PROJECTION`
+converts four parameters from degrees. Generic field access would either lose those grammars or
+reimplement them beside the originals -- and reimplementing beside the original is the exact
+failure the registry exists to prevent. And `conformance` and `grading` drive perhaps a dozen of
+those ninety commands, so a ninety-handler rewrite would have a blast radius far larger than its
+gate. `MIXER FIELD` adds a path and removes none, which is why those batteries could confirm the
+frame path unmoved rather than merely fail to notice.
+
+**A value is dry-run before the transform is queued**, and that is not defensive
+programming -- it is a defect this command shipped and then fixed. `MIXER 1-10 FIELD blend_mode 5`
+pushed the ordinal as the STRING `"5"`, the descriptor's setter looked it up in the name list, did
+not find it, and returned false. But `set` runs inside the transform closure, on the stage
+executor, long after the command replied `202 MIXER OK`. Accepted, reported back as unchanged, no
+effect: the exact shape of the `MIXER EXPOSURE` defect, reproduced by the machinery built to
+prevent it. The fix is both halves -- an ordinal is pushed as a number, and every value is now
+applied to a scratch `image_transform` first, so a bad one is a `403` before anything is queued.
+
 **Out of range is refused rather than clipped.** Rejected: clamping to the descriptor's range,
 which is friendlier and is a different server. `grade_param` refuses, so clipping here would mean
 `MIXER 1-10 CHROMA ... 5.0` and `PUT .../chroma_min_brightness 5.0` doing different things -- and
@@ -484,6 +530,8 @@ and Linux and leaves both bootstraps untouched.
 | **the registry agrees with both mixers** | `compose self-test`, at every startup | 177 fields, 256 randomised transform pairs, **0 divergences on opengl and 0 on vulkan**. Its first run reported 8 diverging fields on both, every one of them a registry error -- see below | 2026-09-05 |
 | **a scheduled batch fires together on both channels** | **none -- checked by hand** | six runs, `at_frame` 40 frames ahead on two channels: the change became observable **2 frames after the named frame every time**, with a **spread of 0 frames between the channels every time**. The offset is the publication pipeline and is not compensated for -- see section 2 | 2026-09-05 |
 | scheduling refusals | **none -- checked by hand** | a frame in the past, `at_frame` and `in_frames` together, and an invalid op in a scheduled batch: each refused before anything was queued, and the value read back unchanged | 2026-09-05 |
+| `MIXER FIELD` reaches every field, and both facades agree | **none -- checked by hand** | inventory 177 rows; scalar, vec2, boolean, enum-by-name and enum-by-ordinal all set and read back; `MIXER 1-10 FIELD opacity 0.37` read back 0.37 through `MIXER FIELD`, through the old `MIXER OPACITY`, **and** through `/v1/value`; out-of-range, read-only, unknown field and short arity each refused with the value unchanged; a 50-frame tween settled at 0.0 | 2026-09-05 |
+| **the frame path is unchanged** | `conformance` + `grading`, **both mixers** | conformance **100/100 within 1.0 LSB** on opengl and on vulkan; grading **48/48 inside their gate** on both | 2026-09-05 |
 | KEYFRAMES still round-trips | **none -- checked by hand** | `KEYFRAMES 1-10 SET`/`GET` with `opacity`, `rgb_r_gamma`, `proj_yaw` and `blur_type`: exact, including `proj_yaw` 90 on the wire and radians in the struct. The frozen-name check passes at 193 | 2026-09-05 |
 
 **What these numbers do not cover, and it is most of it.** They were taken by hand from one server

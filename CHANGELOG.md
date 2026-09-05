@@ -1,6 +1,31 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: `MIXER <ch>-<layer> FIELD <name> [values] [duration] [tween]`
+
+Reads, writes and animates **any** parameter of `image_transform`, from the same declaration
+the control API generates its tree from — so a parameter added to the server is reachable
+over AMCP with no handler written for it, and is validated against the same range the API
+advertises.
+
+```
+MIXER 1-10 FIELD                            # the inventory: 177 rows, name arity rw|r [min..max]
+MIXER 1-10 FIELD opacity 0.37
+MIXER 1-10 FIELD fill_translation 0.1 0.2
+MIXER 1-10 FIELD blend_mode screen          # by name, or by ordinal
+MIXER 1-10 FIELD opacity 0.0 50 easeoutsine
+```
+
+**No existing command changed.** The ninety hand-written `MIXER` handlers carry argument
+grammars this cannot express — `MIXER BLUR` derives `blur.enable` from its radius, `MIXER
+CHROMA` keeps a legacy positional form, `MIXER PROJECTION` converts four angles from degrees —
+and rewriting them as generic field access would reimplement those grammars beside the
+originals. `conformance` **100/100 within 1.0 LSB** and `grading` **48/48**, on **both mixers**,
+confirm the frame path did not move.
+
+An out-of-range value, a read-only field, an unknown name or too few components answers `403`
+and changes nothing, checked **before** the transform is queued.
+
 ### Changed: every layer publishes its non-default mixer state, on every tick
 
 **This changes what an OSC subscriber receives**, and it changes it in two ways.

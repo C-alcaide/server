@@ -856,7 +856,31 @@ sub-command reaches the server.
 | Tracking | `TRACKING <ch>-<l> BIND/UNBIND/OFFSET/SCALE/ZERO/INFO`, `TRACKING LIST` |
 | Calibration | `CALIBRATION <ch> LUT/BYPASS/CLEAR/INFO` |
 | Consumers | `ADD <ch> <NAME> …`, `REMOVE <ch> <NAME>` — see the preview senders below |
+| Any mixer field | `MIXER <ch>-<l> FIELD <name> [values] [duration] [tween]` — see below |
 | System | `INFO`, `RESTART`, `SHUTDOWN` |
+
+### `MIXER FIELD` — every mixer parameter, without a command per parameter
+
+The families above are the commands with their own argument grammars. `MIXER FIELD` reaches
+**every** parameter the mixer has, from the one table the server generates its own documentation
+from — so a parameter added to the server is reachable here with no new command to learn.
+
+```
+MIXER 1-10 FIELD                            # the inventory: name, component count, rw/r, limits
+MIXER 1-10 FIELD opacity                    # read
+MIXER 1-10 FIELD opacity 0.37               # write
+MIXER 1-10 FIELD opacity 0.0 50 easeoutsine # with the usual duration and tween
+MIXER 1-10 FIELD fill_translation 0.1 0.2   # one value per component
+MIXER 1-10 FIELD blend_mode screen          # an enumeration by name, or by its number
+```
+
+An out-of-range value, a read-only field, an unknown name or too few components is refused with
+`403` and changes nothing — checked before the command is queued, so a refusal is never a `202`
+that quietly does nothing.
+
+The existing commands are unchanged and remain the ones to use where they exist: `MIXER BLUR`
+takes a radius, a type, an angle and a centre together and switches blur on for you, which
+`FIELD` will not do.
 
 ### Preview senders (Spout)
 
@@ -883,6 +907,14 @@ A CPU fallback produces the same picture at the same size, so check `INFO <ch>` 
 than the image if it matters: `spout/gpu-path` is true when the frame never reached host
 memory, and `spout/gpu-downscale` when the GPU also did the resize. `spout/every-nth`
 shows the divisor actually in force after `FPS` was resolved.
+
+### The control API (HTTP)
+
+A separate interface on its own port, off unless a `<http>` block is configured. It exposes the
+same state this section describes as an addressable tree a client can discover rather than
+hard-code, with a WebSocket for live changes. See
+[`../features/control-api.md`](../features/control-api.md) for the endpoints, the configuration
+and what is measured.
 
 ### OSC telemetry
 

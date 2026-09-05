@@ -46,6 +46,7 @@
 #include <core/diagnostics/call_context.h>
 #include <core/diagnostics/osd_graph.h>
 #include <core/frame/frame_transform.h>
+#include <core/frame/transform_fields.h>
 #include <core/frame/frame_visitor.h>
 #include <core/frame/mesh_loader.h>
 #include <core/frame/blend_mask_loader.h>
@@ -958,6 +959,21 @@ std::future<core::frame_transform> get_current_transform(command_context& ctx)
     return ctx.channel.stage->get_current_transform(ctx.layer_index());
 }
 
+/// One published datum as a string, for `MIXER FIELD`'s read form. `boost::lexical_cast`
+/// cannot be applied to the variant directly, and a `std::ostream` overload would change
+/// how these values print everywhere else.
+struct monitor_to_string : boost::static_visitor<std::string>
+{
+    std::string operator()(bool v) const { return v ? "1" : "0"; }
+    std::string operator()(const std::string& v) const { return v; }
+    std::string operator()(const std::wstring& v) const { return u8(v); }
+    template <typename T>
+    std::string operator()(T v) const
+    {
+        return boost::lexical_cast<std::string>(v);
+    }
+};
+
 template <typename Func>
 std::future<std::wstring> reply_value(command_context& ctx, const Func& extractor)
 {
@@ -1481,6 +1497,152 @@ single_double_animatable_mixer_command(command_context&                 ctx,
         ctx.layer_index(),
         [=](frame_transform transform) -> frame_transform {
             setter(transform, value);
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
+// ---------------------------------------------------------------------------------------
+// MIXER FIELD -- every transform parameter, from the one declaration
+// ---------------------------------------------------------------------------------------
+//
+// `MIXER 1-10 FIELD opacity 0.5 25 easeoutsine` sets any field in
+// `core::fields::all()`; with no value it reads one back; with no name it lists them.
+//
+// WHY THIS RATHER THAN RE-POINTING THE NINETY EXISTING HANDLERS at the registry, which is
+// what the plan for this branch said. Two reasons, and the second is the one that decided
+// it:
+//
+//   * Those handlers are not merely getters and setters. `MIXER BLUR` takes a radius, a
+//     type NAME, an angle and a centre and derives `blur.enable` from the radius; `MIXER
+//     CHROMA` has a legacy positional form and a modern one; `MIXER PROJECTION` converts
+//     degrees to radians for four parameters at once. Rewriting them as generic field
+//     access would either lose those argument grammars or reimplement them beside the
+//     originals, and reimplementing beside the original is the exact failure this registry
+//     exists to prevent.
+//   * `conformance` and `grading` drive a small subset of those commands. A ninety-handler
+//     rewrite gated by batteries that touch a dozen of them is a change whose blast radius
+//     is much larger than its check. This command adds a path and removes none, so nothing
+//     those batteries measure can move.
+//
+// What it buys is the property the rewrite was for: a field added to the registry is
+// settable, readable and animatable over AMCP with no handler written for it -- and it is
+// validated against the SAME range the control API reports, because both read the
+// descriptor rather than a constant named twice.
+std::future<std::wstring> mixer_field_command(command_context& ctx)
+{
+    namespace fields = core::fields;
+
+    if (ctx.parameters.empty()) {
+        // No name: the inventory. A client with no other documentation can discover the
+        // whole surface from the protocol it is already speaking.
+        std::wstring out = L"201 MIXER OK\r\n";
+        for (const auto& f : fields::all()) {
+            const bool writable =
+                (static_cast<uint8_t>(f.access) & static_cast<uint8_t>(fields::access_t::write)) != 0;
+            out += u16(f.path);
+            out += L" ";
+            out += std::to_wstring(f.arity);
+            out += writable ? L" rw" : L" r";
+            if (f.range)
+                out += L" [" + std::to_wstring(f.range->lo) + L".." + std::to_wstring(f.range->hi) + L"]";
+            out += L"\r\n";
+        }
+        out += L"\r\n";
+        return make_ready_future<std::wstring>(std::move(out));
+    }
+
+    const auto  name = u8(ctx.parameters.at(0));
+    const auto* f    = fields::find(name);
+    if (!f)
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"no such mixer field: " + ctx.parameters.at(0)));
+
+    // Read.
+    if (ctx.parameters.size() < 2) {
+        auto transform = get_current_transform(ctx).share();
+        const auto* fp = f;
+        return std::async(std::launch::deferred, [transform, fp]() -> std::wstring {
+            const auto   v   = fp->get(transform.get().image_transform);
+            std::wstring out = L"201 MIXER OK\r\n";
+            for (std::size_t i = 0; i < v.size(); ++i) {
+                if (i)
+                    out += L" ";
+                out += u16(boost::apply_visitor(monitor_to_string(), v[i]));
+            }
+            out += L"\r\n";
+            return out;
+        });
+    }
+
+    if ((static_cast<uint8_t>(f->access) & static_cast<uint8_t>(fields::access_t::write)) == 0)
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"field is read-only: " + ctx.parameters.at(0)));
+
+    transforms_applier transforms(ctx);
+
+    // `arity` values, then the optional duration and tween -- the same trailing pair every
+    // animatable MIXER command takes, in the same order, so the grammar is not a new one.
+    const std::size_t need = 1 + f->arity;
+    if (ctx.parameters.size() < need)
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(ctx.parameters.at(0) + L" takes " +
+                                                        std::to_wstring(f->arity) + L" value(s)"));
+
+    core::monitor::vector_t value;
+    for (uint8_t i = 0; i < f->arity; ++i) {
+        const auto& raw = ctx.parameters.at(1 + i);
+        switch (f->type) {
+            case fields::value_type::boolean:
+                value.push_back(boost::iequals(raw, L"1") || boost::iequals(raw, L"true"));
+                break;
+            case fields::value_type::enumeration:
+                // A name or its ordinal, exactly as over HTTP -- and the ordinal has to be
+                // pushed as a NUMBER. Pushed as the string "5" the descriptor's setter
+                // looks it up in the name list, does not find it, and returns false; the
+                // failure then happened inside the transform closure on the stage executor,
+                // long after this function replied `202 MIXER OK`. Accepted, reported back
+                // as unchanged, no effect: the exact shape of the `MIXER EXPOSURE` defect,
+                // reproduced by the machinery built to prevent it. The dry run below is the
+                // real fix; this is why it is needed.
+                if (!raw.empty() && raw.find_first_not_of(L"0123456789") == std::wstring::npos)
+                    value.push_back(static_cast<int32_t>(std::stoi(raw)));
+                else
+                    value.push_back(u8(raw));
+                break;
+            case fields::value_type::integer:
+                value.push_back(static_cast<int32_t>(std::stoi(raw)));
+                break;
+            default:
+                value.push_back(f->range ? grade_param(raw, *f->range, ctx.parameters.at(0).c_str())
+                                         : std::stod(raw));
+                break;
+        }
+    }
+
+    // Dry run, before anything is queued. `set` is the only thing that knows whether a
+    // value is acceptable -- an enum name, a NaN, the wrong arity -- and inside the
+    // transform closure it runs on the stage executor, after the reply has gone out. A
+    // failure there is a command that answers 202 and does nothing.
+    {
+        core::image_transform probe;
+        if (!f->set(probe, value))
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"not a valid value for " + ctx.parameters.at(0)));
+    }
+
+    const int          duration = ctx.parameters.size() > need ? std::stoi(ctx.parameters[need]) : 0;
+    const std::wstring tween    = ctx.parameters.size() > need + 1 ? ctx.parameters[need + 1] : L"linear";
+
+    const auto* fp = f;
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [fp, value](frame_transform transform) -> frame_transform {
+            if (!fp->set(transform.image_transform, value))
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"value is not valid for this field"));
+            // The same auto-enable a KEYFRAMES write performs, so a blur radius set through
+            // either route actually blurs.
+            core::fields::apply_enables(transform.image_transform, *fp);
             return transform;
         },
         duration,
@@ -5620,6 +5782,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER BLEND", mixer_blend_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER BLUR", mixer_blur_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER SHAPE", mixer_shape_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER FIELD", mixer_field_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER OPACITY", mixer_opacity_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER BRIGHTNESS", mixer_brightness_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER SATURATION", mixer_saturation_command, 0);
