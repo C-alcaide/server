@@ -32,6 +32,7 @@
 #include <common/future.h>
 
 #include <core/frame/frame_transform.h>
+#include <core/frame/transform_fields.h>
 #include <core/producer/route/route_producer.h>
 #include <modules/keyframes/keyframe_data.h>
 #include <modules/keyframes/keyframe_fields.h>
@@ -79,12 +80,41 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     static constexpr int max_consecutive_layer_failures = 25;
     std::map<int, int>   layer_failures_;
 
-    // ── OSC projection publication state (stage executor only) ──
-    // Last value published per layer, and the set of layers that have ever had
-    // a non-default projection. Used to publish only on change (plus a periodic
-    // refresh) instead of rebuilding ~33 monitor::state keys per layer per tick.
-    std::map<int, core::projection> osc_projection_last_;
-    std::set<int>                  osc_projection_ever_;
+    // ── Per-layer transform publication (stage executor only) ──────────────
+    //
+    // The keys a layer's transform contributes to the channel state: its
+    // non-default mixer fields, and its projection block once it has ever been
+    // non-default. Rebuilt only when the transform CHANGES, and written into
+    // the state on EVERY tick.
+    //
+    // That split is the whole point, and it was got wrong first. The
+    // projection block this replaces published on change and on a periodic
+    // refresh, and skipped the ticks in between -- which is correct for a
+    // stream, because an OSC receiver holds the last value it was sent, and
+    // WRONG for a snapshot, because a reader of one tick's state sees only what
+    // that tick published. Measured: `MIXER 1-10 OPACITY 0.5` reached the
+    // control API on the tick it changed and vanished on the next, so the same
+    // value read as 0.5 or as "absent, therefore default" depending on which
+    // frame the request landed in. A per-frame state has to be COMPLETE; only
+    // the work of building it may be skipped.
+    //
+    // So the cache holds the built keys, and the tick pays only the inserts.
+    // For an untouched layer that is nothing at all; for a graded one it is the
+    // handful of fields that are actually set.
+    //
+    // A field at its default is still absent from the wire -- that is what
+    // keeps this cheap -- so absence means "at its default", never "unknown".
+    // The control API's `/v1/value` falls back to the descriptor default for
+    // exactly this reason, and flags such a read `is_default`.
+    struct layer_publication
+    {
+        core::image_transform built_from;
+        bool                  valid = false;
+        bool                  projection_ever = false;
+        //: relative key ("mixer/opacity", "projection/yaw") and its value
+        std::vector<std::pair<std::string, monitor::vector_t>> keys;
+    };
+    std::map<int, layer_publication> layer_publications_;
 
     // ── Per-layer receive timing (stage executor only) ──────────────────────
     // Layers are pulled sequentially below, so a producer that *blocks* inside
@@ -421,8 +451,15 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     routesCb(-1, chan_lf);
                 }
 
-                // Periodic full republication so an OSC subscriber that connects
-                // mid-show converges even on values that are not changing.
+                // The receive-timing block below publishes on this tick only; publishing
+                // per-tick timings every tick would make the state churn for values nobody
+                // reads at that rate.
+                //
+                // It used to serve a second purpose -- a periodic republication of the
+                // per-layer transform keys, so an OSC subscriber joining mid-show
+                // converged on values that were not changing. That is gone because it is
+                // no longer needed: those keys are now written on EVERY tick from a cache,
+                // so every snapshot is complete and there is nothing to converge to.
                 const auto refresh_ticks =
                     static_cast<uint64_t>(std::max(1, static_cast<int>(result.format_desc.hz)));
                 const bool osc_refresh_due = (frame_number % refresh_ticks) == 0;
@@ -503,80 +540,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
                 for (auto& p : layers_) {
                     state["layer"][p.first] = p.second.state();
-
-                    // Publish the full projection/curve state per layer so OSC
-                    // subscribers (and virtual-production tooling) can mirror the
-                    // server's projection model in real time.
-                    //
-                    // This block used to run unconditionally for every layer every
-                    // tick: ~33 keys, each one a lexical_cast plus a string
-                    // concatenation plus an insert into a flat_map (a sorted
-                    // vector, so O(n) per insert). On a 16-layer channel that is
-                    // hundreds of allocations and a quadratic insert pattern per
-                    // frame, almost always to republish values that did not
-                    // change. Now it is published when it changes, on the periodic
-                    // refresh, and never at all for layers that have never had a
-                    // non-default projection. The OSC client sends whole snapshots
-                    // with no diffing, and OSC receivers hold the last value they
-                    // were sent, so omitting unchanged keys is transparent to them.
-                    auto tw = tweens_.find(p.first);
-                    if (tw != tweens_.end()) {
-                        const auto pr = tw->second.fetch().image_transform.projection;
-
-                        static const core::projection projection_defaults{};
-
-                        if (osc_projection_ever_.find(p.first) == osc_projection_ever_.end()) {
-                            if (pr == projection_defaults)
-                                continue; // never configured — nothing a subscriber can miss
-                            osc_projection_ever_.insert(p.first);
-                        }
-
-                        auto last    = osc_projection_last_.find(p.first);
-                        bool changed = last == osc_projection_last_.end() || last->second != pr;
-                        if (!changed && !osc_refresh_due)
-                            continue;
-
-                        osc_projection_last_[p.first] = pr;
-
-                        auto ps = state["layer"][p.first]["projection"];
-                        ps["enable"]       = pr.enable;
-                        ps["yaw"]          = pr.yaw;
-                        ps["pitch"]        = pr.pitch;
-                        ps["roll"]         = pr.roll;
-                        ps["fov"]          = pr.fov;
-                        ps["offset_x"]     = pr.offset_x;
-                        ps["offset_y"]     = pr.offset_y;
-                        ps["frustum_h"]    = pr.frustum_h;
-                        ps["frustum_v"]    = pr.frustum_v;
-                        ps["lens_k1"]      = pr.lens_k1;
-                        ps["lens_k2"]      = pr.lens_k2;
-                        ps["lens_k3"]      = pr.lens_k3;
-                        ps["lens_p1"]      = pr.lens_p1;
-                        ps["lens_p2"]      = pr.lens_p2;
-                        ps["source_lens"]  = static_cast<int>(pr.source_lens);
-                        ps["curve_enable"] = pr.curve_enable;
-                        ps["curve_auto"]   = pr.curve_auto;
-                        ps["curve_type"]   = static_cast<int>(pr.curve_type);
-                        ps["screen_arc"]   = pr.screen_arc;
-                        ps["screen_arc_v"] = pr.screen_arc_v;
-                        ps["eye_distance"] = pr.eye_distance;
-                        ps["edge_blend"]   = {pr.edge_blend_left,
-                                              pr.edge_blend_right,
-                                              pr.edge_blend_top,
-                                              pr.edge_blend_bottom,
-                                              pr.edge_blend_gamma};
-                        ps["icvfx_enable"]    = pr.icvfx_enable;
-                        ps["inner_fov"]       = pr.inner_fov;
-                        ps["icvfx_feather"]   = pr.icvfx_feather;
-                        ps["icvfx_outer_dim"] = pr.icvfx_outer_dim;
-                        ps["icvfx_inner_dim"] = pr.icvfx_inner_dim;
-                        ps["icvfx_inner_gain"] = {pr.icvfx_inner_gain_r,
-                                                  pr.icvfx_inner_gain_g,
-                                                  pr.icvfx_inner_gain_b};
-                        ps["icvfx_outer_gain"] = {pr.icvfx_outer_gain_r,
-                                                  pr.icvfx_outer_gain_g,
-                                                  pr.icvfx_outer_gain_b};
-                    }
+                    publish_layer_transform(state, p.first);
                 }
                 state_ = std::move(state);
             } catch (...) {
@@ -589,6 +553,125 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
             return result;
         });
+    }
+
+    /// Write this layer's transform keys into the tick's state.
+    ///
+    /// Two jobs with very different costs, and keeping them apart is the point:
+    ///
+    ///   * REBUILD -- work out which fields differ from their declared default and format
+    ///     their keys. Done only when the transform changed, because it walks ~180
+    ///     descriptors and allocates a value vector per non-default field;
+    ///   * WRITE -- put the cached keys into this tick's state. Done EVERY tick, because a
+    ///     per-frame snapshot has to be a complete description of the frame. Cost is one
+    ///     flat_map insert per key that is actually set: nothing for an untouched layer,
+    ///     a handful for a graded one.
+    ///
+    /// The projection block used to skip the write as well as the rebuild, publishing on
+    /// change and on a periodic refresh only. For OSC that is invisible -- a receiver holds
+    /// the last value it was sent -- and for anything reading one tick's state it is a
+    /// value that blinks: measured on the control API, `MIXER 1-10 OPACITY 0.5` was
+    /// readable on the tick it changed and gone on the next, so the same request returned
+    /// 0.5 or "absent, therefore default" depending on which frame it landed in.
+    ///
+    /// A field AT its default is still absent from the wire, which is what keeps the write
+    /// cheap. Absence therefore means "at its default", never "unknown" -- a consumer that
+    /// reads it the other way shows a stale value forever after a reset.
+    void publish_layer_transform(monitor::state& state, int layer)
+    {
+        const auto tw = tweens_.find(layer);
+        if (tw == tweens_.end())
+            return;
+
+        const auto& tf  = tw->second.fetch().image_transform;
+        auto&       pub = layer_publications_[layer];
+
+        if (!pub.valid || !(pub.built_from == tf)) {
+            pub.built_from = tf;
+            pub.valid      = true;
+            rebuild_layer_publication(pub, tf);
+        }
+
+        if (pub.keys.empty())
+            return;
+
+        auto ls = state["layer"][layer];
+        for (const auto& kv : pub.keys)
+            ls[kv.first] = kv.second;
+    }
+
+    /// The expensive half: which keys this transform contributes, and their values.
+    void rebuild_layer_publication(layer_publication& pub, const core::image_transform& tf)
+    {
+        pub.keys.clear();
+
+        // `defaults()` builds a fresh vector per call, so reading all ~180 of them per
+        // rebuild would be most of the cost of the feature. They never change.
+        static const std::vector<monitor::vector_t> defaults = [] {
+            std::vector<monitor::vector_t> d;
+            d.reserve(core::fields::all().size());
+            for (const auto& f : core::fields::all())
+                d.push_back(f.defaults());
+            return d;
+        }();
+
+        const auto& fs = core::fields::all();
+        for (std::size_t i = 0; i < fs.size(); ++i) {
+            auto v = fs[i].get(tf);
+            if (v != defaults[i])
+                pub.keys.emplace_back(std::string("mixer/") + fs[i].path, std::move(v));
+        }
+
+        // The projection block keeps its own rule rather than following the sparse one
+        // above: once a layer has ever had a non-default projection it publishes the WHOLE
+        // block, defaults included. That is what the existing OSC consumers of
+        // `layer/N/projection/*` were written against -- a projection is read as a
+        // coherent set of angles and offsets, and half of one is worse than none.
+        static const core::projection projection_defaults{};
+        const auto&                   pr = tf.projection;
+        if (!pub.projection_ever) {
+            if (pr == projection_defaults)
+                return;
+            pub.projection_ever = true;
+        }
+
+        const auto add = [&pub](const char* key, monitor::vector_t v) {
+            pub.keys.emplace_back(std::string("projection/") + key, std::move(v));
+        };
+        add("enable", {pr.enable});
+        add("yaw", {pr.yaw});
+        add("pitch", {pr.pitch});
+        add("roll", {pr.roll});
+        add("fov", {pr.fov});
+        add("offset_x", {pr.offset_x});
+        add("offset_y", {pr.offset_y});
+        add("frustum_h", {pr.frustum_h});
+        add("frustum_v", {pr.frustum_v});
+        add("lens_k1", {pr.lens_k1});
+        add("lens_k2", {pr.lens_k2});
+        add("lens_k3", {pr.lens_k3});
+        add("lens_p1", {pr.lens_p1});
+        add("lens_p2", {pr.lens_p2});
+        add("source_lens", {static_cast<int32_t>(pr.source_lens)});
+        add("curve_enable", {pr.curve_enable});
+        add("curve_auto", {pr.curve_auto});
+        add("curve_type", {static_cast<int32_t>(pr.curve_type)});
+        add("screen_arc", {pr.screen_arc});
+        add("screen_arc_v", {pr.screen_arc_v});
+        add("eye_distance", {pr.eye_distance});
+        add("edge_blend",
+            {pr.edge_blend_left,
+             pr.edge_blend_right,
+             pr.edge_blend_top,
+             pr.edge_blend_bottom,
+             pr.edge_blend_gamma});
+        add("icvfx_enable", {pr.icvfx_enable});
+        add("inner_fov", {pr.inner_fov});
+        add("icvfx_feather", {pr.icvfx_feather});
+        add("icvfx_outer_dim", {pr.icvfx_outer_dim});
+        add("icvfx_inner_dim", {pr.icvfx_inner_dim});
+        add("icvfx_inner_gain", {pr.icvfx_inner_gain_r, pr.icvfx_inner_gain_g, pr.icvfx_inner_gain_b});
+        add("icvfx_outer_gain", {pr.icvfx_outer_gain_r, pr.icvfx_outer_gain_g, pr.icvfx_outer_gain_b});
     }
 
     core::draw_frame wrap_layer_frames_for_route(std::vector<core::draw_frame> frames)

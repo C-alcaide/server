@@ -1,6 +1,46 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: every layer publishes its non-default mixer state, on every tick
+
+**This changes what an OSC subscriber receives**, and it changes it in two ways.
+
+**New keys.** `channel/N/stage/layer/M/mixer/<field>` now carries any mixer parameter that
+differs from its declared default — `opacity`, `contrast`, `fill_translation`, `blend_mode`,
+the grading operators, the projection block under its registry names, ~180 possible fields in
+all. A parameter AT its default publishes nothing, which is what keeps this cheap and which
+makes absence meaningful: absent means "at its default", never "unknown". Anything reading
+these keys has to fall back to the descriptor's default rather than holding the last value it
+happened to see.
+
+**And an existing key changed cadence.** `.../projection/*` used to be published on change and
+on a once-a-second refresh, skipping the ticks in between. It is now published on every tick.
+For an OSC receiver that holds the last value it was sent, that is invisible. For anything
+reading ONE tick's state it is the difference between a value and a coin flip: measured on the
+control API, `MIXER 1-10 OPACITY 0.5` was readable on the tick it changed and gone on the next,
+so the same request returned `0.5` or "absent, therefore default" depending on which frame it
+landed in. A per-frame snapshot has to be complete; only the WORK of building it may be
+skipped, which is what the cache below does.
+
+**What it costs.** Measured 2026-09-05, 16 layers on one 1080p2500 channel, `tick/produce`
+mean over 49 one-second windows, nominal frame 40 ms:
+
+| the layers are | before | after | delta |
+| :--- | ---: | ---: | ---: |
+| playing, no mixer command issued | 2.560 ms | 2.684 ms | +0.124 ms |
+| each carrying 4 set fields, static | 2.597 ms | 2.919 ms | **+0.322 ms** |
+| each tweening 2 fields, so every transform differs every tick | 2.758 ms | 3.194 ms | **+0.436 ms** |
+
+The worst case is 1.1 % of a frame, and `tick/total` was 39.57–39.65 ms in all six arms — the
+same as the frame period, so no arm ran late. **The first row is not a measurement of anything:
+the run-to-run spread on `produce` is larger than 0.124 ms, so an untouched channel's cost is
+below what this method can resolve.** The third row is the real ceiling, because a tweening
+layer's transform differs on every tick and defeats the cache by construction.
+
+The cache is what makes those numbers small. Working out which fields differ from their default
+walks ~180 descriptors and is done only when the transform CHANGES; writing the resulting keys
+into the state is done every tick and costs one flat_map insert per field actually set.
+
 ### Changed: a producer can see its channel's bit depth — and ISF follows it instead of defaulting to 8
 
 **This changes rendered output for an existing config.** `PLAY 1-10 [ISF] <shader>` on a 16-bit

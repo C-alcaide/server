@@ -91,6 +91,10 @@ std::string osc_tags_for(const core::fields::field_desc& f)
     char c = 'd';
     switch (f.type) {
         case value_type::boolean:
+        // A blob reports PRESENCE, and presence is a boolean -- `lut3d` reads back `false`
+        // when no LUT is loaded. This said `s` on its first outing, which put a string tag
+        // on a boolean value in the same node: the one thing `TYPE` exists to prevent.
+        case value_type::blob:
             // A descriptor cannot know whether the value is true or false, and OSC has no
             // type-agnostic boolean tag. `F` is the honest answer for a type declaration:
             // every boolean field in this table defaults to false, so it is also correct
@@ -99,8 +103,7 @@ std::string osc_tags_for(const core::fields::field_desc& f)
             break;
         case value_type::integer:
         case value_type::enumeration: c = 'i'; break;
-        case value_type::string:
-        case value_type::blob: c = 's'; break;
+        case value_type::string: c = 's'; break;
         default: c = 'd'; break;
     }
     return std::string(f.arity, c);

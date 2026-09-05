@@ -27,6 +27,7 @@ of `MIXER` commands and their argument orders. Turned on by an `<http>` block un
 | The uniform reply envelope, with a `server` name | implemented | `envelope` in `api_status.cpp` |
 | The field registry behind the descriptors | implemented | `core::fields::all()`, `transform_fields.cpp` |
 | `<http>` controller, `<port> <host> <name> <extent> <max-prefixes>` | implemented | the `http` branch of `setup_controllers`, `server.cpp` |
+| Live mixer values, published sparsely by the tick | implemented | `publish_layer_transform` in `stage.cpp` |
 | `<auth>password</auth>` | **refused at startup**, with a fatal log | same branch — see §3 |
 | `PUT /v1/value`, `POST /v1/action`, `POST /v1/batch` | **not implemented**; answered `bad_request` | `route()` in `http_server.cpp` |
 | `WS /v1/events` | **not implemented**; `HOST_INFO.EXTENSIONS.LISTEN` is `false` | §5 gap 1 |
@@ -40,10 +41,17 @@ of `MIXER` commands and their argument orders. Turned on by an `<http>` block un
   supply: a parameter sitting at its default is not published, so without this pass a client would
   discover only the parameters somebody had already changed.
 
-**A mixer value read here is still the descriptor's default even when AMCP has changed it.** The
-sparse publication of non-default mixer fields is a separate change; until it lands, `mixer/*`
-values in this tree are what the field defaults to, flagged `is_default` on a `/v1/value` read.
-That is the single most surprising thing about this build, which is why it is in §1 and not §5.
+**A mixer value at its default is not published at all**, and that is the one thing to know
+before reading anything here. The tick emits only the fields that DIFFER from their declared
+default, so `/v1/value` answers an unpublished path with the descriptor's default and flags the
+reply `is_default`. Absent means "at its default" — never "unknown". A client that treats a
+missing key as unknown will show a stale value forever after a reset.
+
+**An AMCP change is visible here within one tick**, because there is one state and the tick is the
+only thing that publishes it. `MIXER 1-10 OPACITY 0.5` is readable at
+`/v1/value/channel/1/stage/layer/10/mixer/opacity` on the next frame, with no AMCP change of any
+kind — which is the property the whole design rests on, and the reason writes can be added later
+without a second model of the server appearing anywhere.
 
 ---
 
@@ -150,6 +158,17 @@ presence as "this is bounded" and then finds no MIN or MAX to bound it with. The
 **refuses to build** a table with a bounding rule and nothing to bound (`programming_error` from
 `fields::all()`), so the class cannot come back quietly.
 
+**A per-frame snapshot is complete; only the work of building it is skipped.** The obvious way to
+keep sparse publication cheap is to publish on change and stay quiet in between, and that is what
+the projection block did for as long as it existed. It is correct for a stream — an OSC receiver
+holds the last value it was sent — and wrong for a snapshot, where a reader sees one tick and
+nothing else. Measured while building this: `MIXER 1-10 OPACITY 0.5` read back as `0.5` or as
+"absent, therefore default" depending on which frame the request landed in, from the same server,
+seconds apart. The fix is a per-layer cache: work out which fields differ from their default only
+when the transform CHANGES, and write the cached keys into the state on every tick. The cost is in
+§4 and in `CHANGELOG.md`; the projection block was moved onto the same rule, which is a cadence
+change for existing OSC consumers and is why it has a `CHANGELOG.md` entry of its own.
+
 **`auth=password` is refused at startup rather than ignored.** Accepting a mode that is not
 implemented would leave an operator who deliberately configured authentication with a wide-open
 port and nothing in the log to say so — strictly worse than the same port with `off` written in the
@@ -177,6 +196,9 @@ and Linux and leaves both bootstraps untouched.
 | the tree builds and every readable leaf resolves | **none — checked by hand** | 2 channels, 1 layer: 247 leaves, **0 unresolvable** through `/v1/value`; 177 mixer descriptors; 75 KB; 14 ms per full-tree request | 2026-09-05 |
 | status codes | **none — checked by hand** | `unknown_path`, `channel_not_found`, `layer_not_found` each returned for the case that should produce them | 2026-09-05 |
 | readiness is observable | **none — checked by hand** | `foreground/ready` `true` and `foreground/transport` `playing` for a `PLAY`ed layer | 2026-09-05 |
+| an AMCP change reaches the API | **none — checked by hand** | `MIXER 1-10 OPACITY` at 0.5, 0.4 and 0.3 in turn: each read back correctly, and **10 consecutive reads returned the same value every time** — the check that catches a value published only on the tick it changed | 2026-09-05 |
+| a reverted field disappears | **none — checked by hand** | `MIXER 1-10 OPACITY 1.0` returns the path to `is_default` | 2026-09-05 |
+| tick cost of sparse publication | **none — checked by hand** | 16 layers, `tick/produce` mean: +0.322 ms with static fields set, +0.436 ms with every transform tweening; `tick/total` unchanged at 39.6 ms in all six arms. Full table in `CHANGELOG.md` | 2026-09-05 |
 
 **What these numbers do not cover, and it is most of it.** They were taken by hand from one server
 on one machine, not by a battery, so nothing re-runs them and nothing will notice when they stop
@@ -200,19 +222,22 @@ being true. Specifically:
 1. **`WS /v1/events` does not exist.** `HOST_INFO` advertises `LISTEN: false`, so a standard client
    is told the truth rather than left waiting. Closing it needs the per-connection diff, prefix
    matching that is segment-bounded (`/channel/1` must not match `/channel/10`), and a throttle.
-2. **Mixer values in the tree are descriptor defaults, not live values.** Sparse publication of
-   non-default mixer fields from the stage tick closes this, and closes it for OSC at the same time.
-3. **No writes.** `PUT /v1/value`, `POST /v1/action` and `POST /v1/batch` answer `bad_request`.
-4. **No authentication.** `<auth>password</auth>` is refused at startup. Until it exists this port
+   Until then a client that wants live values polls, which is what the tree is cheap enough for and
+   is still the wrong answer at 25 fps.
+2. **No writes.** `PUT /v1/value`, `POST /v1/action` and `POST /v1/batch` answer `bad_request`.
+3. **No authentication.** `<auth>password</auth>` is refused at startup. Until it exists this port
    must not be bound to an interface reachable off-segment.
-5. **No battery.** See §4 — this is the gap that makes every other item here unverifiable rather
+4. **No battery.** See §4 — this is the gap that makes every other item here unverifiable rather
    than merely incomplete.
-6. **The blob fields report presence, not content.** `lut3d`, `hue_curves`, `blend_mask` and
+5. **The blob fields report presence, not content.** `lut3d`, `hue_curves`, `blend_mask` and
    `grade_nodes` appear as `blob` descriptors; loading one stays a `MIXER` command.
-7. **`ocio.source_space` is read-only** even once writes land — validating a colour-space name
+6. **`ocio.source_space` is read-only** even once writes land — validating a colour-space name
    against the loaded OCIO config stays on the AMCP side for now.
-8. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
+7. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
    server is rather than finding it.
+8. **The projection block is published twice**, under its historical `projection/*` names for
+   existing OSC consumers and under its registry names in `mixer/proj_*`. Both are live and they
+   agree; retiring the first is a change to a published interface and is deliberately not made here.
 
 ---
 
