@@ -79,16 +79,31 @@ makes the remaining gap findable; it does not make it smaller.
 
 Still uncovered, and now the priority order for coverage rather than for docs:
 
-* **eleven of the thirteen `PREVIZ` commands.** This used to read *"no battery references PREVIZ
-  at all"*, and that is no longer true — corrected 2026-09-05 by grepping the harness rather than
-  trusting the line. `core/previz_scene.py` **generates** a four-quad stage, and `preview-cost`
-  gained `previz`, `previz_spout` and `previz_screen` arms. **But only `PREVIZ MAP` and `PREVIZ
-  SCREEN` are ever sent**, and they are sent to measure **frame cost, not behaviour** — so the
-  eleven others, `PREVIZ SCENE` included, remain untouched, and no check anywhere asserts what any
-  of the thirteen *does*. The scene reaches the server as a generated `.obj` through configuration,
-  not through `PREVIZ SCENE`. `features/previz.md` §4 lists the first three checks worth writing,
-  in the order that would have caught the ICVFX class. (Thirteen, not twelve: the old count was
-  short by one.)
+* **the PICTURE, on all thirteen `PREVIZ` commands, and eight of the commands entirely.** This
+  used to read *"no battery references PREVIZ at all"*, which went stale on 2026-08-31:
+  `core/previz_scene.py` generates a four-quad stage and `preview-cost`'s previz arms drive
+  **`SCENE`, `MAP`, `SHOW`, `GRID` and `WIREFRAME`** — five of thirteen. Untouched: `UNMAP`,
+  `SCREEN`, `CAMERA`, `VIEW`, `AUTOPROJECTION`, `GIZMO`, `PRESET`, `INFO`.
+
+  **The five that are driven were driven for COST only** — gating on timing *"without ever looking
+  at a pixel"* — until `cli.py previz-picture` landed on 2026-09-05. That now gates the **mapping's
+  picture** on both mixers (arrival, component order, per-mesh identity: 4/4, with identical pixel
+  counts between OGL and Vulkan, which is also the parity `previz.md` §5.2 records as unmeasured).
+  **The other twelve commands still have no picture check**, and a cost battery is still not
+  coverage of a feature.
+
+  *And a trap that cost a fabricated defect, now in `previz.md` §4:* **a mapped channel with no
+  consumer never ticks**, so `PREVIZ MAP` returns `202 OK` and the mesh stays grey. 20 s of settle
+  does not help; a consumer does. Verify the source before blaming the mapping.
+
+  *A caution about verifying this, learned twice on 2026-09-05:* the syntax is
+  `PREVIZ <channel> <VERB>`, so a grep for `PREVIZ MAP` matches **only prose in comments** and
+  misses every command actually sent. Grep `PREVIZ` alone. An earlier version of this bullet said
+  "only `PREVIZ MAP` and `PREVIZ SCREEN` are ever sent" for exactly that reason, and both of those
+  hits were comments.
+
+  §4 lists the first three checks worth writing, in the order that would have caught the ICVFX
+  class. (Thirteen, not twelve: the old count was short by one.)
 * **all eighteen `TRACKING` commands** — the composition order is now read out of the source in
   `architecture/CAMERA_TRACKING_TRANSFORM.md` and verified by nothing.
 * **ICVFX beyond the gain** — `icvfx-parity` covers the gain exchange. The mask geometry, the

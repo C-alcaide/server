@@ -200,13 +200,29 @@ and nothing moves.
 
 ## 4. Verification — what is measured, and what is not
 
-**Cost is measured. The picture is not.** `preview-cost`'s three previz arms drive `PREVIZ SCENE`,
-`MAP`, `SHOW`, `GRID` and `WIREFRAME` against a generated scene (`core/previz_scene.py` — four
-named quads around a stage) and report what previz costs the channel's tick; that is where the
-figures above come from. **They gate on timing and never look at a pixel.** So there is still no
-picture check, no parity check between mixers, and no check that a mapped mesh receives the
-channel's output at all — a previz that rendered the wrong channel onto every mesh, or nothing at
-all, would pass every arm.
+**Cost is measured, and since 2026-09-05 so is the picture — for `MAP`.** `preview-cost`'s three
+previz arms drive `PREVIZ SCENE`, `MAP`, `SHOW`, `GRID` and `WIREFRAME` against a generated scene
+(`core/previz_scene.py` — four named quads around a stage) and report what previz costs the
+channel's tick; that is where the figures above come from. **They gate on timing and never look at
+a pixel**, so on their own *"a previz that rendered the wrong channel onto every mesh, or nothing
+at all, would pass every arm."*
+
+`cli.py previz-picture` closes that for the mapping. Each mapped channel plays a **different
+asymmetric colour** and the previz render is searched for each, which answers all three checks
+below at once: a colour that is absent did not arrive, a colour found has its components in the
+right order, and four distinct colours mean four distinct channels landed. When a colour is
+missing its **permutations** are searched too, so an exchange is named as one rather than reported
+as a mapping fault.
+
+**Result, 2026-09-05, both mixers: 4/4 screens, and the pixel counts are identical between OGL and
+Vulkan** — 346800 / 188232 / 188232 / 405674. So `PREVIZ MAP` delivers the right channel to the
+right mesh with its components in order, and the two mixers agree, which is the parity §5.2 records
+as unmeasured.
+
+**Still not covered**: eight of the thirteen commands (`UNMAP`, `SCREEN`, `CAMERA`, `VIEW`,
+`AUTOPROJECTION`, `GIZMO`, `PRESET`, `INFO`), check 3 below, spatial placement — four colours prove
+four channels arrived on four meshes, not that `screen1` is the back wall — and colour accuracy,
+since the quads are lit and projected so the tolerance is deliberately wide.
 
 This section read *"Nothing. No battery in the harness references PREVIZ"* until 2026-08-31, and
 was already false when the cost figures above were written into this file. The correction is worth
@@ -229,12 +245,37 @@ What a first battery should do, in the order that would have caught the ICVFX cl
 3. `PREVIZ SCREEN ... ICVFX` against `MIXER PROJECTION_ICVFX` for the same screen — two routes to
    one piece of state, which is where they can disagree.
 
+### A mapped channel needs a consumer, or `PREVIZ MAP` succeeds and shows nothing
+
+**Measured 2026-09-05, and it cost a fabricated defect.** The first run of `previz-picture`
+reported 0 of 4 screens on both mixers with every command returning `202 PREVIZ OK` — the scene
+loaded with 4 shapes, all four meshes reported *"Mapped mesh ... to channel N"*, and the render
+came back as grey quads. Read alone that is *"`PREVIZ MAP` reports success and delivers nothing"*,
+which is what it was about to be written up as.
+
+**The cause was the fixture: channels 2–5 had no consumer.** A channel with no consumer does not
+produce frames, so previz had nothing to sample. Confirmed by elimination rather than assumed —
+with the source channels left consumerless, **20 seconds of settle still gave 0 px**, so it is not
+a timing problem; adding a capture on each source channel makes the same run pass 4/4.
+
+Two consequences:
+
+* **For a battery**: `previz-picture` captures each mapped channel *before* asking previz about it,
+  and an arm whose source control fails reports **"this arm says NOTHING about previz"** rather
+  than a previz failure. A check that cannot tell "the mapping dropped it" from "the channel never
+  ticked" will eventually report the second as the first.
+* **For a client**: mapping a channel that nothing consumes gives a silent grey mesh, with `202 OK`
+  on every command. A GUI driving previz must ensure its mapped channels are being consumed, and
+  should not treat `PREVIZ MAP`'s `202` as evidence that anything will appear.
+
 ---
 
 ## 5. Known gaps
 
-1. **No picture coverage at all** — cost is measured (§4), and nothing anywhere checks that previz
-   renders the right thing. See §4 for the first three checks worth writing.
+1. **Picture coverage exists for `MAP` only, since 2026-09-05** — `cli.py previz-picture`, §4.
+   Arrival, component order and per-mesh identity are gated on both mixers. The other twelve
+   commands still have no picture check, and §4's third check (`PREVIZ SCREEN ... ICVFX` against
+   `MIXER PROJECTION_ICVFX`) is blocked on §5.3.
 2. **The renderer is OpenGL on both mixers, and the parity that implies is unmeasured.** This item
    read *"OpenGL-only — either the Vulkan mixer grows the same bridge or the commands should
    refuse"*; the bridge exists (`vulkan/image/image_mixer.cpp:1204-1254`). A Vulkan channel
