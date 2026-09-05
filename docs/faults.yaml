@@ -1,0 +1,131 @@
+# The fault catalogue.
+#
+# Every status code the control API can answer with, and every log line a harness run is
+# expected to see and forgive. One machine-readable list, so the two halves cannot drift
+# from the documentation that quotes them.
+#
+# WHY A FILE RATHER THAN A TABLE IN A DOCUMENT. `docs/features/control-api.md` renders this
+# into its section 8, and `tests/test_fault_catalogue.py` in the harness asserts that every
+# entry has a non-empty meaning and that every code the server can emit has an entry. A
+# table written by hand in Markdown satisfies neither: it goes stale the moment a code is
+# added, and nothing notices.
+#
+# `meaning` is what actually went wrong. `do` is what the reader should do about it. Both
+# are addressed to whoever is reading a failure at 2am, not to whoever wrote the code.
+
+status_codes:
+  - code: ok
+    meaning: The request succeeded.
+    do: Nothing.
+
+  - code: unknown_path
+    meaning: >
+      No such path in the address space, or no such endpoint. For a mixer field this means
+      the NAME is wrong, not that the value is unset -- a field at its default still reads,
+      and answers with the default.
+    do: >
+      Fetch `/v1/tree` and look for the path there. `GET /v1/docs` lists every field name.
+
+  - code: not_writable
+    meaning: >
+      The path exists and this build refuses to write it. The blob fields (`lut3d`,
+      `hue_curves`, `blend_mask`, `grade_nodes`) report presence and are loaded by their own
+      `MIXER` commands; `ocio_source_space` is validated against the loaded OCIO config,
+      which lives in a layer the API does not link.
+    do: Use the `MIXER` command that owns it.
+
+  - code: field_wrong_type
+    meaning: >
+      The JSON type or the component count does not match the descriptor. A string where a
+      number belongs, a two-element array for a scalar, an enumeration name that is not in
+      the list.
+    do: >
+      The descriptor is in the tree, under `casparcg.type` and `casparcg.arity`. Note that
+      `"0.5"` is not `0.5`; a client sending a string for a number has a bug and the API
+      refuses rather than guessing.
+
+  - code: field_out_of_range
+    meaning: >
+      Outside the declared range, and the field is not periodic. `details` carries the
+      component, the limits and the value that arrived.
+    do: >
+      Clamp on the client. `casparcg.bounding` says how -- and note the API REFUSES rather
+      than clipping, deliberately, because the `MIXER` commands refuse too and the two
+      facades must not disagree about what is legal.
+
+  - code: field_missing
+    meaning: A required part of the body is absent -- no `value`, no `expect` on a `cas`, no `ops`.
+    do: The message names which one.
+
+  - code: field_conflict
+    meaning: >
+      A compare-and-set whose `expect` did not match. `details` carries both values. Nothing
+      was written.
+    do: >
+      Re-read, decide whether to overwrite, and either retry or tell the operator that
+      something else moved the value.
+
+  - code: channel_not_found
+    meaning: The channel index does not exist on this server.
+    do: >
+      `GET /v1/tree` lists the channels. A channel with no consumer never ticks and
+      therefore publishes nothing, so it will not appear -- check the config's `<consumers>`.
+
+  - code: layer_not_found
+    meaning: >
+      The layer index does not exist. A layer exists once something has been loaded on it
+      and stops existing on `CLEAR`; a stopped layer still exists, with `foreground/empty`
+      true.
+    do: Load something first, or read `foreground/empty` to tell stopped from cleared.
+
+  - code: producer_not_ready
+    meaning: >
+      A valid request that cannot be honoured yet because the producer has not finished
+      loading.
+    do: Wait for `foreground/ready`, which is what it is published for.
+
+  - code: batch_op_failed
+    meaning: >
+      One op of a batch was invalid, and NOTHING was applied. `details[0].index` is the
+      failing op and `details[0].code` is its own status.
+    do: Fix that op. The rest of the batch was never attempted, so there is nothing to undo.
+
+  - code: not_supported_on_backend
+    meaning: >
+      The request is valid but the configured mixer does not implement it. Reserved: no
+      field currently answers this, and it exists so that a future one-backend feature has
+      an honest answer rather than silently doing nothing.
+    do: Run the other mixer, or avoid the field.
+
+  - code: unauthorized
+    meaning: >
+      `<auth>password</auth>` is configured and the `Authorization` header was absent,
+      malformed, answered a challenge that had already been used, or was wrong.
+    do: >
+      `GET /v1/auth`, then answer THAT challenge. A challenge is single-use whether the
+      answer was right or wrong, so a retry needs a new one.
+
+  - code: bad_request
+    meaning: >
+      Malformed JSON, an unknown `op`, a tween name that does not exist, `at_frame` in the
+      past, or `at_frame` and `in_frames` together.
+    do: The message says which.
+
+  - code: internal
+    meaning: >
+      The server threw. This is a defect, not a usage error, and the message carries what
+      the exception said.
+    do: >
+      Look at the server log around the same moment -- an `internal` with nothing in the log
+      is itself worth reporting.
+
+# Log lines a harness run expects to see. Each must say why it is benign; an entry with an
+# empty `meaning` fails `tests/test_fault_catalogue.py`, because an allowlist without
+# reasons is a way to stop looking.
+benign_log_lines:
+  - match: "[http-api] No authentication"
+    meaning: >
+      The warning that `<auth>off</auth>` is configured. Emitted on purpose -- "no
+      authentication" is a decision worth seeing in the log of a server somebody else set
+      up -- and every harness fixture runs without a password because it binds to loopback.
+      Its ABSENCE on a server configured with `off` would be the finding.

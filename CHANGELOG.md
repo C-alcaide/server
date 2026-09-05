@@ -1,6 +1,42 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: the control API — the server's state as an addressable tree
+
+An HTTP interface exposing what the server publishes as an OSCQuery-shaped tree a client can
+discover rather than hard-code, with a WebSocket for live changes and writes that reach the
+same state AMCP writes. **Off unless configured**: no `<http>` block, no port opened.
+
+```xml
+<controllers>
+    <tcp><port>5250</port><protocol>AMCP</protocol></tcp>
+    <http><port>5254</port><name>stage-left</name></http>
+</controllers>
+```
+
+`GET /v1/tree` · `GET /v1/value/<path>` · `PUT /v1/value/<path>` · `POST /v1/action/<path>` ·
+`POST /v1/batch` · `WS /v1/events` · `GET /v1/auth` · `GET /v1/openapi.json` · `GET /v1/docs`.
+
+**Measured by six batteries on both mixers**, all green:
+
+| battery | numbers |
+| :--- | :--- |
+| `api-tree` | 500 advertised leaves, **0 unresolvable**; 177 mixer descriptors |
+| `api-roundtrip` | **172 fields written with a derived non-default value; 0 refused, 0 failed to store, 0 disagreed with `MIXER FIELD`, 0 failed to restore** |
+| `api-events` | AMCP- and API-originated changes both arrive; throttle at 400 ms gave gaps of 401/438/400 ms and still ended on the final value |
+| `api-write` | eight refusals each with their own code and the value unchanged after all eight; **200 concurrent toggles forming one unbroken chain**; a two-channel batch on **one frame** |
+| `api-atframe` | ten scheduled batches: **spread between channels 0 frames on all ten** |
+| `api-readiness` | readiness observable 113–133 ms after PLAY; `file/frame` (22, 75) against **ffprobe's 75** |
+
+**What none of them can see, and it is the important limit: not one looks at a pixel.** A field
+that stores correctly and renders nothing passes all six — the `MIXER EXPOSURE` class. `conformance`
+(100/100 within 1.0 LSB) and `grading` (48/48), on both mixers, cover the magnitude for the dozen
+fields they drive.
+
+Authentication is available (`<auth>password</auth>`, SHA-256 challenge/response) and buys one
+thing: the password does not cross the wire. Everything after the handshake is cleartext and the
+password is plain text in the config, so it is not a reason to expose the port.
+
 ### Added: `MIXER <ch>-<layer> FIELD <name> [values] [duration] [tween]`
 
 Reads, writes and animates **any** parameter of `image_transform`, from the same declaration

@@ -3,7 +3,7 @@
 > **State:** partial
 > **Modules:** `src/protocol/http`, `src/core/frame/transform_fields.h`
 > **Commands:** 1 fork-specific AMCP command — `MIXER FIELD`, the registry's own projection onto AMCP
-> **Coverage:** **none**
+> **Coverage:** `api-tree`, `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`
 
 An HTTP interface that exposes what the server publishes as an **addressable, self-describing
 tree**, in the OSCQuery format. A client fetches `/v1/tree` once and knows every parameter that
@@ -11,9 +11,9 @@ exists, its type, its arity, its legal range and what animates it — instead of
 of `MIXER` commands and their argument orders. Turned on by an `<http>` block under
 `<controllers>`; absent by default, so a server that does not configure one opens no port.
 
-Reading, subscribing, writing, transport actions and atomic batches all work. What is missing is
-named in §5 rather than implied by the word "API" -- above all, **there is no automated test for
-any of it**.
+Reading, subscribing, writing, transport actions and atomic batches all work, and six batteries
+run against them on **both mixers**. What is missing is named in §5 rather than implied by the
+word "API".
 
 ---
 
@@ -564,58 +564,57 @@ and Linux and leaves both bootstraps untouched.
 
 ---
 
-## 4. Verification — what is measured, and what is not
+## 4. Verification -- what is measured, and what is not
 
-| what | battery | numbers | date |
+Six batteries, run on **both mixers**. Every one exits 0 only if every check passed; an
+INCONCLUSIVE check exits 2, never 0, so a battery whose fixture did not come up cannot report
+success.
+
+| battery | what it drives | numbers | date |
 | :--- | :--- | :--- | :--- |
-| the tree builds and every readable leaf resolves | **none — checked by hand** | 2 channels, 1 layer: 247 leaves, **0 unresolvable** through `/v1/value`; 177 mixer descriptors; 75 KB; 14 ms per full-tree request | 2026-09-05 |
-| status codes | **none — checked by hand** | `unknown_path`, `channel_not_found`, `layer_not_found` each returned for the case that should produce them | 2026-09-05 |
-| readiness is observable | **none — checked by hand** | `foreground/ready` `true` and `foreground/transport` `playing` for a `PLAY`ed layer | 2026-09-05 |
-| an AMCP change reaches the API | **none — checked by hand** | `MIXER 1-10 OPACITY` at 0.5, 0.4 and 0.3 in turn: each read back correctly, and **10 consecutive reads returned the same value every time** — the check that catches a value published only on the tick it changed | 2026-09-05 |
-| a reverted field disappears | **none — checked by hand** | `MIXER 1-10 OPACITY 1.0` returns the path to `is_default` | 2026-09-05 |
-| tick cost of sparse publication | **none -- checked by hand** | 16 layers, `tick/produce` mean: +0.322 ms with static fields set, +0.436 ms with every transform tweening; `tick/total` unchanged at 39.6 ms in all six arms. Full table in `CHANGELOG.md` | 2026-09-05 |
-| an AMCP change reaches a WS subscriber | **none -- checked by hand** | `MIXER 1-10 OPACITY 0.5` produced one event with the correct path and value, carrying `frame` and `server` | 2026-09-05 |
-| prefix exclusion, **with a positive control** | **none -- checked by hand** | a change on channel 2 produced 0 events for a channel-1 subscriber, and a change on channel 1 immediately after produced 1. Absence without a control is not a result | 2026-09-05 |
-| segment-bounded matching | **none -- checked by hand** | a `/channel/1` subscriber received nothing from channel 2 | 2026-09-05 |
-| throttle | **none -- checked by hand** | driven as fast as the client could ask: 51 messages at min gap 78 ms with `throttle_ms:0` (the client's own floor), 15 at min gap **277 ms** at 250, 8 at min gap **511 ms** at 500. **No gap fell below the requested interval**, and the last value delivered was the final one | 2026-09-05 |
-| revert | **none -- checked by hand** | `MIXER 1-10 OPACITY 1.0` produced one event carrying the default and `reverted: true` | 2026-09-05 |
-| teardown | **none -- checked by hand** | `HOST_INFO.SUBSCRIPTIONS` went 3 to 1 to 0 as sockets closed | 2026-09-05 |
-| a write lands, and both facades agree | **none -- checked by hand** | `PUT opacity 0.42` read back 0.42 through `/v1/value` AND `0.41999999999999998` through `MIXER 1-10 OPACITY` | 2026-09-05 |
-| a refused write changes nothing | **none -- checked by hand** | out of range, wrong type, wrong arity, read-only blob, read-only string, unknown field, unknown channel: each returned its own code, and the value was **read back unchanged afterwards** | 2026-09-05 |
-| enumerations canonicalise | **none -- checked by hand** | `"screen"` and `5` both accepted; the reply reports the name, not the ordinal | 2026-09-05 |
-| wrap normalises | **none -- checked by hand** | `hue_shift` 400 to 40.0, -400 to -40.0. `proj_yaw` 7.5 stays 7.5, because it declares `wrap` with no range -- and so does AMCP | 2026-09-05 |
-| tween | **none -- checked by hand** | `{"value":0.0,"duration":50,"tween":"easeoutsine"}` sampled 14 times over 2.1 s: 0.937, 0.813, 0.691 ... 0.012, 0.0005, 0.0 -- **14 distinct values, monotone**, so the curve is running rather than the endpoints being written | 2026-09-05 |
-| **no lost updates under contention** | **none -- checked by hand** | 2 clients x 100 `{"op":"toggle"}` on one boolean: 200 replies, every one flipped its own `previous`, and **every reply's `value` equalled the next reply's `previous`** -- one unbroken chain. A lost update breaks the chain; a parity check would pass by luck | 2026-09-05 |
-| actions | **none -- checked by hand** | `play` with a clip, then `pause`, `resume`, `stop`: `foreground/transport` read back `playing`, `paused`, `playing`, `stopped` | 2026-09-05 |
-| action refusals | **none -- checked by hand** | unknown verb, unknown channel, malformed path and a missing clip each returned their own code | 2026-09-05 |
-| **a two-channel batch lands on one frame** | **none -- checked by hand** | two `set` ops on different channels: both events carried **frame 434**, and both values were correct. This is the assertion the whole `stage_delayed` dance exists for | 2026-09-05 |
-| a failed batch applies nothing | **none -- checked by hand** | `[ok, ok, unknown_path]` answered `batch_op_failed` with `details[0].index == 2`, and **both valid ops read back unapplied**; a range violation at index 1 behaved the same | 2026-09-05 |
-| actions inside a batch | **none -- checked by hand** | two `pause` ops on different channels: both layers read back `paused` | 2026-09-05 |
-| **the registry agrees with both mixers** | `compose self-test`, at every startup | 177 fields, 256 randomised transform pairs, **0 divergences on opengl and 0 on vulkan**. Its first run reported 8 diverging fields on both, every one of them a registry error -- see below | 2026-09-05 |
-| **a scheduled batch fires together on both channels** | **none -- checked by hand** | six runs, `at_frame` 40 frames ahead on two channels: the change became observable **2 frames after the named frame every time**, with a **spread of 0 frames between the channels every time**. The offset is the publication pipeline and is not compensated for -- see section 2 | 2026-09-05 |
-| scheduling refusals | **none -- checked by hand** | a frame in the past, `at_frame` and `in_frames` together, and an invalid op in a scheduled batch: each refused before anything was queued, and the value read back unchanged | 2026-09-05 |
-| `MIXER FIELD` reaches every field, and both facades agree | **none -- checked by hand** | inventory 177 rows; scalar, vec2, boolean, enum-by-name and enum-by-ordinal all set and read back; `MIXER 1-10 FIELD opacity 0.37` read back 0.37 through `MIXER FIELD`, through the old `MIXER OPACITY`, **and** through `/v1/value`; out-of-range, read-only, unknown field and short arity each refused with the value unchanged; a 50-frame tween settled at 0.0 | 2026-09-05 |
-| **the frame path is unchanged** | `conformance` + `grading`, **both mixers** | conformance **100/100 within 1.0 LSB** on opengl and on vulkan; grading **48/48 inside their gate** on both | 2026-09-05 |
-| **the generated OpenAPI document is valid** | **none -- checked by hand, with a real validator** | `openapi-spec-validator` accepts it as OpenAPI 3.1. 43 KB, 8 paths, **177 field schemas**, 15 status codes; `lut3d` carries `readOnly: true`, `blend_mode` carries its 25 value names, `fill_translation` its `minItems`/`maxItems` of 2 | 2026-09-05 |
-| the docs page is self-contained | **none -- checked by hand** | 27 KB, **0 `<script>` tags, 0 external references**, 189 table rows | 2026-09-05 |
-| authentication | **none -- checked by hand** | no header, a replayed answer, a corrupted answer, the wrong password, a malformed header and an unauthenticated WebSocket upgrade: **all six 401**. A correct answer: 200. **A corrupted answer consumed its challenge**, so the correct answer to that same challenge was then refused -- which is the property, and the first version failed it | 2026-09-05 |
-| the vendored SHA-256 is SHA-256 | **none -- implicitly, by the handshake** | the client hashes with Python's `hashlib` and the server with `common/sha256.h`; the handshake succeeds, which it cannot if the two disagree on a single bit | 2026-09-05 |
-| KEYFRAMES still round-trips | **none -- checked by hand** | `KEYFRAMES 1-10 SET`/`GET` with `opacity`, `rgb_r_gamma`, `proj_yaw` and `blur_type`: exact, including `proj_yaw` 90 on the wire and radians in the struct. The frozen-name check passes at 193 | 2026-09-05 |
+| `api-tree` | 2 channels, a clip on layer 10 | **11/11** on both mixers. **500 advertised leaves, 0 unresolvable** through `/v1/value`; 177 mixer descriptors, all carrying their vendor block; 0 empty `RANGE` objects; all four not-found codes specific | 2026-09-05 |
+| `api-roundtrip` | every writable field, with a value **derived from its own descriptor** | **8/8** on both mixers. **172 of 177 fields written with a non-default value; 0 refused, 0 failed to store, 0 disagreed between the API and `MIXER FIELD`, 0 failed to restore** | 2026-09-05 |
+| `api-events` | 3 subscriptions | **10/10** on both mixers. AMCP-originated and API-originated changes both arrive; revert reported; throttle at 400 ms gave gaps of **401, 438, 400 ms** and still ended on the final value; `SUBSCRIPTIONS` back to 0 on close | 2026-09-05 |
+| `api-write` | validation, contention, batches | **9/9** on both mixers. Eight refusals each with their own code and **the value read back unchanged after all eight**; **200 concurrent toggles forming one unbroken chain**; a failed batch applied nothing; a two-channel batch landed on **frame 215 on both** | 2026-09-05 |
+| `api-atframe` | 10 scheduled batches | **7/7** on both mixers. **Spread between channels 0 frames on all ten**; offset from `at_frame` **2 frames on all ten** | 2026-09-05 |
+| `api-readiness` | a 75-frame clip | **7/7** on both mixers. Readiness observable **113-133 ms after PLAY**; transport followed pause/resume/stop; `file/frame` **(22, 75)** against **ffprobe's 75** | 2026-09-05 |
 
-**What these numbers do not cover, and it is most of it.** They were taken by hand from one server
-on one machine, not by a battery, so nothing re-runs them and nothing will notice when they stop
-being true. Specifically:
+**The two things every one of these is blind to, and they are the important ones.**
 
-* **No battery exists for this feature.** The `api-tree`, `api-roundtrip`, `api-events`,
-  `api-write` and `api-readiness` batteries are planned and unwritten. Until they exist, every
-  claim here is a claim about one manual run.
-* **Nothing measures the values.** "247 leaves resolve" says each path answers `ok`; it says
-  nothing about whether any value is *correct*. The one thing that would have caught the
-  `RANGE: [{}]` defect was reading the output, not counting the successes.
-* **The 14 ms is one channel pair with one layer.** It is not a load figure and does not extrapolate
-  — the mixer descriptor set is copied per layer.
-* **Nothing runs against two servers, a remote bind, or a non-loopback network.** WebSocket
-  fragmentation and keep-alive do not exist on loopback.
+* **None of them looks at a pixel.** `api-roundtrip` writes 172 fields and confirms each reads
+  back through both facades -- and a field that stores correctly and renders nothing passes every
+  check in it. That is the `MIXER EXPOSURE` class exactly, and closing it needs a capture per
+  field, which is a different battery. `conformance` and `grading` cover the magnitude for the
+  dozen fields they drive, on both mixers.
+* **The tree and the value come from the same descriptor**, so they agree by construction.
+  Nothing here can say a `min`, a `max` or a default is *right*; only an external reference could,
+  and there is none. The one claim checked by something outside this harness is the OpenAPI
+  document, which `openapi-spec-validator` accepts as OpenAPI 3.1.
+
+Three narrower limits, each stated where it applies:
+
+* **`api-atframe` gates the SPREAD at one frame, not zero.** A batch is atomic against other
+  batches, not against the channel ticks -- the two channels tick on their own threads, so an
+  apply landing between them publishes on frame N for one and N+1 for the other. Measured at
+  0 on twenty of twenty-one runs and 1 once. And this is the spread in the PUBLISHED STATE:
+  whether the two pictures change on the same frame is not measured by anything.
+* **`api-readiness` cannot see `false -> true`.** A local clip is ready before the first tick
+  publishes anything, so the transition is not observable and the battery reports the latency
+  rather than gating it. Only a deliberately slow source would show the edge, and there is no
+  such fixture.
+* **The auth handshake has no battery**; its six refusals and two acceptances are one manual run.
+
+Numbers taken by hand and not by a battery, kept because nothing re-runs them:
+
+| what | numbers | date |
+| :--- | :--- | :--- |
+| tick cost of sparse publication | 16 layers, `tick/produce` mean: **+0.322 ms** with static fields set, **+0.436 ms** with every transform tweening; `tick/total` unchanged at 39.6 ms in all six arms. Full table in `CHANGELOG.md` | 2026-09-05 |
+| the registry agrees with both mixers | `compose self-test`, at every startup: 177 fields, 256 randomised pairs, **0 divergences on opengl and 0 on vulkan**. Its first run reported 8 diverging fields -- see §3 | 2026-09-05 |
+| the generated OpenAPI document is valid | `openapi-spec-validator` accepts it as **OpenAPI 3.1**. 43 KB, 8 paths, **177 field schemas**, 15 status codes | 2026-09-05 |
+| the docs page is self-contained | 27 KB, **0 `<script>` tags, 0 external references** | 2026-09-05 |
+| authentication | no header, replayed answer, corrupted answer, wrong password, malformed header, unauthenticated WS upgrade: **all six 401**; a correct answer 200. A corrupted answer **consumed its challenge** | 2026-09-05 |
+| the frame path is unchanged by `MIXER FIELD` | `conformance` **100/100 within 1.0 LSB** and `grading` **48/48**, on **both mixers** | 2026-09-05 |
+| KEYFRAMES still round-trips | `KEYFRAMES 1-10 SET`/`GET` exact across `opacity`, `rgb_r_gamma`, `proj_yaw` and `blur_type`, including `proj_yaw` 90 on the wire against radians in the struct; frozen-name check passes at 193 | 2026-09-05 |
 
 ---
 
@@ -700,3 +699,33 @@ flowchart LR
 same state and the two read façades leave from the same snapshot — which is a shape, not a
 sequence. The dotted edges are the parts this build does not have, so the picture stays honest
 about what is drawn and what is planned.
+
+## 8. Fault catalogue
+
+Generated from `docs/faults.yaml`, which is the one list of these. The harness's
+`tests/test_fault_catalogue.py` reads the `api_code` enum out of `api_status.h` and asserts that
+every code the server can answer with has a row here, and that every row has substance -- so a
+code added to the enum and not to the catalogue fails a test rather than reaching a client
+undocumented at the moment something has gone wrong.
+
+| code | what it means | what to do |
+| :--- | :--- | :--- |
+| `ok` | The request succeeded. | Nothing. |
+| `unknown_path` | No such path in the address space, or no such endpoint. For a mixer field this means the NAME is wrong, not that the value is unset -- a field at its default still reads, and answers with the default. | Fetch `/v1/tree` and look for the path there. `GET /v1/docs` lists every field name. |
+| `not_writable` | The path exists and this build refuses to write it. The blob fields (`lut3d`, `hue_curves`, `blend_mask`, `grade_nodes`) report presence and are loaded by their own `MIXER` commands; `ocio_source_space` is validated against the loaded OCIO config, which lives in a layer the API does not link. | Use the `MIXER` command that owns it. |
+| `field_wrong_type` | The JSON type or the component count does not match the descriptor. A string where a number belongs, a two-element array for a scalar, an enumeration name that is not in the list. | The descriptor is in the tree, under `casparcg.type` and `casparcg.arity`. Note that `"0.5"` is not `0.5`; a client sending a string for a number has a bug and the API refuses rather than guessing. |
+| `field_out_of_range` | Outside the declared range, and the field is not periodic. `details` carries the component, the limits and the value that arrived. | Clamp on the client. `casparcg.bounding` says how -- and note the API REFUSES rather than clipping, deliberately, because the `MIXER` commands refuse too and the two facades must not disagree about what is legal. |
+| `field_missing` | A required part of the body is absent -- no `value`, no `expect` on a `cas`, no `ops`. | The message names which one. |
+| `field_conflict` | A compare-and-set whose `expect` did not match. `details` carries both values. Nothing was written. | Re-read, decide whether to overwrite, and either retry or tell the operator that something else moved the value. |
+| `channel_not_found` | The channel index does not exist on this server. | `GET /v1/tree` lists the channels. A channel with no consumer never ticks and therefore publishes nothing, so it will not appear -- check the config's `<consumers>`. |
+| `layer_not_found` | The layer index does not exist. A layer exists once something has been loaded on it and stops existing on `CLEAR`; a stopped layer still exists, with `foreground/empty` true. | Load something first, or read `foreground/empty` to tell stopped from cleared. |
+| `producer_not_ready` | A valid request that cannot be honoured yet because the producer has not finished loading. | Wait for `foreground/ready`, which is what it is published for. |
+| `batch_op_failed` | One op of a batch was invalid, and NOTHING was applied. `details[0].index` is the failing op and `details[0].code` is its own status. | Fix that op. The rest of the batch was never attempted, so there is nothing to undo. |
+| `not_supported_on_backend` | The request is valid but the configured mixer does not implement it. Reserved: no field currently answers this, and it exists so that a future one-backend feature has an honest answer rather than silently doing nothing. | Run the other mixer, or avoid the field. |
+| `unauthorized` | `<auth>password</auth>` is configured and the `Authorization` header was absent, malformed, answered a challenge that had already been used, or was wrong. | `GET /v1/auth`, then answer THAT challenge. A challenge is single-use whether the answer was right or wrong, so a retry needs a new one. |
+| `bad_request` | Malformed JSON, an unknown `op`, a tween name that does not exist, `at_frame` in the past, or `at_frame` and `in_frames` together. | The message says which. |
+| `internal` | The server threw. This is a defect, not a usage error, and the message carries what the exception said. | Look at the server log around the same moment -- an `internal` with nothing in the log is itself worth reporting. |
+
+`docs/faults.yaml` also lists the log lines a harness run forgives, each with its reason. There is
+one: the warning that `<auth>off</auth>` is configured, which is emitted on purpose and whose
+absence on a server configured that way would be the finding.

@@ -11,8 +11,8 @@ module directories and registered AMCP command names diffed against `d:\Github\s
 > folder claimed "nothing fork-specific is missed" while missing more changed code than everything
 > it covered. A mechanical criterion is only as good as the question it encodes.
 
-**Numbers, so the scale is honest:** 19 fork-only modules, **91 fork-specific AMCP commands**,
-61 documents in `docs/`, 73 harness batteries.
+**Numbers, so the scale is honest:** 19 fork-only modules, **92 fork-specific AMCP commands**,
+61 documents in `docs/`, 79 harness batteries.
 
 > **That command count was 58 until 2026-08-26, and the correction is instructive.** The first
 > count scanned only `AMCPCommandsImpl.cpp` and missed every command a MODULE registers for
@@ -165,7 +165,7 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 | **PortAudio** | 1 | **none** | shipped, unmeasured | **[portaudio.md](portaudio.md)** |
 | **Replay** | — | **none** | shipped, unmeasured | **[replay.md](replay.md)** |
 | AMF / PRINT RAW | 2 | `amf` | shipped | — |
-| **Control API** (HTTP/OSCQuery) | — | **none** | partial | **[control-api.md](control-api.md)** |
+| **Control API** (HTTP/OSCQuery) | 1 | `api-tree`, `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness` | partial | **[control-api.md](control-api.md)** |
 
 ---
 

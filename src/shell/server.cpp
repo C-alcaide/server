@@ -799,13 +799,26 @@ struct server::impl
                 cfg.extent       = boost::to_lower_copy(xml_controller.second.get(L"extent", L"mixer"));
                 cfg.max_prefixes = xml_controller.second.get(L"max-prefixes", 32);
 
-                if (cfg.extent != L"state" && cfg.extent != L"mixer")
+                // Every refusal below logs a FATAL naming the element before it throws.
+                // Without that the server exits with the config error nowhere in the log:
+                // the shutdown path's own exceptions are logged after it, so the last thing
+                // a reader sees is an unrelated failure in a module that was being torn
+                // down. Measured -- `<extent></extent>` from a template presented as
+                // "[cef_executor] Could not post task", and the harness's startup hint
+                // reported that, correctly and uselessly.
+                if (cfg.extent != L"state" && cfg.extent != L"mixer") {
+                    CASPAR_LOG(fatal) << L"[http-api] <extent>" << cfg.extent
+                                      << L"</extent> is not valid; use state or mixer, or omit it.";
                     CASPAR_THROW_EXCEPTION(user_error()
                                            << msg_info(L"Invalid <extent>, must be state or mixer: " + cfg.extent));
+                }
 
-                if (cfg.auth != L"off" && cfg.auth != L"password")
+                if (cfg.auth != L"off" && cfg.auth != L"password") {
+                    CASPAR_LOG(fatal) << L"[http-api] <auth>" << cfg.auth
+                                      << L"</auth> is not valid; use off or password.";
                     CASPAR_THROW_EXCEPTION(user_error()
                                            << msg_info(L"Invalid <auth>, must be off or password: " + cfg.auth));
+                }
 
                 // A password mode with no password is refused rather than silently letting
                 // everyone in: an operator who wrote `<auth>password</auth>` and left

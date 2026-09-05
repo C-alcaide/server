@@ -55,6 +55,7 @@ catch its mutation cannot fail*.
 | a per-channel colour uniform, on either mixer | `icvfx-parity` for ICVFX, `grading` and `conformance` for the rest — and **the values must be asymmetric**. A red/blue exchange is invariant under equal per-channel values, so a neutral white balance or a grey ramp is a check that cannot fail. This is the trap that hid the ICVFX gain exchange until 2026-08-26 |
 | a GPU interop path — CUDA external memory, an FFmpeg Vulkan decoder, a D3D11 bridge, the encode exporter | `coexistence`, because these now share one `VkDevice` and one graphics queue. A route measured alone says nothing about it running beside the others, and `av_vulkan_import.cpp`'s device-lost at four concurrent producers is what that costs |
 | geometry, rasters, projection | `geometry`, `mixer-parity` |
+| **the control API, the transform registry, or `MIXER FIELD`** | `api-tree`, `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness` — **both mixers**. And note what none of them can see: **not one looks at a pixel**, so a field that stores correctly and renders nothing passes all six. That is the `MIXER EXPOSURE` class, and only a capture per field would catch it |
 | docs only | nothing |
 
 Two rules that outrank the table:
