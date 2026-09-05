@@ -45,6 +45,7 @@
 #include <core/video_channel.h>
 
 #include <accelerator/compose_self_test.h>
+#include <core/stage/stage_math_self_test.h>
 
 #include <protocol/http/http_server.h>
 #include <protocol/http/state_hub.h>
@@ -180,6 +181,7 @@ struct server::impl
         // Run for BOTH backends regardless of which one this server configured. A
         // divergence in the backend nobody selected is still a divergence, and a check that
         // only runs on the configured mixer would report parity that was never tested.
+        core::fields::run_stage_math_self_test();
         accelerator::ogl::run_compose_self_test();
         accelerator::vulkan::run_compose_self_test();
 

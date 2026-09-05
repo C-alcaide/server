@@ -328,6 +328,54 @@ What a first battery should do, in the order that would have caught the ICVFX cl
 3. `PREVIZ SCREEN ... ICVFX` against `MIXER PROJECTION_ICVFX` for the same screen — two routes to
    one piece of state, which is where they can disagree.
 
+### 4.1 The projection maths is checked at boot, since 2026-09-06
+
+`compute_frustum` — the function that turns a screen's placement into the orientation and field of
+view its channel must render at — now has **68 property checks that run on every server start** and
+log `[core] stage math self-test: 68 checks, 0 divergences`. They need no GL device and no display,
+which is the tier `78-client-test-plan.md` §4 specifies for this surface, and which was
+**unavailable until the function moved out of the accelerator** in `b00eb9873`: reaching it meant
+constructing a `previz_renderer`, which needs a `device`, which needs a context.
+
+**There is no standard to check it against.** The convention is this fork's own. So the checks are
+of two kinds, and the second is the one that matters:
+
+* **Properties** any correct implementation has — a screen facing the camera projects at yaw 0;
+  rotating it about Y rotates the projection with it; the field of view follows the
+  **perpendicular** distance rather than the total; `eye_mode FIXED` ignores the camera entirely;
+  the two documented degenerate cases (eye at the screen centre, eye in the screen plane) return
+  what they are documented to return; the curve classification and the `k = perp/radius` ratio.
+* **A second derivation of the ICVFX quad.** The camera and screen bases are computed from
+  **closed-form trigonometry**, not from `mat4` products — deliberately the same expressions
+  `casparcg-360-client`'s pure-numpy, Qt-free `frustum_check.py` uses, which was written
+  independently against the same geometry. Reusing `mat4` here would have compared the
+  implementation against itself and passed for any self-consistent-but-wrong rotation order, which
+  is exactly how two of the ACEScg gamut matrices round-tripped to the identity while both were
+  wrong.
+
+**And it was verified to be able to fail**, because a check that cannot fail is worse than no
+check. Two mutations were compiled into `compute_frustum` and the self-test run against the
+mutant:
+
+| mutation | caught as |
+| :--- | :--- |
+| field of view from the **total** distance instead of the perpendicular | 3 × `offaxis/fov`, e.g. `got 22.191607 want 22.442819` |
+| camera rotation order `Rx·Ry·Rz` instead of `Ry·Rx·Rz` | 16 × `icvfx/quad/{x,y}` |
+
+19 of 68 checks failed on the mutant; 0 of 68 on the reverted build. Tolerances are 1e-3 degrees
+and 1e-4 NDC — several orders tighter than 1 LSB of any encoding of these quantities.
+
+It logs **fatal** on failure where the compose self-test logs a warning, and the difference is not
+stylistic: the generated composition is not on the frame path, so a divergence there breaks nothing
+that is running. `compute_frustum` **is** on the frame path — every auto-projection recompute calls
+it — so a broken property means screens are already being pointed the wrong way.
+
+**What it does not cover.** It is a check on the *maths*, not on the picture: it says nothing about
+whether the computed projection reaches the shader, whether the warp applies it, or where a screen
+appears on screen. Spatial placement stays uncovered, exactly as the previous section says. Nor
+does it touch the twelve `PREVIZ SCREEN` subcommands that *write* this geometry — that is check 3
+above, still unwritten.
+
 ### A mapped channel needs a consumer, or `PREVIZ MAP` succeeds and shows nothing
 
 **Measured 2026-09-05, and it cost a fabricated defect.** The first run of `previz-picture`
