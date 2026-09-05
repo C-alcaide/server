@@ -23,6 +23,8 @@
 
 #include "layer.h"
 
+#include <limits>
+
 #include "frame_producer.h"
 
 #include "../frame/draw_frame.h"
@@ -132,6 +134,37 @@ struct layer::impl
             state_["foreground"]             = foreground_->state();
             state_["foreground"]["producer"] = foreground_->name();
             state_["foreground"]["paused"]   = paused_;
+
+            // What a client otherwise has to guess.
+            //
+            // `casparcg-state`, the Sofie-ecosystem library that drives upstream CasparCG,
+            // carries `MIN_TIME_SINCE_PLAY = 150 // [ms]` -- a hardcoded quarantine after a
+            // PLAY, during which it holds commands rather than issuing them. It exists
+            // because the client cannot ask whether the producer is ready, so the number was
+            // arrived at empirically. `is_ready()` has been on every producer all along and
+            // was published nowhere: no OSC key, no INFO field, no command.
+            //
+            // Called here, on the tick thread, and nowhere else -- `av_producer::is_ready`
+            // takes the same `buffer_mutex_` the decode thread does. `transition_producer`
+            // already calls it once per tick per layer, so this is within precedent.
+            const bool empty = foreground_ == frame_producer::empty();
+            const bool ready = !empty && foreground_->is_ready();
+
+            state_["foreground"]["empty"] = empty;
+            state_["foreground"]["ready"] = ready;
+
+            // A transport state, so "what is this layer doing" is one read rather than an
+            // inference over paused, frames_left and a duration the client had to fetch
+            // separately. `nb_frames()` is UINT32_MAX while looping, so a loop never reads eof.
+            const auto nb  = foreground_->nb_frames();
+            const auto fn  = foreground_->frame_number();
+            const bool eof = !empty && nb != std::numeric_limits<uint32_t>::max() && fn >= nb;
+
+            state_["foreground"]["transport"] = empty    ? std::string("stopped")
+                                               : paused_ ? std::string("paused")
+                                               : !ready  ? std::string("loading")
+                                               : eof     ? std::string("eof")
+                                                         : std::string("playing");
 
             if (frames_left > 0) {
                 state_["foreground"]["frames_left"] = frames_left;

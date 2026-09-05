@@ -4605,6 +4605,18 @@ struct AVProducer::Impl
         boost::lock_guard<boost::mutex> lock(state_mutex_);
         state_["file/clip"] = {start().value_or(0) / format_desc_.fps, duration().value_or(0) / format_desc_.fps};
         state_["file/time"] = {time() / format_desc_.fps, file_duration().value_or(0) / format_desc_.fps};
+
+        // The same two quantities in FRAMES, which is what a seek takes.
+        //
+        // Publishing only seconds is what forced `casparcg-state` to reconstruct a seek --
+        // convert the clip's length to frames, fold in its own estimate of the time since
+        // PLAY, and convert between the old and new channel formats -- and its
+        // `calculateSeek` gives up outright when it cannot: "if we don't know the length of
+        // the loop, we can't seek.. return 0". Every term in that expression is a client
+        // recomputing something the server already has exactly.
+        state_["file/frame"] = {static_cast<int64_t>(time()), static_cast<int64_t>(file_duration().value_or(0))};
+        state_["file/in"]    = static_cast<int64_t>(start().value_or(0));
+        state_["file/out"]   = static_cast<int64_t>(start().value_or(0) + duration().value_or(0));
         state_["loop"]      = loop_.load();
         state_["pingpong"]  = pingpong_.load();
         if (hdr10_seen_.load(std::memory_order_relaxed)) {
