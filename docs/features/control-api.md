@@ -625,14 +625,31 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
    "No battery. Every number in section 4 is one manual run on one machine" for some time
    after they landed, which is exactly the class of stale claim §5 exists to hold.
 
-   **A live intermittent, recorded rather than smoothed over:** `api-write --mixer ogl` fails
-   about one run in three, on two *different* checks — "a two-channel batch lands on ONE frame"
-   (seen with frames 222 and 223) and "no lost updates under contention" (200 toggles, unbroken
-   chain false). The vulkan arm has not been seen to fail. It is not caused by the stage work:
-   the first occurrence was on the commit that only MOVED types between namespaces, before any
-   tick or write path changed. Both checks are timing-sensitive and neither has been
-   investigated. **Until it is, a single green `api-write --mixer ogl` is weak evidence** — re-run
-   it before quoting it.
+   ~~**A live intermittent**~~ — **DIAGNOSED AND FIXED 2026-09-06, and neither cause was a
+   server defect.** `api-write --mixer ogl` had been failing about one run in three, on two
+   *different* checks. Both were faults in the check:
+
+   * **"no lost updates under contention"** sorted the 200 toggle replies by `time.time()`
+     recorded **client-side after each reply arrived**, then required each reply's `value` to
+     equal the next one's `previous`. A receive timestamp is not execution order — the threads
+     race in the client as well as in the server — so the chain read as broken with nothing
+     lost. It now counts **edge directions** instead: 200 toggles from `false` must report
+     exactly 100 `false→true` and 100 `true→false`. A lost update is two clients reading one
+     state and both writing its opposite, which imbalances the counts **whatever order the
+     replies arrive in**, so no clock is consulted and none can be wrong.
+   * **"a two-channel batch lands on ONE frame"** asserted frame *equality*, which is stricter
+     than what a batch offers. `api-atframe` already gates the same property at a spread of
+     **≤ 1** because a batch is atomic against other batches, not against the channel ticks —
+     and the observed failure, frames 222 and 223, is a spread of exactly 1. The two batteries
+     were disagreeing about the same guarantee. Now both gate at ≤ 1; a spread of 2 still fails.
+
+   Same class as the Phase-1 `is_default` race that reported 112 restored fields as unrestored:
+   a check that measured *when a reply arrived* rather than *what the server did*.
+
+   Measured after the fix: **five consecutive `api-write` runs on each mixer, 9/9 every time**,
+   plus ten mutation tests in the harness's `tests/test_api_write_invariants.py` that hold each
+   replacement to failing on the fault it exists for — including a correct-but-shuffled run,
+   which is precisely what the old check rejected.
 2. ~~**Only mixer fields are writable.**~~ **CLOSED 2026-09-06 for the 3D stage.** `PUT` also
    resolves `/channel/{n}/mixer/previz/camera/{field}`, `.../view_camera/{field}` and
    `.../screen/{name}/{field}`.
