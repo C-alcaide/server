@@ -557,14 +557,34 @@ Two consequences:
    does the same for `CAMERA` and `VIEW`, which §1 had described as *"placement arguments"*. Seven
    behaviours that the grammar does not imply are recorded there; four of them are defects rather
    than surprises, listed in §5.5.
-4. **Two routes to per-screen ICVFX state**, and the precedence is now known: **auto-projection
-   silently wins.** `PREVIZ AUTOPROJECTION` writes the ICVFX block on every recompute with no guard,
-   whereas the *curve* block beside it is protected by `curve_auto` — an explicit
-   `MIXER PROJECTION_CURVE` clears that flag and freezes the operator's values, and nothing does
-   the same for ICVFX. So a hand-set `MIXER PROJECTION_ICVFX` survives exactly until the next
-   camera move. **Not measured, and not changed**: making ICVFX follow the curve block's rule would
-   alter rendered output for any show that sets it manually, so it needs its own commit and its own
-   before/after. §4's check 3 is what would measure it, and §1.1 has unblocked it.
+4. ~~**Two routes to per-screen ICVFX state, and auto-projection silently wins.**~~ **FIXED
+   2026-09-06.** `PREVIZ AUTOPROJECTION` wrote the ICVFX block on every recompute with no guard,
+   whereas the *curve* block beside it had always been protected by `curve_auto`. So a hand-set
+   `MIXER PROJECTION_ICVFX` survived exactly until the next camera move — and with a tracker
+   bound, that is every sample. Nobody had chosen that precedence; the curve block was guarded
+   from the start and this one was simply missed.
+
+   `projection.icvfx_auto` now tracks ownership, cleared by any explicit
+   `MIXER PROJECTION_ICVFX`, and **both** auto-projection call sites are guarded by it. Measured
+   before and after, reading `proj_icvfx_enable` back through the control API after an explicit
+   `MIXER 2-0 PROJECTION_ICVFX 0` followed by a camera move:
+
+   | | after the explicit set | after a camera move |
+   | :--- | :--- | :--- |
+   | before | `false` | **`true`** — overwritten |
+   | after | `false` | `false` — the operator keeps it |
+
+   **The first version of this fix did not work, and the measurement is what caught it.** It
+   copied the curve block's guard verbatim — `icvfx_auto || !icvfx_enable` — and that second
+   clause cannot transfer: an explicit `PROJECTION_ICVFX 0` means *"I want ICVFX off"* and leaves
+   `icvfx_enable` false, which `!icvfx_enable` reads as *unowned*. Auto-projection turned it
+   straight back on, exactly as before the fix. The guard is ownership alone, and `icvfx_auto`
+   **defaults true** so a fresh layer is still auto-owned — the asymmetry with `curve_auto` is
+   deliberate and commented at the field.
+
+   **Deliberately not added:** any way to hand ownership *back* to auto-projection. The curve
+   block gets that free from its `!curve_enable` clause; designing an affordance for ICVFX is a
+   different job from stopping the overwrite.
 
 ### 5.5 Six defects in the command surface
 

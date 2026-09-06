@@ -121,6 +121,7 @@ image_transform image_transform::tween(double                 time,
     result.projection.curve_enable = dest.projection.curve_enable;
     result.projection.curve_type   = dest.projection.curve_type;
     result.projection.curve_auto   = dest.projection.curve_auto;
+    result.projection.icvfx_auto   = dest.projection.icvfx_auto;
     result.projection.screen_arc   = do_tween(time, source.projection.screen_arc, dest.projection.screen_arc, duration, tween);
     result.projection.screen_arc_v = do_tween(time, source.projection.screen_arc_v, dest.projection.screen_arc_v, duration, tween);
     result.projection.eye_distance = do_tween(time, source.projection.eye_distance, dest.projection.eye_distance, duration, tween);
@@ -342,7 +343,8 @@ bool operator==(const projection& lhs, const projection& rhs)
            lhs.source_lens == rhs.source_lens && lhs.curve_enable == rhs.curve_enable &&
            lhs.curve_type == rhs.curve_type && eq(lhs.screen_arc, rhs.screen_arc) &&
            eq(lhs.screen_arc_v, rhs.screen_arc_v) && eq(lhs.eye_distance, rhs.eye_distance) &&
-           lhs.curve_auto == rhs.curve_auto && eq(lhs.edge_blend_left, rhs.edge_blend_left) &&
+           lhs.curve_auto == rhs.curve_auto && lhs.icvfx_auto == rhs.icvfx_auto &&
+           eq(lhs.edge_blend_left, rhs.edge_blend_left) &&
            eq(lhs.edge_blend_right, rhs.edge_blend_right) && eq(lhs.edge_blend_top, rhs.edge_blend_top) &&
            eq(lhs.edge_blend_bottom, rhs.edge_blend_bottom) && eq(lhs.edge_blend_gamma, rhs.edge_blend_gamma) &&
            lhs.icvfx_enable == rhs.icvfx_enable && eq(lhs.inner_yaw, rhs.inner_yaw) &&

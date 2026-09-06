@@ -2119,6 +2119,10 @@ std::future<std::wstring> mixer_projection_icvfx_command(command_context& ctx)
         [=](frame_transform transform) -> frame_transform {
             auto& p = transform.image_transform.projection;
             p.icvfx_enable = enable;
+            // An explicit set LOCKS against auto-projection, which is what
+            // `MIXER PROJECTION_CURVE` has always done for the curve block. Without this the
+            // operator's values are overwritten on the next recompute.
+            p.icvfx_auto   = false;
             if (has_fov && inner_fov > 0.0)
                 p.inner_fov = inner_fov;
             if (has_feat)
@@ -5641,10 +5645,25 @@ std::wstring previz_autoprojection_command(command_context& ctx)
                                     p.curve_auto   = true;
                                 }
                                 // ICVFX inner/outer frustum (auto path)
-                                {
+                                //
+                                // GUARDED THE WAY THE CURVE BLOCK ABOVE IS, and it was not until 2026-09-06.
+                                // This block wrote unconditionally, so an explicit `MIXER PROJECTION_ICVFX`
+                                // survived exactly until the next camera move -- auto-projection silently won,
+                                // on every recompute, and with a tracker bound that is per tracker sample.
+                                // `previz.md` SS5.4 recorded the precedence as undocumented; nobody chose it.
+                                //
+                                // The guard is OWNERSHIP ALONE, not the curve block's
+                                // `curve_auto || !curve_enable`. An explicit
+                                // MIXER PROJECTION_ICVFX 0 leaves icvfx_enable false, which
+                                // that second clause reads as unowned -- so the first version
+                                // of this fix turned the operator's ICVFX straight back on at
+                                // the next camera move, exactly as before. `icvfx_auto`
+                                // defaults true so a fresh layer is still auto-owned.
+                                if (t.image_transform.projection.icvfx_auto) {
                                     static const double I2R = 3.141592653589793 / 180.0;
                                     auto& p = t.image_transform.projection;
                                     p.icvfx_enable = proj.icvfx_enable;
+                                    p.icvfx_auto   = true;
                                     if (proj.icvfx_enable) {
                                         p.inner_yaw          = static_cast<double>(proj.inner_yaw_deg)   * I2R;
                                         p.inner_pitch        = static_cast<double>(proj.inner_pitch_deg) * I2R;
@@ -5707,10 +5726,17 @@ std::wstring previz_autoprojection_command(command_context& ctx)
                                 p.curve_auto   = true;
                             }
                             // ICVFX inner/outer frustum (auto path)
-                            {
+                            //
+                            // GUARDED THE WAY THE CURVE BLOCK ABOVE IS, and it was not until 2026-09-06.
+                            // This block wrote unconditionally, so an explicit `MIXER PROJECTION_ICVFX`
+                            // survived exactly until the next camera move -- auto-projection silently won,
+                            // on every recompute, and with a tracker bound that is per tracker sample.
+                            // `previz.md` SS5.4 recorded the precedence as undocumented; nobody chose it.
+                            if (t.image_transform.projection.icvfx_auto) {
                                 static const double I2R = 3.141592653589793 / 180.0;
                                 auto& p = t.image_transform.projection;
                                 p.icvfx_enable = proj.icvfx_enable;
+                                p.icvfx_auto   = true;
                                 if (proj.icvfx_enable) {
                                     p.inner_yaw          = static_cast<double>(proj.inner_yaw_deg)   * I2R;
                                     p.inner_pitch        = static_cast<double>(proj.inner_pitch_deg) * I2R;

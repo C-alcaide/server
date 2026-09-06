@@ -120,6 +120,7 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     // ICVFX inner/outer frustum merges independently of 360/curve modes
     if (other.projection.icvfx_enable) {
         self.projection.icvfx_enable       = true;
+        self.projection.icvfx_auto         = other.projection.icvfx_auto;
         self.projection.inner_yaw          = other.projection.inner_yaw;
         self.projection.inner_pitch        = other.projection.inner_pitch;
         self.projection.inner_roll         = other.projection.inner_roll;

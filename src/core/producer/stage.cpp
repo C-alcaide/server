@@ -655,6 +655,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         add("source_lens", {static_cast<int32_t>(pr.source_lens)});
         add("curve_enable", {pr.curve_enable});
         add("curve_auto", {pr.curve_auto});
+        add("icvfx_auto", {pr.icvfx_auto});
         add("curve_type", {static_cast<int32_t>(pr.curve_type)});
         add("screen_arc", {pr.screen_arc});
         add("screen_arc_v", {pr.screen_arc_v});

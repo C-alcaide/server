@@ -1,6 +1,48 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: auto-projection no longer overwrites a hand-set ICVFX
+
+**A hand-set `MIXER PROJECTION_ICVFX` survived only until the next camera move** — and with a
+tracker bound, that is every sample. Auto-projection wrote the whole ICVFX block on every
+recompute with no guard, while the curve block immediately beside it had always been protected by
+`curve_auto`. Nobody chose that precedence; one block was guarded and the other was missed.
+
+`projection.icvfx_auto` now tracks whether auto-projection owns a layer's ICVFX block. Any
+explicit `MIXER PROJECTION_ICVFX` clears it and the values are then the operator's, unchanged by
+every later recompute. **Both** auto-projection call sites are guarded.
+
+**Behaviour change**, and it is the point: on a channel driven by auto-projection, ICVFX values set
+by hand now persist. A show that (knowingly or not) relied on auto-projection re-asserting them
+after a manual change will see the manual value stay. There is deliberately **no** command to hand
+ownership back to auto-projection — the curve block gets that free from its `!curve_enable` clause,
+and inventing an affordance for ICVFX is a separate job.
+
+Measured, reading `proj_icvfx_enable` back through the control API after
+`MIXER 2-0 PROJECTION_ICVFX 0` and then a camera move:
+
+| | after the explicit set | after a camera move |
+| :--- | :--- | :--- |
+| before | `false` | **`true`** — overwritten |
+| after | `false` | `false` |
+
+**The first version of this fix did not work.** It reused the curve block's
+`curve_auto || !curve_enable` guard, and that second clause reads an explicit "ICVFX off" as
+"unowned" — so it overwrote just the same. The guard is ownership alone, and `icvfx_auto` defaults
+**true** so an untouched layer stays auto-owned.
+
+A new `image_transform` field means the composition allowlist in **both** mixers, which is the trap
+this tree opens its own notes with. The startup compose self-test is what proves they agree:
+
+  compose self-test  178 fields, 256 iterations, **0 divergences**, opengl and vulkan
+  conformance        100/100 within 1.0 LSB, both mixers
+  grading            48/48 inside their gate, both mixers
+  api-tree 11/11 · api-roundtrip 8/8 · api-stage 22/22 · previz-picture 4/4, both mixers
+
+`proj_icvfx_auto` is **not** animatable, unlike `proj_curve_auto` beside it: ownership is not a
+quantity to tween. KEYFRAMES still reports 193 animatable components, so no saved timeline can come
+to depend on it.
+
 ### Fixed: two previz commands left the screen list disagreeing with the stage
 
 Both had been silent, and both became *wrong in writing* once screens were published into the

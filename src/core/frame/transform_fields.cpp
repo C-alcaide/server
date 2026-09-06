@@ -529,6 +529,11 @@ const std::vector<field_desc>& all()
         F("proj_screen_arc_v", projection.screen_arc_v, 0.0, std::nullopt, free, innermost_wins, curve_enable, nullptr, "rad", "proj_screen_arc_v", angular_rad),
         F("proj_eye_distance", projection.eye_distance, 1.0, std::nullopt, free, innermost_wins, curve_enable, nullptr, "",    "proj_eye_distance", continuous),
         B("proj_curve_auto",   projection.curve_auto, false, innermost_wins, curve_enable, nullptr, "proj_curve_auto"),
+        // Deliberately NOT animatable, unlike `proj_curve_auto` beside it: "this block is
+        // owned by auto-projection" is a fact about ownership, not a quantity to tween. The
+        // kf slot is `nullptr` rather than a name, so the keyframes module's frozen list needs
+        // no entry and a saved timeline cannot come to depend on it.
+        B("proj_icvfx_auto",   projection.icvfx_auto, true,  innermost_wins, icvfx_enable, nullptr, nullptr),
 
         // ---- projection: edge blending (a GROUP gate; see compose_colour) -----------------------------
         F("proj_edge_blend_left",   projection.edge_blend_left,   0.0, lim::unit,    clip, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_left",   continuous),
@@ -860,6 +865,7 @@ void compose_colour(image_transform& self, const image_transform& other)
     self.projection.curve_enable = self.projection.curve_enable || other.projection.curve_enable;
     if (other.projection.icvfx_enable) {
         self.projection.icvfx_enable       = true;
+        self.projection.icvfx_auto         = other.projection.icvfx_auto;
         self.projection.inner_yaw          = other.projection.inner_yaw;
         self.projection.inner_pitch        = other.projection.inner_pitch;
         self.projection.inner_roll         = other.projection.inner_roll;

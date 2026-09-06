@@ -226,6 +226,29 @@ struct projection final
     double            icvfx_outer_gain_r = 1.0;
     double            icvfx_outer_gain_g = 1.0;
     double            icvfx_outer_gain_b = 1.0;
+    // Does auto-projection OWN this layer's ICVFX block?  True until an operator says
+    // otherwise: any explicit MIXER PROJECTION_ICVFX clears it and the block is then
+    // theirs, unchanged by every later recompute.
+    //
+    // DEFAULTS TRUE, unlike curve_auto beside it, and the asymmetry is the whole point.
+    // The curve block's guard is `curve_auto || !curve_enable`, so a layer nobody has
+    // touched qualifies through the second clause -- "no curve is enabled, so auto may
+    // own it".  That clause cannot be reused here: an operator's explicit
+    // MIXER PROJECTION_ICVFX 0 means "I want ICVFX OFF", and it leaves icvfx_enable
+    // false, which `!icvfx_enable` reads as unowned.  Auto-projection then turned it
+    // straight back on at the next camera move -- measured, with the guard written that
+    // way first.  Ownership has to be tracked on its own, so it is: the guard is just
+    // `icvfx_auto`, and this default is what makes a fresh layer auto-owned.
+    //
+    // Until 2026-09-06 there was no flag at all and the callback wrote the block
+    // unconditionally, so a hand-set MIXER PROJECTION_ICVFX survived only until the next
+    // camera move -- and with a tracker bound, that is every sample.
+    //
+    // There is deliberately no command to hand ownership BACK to auto-projection. The
+    // curve block gets that for free from its `!curve_enable` clause; inventing an
+    // affordance for ICVFX belongs to whoever designs the ownership model, not to the
+    // commit that stops the overwrite.
+    bool              icvfx_auto        = true;
 };
 
 // Transfer: 0=linear,1=srgb,2=rec709,3=pq(st2084),4=hlg,5=logc3(arri),6=slog3(sony)
