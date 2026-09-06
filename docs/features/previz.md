@@ -8,7 +8,7 @@
 > **Architecture:** none — shares the ICVFX state the projection commands write; the two routes to
 > it are §5.3 below
 > **Guide:** [`../guides/PREVIZ_3D_MODULE.md`](../guides/PREVIZ_3D_MODULE.md)
-> **Coverage:** `cli.py preview-cost --arm previz --arm previz_spout --arm previz_screen` — what previz costs the channel, at 1080p50 and at the VP workload; the floor those shares are measured against is `cli.py raster-capacity`. **No picture check of any kind** — see §4
+> **Coverage:** `cli.py previz-picture` — does the mapped channel arrive on the mesh, in order, on both mixers (§4). `cli.py api-stage` — screens and cameras as addressable nodes, and §4's check 3, the two routes to ICVFX state (§4.2). `cli.py preview-cost --arm previz --arm previz_spout --arm previz_screen` — what previz costs the channel, at 1080p50 and at the VP workload; the floor those shares are measured against is `cli.py raster-capacity`. The projection maths itself is checked at every server start (§4.1). **Spatial placement is still uncovered by all of them** — see §4
 
 Loads a 3D scene, maps channel output onto meshes in it, and renders a camera view of the result —
 so a projection design can be checked without the venue. Screens, presets and camera positions are
@@ -325,8 +325,53 @@ What a first battery should do, in the order that would have caught the ICVFX cl
    colour — the cheapest possible "did anything arrive" check.
 2. An **asymmetric** source colour through the mapping, compared per channel, because a symmetric
    one cannot see a channel exchange.
-3. `PREVIZ SCREEN ... ICVFX` against `MIXER PROJECTION_ICVFX` for the same screen — two routes to
-   one piece of state, which is where they can disagree.
+3. ~~`PREVIZ SCREEN ... ICVFX` against `MIXER PROJECTION_ICVFX` for the same screen~~ — **written
+   2026-09-06**, as `api-stage`'s last check. §4.2 records what it measures and why it measures
+   rather than asserts.
+
+### 4.2 The stage is addressable, and `api-stage` covers it — check 3 included
+
+Since 2026-09-06 a screen and a previz camera are ordinary nodes: `GET /v1/tree` describes all
+sixteen properties, `PUT /v1/value/channel/1/mixer/previz/screen/back/position` moves one, and
+`cli.py api-stage` gates 19 checks on both mixers.
+
+What it establishes that nothing did before:
+
+* **Every screen property is READABLE.** `SCREEN LIST` reports four of fifteen and there is no
+  `SCREEN <name> INFO`, so position, rotation, vertical arc, resolution, eye mode, design eye and
+  ICVFX were write-only over AMCP. All of them read back now, and both facades are compared
+  through `PREVIZ CAMERA` for the camera.
+* **A derived field says it is derived.** `radius` is read-only and the tree shows the value the
+  server actually holds: a screen added as `CURVED 4 3 5 60` reads back **4.0**, not the 5 that was
+  supplied. §5.5's defect 1 is now visible instead of silent.
+* **The documented refusals are asserted to be exactly three** — `size` and `arc`, which have no
+  mutator, and `design_eye` outside `fixed` mode. A NEW refusal fails the check rather than
+  blending in.
+* **Mutation-verified.** With the write bridge echoing its own local copy instead of re-reading the
+  renderer, two checks fail and name the real symptom: `design_eye` written `[-2600, -400, 1800]`
+  and reading back `[0, 1.5, 3]`.
+
+**§4's check 3 exists now**, as `api-stage`'s last check, and it is deliberately a MEASUREMENT
+rather than an assertion. §5.4 says the precedence between `PREVIZ SCREEN … ICVFX` and
+`MIXER PROJECTION_ICVFX` is "auto-projection silently wins" — but nobody CHOSE that, so asserting
+it would freeze an accident into a gate. What the check does assert is the unambiguous half: the
+two routes must not disagree silently. Measured, both mixers: the API sets the screen flag `true`
+and reads `true`; `PREVIZ SCREEN back ICVFX 0` sets it `false` and reads `false`; and the screen's
+own flag **survives** a `MIXER 1-10 PROJECTION_ICVFX 0` with auto-projection on, which is correct —
+the layer's ICVFX block and the screen's flag are different quantities, and it is the LAYER's that
+auto-projection overwrites.
+
+**A backend divergence it caught on its first run**, worth recording because no other battery could
+have: the OpenGL mixer holds its `previz_renderer` **by value**, so one exists from construction,
+while the Vulkan mixer builds one lazily on the first `PREVIZ` command. The publication therefore
+gave every idle OpenGL channel a previz sub-tree and gave Vulkan channels none. Fixed by making the
+rule about the STAGE rather than about the renderer: a snapshot equal to a default-constructed one
+publishes nothing, whichever backend is running.
+
+**Still not covered, and it is the same hole §4 already names**: `api-stage` looks at no pixel. A
+screen whose position stores perfectly and renders in the wrong place passes all nineteen checks.
+`previz-picture` proves a mapped *channel* arrives on a mesh, not *where* the mesh is. Spatial
+placement is uncovered by both, and is tracked as A16 in the harness's mutation battery.
 
 ### 4.1 The projection maths is checked at boot, since 2026-09-06
 

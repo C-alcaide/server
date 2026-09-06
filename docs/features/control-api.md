@@ -3,7 +3,7 @@
 > **State:** partial
 > **Modules:** `src/protocol/http`, `src/core/frame/transform_fields.h`
 > **Commands:** 1 fork-specific AMCP command — `MIXER FIELD`, the registry's own projection onto AMCP
-> **Coverage:** `api-tree`, `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`
+> **Coverage:** `api-tree`, `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`, `api-stage`
 
 An HTTP interface that exposes what the server publishes as an **addressable, self-describing
 tree**, in the OSCQuery format. A client fetches `/v1/tree` once and knows every parameter that

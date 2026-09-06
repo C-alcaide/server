@@ -442,6 +442,23 @@ void stage_publisher::refresh(const stage_snapshot& snap)
 
     monitor::state st;
 
+    // AN UNTOUCHED STAGE PUBLISHES NOTHING, and this is what makes the two backends agree.
+    //
+    // The OpenGL mixer holds its `previz_renderer` BY VALUE, so one exists from construction and
+    // its snapshot is available on every tick of every channel. The Vulkan mixer builds one
+    // lazily, on the first `PREVIZ` command. Without this test the OpenGL backend carried a
+    // previz sub-tree on every idle channel and the Vulkan one did not -- measured, and caught by
+    // `api-stage`'s first check on the first run of the ogl arm.
+    //
+    // "Untouched" is decided by comparing against a default-constructed snapshot through
+    // `same_stage`, so it means exactly what the registry says it means and needs no second list
+    // of what counts as interesting.
+    static const stage_snapshot fresh{};
+    if (same_stage(snap, fresh)) {
+        state_ = std::move(st);
+        return;
+    }
+
     // Always published: no descriptor table stands behind these, so an absent key would leave a
     // reader with nothing to fall back on.
     st["active"]          = snap.flags.active;
