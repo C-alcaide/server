@@ -135,8 +135,8 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 | :--- | ---: | :--- | :--- | :--- |
 | **Projection warp, blend, curve, distortion, frustum, lens, offset** | 10 | `geometry`, `blend-mask`, `calibration`, `venue-test` | **partial** | **[projection-and-icvfx.md](projection-and-icvfx.md)** |
 | **ICVFX inner/outer frustum** | 2 | `icvfx-parity` (gain only) | **partial** | **[projection-and-icvfx.md](projection-and-icvfx.md)** |
-| **PREVIZ 3D module** | 13 | **none** | **shipped, unmeasured** | **[previz.md](previz.md)** |
-| **Camera tracking** | **18** | **none** | shipped, unmeasured | **[camera-tracking.md](camera-tracking.md)** |
+| **PREVIZ 3D module** | 13 | `previz-picture`, `api-stage`, `preview-cost` previz arms | shipped; the mapping's picture and the stage's state measured, **spatial placement not** | **[previz.md](previz.md)** |
+| **Camera tracking** | **18** | `tracking-previz` — **1 protocol of 5, 2 commands of 18** | shipped; the other sixteen commands unmeasured | **[camera-tracking.md](camera-tracking.md)** |
 | Projection calibration | 1 | `calibration` | shipped | `PROJECTION_CALIBRATION.md` |
 
 ### GPU pipeline
@@ -165,7 +165,7 @@ nothing drove it. Undocumented and untested proved to be the same gap seen from 
 | **PortAudio** | 1 | **none** | shipped, unmeasured | **[portaudio.md](portaudio.md)** |
 | **Replay** | — | **none** | shipped, unmeasured | **[replay.md](replay.md)** |
 | AMF / PRINT RAW | 2 | `amf` | shipped | — |
-| **Control API** (HTTP/OSCQuery) | 1 | `api-tree`, `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness` | partial | **[control-api.md](control-api.md)** |
+| **Control API** (HTTP/OSCQuery) | 1 | `api-tree`, `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`, `api-stage` | partial; **no battery looks at a pixel** | **[control-api.md](control-api.md)** |
 
 ---
 
@@ -176,8 +176,10 @@ Not alphabetical, and not by size. **By where defects have actually hidden**, wh
 
 1. **Projection and ICVFX** — 12 commands, all undocumented before this folder existed, one
    carrying a live colour defect. Written; see the document above.
-2. **PREVIZ** — written; see the document above. 13 commands, still **no coverage**, and the
-   document says what a first battery should check and in what order.
+2. **PREVIZ** — written; see the document above. 13 commands. It said "still **no coverage**"
+   until 2026-09-06; there are now three batteries (`previz-picture`, `api-stage`, `preview-cost`'s
+   previz arms) and the projection maths is checked at every server start. **Spatial placement is
+   still uncovered** — the document's §4 says so, and that is the gap that remains.
 3. **CUDA ProRes** — written. Chosen third because it is the most heavily measured part of the
    fork, so its document is mostly a place to put numbers that were scattered across commits.
 4. **LTC, Spout, HAP, NotchLC, DMX/sACN/Art-Net** — written. Each had no document of its own;

@@ -1,6 +1,7 @@
 # PREVIZ — 3D pre-visualisation
 
-> **State:** shipped; **cost** measured, **picture** unmeasured
+> **State:** shipped; **cost** measured, the **mapping's picture** measured on both mixers,
+> **spatial placement** unmeasured
 > **Modules:** **not a module** — `src/accelerator/ogl/image/previz_renderer.cpp`, `previz_scene.h`,
 > `previz.frag` / `previz.vert`, with the Vulkan route through
 > `src/accelerator/vulkan/image/previz_texture_bridge.cpp`
@@ -540,18 +541,25 @@ Two consequences:
 ## 5. Known gaps
 
 1. **Picture coverage exists for `MAP` only, since 2026-09-05** — `cli.py previz-picture`, §4.
-   Arrival, component order and per-mesh identity are gated on both mixers. The other twelve
-   commands still have no picture check. §4's third check (`PREVIZ SCREEN ... ICVFX` against
-   `MIXER PROJECTION_ICVFX`) **was** blocked on §5.3 and is now unblocked — §1.1 gives its exact
-   grammar — but it is still unwritten, and §5.4 says what it would find.
-2. **The renderer is OpenGL on both mixers, and the parity that implies is unmeasured.** This item
-   read *"OpenGL-only — either the Vulkan mixer grows the same bridge or the commands should
-   refuse"*; the bridge exists (`vulkan/image/image_mixer.cpp:1204-1254`). A Vulkan channel
-   composites in Vulkan, posts the result to the VK→GL bridge, renders the scene on the OGL thread
-   and returns *that* as the channel output — so previz **replaces** the 2D output and skips the
-   working-space composite. Two consequences nothing checks: a Vulkan channel running previz is
-   doing a per-frame round trip through a second API, and its colour handling differs from the same
-   channel with previz off.
+   Arrival, component order and per-mesh identity are gated on both mixers. **The other twelve
+   commands still have no picture check**, and that is the gap this item is about.
+
+   §4's third check (`PREVIZ SCREEN ... ICVFX` against `MIXER PROJECTION_ICVFX`) was blocked on
+   §5.3 and is **written** as of 2026-09-06 — `api-stage`'s last check, described in §4.2. It is
+   not a picture check, and it does not close this one: it compares the two routes' *state*. What
+   it found is in §5.4, which is now a fix rather than a finding.
+2. **The renderer is OpenGL on both mixers. The PICTURE parity is measured; the COLOUR
+   consequence is not.** This item read *"the parity that implies is unmeasured"* until 2026-09-06
+   and was already half false: `previz-picture` reports **identical per-mesh pixel counts** between
+   the two backends (346800 / 188232 / 188232 / 405674), and `api-stage` and `tracking-previz` both
+   run on both arms.
+
+   What remains genuinely unmeasured is narrower and more interesting. A Vulkan channel composites
+   in Vulkan, posts the result to the VK→GL bridge, renders the scene on the OGL thread and returns
+   *that* as the channel output — so previz **replaces** the 2D output and **skips the
+   working-space composite**. Two consequences nothing checks: the per-frame round trip through a
+   second API is uncosted, and a channel's colour handling differs from the same channel with
+   previz off. Neither `conformance` nor `grading` can see it — they drive no previz.
 3. ~~**`PREVIZ SCREEN`'s eight subcommands are unenumerated**~~ — **CLOSED 2026-09-06**, and
    there were **twelve**, not eight. §1.1 enumerates all of them argument by argument, and §1.2
    does the same for `CAMERA` and `VIEW`, which §1 had described as *"placement arguments"*. Seven

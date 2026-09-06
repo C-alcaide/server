@@ -88,18 +88,22 @@ makes the remaining gap findable; it does not make it smaller.
 
 Still uncovered, and now the priority order for coverage rather than for docs:
 
-* **the PICTURE, on all thirteen `PREVIZ` commands, and eight of the commands entirely.** This
-  used to read *"no battery references PREVIZ at all"*, which went stale on 2026-08-31:
-  `core/previz_scene.py` generates a four-quad stage and `preview-cost`'s previz arms drive
-  **`SCENE`, `MAP`, `SHOW`, `GRID` and `WIREFRAME`** — five of thirteen. Untouched: `UNMAP`,
-  `SCREEN`, `CAMERA`, `VIEW`, `AUTOPROJECTION`, `GIZMO`, `PRESET`, `INFO`.
+* **SPATIAL PLACEMENT, and the picture on twelve of the thirteen `PREVIZ` commands.** This
+  bullet has now been wrong in three different directions, which is itself the lesson: it read
+  *"no battery references PREVIZ at all"* until 2026-08-31, then listed eight commands as
+  untouched until 2026-09-06, when `api-stage` began driving `SCREEN` and `CAMERA` and
+  `tracking-previz` began driving the camera through a tracker.
 
-  **The five that are driven were driven for COST only** — gating on timing *"without ever looking
-  at a pixel"* — until `cli.py previz-picture` landed on 2026-09-05. That now gates the **mapping's
-  picture** on both mixers (arrival, component order, per-mesh identity: 4/4, with identical pixel
-  counts between OGL and Vulkan, which is also the parity `previz.md` §5.2 records as unmeasured).
-  **The other twelve commands still have no picture check**, and a cost battery is still not
-  coverage of a feature.
+  Driven today: `SCENE`, `MAP`, `SHOW`, `GRID`, `WIREFRAME` (`preview-cost`, for COST),
+  `MAP` again for its picture (`previz-picture`), and `SCREEN` and `CAMERA` for their STATE
+  (`api-stage`). **Still driven by nothing: `UNMAP`, `VIEW`, `AUTOPROJECTION`, `GIZMO`, `PRESET`,
+  `INFO`** — six, not eight.
+
+  **What no battery does at all is look at WHERE a screen is.** `previz-picture` proves the right
+  channel arrives on the right mesh — four asymmetric colours, identical pixel counts on both
+  backends — and says nothing about `screen1` being the back wall. `api-stage` reads every screen
+  property back through the tree and touches no pixel. That is A16 in the harness's mutation
+  battery, and it is the honest headline for this bullet now that the state half is covered.
 
   *And a trap that cost a fabricated defect, now in `previz.md` §4:* **a mapped channel with no
   consumer never ticks**, so `PREVIZ MAP` returns `202 OK` and the mesh stays grey. 20 s of settle
@@ -113,8 +117,22 @@ Still uncovered, and now the priority order for coverage rather than for docs:
 
   §4 lists the first three checks worth writing, in the order that would have caught the ICVFX
   class. (Thirteen, not twelve: the old count was short by one.)
-* **all eighteen `TRACKING` commands** — the composition order is now read out of the source in
-  `architecture/CAMERA_TRACKING_TRANSFORM.md` and verified by nothing.
+* **sixteen of the eighteen `TRACKING` commands, and four of the five protocols.**
+  `tracking-previz` landed 2026-09-06 and is the first coverage this family ever had: a synthetic
+  29-byte FreeD D1 packet through `BIND ... MODE PREVIZ`, gated on the camera's resulting position
+  and rotation VALUES on both mixers. It covers `BIND` and `UNBIND` over FreeD and nothing else.
+
+  Still verified by nothing: `OFFSET`, `SCALE`, `ZERO`, `DEFAULT_FOV`, `ZOOM_LUT`,
+  `POSITION_SCALE`, `DELAY`, `GENLOCK`, `NODAL`, `WORLDALIGN`, `DOF`, `LENS`, `TARGET_CAMERA`,
+  `TARGET_MAP`, `INFO`, `LIST`; the FreeD+, OSC, VRPN, PSN and OpenTrackIO receivers; the 2D and
+  TARGET modes; and the composition order read out of the source in
+  `architecture/CAMERA_TRACKING_TRANSFORM.md`.
+
+  *The reason it had no coverage was structural, not neglect, and worth remembering for the next
+  surface like it:* a tracker needs a wire protocol on one side and something observable on the
+  other. FreeD turned out to be a fixed-size packet with the receiver as its own specification,
+  and the previz camera became readable only when the stage was published into the control API.
+  **Before recording a gap as "nobody wrote a battery", check whether either end was reachable.**
 * **ICVFX beyond the gain** — `icvfx-parity` covers the gain exchange. The mask geometry, the
   feather, the inner-frustum reprojection and the tweened forms remain uncovered.
 

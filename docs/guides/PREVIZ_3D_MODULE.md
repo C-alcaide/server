@@ -685,4 +685,15 @@ PREVIZ AUTOPROJECTION ...
 are two routes into one ICVFX state**, so a value set through one is visible to the other. Setting
 the same quantity from both is not additive and not an error — the last write wins.
 
-**No battery drives any of the twelve `PREVIZ` commands.**
+**Three batteries drive PREVIZ, and none of them checks where a screen appears.**
+
+This line read *"No battery drives any of the twelve `PREVIZ` commands"* until 2026-09-06 and
+was wrong twice over: there are **thirteen** commands, not twelve, and `preview-cost`'s previz
+arms, `cli.py previz-picture` and `cli.py api-stage` all drive them. `previz-picture` gates the
+mapping's picture on both mixers; `api-stage` gates every screen and camera property through
+the control API; the projection maths has 68 property checks at every server start.
+
+**What none of them do is look at where a screen is.** Four colours prove four channels
+arrived on four meshes, not that `screen1` is the back wall, and `api-stage` touches no pixel
+at all. Eight of the thirteen commands still have no picture check. See
+[`../features/previz.md`](../features/previz.md) §4.
