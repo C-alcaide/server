@@ -1,6 +1,67 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: the 3D stage is addressable — screens and previz cameras in the tree
+
+Every screen and both previz cameras are now ordinary nodes in the control API, at
+`/channel/{n}/mixer/previz/…`. **Additive**: the thirteen `PREVIZ` commands are unchanged and
+nothing that worked before stops working.
+
+```
+curl http://127.0.0.1:5254/v1/tree/channel/1/mixer/previz
+curl -X PUT -d '{"value":[2.5,0,-5.5]}' \
+     http://127.0.0.1:5254/v1/value/channel/1/mixer/previz/screen/back/position
+```
+
+**The half that matters is READING.** `PREVIZ SCREEN LIST` reports four of a screen's fifteen
+properties and there is no `SCREEN <name> INFO`, so position, rotation, vertical arc, resolution,
+eye mode, design eye and ICVFX were **write-only over AMCP**. All sixteen properties now read back,
+carry a type, a range, a unit and a description, and appear in `GET /v1/tree` and
+`GET /v1/openapi.json`. `HOST_INFO.EXTENSIONS.DESCRIPTION` consequently reports `true` for the
+first time — it had been advertised as `true` while no field in the server emitted one.
+
+**Two things the tree makes visible that were silent:**
+
+* `radius` on a curved screen is **derived** — `width / 2 / sin(arc / 2)` — so the value an
+  operator supplies to `PREVIZ SCREEN ADD … CURVED` is accepted and discarded. It is `read` access
+  in the tree and shows what the server actually holds: a screen added as `CURVED 4 3 5 60` reads
+  back **4.0**.
+* `design_eye` is stored only while `eye_mode` is `fixed`. A write outside that comes back as
+  `field_conflict` with both values, because the reply reports what the renderer **holds** rather
+  than what was asked for.
+
+**Rendered output is unchanged.** `conformance` 100/100 within 1.0 LSB and `grading` 48/48 on both
+mixers; `previz-picture` 4/4 on both with **identical per-mesh pixel counts** — 346800, 188232,
+188232, 405674 — before and after the projection maths moved out of the accelerator.
+
+**Tick cost, four channels, three screens each, measured A/B/A/B on one binary:**
+
+| | `tick/osc` avg_ms | `tick/total` avg_ms |
+| :--- | ---: | ---: |
+| opengl, no stage | 0.05152 | 39.83278 |
+| opengl, stage    | 0.05927 (**+0.00776**) | 39.79175 (−0.04103) |
+| vulkan, no stage | 0.02342 | 39.92707 |
+| vulkan, stage    | 0.02914 (**+0.00572**) | 39.90179 (−0.02528) |
+
+`tick/osc` is the figure; `tick/total` is **not an instrument here** — at 1080p2500 it is dominated
+by the frame-rate wait, and its delta comes out negative on both mixers, which is how you can tell
+it resolves nothing rather than that previz made the server faster. A channel with no stage on it
+publishes nothing and costs an atomic load.
+
+**Also new: the projection maths is checked at every server start.** `compute_frustum` moved to
+`core/` and now has 68 property checks that need no GL device and no display, logged as
+`[core] stage math self-test: 68 checks, 0 divergences`. They are FATAL on failure, because that
+function is on the frame path. The ICVFX quad is additionally intersected a second time from a
+closed-form camera basis — the same expressions `casparcg-360-client`'s pure-numpy
+`frustum_check.py` uses — and the two implementations agree. Verified able to fail: two mutations
+compiled into `compute_frustum` failed 19 of the 68.
+
+**What none of this can see:** no stage check looks at a pixel. A screen whose position stores
+perfectly and renders in the wrong place passes every one of `api-stage`'s 19 checks;
+`previz-picture` proves a mapped *channel* arrives on a mesh, not *where* the mesh is. Spatial
+placement is uncovered, and screens are not animatable — KEYFRAMES is bound to `image_transform`,
+so `duration` and `tween` are refused rather than ignored.
+
 ### Added: the control API — the server's state as an addressable tree
 
 An HTTP interface exposing what the server publishes as an OSCQuery-shaped tree a client can

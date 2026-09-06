@@ -265,14 +265,105 @@ PREVIZ AUTOPROJECTION
 
 No `<configuration>` elements; entirely runtime.
 
+### 2.1 The same stage, as addressable nodes — since 2026-09-06
+
+Every screen and both cameras are also ordinary nodes in the control API's tree, beside the mixer
+fields. **Additive**: the thirteen `PREVIZ` commands are unchanged and nothing that works today
+stops working. What the tree adds is that a screen can now be *read*, *described* and *discovered*
+rather than only written.
+
+```mermaid
+flowchart LR
+    AMCP["AMCP<br/>PREVIZ SCREEN back POSITION"] --> MUT
+    HTTP["HTTP<br/>PUT .../screen/back/position"] --> BRIDGE["api_context::set_stage_field<br/><i>(the shell; protocol cannot see the accelerator)</i>"]
+    BRIDGE --> MUT["previz_renderer::set_screen_position<br/><i>re-applies the mesh transform,<br/>calls update_projections()</i>"]
+    MUT --> SCENE[("previz_scene<br/>screens, cameras, flags")]
+    SCENE --> SNAP["stage_snapshot()<br/><i>no geometry</i>"]
+    SNAP --> PUB["stage_publisher<br/><i>rebuild on change,<br/>write every tick</i>"]
+    PUB --> STATE[("monitor::state<br/>/channel/n/mixer/previz/...")]
+    STATE --> TREE["GET /v1/tree"]
+    STATE --> VALUE["GET /v1/value"]
+    STATE --> EVENTS["WS /v1/events"]
+    STATE --> OSC["OSC"]
+```
+
+**Both routes end at the same mutator**, and that is the point rather than an implementation
+detail: `set_screen_position` and its siblings re-apply the mesh transform and call
+`update_projections()`. A write that set the struct directly would store a value that changes
+nothing on screen — 202 and no picture.
+
+| address | type | notes |
+| :--- | :--- | :--- |
+| `/channel/{n}/mixer/previz/active` | bool | read-only telemetry, always published |
+| `…/auto_projection`, `…/show_grid`, `…/show_wireframe`, `…/show_gizmo` | bool | the diagnostic aids as fields, not a debug menu |
+| `…/camera_locked`, `…/view_override`, `…/scene_path` | bool, bool, string | always published |
+| `…/screens` | string[] | which named screens exist. Always published, including empty |
+| `…/camera/{position,rotation,fov}` | vec3 m, vec3 deg, real deg | the **production** camera — what `compute_frustum` reads |
+| `…/camera/{near_clip,far_clip}` | real m | **read-only**: hard-coded by `set_camera`, not in the layout file |
+| `…/view_camera/…` | same five | the operator's viewport. Moving it never moves a projection |
+| `…/screen/{name}/size` | vec2 m | **not writable** — see below |
+| `…/screen/{name}/{position,rotation}` | vec3 m, vec3 deg | |
+| `…/screen/{name}/radius` | real m | **read-only and DERIVED** — `width / 2 / sin(arc / 2)` |
+| `…/screen/{name}/arc` | real deg | **not writable** — see below |
+| `…/screen/{name}/arc_v` | real deg | 0 leaves a cylinder |
+| `…/screen/{name}/resolution` | vec2 px | stored, persisted, **read by nothing** (§5.5 defect 4) |
+| `…/screen/{name}/channel` | integer | −1 unmapped. Note `PREVIZ MAP` does **not** write this (§5.5 defect 5) |
+| `…/screen/{name}/eye_mode` | enum `camera｜fixed` | a **closed** enum here: an unknown name is refused, where the AMCP form accepts any word as CAMERA (§5.5 defect 2) |
+| `…/screen/{name}/design_eye` | vec3 m | writable only while `eye_mode` is `fixed` — see below |
+| `…/screen/{name}/icvfx` | bool | |
+
+```
+curl http://127.0.0.1:5254/v1/tree/channel/1/mixer/previz
+curl -X PUT -d '{"value":[2.5,0,-5.5]}' \
+     http://127.0.0.1:5254/v1/value/channel/1/mixer/previz/screen/back/position
+```
+
+**A field at its default is not published**, exactly as for the mixer: `/v1/value` answers an
+absent path with the descriptor's default and flags it `is_default`. That is why `screens` is
+published unconditionally — a screen whose every property happened to sit at its default would
+otherwise not appear at all. A channel with no stage on it publishes nothing under `previz`, on
+either backend.
+
+**Four restrictions, each with a reason rather than a to-do:**
+
+* **`op: set` only.** `toggle`, `add` and `cas` get their atomicity on the mixer path from running
+  inside one closure on the stage executor. The previz renderer is a set of per-property setters,
+  so a read-modify-write would span two acquisitions of the scene lock. A `toggle` that is not
+  atomic is worse than no `toggle`.
+* **Not tweenable.** `duration` and `tween` are refused rather than ignored: KEYFRAMES is bound to
+  `image_transform` end to end, so a screen cannot be animated in this build. L57 of the design
+  study says it should be; that is a real gap, named rather than papered over.
+* **`size` and `arc` have no mutator.** Both are set only by `add_screen_flat`/`add_screen_curved`,
+  which build a *fresh* `screen_meta` and would silently discard position, rotation, eye mode and
+  ICVFX. Refused with that reason in the message, until the renderer grows a resize that
+  regenerates the mesh in place.
+* **`design_eye` is declined outside `fixed` mode**, because `set_screen_eye_mode` stores those
+  three components only when the mode is already FIXED. Set `eye_mode` first. The write comes back
+  as `field_conflict` with both values rather than as a success, because the reply reports what the
+  renderer **holds**, not what was asked for.
+
 ---
 
 ## 3. Design decisions, and what they cost
 
-**The bridge lives in the OpenGL mixer.** `previz_*` commands reach the mixer through
-`ogl_mix->...` (e.g. `unmap_mesh` at 4869), so this feature is tied to the OpenGL accelerator.
-On a Vulkan channel the commands have no mixer to talk to. That is a real constraint on a fork
-whose Vulkan mixer is the one under active development, and it is not stated anywhere else.
+**The renderer is an OpenGL one on both backends, and the commands reach it either way.**
+`get_previz_renderer` in `AMCPCommandsImpl.cpp` tries `dynamic_cast<ogl::image_mixer*>` first and
+`vulkan::image_mixer` second; the Vulkan mixer builds the same `ogl::previz_renderer` lazily on a
+dedicated OGL device and bridges its output back. So `PREVIZ` works on a Vulkan channel —
+`api-stage` and `previz-picture` both drive it there, 19/19 and 4/4.
+
+*This paragraph used to say the opposite* — "on a Vulkan channel the commands have no mixer to talk
+to" — and it was already false when written. The real constraint is narrower and is recorded as
+§5.5's defect 6: **camera tracking** in `mode_previz` casts only to `ogl::image_mixer`, so tracker-
+driven previz is OpenGL-only. One `dynamic_cast` chain was widened to cover Vulkan and another was
+not, and the difference is invisible from the command surface.
+
+**The two backends allocate the renderer differently, and it leaked once.** OpenGL holds it by
+value (one always exists); Vulkan builds it on first use. That gave every idle OpenGL channel a
+previz sub-tree in the control API and Vulkan channels none, until the publication was made
+conditional on the STAGE being non-default rather than on a renderer existing. Worth remembering
+whenever something asks "does this channel have previz" — the honest answer is about the scene,
+not about the object.
 
 **Names rather than indices** for meshes, screens and presets. It makes show files readable and
 survives a scene being re-exported with different ordering, at the cost of silent no-ops when a
@@ -475,7 +566,7 @@ Two consequences:
    alter rendered output for any show that sets it manually, so it needs its own commit and its own
    before/after. §4's check 3 is what would measure it, and §1.1 has unblocked it.
 
-### 5.5 Five defects in the command surface, from reading the handler
+### 5.5 Six defects in the command surface
 
 Found while enumerating §1.1 on 2026-09-06. None is fixed here; each is recorded so the next reader
 does not have to rediscover it.
@@ -505,6 +596,20 @@ does not have to rediscover it.
 
    `previz-picture` cannot see this: it uses `MAP` and asserts the **texture arrives**, which it
    does. What does not arrive is the projection, and no battery looks at that.
+6. **Tracker-driven previz is OpenGL-only, and fails silently.** `tracking_commands.cpp`'s
+   `mode_previz` branch does `dynamic_cast<accelerator::ogl::image_mixer*>` and nothing else, so on
+   a Vulkan channel `ogl_mix` is null, the `if` is skipped, `previz_camera_fn` is never installed
+   — and the command still answers `202 TRACKING OK`. The tracker binds, samples arrive, and the
+   previz camera never moves.
+
+   It is the same `dynamic_cast` chain the `PREVIZ` commands use, minus its second branch:
+   `AMCPCommandsImpl.cpp`'s `get_previz_renderer` tries `vulkan::image_mixer` as well. One was
+   widened to cover both backends and the other was not, which is why §3 said for a long time that
+   previz did not work on Vulkan at all — half of that was true, and it was this half.
+
+   Found 2026-09-06 while correcting §3. **Not fixed here**: it needs the Vulkan branch and a check
+   that drives a tracker, and `TRACKING` has no battery of any kind — all eighteen of its commands
+   are uncovered.
 
 ---
 

@@ -46,6 +46,7 @@ catch its mutation cannot fail*.
 | :--- | :--- |
 | the shader, the colour maths, a grading operator | `conformance` + `grading`, **both mixers** |
 | a new `image_transform` field | the battery owning that command, **both mixers** — and check the allowlist trap below, which no battery can see for you |
+| a **screen or previz camera** property, or anything the stage publishes | `api-stage`, **both mixers** — and add the row to `core/stage/stage_fields.*`, because a property that is not in that table is invisible to the tree, to the publisher's change detection and to the write path all three at once |
 | an OCIO stage | `ocio`, `ocio-display`, `ocio-look`, `ocio-lut3d`, `consumer-view` as the stage dictates |
 | the composite / blend / alpha domain | `blend-domain`, `alpha-domain`, `mix-stage` |
 | the decode path | `flat-decoded` (the only 1 LSB decode gate), `sdi-input`, `source-colorspace` |
@@ -57,6 +58,13 @@ catch its mutation cannot fail*.
 | geometry, rasters, projection | `geometry`, `mixer-parity` |
 | **the control API, the transform registry, or `MIXER FIELD`** | `api-tree`, `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness` — **both mixers**. And note what none of them can see: **not one looks at a pixel**, so a field that stores correctly and renders nothing passes all six. That is the `MIXER EXPOSURE` class, and only a capture per field would catch it |
 | docs only | nothing |
+
+**A third rule, learned on the stage work 2026-09-06:** *"both mixers"* in this table means the
+two backends can differ for reasons that have nothing to do with pixels. The OpenGL mixer holds its
+`previz_renderer` **by value** and the Vulkan one builds it lazily, so the first version of the
+stage publication gave every idle OpenGL channel a previz sub-tree and gave Vulkan channels none.
+No colour battery could see that; `api-stage`'s first check on the ogl arm did, on its first run.
+**Object lifetime is a parity axis too**, not only arithmetic.
 
 Two rules that outrank the table:
 
