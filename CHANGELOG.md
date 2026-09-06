@@ -1,6 +1,42 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: two previz commands left the screen list disagreeing with the stage
+
+Both had been silent, and both became *wrong in writing* once screens were published into the
+control API. They share one root cause: `screens` and the mesh mapping were two sources of truth
+that could drift apart.
+
+**A scene reload no longer leaves phantom screens.** `PREVIZ SCENE <path>` cleared `meshes` but
+not `screens` or `mesh_to_channel` — only `SCENE NONE` cleared those. `update_projections()`
+iterates `screens`, so after loading a second model the screens whose meshes were gone **kept
+computing frustums and writing them to their mapped channels**, indefinitely. The load path now
+clears both.
+
+*Behaviour change:* loading a new scene now discards procedurally added screens. It already
+discarded their meshes, so what is removed is debris — a procedural screen generates its own mesh.
+Preserving an operator's stage across a venue-model swap would mean regenerating those meshes,
+which is a larger change and is not this one.
+
+**`PREVIZ MAP` now writes the screen's channel, so the screen actually projects.** `map_mesh`
+wrote `mesh_to_channel` and never `screens[name].channel`, and `update_projections()` skips any
+screen whose channel is below 1 — so `PREVIZ 1 MAP back 3` textured the mesh and left
+auto-projection **off** for that screen, while `PREVIZ 1 SCREEN back CHANNEL 3` did both. Both
+answered `202`, and nothing reported which one you had. `UNMAP` clears it symmetrically. A mesh
+that is not a procedural screen is untouched: `MAP` has always worked on plain glTF/OBJ meshes and
+auto-projection has never applied to them.
+
+**Measured, both mixers, each check shown failing before its fix** — `api-stage` 22/22:
+
+| check | before | after |
+| :--- | :--- | :--- |
+| a scene reload leaves no phantom screens | 3 of 3 screens survived | 0 survive |
+| `PREVIZ MAP` writes the screen's channel | `channel` read `-1` | reads `2` |
+
+`previz-picture` 4/4 and `api-tree` 11/11 on both mixers, unchanged — `previz-picture` drives
+`MAP` against OBJ *meshes* rather than procedural screens, which is exactly why it never saw the
+second defect and still cannot.
+
 ### Added: the 3D stage is addressable — screens and previz cameras in the tree
 
 Every screen and both previz cameras are now ordinary nodes in the control API, at

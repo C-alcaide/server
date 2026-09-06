@@ -668,6 +668,24 @@ struct previz_renderer::impl
             return;
         }
 
+        // The procedural screens go with the meshes, and this used to be the ONE branch that
+        // forgot them. `SCENE NONE` above clears `meshes`, `mesh_to_channel` AND `screens`;
+        // loading a new scene cleared only `meshes` (inside `load_gltf_scene`/`load_obj_scene`),
+        // so `screens` went on describing screens whose meshes no longer existed.
+        //
+        // That is not cosmetic: `update_projections()` iterates `screens`, so the phantoms kept
+        // computing frustums and writing them to their mapped channels forever -- and since the
+        // stage became addressable they published into the tree as well, advertising screens an
+        // operator cannot see and cannot remove by name.
+        //
+        // A procedural screen GENERATES its mesh (`add_screen_flat`/`add_screen_curved`), so a
+        // screen whose mesh has gone is not recoverable state -- it is debris. Regenerating the
+        // meshes instead, so an operator's stage survives a venue-model swap, is a bigger and
+        // separately arguable behaviour change; this makes the load path agree with the clear
+        // path, which is the defect.
+        scene_.screens.clear();
+        scene_.mesh_to_channel.clear();
+
         auto ext = boost::filesystem::path(path).extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
@@ -728,14 +746,41 @@ void previz_renderer::load_scene(const std::string& path)
 
 void previz_renderer::map_mesh(const std::string& mesh_name, int channel_index)
 {
-    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
-    impl_->map_mesh(mesh_name, channel_index);
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        impl_->map_mesh(mesh_name, channel_index);
+
+        // If the mapped name is ALSO a procedural screen, `MAP` and `SCREEN ... CHANNEL` have to
+        // agree. `impl::map_mesh` writes `mesh_to_channel` and `mesh.is_screen` and nothing else,
+        // while `update_projections()` iterates `screens` and skips any whose channel is < 1 --
+        // so `PREVIZ 1 MAP back 3` textured the mesh and left auto-projection OFF for it, with
+        // both forms answering 202 and nothing reporting which one you got. Since the stage
+        // became addressable the tree also published `channel: -1` for a screen that is plainly
+        // mapped, which is worse than silent: it is wrong in writing.
+        //
+        // A mesh that is NOT a procedural screen is untouched, deliberately. `MAP` has always
+        // worked on plain glTF/OBJ meshes and auto-projection has never applied to them.
+        auto it = impl_->scene_.screens.find(mesh_name);
+        if (it != impl_->scene_.screens.end())
+            it->second.channel = channel_index;
+    }
+    // Outside the lock, mirroring `set_screen_channel` -- `update_projections()` takes the scene
+    // lock itself and then calls out to the stage. It returns immediately unless auto-projection
+    // is on and a callback is bound, so this costs nothing on a channel that does not use it.
+    update_projections();
 }
 
 void previz_renderer::unmap_mesh(const std::string& mesh_name)
 {
-    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
-    impl_->unmap_mesh(mesh_name);
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        impl_->unmap_mesh(mesh_name);
+
+        auto it = impl_->scene_.screens.find(mesh_name);
+        if (it != impl_->scene_.screens.end())
+            it->second.channel = -1;
+    }
+    update_projections();
 }
 
 void previz_renderer::set_camera(float x, float y, float z, float yaw, float pitch, float roll, float fov)

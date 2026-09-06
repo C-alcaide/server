@@ -568,8 +568,10 @@ Two consequences:
 
 ### 5.5 Six defects in the command surface
 
-Found while enumerating §1.1 on 2026-09-06. None is fixed here; each is recorded so the next reader
-does not have to rediscover it.
+Found while enumerating §1.1 on 2026-09-06. **Two are fixed as of the same day — 3 and 5, both
+below — and the rest are recorded so the next reader does not have to rediscover them.** The two
+that were fixed are the two the addressable stage made *worse*: they had been silent, and once
+screens were published they became wrong in writing.
 
 1. **`ADD … CURVED` discards the `radius_m` argument** — it is recomputed from width and arc. The
    parameter is in the grammar, is accepted, and is almost never the value stored. The layout file
@@ -577,25 +579,43 @@ does not have to rediscover it.
 2. **`EYEMODE` accepts any word as `CAMERA`.** The test is `== "FIXED"`, so a typo returns `202`
    and silently selects the other mode. And `FIXED` with fewer than three coordinates uses the
    defaults rather than refusing.
-3. **A scene reload keeps the old screens.** `PREVIZ SCENE <path>` clears `meshes` but not
-   `screens` or `mesh_to_channel` — only `SCENE NONE` clears those. So after loading a second
-   model, `screens` still describes screens whose meshes are gone, and `update_projections()`
-   iterates `screens`, so those phantoms keep writing projections to their mapped channels.
+3. ~~**A scene reload keeps the old screens.**~~ **FIXED 2026-09-06.** `PREVIZ SCENE <path>`
+   cleared `meshes` but not `screens` or `mesh_to_channel` — only `SCENE NONE` cleared those. So
+   after loading a second model, `screens` still described screens whose meshes were gone, and
+   because `update_projections()` iterates `screens`, those phantoms kept computing frustums and
+   writing them to their mapped channels forever. Once the stage became addressable they were
+   published too, advertising screens an operator can neither see nor remove by name.
+
+   The load path now clears both, agreeing with the clear path. A procedural screen *generates*
+   its own mesh, so a screen whose mesh has gone is debris rather than recoverable state.
+   Regenerating the meshes instead — so an operator's stage survives a venue-model swap — is a
+   larger and separately arguable behaviour change, and is not what this fixes.
+
+   Gated by `api-stage`'s "a scene reload leaves no phantom screens", **shown failing first**:
+   three screens survived the reload before the fix, zero after, on both mixers.
 4. **`show_gizmo` is written and never read**, and `res_w`/`res_h` are stored, persisted and never
    read. `PREVIZ GIZMO` and `SCREEN … RESOLUTION` both answer `202` and change nothing that
    renders.
-5. **`PREVIZ MAP` and `PREVIZ SCREEN … CHANNEL` are not the same operation, and the difference is
-   silent.** `map_mesh` writes `mesh_to_channel[name]` and `mesh.is_screen`; it never touches
-   `screens[name].channel`. `set_screen_channel` writes **both**, then recomputes projections. And
-   `update_projections` iterates `screens`, skipping any whose `channel < 1`.
+5. ~~**`PREVIZ MAP` and `PREVIZ SCREEN … CHANNEL` are not the same operation.**~~ **FIXED
+   2026-09-06.** `map_mesh` wrote `mesh_to_channel[name]` and `mesh.is_screen` and never touched
+   `screens[name].channel`, while `update_projections` iterates `screens` and skips any whose
+   `channel < 1`. So on a procedurally added screen, `PREVIZ 1 MAP back 3` **textured the mesh and
+   left auto-projection off for it** — the screen still read `channel = -1` and no frustum was
+   ever written to channel 3. `PREVIZ 1 SCREEN back CHANNEL 3` did both. Both answered `202` and
+   nothing reported which one you got; after the stage became addressable, the tree also published
+   `channel: -1` for a screen that is plainly mapped.
 
-   So on a procedurally added screen, `PREVIZ 1 MAP back 3` **textures the mesh and leaves
-   auto-projection off for it** — the screen still reads `channel = -1`, and no frustum is ever
-   written to channel 3. `PREVIZ 1 SCREEN back CHANNEL 3` does both. Both answer `202`, and
-   nothing reports which one you got.
+   `map_mesh` now writes the screen's channel when the mapped name **is** a procedural screen, and
+   `unmap_mesh` clears it, both recomputing projections outside the scene lock the way
+   `set_screen_channel` already did. A mesh that is *not* a procedural screen is untouched
+   deliberately: `MAP` has always worked on plain glTF/OBJ meshes and auto-projection has never
+   applied to them.
 
-   `previz-picture` cannot see this: it uses `MAP` and asserts the **texture arrives**, which it
-   does. What does not arrive is the projection, and no battery looks at that.
+   **Why `previz-picture` could not see it, and still cannot:** it drives `MAP` against
+   `previz_scene.obj` *meshes*, which are not procedural screens, and asserts the **texture
+   arrives** — which it does. The fork's best-covered previz command was covered on exactly the
+   half that worked. `api-stage` covers the other half now, **shown failing first**: `channel`
+   read `-1` before the fix and `2` after, on both mixers.
 6. **Tracker-driven previz is OpenGL-only, and fails silently.** `tracking_commands.cpp`'s
    `mode_previz` branch does `dynamic_cast<accelerator::ogl::image_mixer*>` and nothing else, so on
    a Vulkan channel `ogl_mix` is null, the `if` is skipped, `previz_camera_fn` is never installed
