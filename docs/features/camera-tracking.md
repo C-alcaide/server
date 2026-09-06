@@ -1,11 +1,13 @@
 # Camera tracking
 
-> **State:** shipped, unmeasured
+> **State:** shipped; one protocol and two commands measured, the other sixteen unmeasured
 > **Modules:** `src/modules/tracking`
 > **Commands:** **18** fork-specific AMCP commands, all registered by the module itself
 > **Architecture:** [`../architecture/CAMERA_TRACKING_TRANSFORM.md`](../architecture/CAMERA_TRACKING_TRANSFORM.md)
 > **Guide:** [`../guides/CAMERA_TRACKING.md`](../guides/CAMERA_TRACKING.md)
-> **Coverage:** **none**
+> **Coverage:** `cli.py tracking-previz` — a synthetic FreeD D1 packet through `BIND ... MODE
+> PREVIZ` to the previz camera, gated on the **values**, both mixers. **1 of 5 protocols and 2 of
+> 18 commands**; everything else is still verified by nothing — see §5
 
 Receives live camera position, rotation and lens data from a tracking system and drives a
 channel's projection from it, so rendered content stays correct as the camera moves. Five wire
@@ -111,7 +113,36 @@ None of those needs a camera. All three are absent.
 
 ## 5. Known gaps
 
-1. **No coverage of any kind**; §4 lists three things testable without hardware.
+1. ~~**No coverage of any kind**~~ — **first coverage landed 2026-09-06**, and it is narrow
+   enough that the ratio matters more than the fact: `cli.py tracking-previz` drives **one of
+   five protocols** (FreeD) and **two of eighteen commands** (`BIND`, `UNBIND`).
+
+   It exists because two halves arrived in the same week. FreeD D1 turns out to be a **fixed
+   29-byte UDP packet** — `freed_receiver.cpp` is the whole specification, so a sample needs no
+   camera, no hardware and no vendor SDK. And the previz camera became **readable** at
+   `/channel/{n}/mixer/previz/camera/position` when the 3D stage was published into the control
+   API, so a tracked camera finally moves something a test can see. Neither half was available
+   before, which is why this surface had no coverage rather than bad coverage.
+
+   It gates the **values**, not the changes: under the default chain 1500 mm arrives as 1.5 m on
+   the same axis and pan/tilt/roll map 1:1 onto yaw/pitch/roll in degrees, so a scale error or an
+   axis swap fails where a did-it-move check would pass. **Both mixers, and the ogl arm is a
+   control rather than a duplicate** — the defect it was written for (§5.1 below) was
+   Vulkan-only, so a Vulkan-only run cannot tell a working fix from a packet that never arrived.
+
+   The other **sixteen commands remain uncovered**, and §4 still lists what is testable without
+   hardware.
+
+2. **PREVIZ mode reached only the OpenGL mixer, silently — fixed 2026-09-06.**
+   `tracking_commands.cpp`'s `mode_previz` branch cast only to `ogl::image_mixer`, so on a Vulkan
+   channel `previz_camera_fn` was never installed and `BIND` still answered `202 TRACKING OK`:
+   the tracker bound, samples arrived, the camera never moved, and nothing said why. It was the
+   same `dynamic_cast` chain `get_previz_renderer` walks, minus its second branch — one was
+   widened to cover both backends and its twin was not.
+
+   Measured against the pre-fix binary: **ogl 7/7, vulkan 4/7** with the camera sitting at its
+   default. A channel with genuinely no previz renderer now logs a warning rather than binding a
+   tracker that drives nothing.
 2. **The composition order is written down but unmeasured.**
    [`../architecture/CAMERA_TRACKING_TRANSFORM.md`](../architecture/CAMERA_TRACKING_TRANSFORM.md)
    reads the sequence out of `tracker_registry.cpp::inject_transform` — including that

@@ -627,9 +627,14 @@ screens were published they became wrong in writing.
    widened to cover both backends and the other was not, which is why §3 said for a long time that
    previz did not work on Vulkan at all — half of that was true, and it was this half.
 
-   Found 2026-09-06 while correcting §3. **Not fixed here**: it needs the Vulkan branch and a check
-   that drives a tracker, and `TRACKING` has no battery of any kind — all eighteen of its commands
-   are uncovered.
+   Found 2026-09-06 while correcting §3, and **FIXED the same day** — both halves: the Vulkan
+   branch, and the check that drives a tracker. `cli.py tracking-previz` sends a synthetic 29-byte
+   FreeD D1 packet and reads the camera back through the control API, which only became possible
+   when the stage was published. Pre-fix: **ogl 7/7, vulkan 4/7** with the camera at its default.
+
+   A channel with genuinely no previz renderer now logs a warning rather than binding a tracker
+   that drives nothing. `TRACKING` still has coverage of **1 of 5 protocols and 2 of 18 commands** —
+   see `camera-tracking.md` §5.
 
 ---
 
