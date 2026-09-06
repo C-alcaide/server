@@ -38,6 +38,9 @@
 #include <core/video_format.h>
 #include <accelerator/ogl/image/image_mixer.h>
 #include <accelerator/ogl/image/previz_renderer.h>
+#ifdef ENABLE_VULKAN
+#include <accelerator/vulkan/image/image_mixer.h>
+#endif
 
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
@@ -204,17 +207,48 @@ static std::wstring tracking_bind_command(command_context& ctx)
             auto raw_ch = ctx.channel.raw_channel;
             if (raw_ch) {
                 auto img = raw_ch->mixer().get_image_mixer();
-                auto* ogl_mix = dynamic_cast<accelerator::ogl::image_mixer*>(img.get());
-                if (ogl_mix) {
+
+                // BOTH backends, and this used to be OpenGL only.
+                //
+                // The branch below tried `ogl::image_mixer` and nothing else. On a Vulkan channel
+                // the cast returned null, the `if` was skipped, `previz_camera_fn` was never
+                // installed -- and `TRACKING ... BIND` still answered `202 TRACKING OK`. The
+                // tracker bound, samples arrived, and the previz camera never moved, with nothing
+                // anywhere reporting why.
+                //
+                // It is the same chain `AMCPCommandsImpl.cpp`'s `get_previz_renderer` walks, and
+                // that one already had the Vulkan branch: the Vulkan mixer builds the same
+                // `ogl::previz_renderer` lazily on a dedicated OGL device. One was widened to
+                // cover both backends and its twin was not, and the difference is invisible from
+                // the command surface -- which is exactly why it survived.
+                accelerator::ogl::previz_renderer* previz = nullptr;
+                if (auto* ogl_mix = dynamic_cast<accelerator::ogl::image_mixer*>(img.get()))
+                    previz = &ogl_mix->get_previz_renderer();
+#ifdef ENABLE_VULKAN
+                else if (auto* vk_mix = dynamic_cast<accelerator::vulkan::image_mixer*>(img.get()))
+                    previz = vk_mix->get_previz_renderer();
+#endif
+
+                if (previz) {
                     // Capture a weak reference to the stage so we can detect channel destruction.
+                    // The renderer is held by POINTER rather than by reference because the Vulkan
+                    // accessor returns one and can return null; `stage_weak.lock()` is what
+                    // guards the lifetime either way.
                     auto stage_weak = b.stage;
-                    auto& renderer  = ogl_mix->get_previz_renderer();
-                    b.previz_camera_fn = [&renderer, stage_weak](float x, float y, float z,
-                                                                  float yaw, float pitch, float roll, float fov) {
+                    b.previz_camera_fn = [previz, stage_weak](float x, float y, float z,
+                                                              float yaw, float pitch, float roll, float fov) {
                         // Skip while the operator has frozen the camera (OVERRIDE).
-                        if (stage_weak.lock() && !renderer.is_camera_locked())
-                            renderer.set_camera(x, y, z, yaw, pitch, roll, fov);
+                        if (stage_weak.lock() && !previz->is_camera_locked())
+                            previz->set_camera(x, y, z, yaw, pitch, roll, fov);
                     };
+                } else {
+                    // Say so rather than binding a tracker that drives nothing. The command still
+                    // succeeds -- the tracker is bound and its data is still published -- but
+                    // PREVIZ mode specifically cannot work, and silence is what made this defect
+                    // survive on the Vulkan mixer.
+                    CASPAR_LOG(warning)
+                        << L"[tracking] PREVIZ mode bound on channel " << ch
+                        << L", but this channel has no previz renderer -- the camera will not move.";
                 }
             }
         }
