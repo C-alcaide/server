@@ -10,6 +10,8 @@
  */
 
 #include "api_openapi.h"
+
+#include <core/stage/stage_fields.h>
 #include "api_status.h"
 #include "json_state.h"
 
@@ -234,12 +236,17 @@ json::object openapi(const http_config& cfg)
         p["get"] = op("Read one value",
                       "A mixer parameter at its default is not published, so an unpublished path answers "
                       "with the descriptor's default and sets `result.is_default`. Absent means at its "
-                      "default, never unknown.",
+                      "default, never unknown. The same holds for the 3D stage, at "
+                      "`/channel/{n}/mixer/previz/camera/{field}`, `.../view_camera/{field}` and "
+                      "`.../screen/{name}/{field}`.",
                       json::array{path_param("path", "channel/1/stage/layer/10/mixer/opacity")});
         p["put"] = op("Write one value",
                       "Body: {\"value\": ..., \"duration\": frames, \"tween\": name, \"label\": text}, or an "
                       "in-place operation {\"op\": \"toggle\"|\"add\"|\"cas\", ...}. Out of range is refused, "
-                      "never clipped. The reply's `value` is what the field now HOLDS.",
+                      "never clipped. The reply's `value` is what the field now HOLDS. "
+                      "STAGE fields take `op: set` only and are not tweenable: the previz renderer "
+                      "cannot make a read-modify-write atomic, and KEYFRAMES is bound to "
+                      "image_transform so a screen cannot be animated in this build.",
                       json::array{path_param("path", "channel/1/stage/layer/10/mixer/opacity")},
                       "#/components/schemas/ValueWrite");
         paths["/v1/value/{path}"] = std::move(p);
@@ -395,7 +402,7 @@ std::string docs_page(const http_config& cfg)
     static const row rows[] = {
         {"GET", "/v1/tree", "The whole address space"},
         {"GET", "/v1/tree/{path}", "A sub-tree"},
-        {"GET", "/v1/value/{path}", "One value; an unpublished mixer field reads as its default"},
+        {"GET", "/v1/value/{path}", "One value; an unpublished mixer or stage field reads as its default"},
         {"PUT", "/v1/value/{path}", "Write one value; op set|toggle|add|cas, with duration and tween"},
         {"POST", "/v1/action/{path}", "play, stop, pause, resume, preview, clear, clear_transforms"},
         {"POST", "/v1/batch", "Several ops, one frame, all or nothing; at_frame or in_frames"},
@@ -433,7 +440,46 @@ std::string docs_page(const http_config& cfg)
         o << "</td><td>" << compose_name(f.compose) << "</td><td class=\"m\">"
           << (f.kf_names ? f.kf_names : "&mdash;") << "</td></tr>";
     }
-    o << "</tbody></table></div></main></body></html>";
+    o << "</tbody></table></div>";
+
+    // The stage, from its own two tables. Generated for the same reason the mixer list above is:
+    // a hand-written copy of a table is a claim that goes stale, and this one would go stale in
+    // two places at once.
+    const auto stage_table = [&](const char*        heading,
+                                 const char*        addr,
+                                 const auto&        table) {
+        o << "<h2>" << heading << "</h2><p class=\"m\">" << table.size() << " properties, under <code>"
+          << addr << "</code>. Generated.</p>"
+             "<div class=\"w\"><table><thead><tr><th>Name</th><th>Type</th><th>Range</th><th>Unit</th>"
+             "<th>Description</th></tr></thead><tbody>";
+        for (const auto& f : table) {
+            const bool writable =
+                (static_cast<uint8_t>(f.access) & static_cast<uint8_t>(fields::access_t::write)) != 0;
+            o << "<tr><td><code>" << f.path << "</code>";
+            if (!writable)
+                o << " <span class=\"ro\">read-only</span>";
+            o << "</td><td>" << type_name(f.type);
+            if (f.arity > 1)
+                o << "[" << static_cast<int>(f.arity) << "]";
+            o << "</td><td>";
+            if (f.range)
+                o << f.range->lo << " .. " << f.range->hi;
+            else if (f.type == fields::value_type::enumeration && f.values)
+                o << "<span class=\"m\">" << f.values << "</span>";
+            else
+                o << "<span class=\"m\">&mdash;</span>";
+            o << "</td><td class=\"m\">" << (f.unit && *f.unit ? f.unit : "&mdash;") << "</td><td class=\"m\">"
+              << (f.description ? f.description : "&mdash;") << "</td></tr>";
+        }
+        o << "</tbody></table></div>";
+    };
+
+    stage_table("Stage &mdash; screen", "/channel/{n}/mixer/previz/screen/{name}/{field}",
+                fields::screen_fields());
+    stage_table("Stage &mdash; camera", "/channel/{n}/mixer/previz/{camera|view_camera}/{field}",
+                fields::camera_fields());
+
+    o << "</main></body></html>";
     return o.str();
 }
 

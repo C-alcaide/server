@@ -10,6 +10,8 @@
  */
 
 #include "api_value.h"
+
+#include <core/stage/stage_fields.h>
 #include "json_state.h"
 
 #include <common/log.h>
@@ -127,6 +129,51 @@ json::object range_detail(const fields::field_meta& f, std::size_t component, do
 }
 
 } // namespace
+
+bool is_stage_path(const std::string& path)
+{
+    const auto seg = split_path(path);
+    return seg.size() >= 5 && seg[0] == "channel" && seg[2] == "mixer" && seg[3] == "previz";
+}
+
+api_reply resolve_stage_write_target(const std::string& path, stage_write_target& out)
+{
+    const auto seg = split_path(path);
+    if (!is_stage_path(path))
+        return api_reply::fail(api_code::unknown_path, "not a stage path: " + path);
+
+    if (!is_number(seg[1]))
+        return api_reply::fail(api_code::channel_not_found, "channel index is not a number: " + seg[1]);
+    out.channel = std::atoi(seg[1].c_str());
+
+    // channel N mixer previz camera FIELD          (6)
+    // channel N mixer previz view_camera FIELD     (6)
+    // channel N mixer previz screen NAME FIELD     (7)
+    if (seg.size() == 6 && (seg[4] == "camera" || seg[4] == "view_camera")) {
+        out.object = seg[4];
+        out.field  = core::fields::find_camera_field(seg[5]);
+        if (!out.field)
+            return api_reply::fail(api_code::unknown_path, "no such camera field: " + seg[5]);
+    } else if (seg.size() == 7 && seg[4] == "screen") {
+        // `unknown_path` rather than a "screen not found" of its own: whether the screen exists
+        // is decided by the renderer, on the channel, and this layer cannot see it. The write
+        // below reports it, and reporting it twice with two different codes would be worse.
+        out.object = "screen/" + seg[5];
+        out.field  = core::fields::find_screen_field(seg[6]);
+        if (!out.field)
+            return api_reply::fail(api_code::unknown_path, "no such screen field: " + seg[6]);
+    } else {
+        return api_reply::fail(api_code::unknown_path,
+                               "a writable stage path is /channel/{n}/mixer/previz/camera/{field}, "
+                               ".../view_camera/{field} or .../screen/{name}/{field}, not " +
+                                   path);
+    }
+
+    if ((static_cast<uint8_t>(out.field->access) & static_cast<uint8_t>(core::fields::access_t::write)) == 0)
+        return api_reply::fail(api_code::not_writable,
+                               std::string("field is derived and cannot be set: ") + out.field->path);
+    return api_reply{};
+}
 
 api_reply resolve_write_target(const std::string& path, write_target& out)
 {
@@ -284,12 +331,106 @@ core::stage_base::transform_func_t set_closure(const prepared_set& p)
     };
 }
 
+namespace {
+
+/// PUT one field of one screen or camera.
+///
+/// `set` ONLY, and that is a scope decision rather than an oversight. `toggle`, `add` and `cas`
+/// get their atomicity on the mixer path from running inside one closure on the stage executor,
+/// where no other client can interleave between the read and the write. The previz renderer has
+/// no equivalent: its API is a set of per-property setters, so a read-modify-write here would
+/// span two calls and two acquisitions of the scene lock. Offering a `toggle` that is not atomic
+/// would be worse than not offering one, so the other three ops are refused by name and the
+/// reason is in the message.
+api_reply write_stage_value(const api_context& ctx,
+                            const std::string& path,
+                            const std::string& body,
+                            const std::string& peer)
+{
+    stage_write_target target;
+    if (auto r = resolve_stage_write_target(path, target); r.code != api_code::ok)
+        return r;
+
+    json::value doc;
+    try {
+        doc = body.empty() ? json::value(json::object()) : json::parse(body);
+    } catch (...) {
+        return api_reply::fail(api_code::bad_request, "body is not valid JSON");
+    }
+    if (!doc.is_object())
+        return api_reply::fail(api_code::bad_request, "body must be a JSON object");
+    const auto& o = doc.as_object();
+
+    const std::string op =
+        o.if_contains("op") && o.at("op").is_string() ? std::string(o.at("op").as_string().c_str()) : "set";
+    if (op != "set")
+        return api_reply::fail(api_code::bad_request,
+                               "stage fields take op 'set' only; " + op +
+                                   " needs a read-modify-write the previz renderer cannot make "
+                                   "atomic, and a non-atomic one would be worse than none");
+
+    if (o.if_contains("duration") || o.if_contains("tween"))
+        return api_reply::fail(api_code::bad_request,
+                               "stage fields are not tweenable: KEYFRAMES is bound to "
+                               "image_transform, so a screen cannot be animated in this build");
+
+    const auto& f = *target.field;
+
+    const auto* v = o.if_contains("value");
+    if (!v)
+        return api_reply::fail(api_code::field_missing, "no value in the body");
+
+    core::monitor::vector_t operand;
+    if (auto r = json_to_value(f, *v, operand); r.code != api_code::ok)
+        return r;
+    if (auto r = check_and_bound(f, operand); r.code != api_code::ok)
+        return r;
+
+    if (!ctx.set_stage_field)
+        return api_reply::fail(api_code::internal, "the API was built without access to the stage");
+
+    const auto res = ctx.set_stage_field(target.channel, target.object, f.path, operand);
+    if (!res.applied)
+        return api_reply::fail(api_code::unknown_path,
+                               res.reason.empty() ? std::string("the stage write did not apply")
+                                                  : res.reason);
+
+    // The bridge compared what it INTENDED against what the renderer now HOLDS, so this catches
+    // a mutator that silently declined -- and one does. `set_screen_eye_mode` writes
+    // `design_eye_*` only when the mode is already FIXED, so setting a design eye on a
+    // camera-mode screen stores nothing. Reporting that as success would be the "202 and no
+    // change" failure this whole registry exists to prevent.
+    if (res.declined) {
+        json::object d;
+        d["requested"] = vector_to_json(res.intended);
+        d["actual"]    = vector_to_json(res.written);
+        d["path"]      = f.path;
+        return api_reply::fail(api_code::field_conflict,
+                               std::string("the renderer declined the value for ") + f.path +
+                                   "; it still holds what it held",
+                               json::array{std::move(d)});
+    }
+
+    CASPAR_LOG(info) << L"[http] " << u16(peer) << L" set " << u16(path);
+
+    json::object r;
+    r["path"]     = path;
+    r["previous"] = vector_to_json(res.previous);
+    r["value"]    = vector_to_json(res.written);
+    return api_reply::ok_with(std::move(r));
+}
+
+} // namespace
+
 api_reply write_value(const api_context& ctx,
                       const state_hub&,
                       const std::string& path,
                       const std::string& body,
                       const std::string& peer)
 {
+    if (is_stage_path(path))
+        return write_stage_value(ctx, path, body, peer);
+
     write_target target;
     if (auto r = resolve_write_target(path, target); r.code != api_code::ok)
         return r;

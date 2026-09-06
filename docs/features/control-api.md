@@ -620,12 +620,48 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
 
 ## 5. Known gaps
 
-1. **No battery.** Every number in section 4 is one manual run on one machine. Nothing re-runs
-   them, and nothing will notice when they stop being true. This is the gap that makes every other
-   item here unverifiable rather than merely incomplete.
-2. **Only mixer fields are writable.** `PUT` resolves `/channel/{n}/stage/layer/{m}/mixer/{field}`
-   and nothing else.
-3. **No field emits a `DESCRIPTION`** — still true. **What is fixed is the lie about it.**
+1. ~~**No battery.**~~ **CLOSED.** Six batteries run on both mixers — `api-tree`,
+   `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`. This item read
+   "No battery. Every number in section 4 is one manual run on one machine" for some time
+   after they landed, which is exactly the class of stale claim §5 exists to hold.
+
+   **A live intermittent, recorded rather than smoothed over:** `api-write --mixer ogl` fails
+   about one run in three, on two *different* checks — "a two-channel batch lands on ONE frame"
+   (seen with frames 222 and 223) and "no lost updates under contention" (200 toggles, unbroken
+   chain false). The vulkan arm has not been seen to fail. It is not caused by the stage work:
+   the first occurrence was on the commit that only MOVED types between namespaces, before any
+   tick or write path changed. Both checks are timing-sensitive and neither has been
+   investigated. **Until it is, a single green `api-write --mixer ogl` is weak evidence** — re-run
+   it before quoting it.
+2. ~~**Only mixer fields are writable.**~~ **CLOSED 2026-09-06 for the 3D stage.** `PUT` also
+   resolves `/channel/{n}/mixer/previz/camera/{field}`, `.../view_camera/{field}` and
+   `.../screen/{name}/{field}`.
+
+   Three restrictions, each with a reason rather than a to-do:
+
+   * **`op: set` only.** `toggle`, `add` and `cas` get their atomicity on the mixer path from
+     running inside one closure on the stage executor, where no other client can interleave
+     between the read and the write. The previz renderer has no equivalent — its API is a set of
+     per-property setters — so a read-modify-write here would span two calls and two acquisitions
+     of the scene lock. A `toggle` that is not atomic would be worse than no `toggle`.
+   * **Not tweenable.** KEYFRAMES is bound to `image_transform` end to end, so a screen cannot be
+     animated in this build. `duration` and `tween` are refused rather than ignored.
+   * **`size` and `arc` have no mutator.** Both are set only by `add_screen_flat` /
+     `add_screen_curved`, which build a fresh `screen_meta` and would silently discard position,
+     rotation, eye mode and ICVFX. Refused with that reason in the message.
+
+   **The write reports what the renderer HOLDS, not what was asked for**, and the difference is
+   not hypothetical: `set_screen_eye_mode` stores `design_eye_*` only when the mode is already
+   `fixed`, so setting a design eye on a camera-mode screen changes nothing. The bridge compares
+   intended against actual — both read through the same accessor, so canonicalisation and float
+   widening cancel — and a genuine refusal comes back as `field_conflict` with both values.
+3. ~~**No field emits a `DESCRIPTION`.**~~ **CLOSED for the stage, still open for the mixer.**
+   The sixteen stage rows each carry one and the table refuses to load without it, so
+   `HOST_INFO.EXTENSIONS.DESCRIPTION` now derives to `true` and the leaves that carry the key are
+   the stage's. The 177 mixer rows still pass `nullptr`; filling them needs a slot in the eleven
+   macros and is its own commit.
+
+   The original finding, kept because the shape of it recurs:
 
    As found on 2026-09-06: the `field_desc` column existed, `api_tree.cpp` emitted `DESCRIPTION`
    when it was non-null, **every row passed `nullptr`**, and `HOST_INFO` nevertheless advertised
@@ -633,11 +669,8 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
    capability probe said otherwise. Same class as `LISTEN`, which is advertised `false` precisely
    so a client does not wait for something that never comes — this one had the care backwards.
 
-   `host_info` now **derives** the flag from the table rather than asserting it, so it reports
-   `false` today and turns itself on when the first described field lands. That is the half worth
-   fixing immediately: a client branching on the flag now takes the branch that matches what it
-   will actually receive. Filling the ~177 strings still needs a slot in the eleven macros and is
-   still its own commit — but it is no longer racing a false advertisement.
+   `host_info` **derives** the flag across all three tables rather than asserting it, so it says
+   what is true on the day it is asked and needed no second edit when the stage rows landed.
 
    **Not covered by any battery.** `api-tree` reads `HOST_INFO` and asserts nothing about
    `EXTENSIONS`, so nothing would have caught the original and nothing gates the derivation now.

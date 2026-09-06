@@ -46,6 +46,8 @@
 
 #include <accelerator/compose_self_test.h>
 #include <core/stage/stage_fields.h>
+#include <accelerator/ogl/image/image_mixer.h>
+#include <accelerator/ogl/image/previz_renderer.h>
 #include <core/stage/stage_math_self_test.h>
 
 #include <protocol/http/http_server.h>
@@ -55,6 +57,7 @@
 #include <modules/image/consumer/image_consumer.h>
 
 #ifdef ENABLE_VULKAN
+#include <accelerator/vulkan/image/image_mixer.h>
 #include <modules/vulkan_output/util/vk_device_manager.h>
 #endif
 
@@ -895,6 +898,145 @@ struct server::impl
                         out.code = 500;
                         out.text = L"unhandled exception";
                     }
+                    return out;
+                };
+
+                // The stage bridge. `protocol_http` cannot see `accelerator`, and this is
+                // where the `dynamic_cast` that reaches the previz renderer belongs -- the
+                // same one `AMCPCommandsImpl.cpp` already does, for the same reason.
+                api_ctx.set_stage_field =
+                    [channels](int                            index,
+                               const std::string&             object,
+                               const std::string&             path,
+                               const core::monitor::vector_t& value) -> http::api_context::stage_write {
+                    http::api_context::stage_write out;
+
+                    if (index < 1 || index > static_cast<int>(channels->size())) {
+                        out.reason = "no channel " + std::to_string(index);
+                        return out;
+                    }
+                    auto img = channels->at(static_cast<std::size_t>(index - 1)).raw_channel->mixer().get_image_mixer();
+
+                    accelerator::ogl::previz_renderer* previz = nullptr;
+                    if (auto* o = dynamic_cast<accelerator::ogl::image_mixer*>(img.get()))
+                        previz = &o->get_previz_renderer();
+#ifdef ENABLE_VULKAN
+                    else if (auto* v = dynamic_cast<accelerator::vulkan::image_mixer*>(img.get()))
+                        previz = v->get_previz_renderer();
+#endif
+                    if (!previz) {
+                        out.reason = "channel " + std::to_string(index) + " has no previz renderer";
+                        return out;
+                    }
+
+                    // Read the CURRENT object first: every camera mutator takes all seven
+                    // components at once, so setting `fov` alone means re-sending the other six.
+                    // Reading here rather than in the protocol layer is also what makes
+                    // `previous` in the reply the value that was actually replaced.
+                    const auto snap = previz->stage_snapshot();
+
+                    if (object == "camera" || object == "view_camera") {
+                        const auto* cf = core::fields::find_camera_field(path);
+                        if (!cf) {
+                            out.reason = "no such camera field: " + path;
+                            return out;
+                        }
+                        const bool view = object == "view_camera";
+                        auto       cam  = view ? snap.view_camera : snap.camera;
+                        out.previous    = cf->get(cam);
+                        if (!cf->set(cam, value)) {
+                            out.reason = "value does not fit camera field " + path;
+                            return out;
+                        }
+                        if (view)
+                            previz->set_view_camera(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.roll, cam.fov);
+                        else
+                            previz->set_camera(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.roll, cam.fov);
+                        // READ BACK FROM THE RENDERER, not from the local copy. Echoing `cam`
+                        // would report what was INTENDED; the point of a reply is what the
+                        // server now holds. See the screen branch below, where the difference
+                        // is not hypothetical.
+                        const auto post = previz->stage_snapshot();
+                        out.intended    = cf->get(cam);
+                        out.written     = cf->get(view ? post.view_camera : post.camera);
+                        out.declined    = !(out.written == out.intended);
+                        out.applied     = true;
+                        return out;
+                    }
+
+                    const std::string prefix = "screen/";
+                    if (object.rfind(prefix, 0) != 0) {
+                        out.reason = "unknown stage object: " + object;
+                        return out;
+                    }
+                    const auto name = object.substr(prefix.size());
+                    const auto it   = snap.screens.find(name);
+                    if (it == snap.screens.end()) {
+                        out.reason = "no screen '" + name + "' on channel " + std::to_string(index);
+                        return out;
+                    }
+
+                    const auto* sf = core::fields::find_screen_field(path);
+                    if (!sf) {
+                        out.reason = "no such screen field: " + path;
+                        return out;
+                    }
+                    auto sm      = it->second;
+                    out.previous = sf->get(sm);
+                    if (!sf->set(sm, value)) {
+                        out.reason = "value does not fit screen field " + path;
+                        return out;
+                    }
+
+                    // Dispatch to the mutator that carries this field. Going through them rather
+                    // than writing `sm` back is the whole point: each one also re-applies the
+                    // mesh transform and calls `update_projections()`.
+                    if (path == "position")
+                        previz->set_screen_position(name, sm.pos_x, sm.pos_y, sm.pos_z);
+                    else if (path == "rotation")
+                        previz->set_screen_rotation(name, sm.rot_yaw, sm.rot_pitch, sm.rot_roll);
+                    else if (path == "resolution")
+                        previz->set_screen_resolution(name, sm.res_w, sm.res_h);
+                    else if (path == "channel")
+                        previz->set_screen_channel(name, sm.channel);
+                    else if (path == "eye_mode" || path == "design_eye")
+                        previz->set_screen_eye_mode(
+                            name, sm.eye_mode, sm.design_eye_x, sm.design_eye_y, sm.design_eye_z);
+                    else if (path == "arc_v")
+                        previz->set_screen_arc_v(name, sm.arc_v_deg);
+                    else if (path == "icvfx")
+                        previz->set_screen_icvfx(name, sm.icvfx_enable);
+                    else {
+                        // `size` and `arc` reach here. The renderer has no mutator for either:
+                        // both are set only by `add_screen_flat`/`add_screen_curved`, which build
+                        // a FRESH screen_meta and would silently discard position, rotation, eye
+                        // mode and ICVFX. Refusing is the honest answer until the renderer grows
+                        // a resize that regenerates the mesh in place.
+                        out.reason = "screen field '" + path +
+                                     "' has no mutator in the renderer: it is set only when the "
+                                     "screen is created, and re-creating it would discard every "
+                                     "other property";
+                        return out;
+                    }
+
+                    // READ BACK FROM THE RENDERER rather than echoing the local copy, and this
+                    // is where it earns itself. `set_screen_eye_mode` writes `design_eye_*` ONLY
+                    // when the mode is FIXED, so a `design_eye` write while the screen is in
+                    // CAMERA mode stores nothing at all -- and echoing `sm` reported the new
+                    // value with `applied: true`. That is precisely the "202 and no change" shape
+                    // this whole registry exists to make impossible.
+                    const auto after = previz->stage_snapshot();
+                    const auto ait   = after.screens.find(name);
+                    if (ait == after.screens.end()) {
+                        out.reason = "screen '" + name + "' disappeared during the write";
+                        return out;
+                    }
+                    // INTENDED vs ACTUAL, both through `sf->get`, so canonicalisation and float
+                    // widening cancel and only a genuine refusal survives the comparison.
+                    out.intended = sf->get(sm);
+                    out.written  = sf->get(ait->second);
+                    out.declined = !(out.written == out.intended);
+                    out.applied  = true;
                     return out;
                 };
 

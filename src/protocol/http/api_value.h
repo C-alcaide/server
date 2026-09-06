@@ -36,6 +36,31 @@ struct write_target
 /// between a typo, a channel that is not configured and a field this build does not have.
 api_reply resolve_write_target(const std::string& path, write_target& out);
 
+/// Where a stage write lands: which channel, which object, which field.
+struct stage_write_target
+{
+    int                            channel = 0;
+    /// "camera", "view_camera", or "screen/<name>" -- what `api_context::set_stage_field` takes.
+    std::string                    object;
+    const core::fields::field_meta* field = nullptr;
+};
+
+/// Parse `/channel/1/mixer/previz/camera/fov`, `/channel/1/mixer/previz/view_camera/position`
+/// or `/channel/1/mixer/previz/screen/back/position`.
+///
+/// A SIBLING of `resolve_write_target` rather than a branch inside it. The two address spaces
+/// have different shapes -- a layer is an integer and a screen is a runtime name -- and the
+/// codes they return for a miss are different in a way a client acts on: an unknown layer is
+/// `layer_not_found`, an unknown screen is `unknown_path`, because a screen that does not exist
+/// is a typo rather than a channel that was not configured.
+///
+/// Returns `unknown_path` with no diagnosis for anything that is not a previz path at all, so
+/// the caller can fall through to the mixer resolver and let THAT one produce the message.
+api_reply resolve_stage_write_target(const std::string& path, stage_write_target& out);
+
+/// Is this path shaped like a stage write? Cheap enough to test before either resolver runs.
+bool is_stage_path(const std::string& path);
+
 /// A JSON value as the descriptor's `vector_t`, checked for type and arity.
 ///
 /// This is where a client's `"0.5"` is refused rather than quietly parsed: a control

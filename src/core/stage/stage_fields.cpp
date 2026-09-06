@@ -138,13 +138,20 @@ bool as_str(const monitor::data_t& d, std::string& out)
     }
 
 /// Two `int` members as one tuple.
+///
+/// Published as DOUBLES, not int32, although the members are ints. `value_type::vec2` maps to
+/// the OSC tag string "dd", and emitting an int pair under it made the tree contradict itself:
+/// TYPE said two doubles and VALUE held two integers. There is no integer-vector `value_type`,
+/// and inventing one to describe a single field would be worse than saying what every other
+/// vector field says. `kind: discrete` and `step: 1.0` in the vendor block are how a client
+/// knows the quantity is integral, the same way it knows for any other stepped control.
 #define SV2I(T, NAME, A, B, DA, DB, RANGE, BOUND, UNIT, DESC)                                                          \
     typed_field<T>                                                                                                     \
     {                                                                                                                  \
         NAME, value_type::vec2, access_t::read_write, RANGE, bounding_t::BOUND, compose_t::none, guard_t::none,         \
             nullptr, UNIT, nullptr, DESC, nullptr, kf_kind::discrete, 1.0, 2, false,                                    \
             [](const T& s) {                                                                                           \
-                return monitor::vector_t{static_cast<int32_t>(s.A), static_cast<int32_t>(s.B)};                         \
+                return monitor::vector_t{static_cast<double>(s.A), static_cast<double>(s.B)};                         \
             },                                                                                                         \
             [](T& s, const monitor::vector_t& v) {                                                                     \
                 double a, b;                                                                                           \
@@ -154,7 +161,7 @@ bool as_str(const monitor::data_t& d, std::string& out)
                 s.B = static_cast<int>(b + 0.5);                                                                       \
                 return true;                                                                                           \
             },                                                                                                         \
-            []() { return monitor::vector_t{static_cast<int32_t>(DA), static_cast<int32_t>(DB)}; }                      \
+            []() { return monitor::vector_t{static_cast<double>(DA), static_cast<double>(DB)}; }                      \
     }
 
 #define SI(T, NAME, MEMBER, DEF, DESC)                                                                                 \
@@ -280,7 +287,9 @@ const std::vector<screen_field>& screen_table()
            "Where the eye sits for curve compensation and field of view. 'camera' follows the "
            "production virtual camera (in-camera VFX); 'fixed' sits at design_eye."),
         SV3(S, "design_eye", design_eye_x, design_eye_y, design_eye_z, 0.0, 1.5, 3.0, R_POS, clip, "m",
-            "The audience design eye position, used only when eye_mode is 'fixed'."),
+            "The audience design eye position, used only when eye_mode is 'fixed'. It is also "
+            "only WRITABLE then: the renderer's mutator stores these three components solely "
+            "when the mode is already 'fixed', so set eye_mode first or the write is declined."),
         SB(S, "icvfx", icvfx_enable, false,
            "Compute a camera-eye inner frustum and a feathered camera-frustum mask for this "
            "screen. Also reachable as MIXER PROJECTION_ICVFX, and auto-projection overwrites "

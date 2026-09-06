@@ -12,6 +12,10 @@
 #include "api_tree.h"
 #include "json_state.h"
 
+#include <core/stage/stage_fields.h>
+
+#include <boost/variant/get.hpp>
+
 #include <common/utf.h>
 
 #include <algorithm>
@@ -171,6 +175,56 @@ json::object vendor_block(const fields::field_meta& f, const core::monitor::vect
     return c;
 }
 
+/// One descriptor leaf, from a `field_meta` plus its default.
+///
+/// The default arrives separately for the same reason `vendor_block` takes it separately:
+/// `defaults()` is the one accessor that depends on which struct owns the field, and this
+/// function is used for three different structs.
+json::object descriptor_leaf(const fields::field_meta& f, const core::monitor::vector_t& def)
+{
+    json::object leaf;
+    leaf["FULL_PATH"] = "";
+    leaf["ACCESS"]    = static_cast<int>(static_cast<uint8_t>(f.access));
+    leaf["TYPE"]      = osc_tags_for(f);
+    leaf["VALUE"]     = vector_to_oscquery_value(def);
+    // A field with neither limits nor a value list gets no `RANGE` key at all.
+    // Emitting `[{}]` would be worse than saying nothing: a client reads the key's
+    // presence as "this is bounded" and then finds no MIN or MAX to bound it with.
+    if (auto range = range_for(f); !range.empty())
+        leaf["RANGE"] = std::move(range);
+    leaf["CLIPMODE"] = clipmode_name(f.bounding, f.range.has_value());
+    if (f.description)
+        leaf["DESCRIPTION"] = f.description;
+    leaf["casparcg"] = vendor_block(f, def);
+    return leaf;
+}
+
+/// A whole object's descriptor node, from any of the three tables.
+template <class T>
+json::object object_template(const std::vector<fields::typed_field<T>>& table)
+{
+    json::object node;
+    node["FULL_PATH"] = "";
+    node["ACCESS"]    = 0;
+    json::object contents;
+    for (const auto& f : table)
+        contents.emplace(f.path, descriptor_leaf(f, f.defaults()));
+    node["CONTENTS"] = std::move(contents);
+    return node;
+}
+
+const json::object& screen_template()
+{
+    static const json::object t = object_template(fields::screen_fields());
+    return t;
+}
+
+const json::object& camera_template()
+{
+    static const json::object t = object_template(fields::camera_fields());
+    return t;
+}
+
 /// The per-layer `mixer` sub-tree. Built once and copied per layer: the descriptor set is
 /// the bulk of the tree and is identical for every layer on every channel.
 const json::object& mixer_template()
@@ -181,23 +235,8 @@ const json::object& mixer_template()
         node["ACCESS"]    = 0;
         json::object contents;
 
-        for (const auto& f : fields::all()) {
-            json::object leaf;
-            leaf["FULL_PATH"] = "";
-            leaf["ACCESS"]    = static_cast<int>(static_cast<uint8_t>(f.access));
-            leaf["TYPE"]      = osc_tags_for(f);
-            leaf["VALUE"]     = vector_to_oscquery_value(f.defaults());
-            // A field with neither limits nor a value list gets no `RANGE` key at all.
-            // Emitting `[{}]` would be worse than saying nothing: a client reads the key's
-            // presence as "this is bounded" and then finds no MIN or MAX to bound it with.
-            if (auto range = range_for(f); !range.empty())
-                leaf["RANGE"] = std::move(range);
-            leaf["CLIPMODE"] = clipmode_name(f.bounding, f.range.has_value());
-            if (f.description)
-                leaf["DESCRIPTION"] = f.description;
-            leaf["casparcg"] = vendor_block(f, f.defaults());
-            contents.emplace(f.path, std::move(leaf));
-        }
+        for (const auto& f : fields::all())
+            contents.emplace(f.path, descriptor_leaf(f, f.defaults()));
 
         node["CONTENTS"] = std::move(contents);
         return node;
@@ -276,6 +315,75 @@ json::object build_tree(const state_hub& hub, const http_config& cfg)
         if (!with_mixer)
             continue;
 
+        // Source 3a: the STAGE registry, for the objects this channel's snapshot says exist.
+        //
+        // Named dynamic children, unlike a layer: a screen is created at runtime and addressed
+        // by name, so the set comes out of the always-published `screens` list rather than being
+        // scanned for. A screen every one of whose fields sits at its default publishes no field
+        // keys at all, which is exactly why that list is published unconditionally.
+        {
+            std::vector<std::string> screens;
+            bool                     has_previz = false;
+            for (const auto& kv : *snap) {
+                if (!starts_with(kv.first, "mixer/previz/"))
+                    continue;
+                has_previz = true;
+                if (kv.first != "mixer/previz/screens")
+                    continue;
+                for (const auto& d : kv.second)
+                    if (const auto* nm = boost::get<std::string>(&d))
+                        screens.push_back(*nm);
+            }
+
+            if (has_previz) {
+                const std::string previz_base = ch_base + "/mixer/previz";
+                auto&             previz_node = node_at(ch_node, ch_base, {"mixer", "previz"});
+                previz_node["ACCESS"]         = 0;
+                auto& previz_contents         = previz_node["CONTENTS"].is_object()
+                                                    ? previz_node["CONTENTS"].as_object()
+                                                    : (previz_node["CONTENTS"] = json::object()).as_object();
+
+                const auto graft = [&](json::object&                    parent,
+                                       const std::string&               base,
+                                       const std::string&               name,
+                                       const json::object&              tmpl,
+                                       const std::string&               published_prefix) {
+                    json::object obj = tmpl;
+                    instantiate_mixer(obj, base + "/" + name);
+                    // A published value overwrites the descriptor default, so a moved screen
+                    // reads back where it is while its untouched neighbours still describe
+                    // themselves. Merged rather than replaced: the published leaf knows the
+                    // value, the descriptor knows everything else about it.
+                    auto& oc = obj["CONTENTS"].as_object();
+                    for (const auto& kv : *snap) {
+                        if (!starts_with(kv.first, published_prefix))
+                            continue;
+                        auto it = oc.find(kv.first.substr(published_prefix.size()));
+                        if (it != oc.end())
+                            it->value().as_object()["VALUE"] = vector_to_oscquery_value(kv.second);
+                    }
+                    parent[name] = std::move(obj);
+                };
+
+                graft(previz_contents, previz_base, "camera", camera_template(),
+                      "mixer/previz/camera/");
+                graft(previz_contents, previz_base, "view_camera", camera_template(),
+                      "mixer/previz/view_camera/");
+
+                if (!screens.empty()) {
+                    json::object screen_node;
+                    screen_node["FULL_PATH"] = previz_base + "/screen";
+                    screen_node["ACCESS"]    = 0;
+                    json::object screen_contents;
+                    for (const auto& name : screens)
+                        graft(screen_contents, previz_base + "/screen", name, screen_template(),
+                              "mixer/previz/screen/" + name + "/");
+                    screen_node["CONTENTS"] = std::move(screen_contents);
+                    previz_contents["screen"] = std::move(screen_node);
+                }
+            }
+        }
+
         // Source 3: the registry, per existing layer. This is the part a snapshot cannot
         // supply -- a parameter at its default is not published, so without this pass a
         // client discovers only the parameters somebody has already changed.
@@ -347,9 +455,11 @@ json::object host_info(const http_config& cfg, int subscriptions)
     // finds nothing. Computing it from the table means it says what is true on the day it is
     // asked, and turns itself on when the first described field lands rather than needing anyone
     // to remember.
-    const auto& all         = fields::all();
-    ext["DESCRIPTION"]      = std::any_of(all.begin(), all.end(),
-                                     [](const fields::field_desc& f) { return f.description != nullptr; });
+    const auto described = [](const auto& table) {
+        return std::any_of(table.begin(), table.end(), [](const auto& f) { return f.description != nullptr; });
+    };
+    ext["DESCRIPTION"] = described(fields::all()) || described(fields::screen_fields()) ||
+                         described(fields::camera_fields());
     ext["CLIPMODE"]    = true;
     ext["TAGS"]        = false;
     // Live values arrive on `/v1/events` as a prefix subscription, which is a different
@@ -434,6 +544,77 @@ api_reply read_value(const state_hub& hub, const std::string& path)
                     return api_reply::ok_with(std::move(r));
                 }
             }
+        }
+    }
+
+    // The same rule for the stage. `mixer/previz/camera/{field}`,
+    // `mixer/previz/view_camera/{field}` and `mixer/previz/screen/{name}/{field}` are published
+    // sparsely too, so an absent one is at its default rather than unknown -- and the object has
+    // to EXIST for that to be true, which is what distinguishes an untouched screen from a
+    // misspelt one.
+    static const std::string previz_prefix = "mixer/previz/";
+    if (starts_with(key, previz_prefix)) {
+        const auto rest = key.substr(previz_prefix.size());
+
+        // The DEFAULT is carried alongside the descriptor rather than read from it, because
+        // `defaults()` is the one accessor that depends on which struct the field belongs to --
+        // a camera field and a screen field are different `typed_field<T>`s over one
+        // `field_meta`. Capturing it here is what lets the rest of this block stay type-blind.
+        const fields::field_meta* f = nullptr;
+        core::monitor::vector_t   def;
+        bool                      exists = false;
+
+        auto object_published = [&](const std::string& obj_prefix) {
+            for (const auto& kv : *snap)
+                if (starts_with(kv.first, previz_prefix + obj_prefix))
+                    return true;
+            return false;
+        };
+
+        if (starts_with(rest, "camera/") || starts_with(rest, "view_camera/")) {
+            const auto slash = rest.find('/');
+            if (const auto* cf = fields::find_camera_field(rest.substr(slash + 1))) {
+                f   = cf;
+                def = cf->defaults();
+            }
+            // A camera always exists once previz does, so `previz/screens` -- which is always
+            // published -- is the presence test rather than the camera's own keys, which are
+            // sparse and can all be absent on an untouched camera.
+            exists = object_published("screens");
+            (void)slash;
+        } else if (starts_with(rest, "screen/")) {
+            const auto body  = rest.substr(std::string("screen/").size());
+            const auto slash = body.find('/');
+            if (slash != std::string::npos) {
+                const auto name = body.substr(0, slash);
+                if (const auto* sf = fields::find_screen_field(body.substr(slash + 1))) {
+                    f   = sf;
+                    def = sf->defaults();
+                }
+                // A screen with every field at its default publishes no field keys at all, so
+                // its existence is read out of the always-published `screens` list.
+                for (const auto& kv : *snap) {
+                    if (kv.first != previz_prefix + "screens")
+                        continue;
+                    for (const auto& d : kv.second) {
+                        const auto* nm = boost::get<std::string>(&d);
+                        if (nm && *nm == name)
+                            exists = true;
+                    }
+                }
+            }
+        }
+
+        if (f) {
+            if (!exists)
+                return api_reply::fail(api_code::unknown_path,
+                                       "no such stage object on channel " + segments[1] + ": " + path);
+            json::object r;
+            r["path"]       = full;
+            r["value"]      = vector_to_json(def);
+            r["type"]       = osc_tags_for(*f);
+            r["is_default"] = true;
+            return api_reply::ok_with(std::move(r));
         }
     }
 
