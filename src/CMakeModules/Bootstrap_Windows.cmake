@@ -277,6 +277,10 @@ if (ENABLE_HTML)
 	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/libcef.dll")
 	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/chrome_elf.dll")
 	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/d3dcompiler_47.dll")
+	# DirectX Shader Compiler, used by Dawn's D3D12 backend to compile WGSL for WebGPU.
+	# d3dcompiler_47.dll above serves ANGLE and does not cover it.
+	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/dxcompiler.dll")
+	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/dxil.dll")
 	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/libEGL.dll")
 	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/libGLESv2.dll")
 	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/vk_swiftshader.dll")
