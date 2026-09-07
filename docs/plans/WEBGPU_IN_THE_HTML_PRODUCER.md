@@ -1,8 +1,9 @@
 # WebGPU in the HTML producer — what could run, and what including it costs
 
-> **Status:** SURVEY. **One item is measured and the rest are not.** `vgpu` 0.4.0 was actually run
-> in a channel on 2026-09-07 (§3.1); every other project here was assessed from its repository and
-> documentation and **has never been started in this server**. Star counts and dates are from the
+> **Status:** SURVEY. **Three items are measured and the rest are not.** `vgpu` 0.4.0 (§3.1),
+> three.js r185 (§3.2) and PlayCanvas 2.22.0 rendering 3DGS (§3.3) were run in a channel on
+> 2026-09-07; every other project here was
+> assessed from its repository and documentation and **has never been started in this server**. Star counts and dates are from the
 > GitHub API on 2026-09-07 and go stale.
 > **Falsifier:** if `docs/features/html-gpu-direct.md` §2 stops listing three gates for WebGPU,
 > this document's premise has changed and its effort estimates are void.
@@ -73,7 +74,7 @@ an application costs a fork.
 | [web-splat](https://github.com/KeKsBoTer/web-splat) | 298 | Apache-2.0 | 2026-03-31 | WebGPU (wgpu) | **app**, Rust |
 | [cables_dev](https://github.com/cables-gl/cables_dev) | 100 | MIT | 2026-09-07 | WebGL | node editor |
 
-### 3.1 vgpu — the only one measured
+### 3.1 vgpu — measured 2026-09-07
 
 Vercel's TypeScript WebGPU layer; WGSL as a typed module system. **Verified running in a channel
 on 2026-09-07**: `init`/`surface`/`effect`/`frameLoop` over 37 frames, four asymmetric quadrant
@@ -91,26 +92,83 @@ carrying substantial WGSL.
 
 *Against it:* WebGPU only, no fallback. A vgpu template is blank on a default-configured server.
 
-### 3.2 three.js — the low-risk general answer
+### 3.2 three.js — measured 2026-09-07, and one claim here was wrong
 
-*Including it:* bundle and a `<script>`. **Effort: hours.** 254 WebGPU examples in-tree.
+*Including it:* `npm i three`, bundle, one `<script>`. **Effort: hours**, confirmed — r185 through
+`WebGPURenderer` + TSL rendered four asymmetric quadrants into a channel, 39 frames, worst **1
+LSB** against the shader constants. Numerically identical to the vgpu run.
 
-The reason it suits **this** server specifically is not performance, it is **TSL**: shaders are
-written once and compile to *both* WGSL and GLSL, and `WebGPURenderer` falls back to WebGL 2 on
-its own. Since `<enable-gpu>` defaults to **false**, a template that degrades instead of going
-blank is worth more here than peak throughput.
+**Trap, and it is a colour-management one.** three.js sets `outputColorSpace = SRGBColorSpace` by
+default and applies that OETF on top of whatever the shader wrote. Measured: linear `0.90` arrived
+as **243** instead of 230, `0.20` as 124 instead of 51, `0.10` as 89 instead of 26 — every patch
+~70 LSB light, in the right position with the right hue, which is exactly the shape of error that
+reads as "looks a bit washed out" rather than as a fault. A template feeding a colour-managed
+server must set:
 
-### 3.3 PlayCanvas — the best current answer for Gaussian splats
+```js
+renderer.outputColorSpace = THREE.NoColorSpace;
+```
 
-Engine 2.19.0 ships a **compute-based WebGPU renderer for 3D Gaussian splats**, with automatic
+With that one line the same page lands at 1 LSB. Any engine in §3 may have an equivalent default;
+none of the others has been checked.
+
+**The "it degrades gracefully" argument was wrong, and this is the more useful finding.** TSL does
+compile one source to both WGSL and GLSL, and `WebGPURenderer` does fall back — it logs
+*"WebGPU is not available, running under WebGL2 backend"* — and then it **throws**, because on a
+default CasparVP config there is no WebGL either. Measured on the shipped default
+(`<enable-gpu>` absent):
+
+| context | `enable-gpu` false (default) | `enable-gpu` true + `gpu-direct` |
+| :--- | :--- | :--- |
+| `webgl2` | **false** | ANGLE / NVIDIA RTX A4000 / Direct3D11 |
+| `webgpu` | api present, **no adapter** | working (nvidia / ampere) |
+
+`--disable-gpu` takes WebGL with it, and `enable-webgl` is appended only *inside* the
+`if (enable_gpu_)` branch, so it never applies when it would be needed. **On a default
+configuration no GPU rendering context of any kind exists** — which is a statement about every
+WebGL template as much as about WebGPU, and is worth knowing independently of this survey.
+
+So the fallback protects against *a browser without WebGPU*. It does not protect against *this
+server with its default config*, and nothing does: `<enable-gpu>true` is a prerequisite, not a
+nicety.
+
+### 3.3 PlayCanvas — 3DGS measured in a channel, 2026-09-07
+
+Engine 2.22.0 ships a **compute-based WebGPU renderer for 3D Gaussian splats**, with automatic
 streamed LOD and a WebGL2 fallback its authors describe as visually identical.
 
-*Including it:* an embeddable JS library with a real camera API, so the camera can be driven from
-JavaScript and therefore from AMCP. **Effort: days**, most of it in the bridge between a
-`PREVIZ`/`TRACKING` camera and the engine's.
+**Verified rendering 3DGS into a CasparCG channel.** `createGraphicsDevice(..., {deviceTypes:
+["webgpu"]})` reported `deviceType: "webgpu"`, a `gsplat` asset loaded, and 36 frames rendered.
 
-This is the item that connects to `GAUSSIAN_SPLATTING_SURVEY_2026-09.md`: it is the shortest path
-from a captured splat scene to something rendering in a channel, and it needs **no C++**.
+The oracle was **synthetic rather than a downloaded scene**, which is what makes the number mean
+anything: a four-gaussian INRIA `.ply` written by hand, colours encoded through the SH DC relation
+`c = 0.5 + C0·f_dc`, identity rotations, `log` scale and `logit` opacity. So the expected picture
+is closed-form, and the four colours are asymmetric for the usual reason.
+
+| splat | measured | expected | Δ |
+| :--- | :--- | :--- | ---: |
+| (−1,+1) | (228, 51, 26) | (230, 51, 26) | 2 |
+| (+1,+1) | (25, 177, 64) | (26, 178, 64) | 1 |
+| (−1,−1) | (38, 89, 215) | (38, 89, 217) | 2 |
+| (+1,−1) | (203, 190, 38) | (204, 191, 38) | 1 |
+
+**Worst 2 LSB** across the whole chain: ply → SH DC decode → gaussian rasterisation → WebGPU →
+CEF compositing → the gpu-direct D3D11 shared texture → mixer → IMAGE consumer.
+
+*Including it:* `npm i playcanvas`, bundle, one `<script>`. One bundler wrinkle — its sort workers
+carry a Node dual-path, so esbuild needs `--external:node:worker_threads` for a browser build.
+Tone mapping and gamma were set to `NONE` up front rather than discovered later, on the strength
+of §3.2.
+
+**What this does NOT establish, and it is the part that matters for playout:** four gaussians is
+not a scene. Nothing here says anything about a real capture of one to ten million splats, about
+the streamed-LOD path, about memory, or about holding 25/50 fps beside a mixer — and
+`--enable-begin-frame-scheduling` means a scene that cannot keep up will **pace the channel**.
+The correctness question is answered; the cost question is untouched.
+
+*Still to do for it to be useful:* the camera is an ordinary `pc.Entity`, so driving it from
+`PREVIZ`/`TRACKING` through AMCP is a bridge of maybe a day — that remains the interesting work
+and is not done.
 
 Note `supersplat` (9959★) is the **editor** built on the same engine, not a runtime to embed —
 useful for preparing scenes, not for playing them out.
@@ -167,10 +225,12 @@ single-image. Treat any frame-rate claim as unproven until `coexistence` says ot
 
 ## 4. Suggested order, if any of this is pursued
 
-1. **three.js**, because it is hours of work, degrades gracefully on a default config, and proves
-   the whole path end to end with something an operator would actually use.
-2. **PlayCanvas splats**, because it turns the 3DGS survey into a picture without C++ or a Rust
-   fork, and because its camera is reachable from AMCP.
+1. ~~**three.js**~~ — **done, 2026-09-07.** Hours of work as estimated, 1 LSB against the shader
+   constants, and it found the `outputColorSpace` trap in §3.2. The "degrades gracefully"
+   half of the argument was wrong and is corrected there.
+2. ~~**PlayCanvas splats**~~ — **rendering, 2026-09-07**, at 2 LSB against a synthetic ply
+   (§3.3). What remains is the camera bridge to `PREVIZ`/`TRACKING`, and a cost measurement
+   on a real scene rather than four gaussians.
 3. Everything else only if a specific show needs it.
 
 And before any of them ships: **`coexistence`**. These are all additional tenants on the one
@@ -179,8 +239,8 @@ exists precisely because a route measured alone says nothing about it running be
 
 ## 5. What this document does not establish
 
-* **Nothing here except vgpu has been run.** Every effort estimate is read off a repository, not
-  measured, and the two that involve a camera bridge (PlayCanvas, web-splat) are the ones most
+* **Nothing here except vgpu, three.js and PlayCanvas has been run.** Every other effort
+  estimate is read off a repository, not measured, and the two that involve a camera bridge (PlayCanvas, web-splat) are the ones most
   likely to be wrong.
 * **No frame-rate claim is ours.** Every FPS figure quoted is the project's own, on their
   hardware, outside CEF's offscreen path — which is exactly the variable that matters here.
