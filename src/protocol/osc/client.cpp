@@ -204,7 +204,22 @@ struct client::impl : public spl::enable_shared_from_this<client::impl>
 
             // TODO: time_++ is a hack. Use proper channel time.
             bundle_time_ = time_++;
-            bundle_      = state;
+
+            // Every channel publishes here from its own thread with a state holding only
+            // that channel, so replacing the pending bundle discarded whatever the other
+            // channels had queued since the last send. Channels tick in LOCKSTEP -- same
+            // video mode, and on a genlocked show the same reference -- so the collision
+            // happened every frame period rather than occasionally, and only the last
+            // writer survived. Channel 1 came out best purely because it publishes first
+            // and finds the sender idle; the rest overwrote each other while it was busy.
+            //
+            // Merge by address instead. Channels do not share addresses, so all of them
+            // survive, and a channel that ticks twice before the sender drains supersedes
+            // only its own values -- which is the right way to shed load. The merge is
+            // safe only because monitor::state now really moves: the drain below reads as
+            // emptying bundle_ and, with the implicit move operations suppressed, was
+            // copying it and leaving every key behind.
+            bundle_.merge(state);
         }
         cond_.notify_all();
     }

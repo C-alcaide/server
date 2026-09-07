@@ -1,6 +1,62 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: every channel but one lost OSC state updates to a shared bundle slot
+
+**A multi-channel show's timecode advanced smoothly on channel 1 and skipped frames on all the
+others.** Each `video_channel` publishes its monitor state from its own thread, and
+`osc::client::impl::send` replaced the one pending bundle wholesale — so whatever the other
+channels had queued since the last send was discarded before the sender thread ever saw it.
+
+The collision was not occasional. Channels tick in **lockstep** — same video mode, and on a
+genlocked show the same reference — so every frame period had all of them publishing into one
+slot, and only the last writer survived. Channel 1 came out best purely because it publishes
+first and finds the sender idle; the rest overwrote each other while it was busy. That ordering
+is the whole explanation for a symptom that reads like a per-channel fault.
+
+`send` now merges into the pending bundle by address. Channels do not share addresses, so all of
+them survive, and a channel that ticks twice before the sender drains supersedes only its own
+values. `monitor::state` gains the move operations its declared copy operations were suppressing:
+the sender's `bundle = std::move(bundle_)` reads as a drain and was silently copying.
+
+**Behaviour change.** One OSC datagram can now carry more than one channel. This is what OSC
+bundles are for and the existing 2048-byte chunking already split a single busy channel across
+datagrams, so a client that parses addresses is unaffected — but a client that assumed one
+channel per packet is not.
+
+Measured on upstream `master` at 1080p5000 with a loopback OSC client, 15 s windows, counting the
+`file/time` steps a client renders as timecode. Four channels, each looping one clip — share of
+updates that skipped at least one frame:
+
+| | before | after |
+| :--- | :--- | :--- |
+| channel 1 | 20.2 % | **0.0 %** |
+| channel 2 | 45.1 % | **0.0 %** |
+| channel 3 | 58.5 % | **0.0 %** |
+| channel 4 | 31.5 % | **0.0 %** |
+
+Worst single skip was 10 frames. Share of ticks delivered, idle channels: 1 channel 100 % → 100 %
+(unaffected), 4 channels 54-82 % → 100 % on all four, 32 channels 28-74 % → **100 % on all 32**.
+Server CPU is unchanged (32 idle channels: 99.4 % of one core before, 99.2 % after — the channel
+threads dominate) and the datagram rate *falls*, 761/s to 723/s, while carrying nearly twice the
+data.
+
+Verified on this tree too, four channels each looping a clip, **both mixers**: every channel at
+50.1 updates/s and **not one skipped step** — `--accelerator opengl` and `--accelerator vulkan`
+alike. About 1 % of steps *hold* rather than advance, and a one-channel control run — which the
+bug never touched — holds at the same rate, so that is the 25 fps clip repeating a source frame in
+a 50 Hz channel, not the OSC path.
+
+**What is not measured.** Nothing in the harness drives OSC delivery — `core/osc_sync.py` is a
+capture-timing helper, not a battery — so these numbers come from a scratchpad listener that reads
+bundle timetags and `file/time` values off the wire. The address inventory was compared before and
+after on a three-channel run, including after a `STOP`, and is identical; nothing checks that the
+*values* in a merged bundle are the same ones a split bundle would have carried. An `osc-delivery`
+battery is owed.
+
+Filed upstream as [CasparCG/server#1788](https://github.com/CasparCG/server/pull/1788); the same
+commit applies to `v2.5.x`.
+
 ### Fixed: auto-projection no longer overwrites a hand-set ICVFX
 
 **A hand-set `MIXER PROJECTION_ICVFX` survived only until the next camera move** — and with a

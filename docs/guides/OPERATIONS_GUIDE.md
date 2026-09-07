@@ -923,6 +923,13 @@ frames, fps, clip name and paused flag per `channel/layer`, plus channel frame
 rate. This drives the playhead timelines, timecode, keyframe evaluation and
 rundown timers. The traffic dot in the OSC widget confirms packets are arriving.
 
+**Every channel's telemetry arrives once per frame, on every channel.** Until
+2026-09-07 it did not: the server kept one pending OSC bundle for the whole
+process and channels overwrote each other's, so a multi-channel show saw its
+timecode advance smoothly on channel 1 and skip frames on all the others. If
+you are running a server built before that, the traffic dot blinks and the
+timecode still stutters — the fix is server-side, nothing here.
+
 ---
 
 ## 18. Troubleshooting
@@ -930,6 +937,7 @@ rundown timers. The traffic dot in the OSC widget confirms packets are arriving.
 | Symptom | Check |
 | :--- | :--- |
 | Timelines / timecode frozen | OSC traffic dot not blinking → verify the server's OSC consumer host/port and the listener port here. |
+| Timecode skips frames on some channels but not channel 1 | A server from before 2026-09-07. All channels shared one pending OSC bundle and overwrote each other; update the server. |
 | Commands have no effect | Wrong **CH/LAY** target, or AMCP shows *Disconnected* in the connection bar. |
 | Embedded viewport is black | The channel has no screen consumer, or the consumer window has not appeared yet. |
 | **Server 3D Previz** view stays blank | The server is not rendering previz on the selected **Previz channel** — confirm the channel and that previz is enabled server-side. |

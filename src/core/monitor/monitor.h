@@ -108,6 +108,18 @@ class state
         data_ = other.data_;
         return *this;
     }
+    // Declaring the copy operations suppresses the implicit move ones, so every
+    // std::move of a state was a silent copy that left the source populated. The osc
+    // client's `bundle = std::move(bundle_)` reads as a drain and was not one.
+    state(state&& other) noexcept            = default;
+    state& operator=(state&& other) noexcept = default;
+
+    void merge(const state& other)
+    {
+        for (const auto& p : other.data_) {
+            data_[p.first] = p.second;
+        }
+    }
 
     template <typename T>
     state_proxy operator[](const T& key)
