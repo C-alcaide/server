@@ -566,6 +566,13 @@ if (ENABLE_HTML)
 	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/libcef.dll")
 	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/chrome_elf.dll")
 	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/d3dcompiler_47.dll")
+	# The DirectX Shader Compiler pair, needed by Dawn's D3D12 backend to compile WGSL --
+	# i.e. by WebGPU, which Chromium 142 otherwise exposes and cannot use. Without these
+	# `navigator.gpu` is present and an adapter is found, and then `requestDevice()` throws
+	# `DynamicLib.Open: dxil.dll Windows Error: 87` from PlatformFunctionsD3D12.cpp. Distinct
+	# from d3dcompiler_47.dll above, which serves ANGLE (WebGL) and does NOT cover this.
+	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/dxcompiler.dll")
+	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/dxil.dll")
 	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/libEGL.dll")
 	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/libGLESv2.dll")
 	casparcg_add_runtime_dependency("${CEF_BIN_PATH}/vk_swiftshader.dll")

@@ -1,6 +1,26 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: WebGPU was unusable in the HTML producer — two CEF DLLs were never copied
+
+**`requestDevice()` threw `DynamicLib.Open: dxil.dll Windows Error: 87` on every page that tried
+to use WebGPU.** Dawn's D3D12 backend compiles WGSL through the DirectX Shader Compiler, and
+`Bootstrap_Windows.cmake` copied `d3dcompiler_47.dll` — which serves ANGLE, i.e. WebGL — and
+neither `dxcompiler.dll` nor `dxil.dll`. Both ship in the CEF distribution and simply never
+reached the output folder.
+
+Adding the two lines makes WebGPU work. Measured 2026-09-07 on CEF 142.0.17 / Chromium
+142.0.7444.176, OpenGL mixer, nvidia/ampere: adapter acquired with 18 features, a compute shader
+round-tripped correctly, and a canvas composited into the channel at 1 LSB. Vercel's `vgpu` 0.4.0
+runs on it unmodified — `init`/`surface`/`effect`/`frameLoop`, 37 frames, four asymmetric
+quadrant colours landing in the right positions within 1 LSB on every channel.
+
+**This is a build fix, not a behaviour change to an existing config.** Two further settings are
+still required and both keep their current defaults: `<html><enable-gpu>` must be `true` (it
+defaults to `false`, and the server then passes `--disable-gpu`, so no adapter is offered at all),
+and `<gpu-direct>` must be `true` or the channel composites a fully transparent frame. Documented
+in `docs/features/html-gpu-direct.md` §2.
+
 ### Fixed: every channel but one lost OSC state updates to a shared bundle slot
 
 **A multi-channel show's timecode advanced smoothly on channel 1 and skipped frames on all the

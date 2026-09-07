@@ -46,6 +46,30 @@ shared surface, and this fork does not assume it.
 **`gpu-direct-adapter-luid` is load-bearing on a two-GPU machine.** A D3D11 shared handle is
 adapter-bound; importing one produced on the other adapter fails rather than degrades.
 
+### WebGPU needs all three of these, and each failure looks like "unsupported"
+
+Measured 2026-09-07 on CEF 142.0.17 / Chromium 142.0.7444.176, OpenGL mixer, nvidia/ampere.
+WebGPU works in the HTML producer, and `vgpu` 0.4.0 runs on it unmodified — but three separate
+things gate it, and the symptoms are easy to misread as the engine lacking the feature:
+
+| requirement | symptom when missing |
+| :--- | :--- |
+| `enable-gpu` **true** (defaults **false**) | `navigator.gpu` exists, `requestAdapter()` returns null, log says `No available adapters` |
+| `dxil.dll` + `dxcompiler.dll` beside the exe | adapter found, then `requestDevice()` throws `DynamicLib.Open: dxil.dll Windows Error: 87` |
+| `gpu-direct` **true** | the channel composites a **fully transparent** frame — RGBA all zero |
+
+The DXC pair is what Dawn's D3D12 backend uses to compile WGSL. `d3dcompiler_47.dll`, already in
+the list, serves ANGLE (WebGL) and does **not** cover it. Both ship in the CEF distribution and
+were absent from `Bootstrap_Windows.cmake` until the commit that added this section.
+
+**A WebGPU canvas must redraw every frame.** `getCurrentTexture()` returns a new texture per
+frame, so a page that submits once at load composites as nothing. That is a page bug rather than
+a server one, but it presents identically to a broken WebGPU path.
+
+Verified through the IMAGE consumer with four **asymmetric** quadrant colours — the channel-order
+trap in `CLAUDE.md` makes a neutral test worthless here. All four landed in the right positions
+within 1 LSB, each channel perfectly uniform.
+
 ---
 
 ## 3. Why this matters beyond speed
