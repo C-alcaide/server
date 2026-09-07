@@ -43,10 +43,17 @@ Two further constraints that shape every choice below:
 * **`gpu-direct` pins ONE adapter for every html producer in the server.** `CefInitialize` runs
   once per process, long before any channel exists, so `gpu-direct-adapter-luid` is a global
   decision on a two-GPU box, not a per-channel one.
-* **`--enable-begin-frame-scheduling` is set**, so CEF paces to the channel. A page that cannot
-  hold frame rate **paces the channel** rather than dropping frames quietly. Better than silent
-  corruption, but it means "looks right" and "holds rate" are separate questions, and only the
-  second one is a broadcast question.
+* **`--enable-begin-frame-scheduling` is set**, so CEF paces the page to the channel — the page
+  renders at exactly the channel rate and no faster. **What it does NOT do is pace the channel to
+  the page**, which is what an earlier version of this file claimed. Measured 2026-09-07 at 4M
+  gaussians: the page rendered **21 fps into a 25 fps channel** while the channel's period stayed
+  at 39.99 ms against a 40 ms nominal, with **zero late frames**.
+
+  So the failure mode of an over-heavy page is **stale repeated frames in the channel**, and
+  `late_frames`, `period_avg_ms` and `consume_load` are **all blind to it**. The only instrument
+  that sees it is the page's own render rate. A capacity ladder built on channel timing alone
+  would report this as a clean pass — which is the `false-green-from-wrong-input` shape again,
+  and the reason §3.3's ladder reports both numbers.
 
 And the fork-specific one: **HTML is how this fork renders fill + key lower thirds**, so the key
 is an output of the page. Anything touching alpha or premultiplication has to be checked in both.
@@ -160,15 +167,71 @@ carry a Node dual-path, so esbuild needs `--external:node:worker_threads` for a 
 Tone mapping and gamma were set to `NONE` up front rather than discovered later, on the strength
 of §3.2.
 
-**What this does NOT establish, and it is the part that matters for playout:** four gaussians is
-not a scene. Nothing here says anything about a real capture of one to ten million splats, about
-the streamed-LOD path, about memory, or about holding 25/50 fps beside a mixer — and
-`--enable-begin-frame-scheduling` means a scene that cannot keep up will **pace the channel**.
-The correctness question is answered; the cost question is untouched.
+**The cost ladder, measured 2026-09-07.** Synthetic scenes at increasing gaussian counts, spread
+across the visible ortho volume so coverage and sort cost are realistic, into a 1080p2500 channel
+on the OpenGL mixer. Every rung was run, including past the first sign of trouble, for the reason
+`raster_capacity.py` gives. Channel timing from `parse_channel_timing`; page rate from the
+engine's own `frameend` count over an 8 s window after a warm-up.
 
-*Still to do for it to be useful:* the camera is an ordinary `pc.Entity`, so driving it from
-`PREVIZ`/`TRACKING` through AMCP is a bridge of maybe a day — that remains the interesting work
-and is not done.
+| gaussians | ply | channel period | late | page fps | verdict |
+| ---: | ---: | :--- | ---: | ---: | :--- |
+| 4 | 683 B | 40.00 / 40 ms | 0 | 25 | holds |
+| 10 000 | 0.7 MB | 40.00 / 40 ms | 0 | 25 | holds |
+| 100 000 | 6.8 MB | 40.00 / 40 ms | 0 | 25 | holds |
+| 500 000 | 34 MB | 40.00 / 40 ms | 0 | 25.1 | holds |
+| 1 000 000 | 68 MB | 40.00 / 40 ms | 0 | 25 | holds |
+| 2 000 000 | 136 MB | 39.69 / 40 ms | 0 | 25 | holds |
+| 4 000 000 | 272 MB | 39.99 / 40 ms | 0 | **21** | **page short** |
+
+**The ceiling is between 2M and 4M gaussians at 1080p25**, and it is a *page* ceiling, not a
+channel one — see §2. At 4M the channel is still perfectly on time and still reports nothing
+wrong; the page is simply producing 21 new frames a second for a surface consuming 25, so roughly
+one frame in six is a repeat.
+
+The 1M rung was captured and inspected rather than trusted: a dense full-canvas field of
+gaussians, not an empty scene. A ladder where every rung "passes" is exactly what a scene that
+silently failed to load would produce, and that check is what separates the two.
+
+**What this does NOT establish:** these are uniformly-distributed synthetic gaussians, not a real
+capture — no streamed LOD, no depth complexity from actual geometry, no SH beyond the DC term, and
+one splat entity rather than a composed scene. Nothing here has run beside a decoder or an encoder,
+so **`coexistence` remains the open question**, and nothing was measured at 1080p50, where the
+budget halves.
+
+**The camera bridge works — measured 2026-09-07, 0.5 px.** A page cannot receive OSC, but the fork
+publishes the 3D stage into the control API, so the route is: `PREVIZ 1 CAMERA x y z yaw pitch
+roll fov` → `/channel/1/mixer/previz/camera/position` → the `/v1/events` WebSocket → a
+`pc.Entity` camera. Roughly 30 lines in the page.
+
+Gated projectively rather than by eye: the four-gaussian scene at known world positions, a
+perspective camera of known fov, so a camera move of a known distance must move each splat by a
+computable number of pixels — `pixels = (offset / (distance·tan(fov/2))) · height/2`.
+
+| camera x | splat displacement vs prediction |
+| ---: | :--- |
+| 0.0 | all four within 0.5 px |
+| +1.0 | all four within 0.5 px |
+| −1.5 | all four within 0.5 px |
+
+The residual is a constant −0.5 px on every splat in every pose — a pixel-centre convention, not
+drift.
+
+**Two traps, and the second one cost a false pass.**
+
+1. **Event prefixes must start with a leading slash.** `channel/1/mixer/previz/camera` is refused
+   with *"a prefix must start with /channel/{index}"*; `/channel/1/...` is accepted. A browser
+   `WebSocket` cannot set headers, which is fine — auth is off when no `http_password` is set.
+2. **The first run of this test reported a perfect match while the bridge was completely dead.**
+   The page hard-coded its camera at `(0, 0, 5)`, the previz default is `(0, 1.5, 5)`, and at
+   `cam_x = 0` the projection agreed to 0.5 px — so the control run passed and only the *moved*
+   poses exposed it. The fix is to make the page's default **deliberately wrong** (`(0, 0, 12)`),
+   so a dead bridge is visibly dead. A control that also passes when the mechanism is disconnected
+   is not a control.
+
+*Not tested:* the rotation and fov legs of the bridge (only `position` was exercised, and only
+`camera/position` appeared in the published set), and the leg that actually matters for ICVFX —
+driving this from a **FreeD tracker** through `TRACKING … MODE PREVIZ`. That writes the same
+previz camera, so it should follow, but "should" is not a measurement.
 
 Note `supersplat` (9959★) is the **editor** built on the same engine, not a runtime to embed —
 useful for preparing scenes, not for playing them out.
@@ -228,9 +291,9 @@ single-image. Treat any frame-rate claim as unproven until `coexistence` says ot
 1. ~~**three.js**~~ — **done, 2026-09-07.** Hours of work as estimated, 1 LSB against the shader
    constants, and it found the `outputColorSpace` trap in §3.2. The "degrades gracefully"
    half of the argument was wrong and is corrected there.
-2. ~~**PlayCanvas splats**~~ — **rendering, 2026-09-07**, at 2 LSB against a synthetic ply
-   (§3.3). What remains is the camera bridge to `PREVIZ`/`TRACKING`, and a cost measurement
-   on a real scene rather than four gaussians.
+2. ~~**PlayCanvas splats**~~ — **done, 2026-09-07.** Rendering at 2 LSB, a cost ladder to 4M
+   gaussians, and the `PREVIZ` camera bridge landing within 0.5 px (§3.3). What remains is
+   the FreeD leg, a real capture rather than synthetic gaussians, and `coexistence`.
 3. Everything else only if a specific show needs it.
 
 And before any of them ships: **`coexistence`**. These are all additional tenants on the one
