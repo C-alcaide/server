@@ -28,19 +28,51 @@ if(WIN32)
     set(PA_USE_WMME ON CACHE BOOL "" FORCE)
     set(PA_USE_WDMKS OFF CACHE BOOL "" FORCE)  # Avoid GUID_NULL conflict with uuid.lib
 
-    # ASIO SDK: set PA_USE_ASIO=ON and ASIOSDK_ROOT_DIR to the Steinberg ASIO SDK path
-    # Users must download the ASIO SDK separately from Steinberg.
-    if(DEFINED ASIOSDK_ROOT_DIR AND EXISTS "${ASIOSDK_ROOT_DIR}")
+    # ASIO. Steinberg dual-licensed the SDK under GPLv3 on 2025-10-15 (SDK 2.3.4), so it
+    # can now be fetched and linked by a GPLv3 project like this one; before that it was
+    # proprietary-only and no GPL build could ship it. The SDK's own LICENSE.txt carries
+    # the dual grant. Set -DENABLE_ASIO=OFF to build without it, or point ASIOSDK_ROOT_DIR
+    # at a local copy to skip the download.
+    option(ENABLE_ASIO "Build PortAudio with ASIO support (Steinberg SDK, GPLv3 option)" ON)
+
+    if(ENABLE_ASIO AND NOT (DEFINED ASIOSDK_ROOT_DIR AND EXISTS "${ASIOSDK_ROOT_DIR}"))
+        # Pinned by version and hash rather than the /asiosdk redirect, which always points
+        # at the newest release and would change the build under us.
+        FetchContent_Declare(
+            asiosdk
+            URL      https://download.steinberg.net/sdk_downloads/ASIO-SDK_2.3.4_2025-10-15.zip
+            URL_HASH SHA256=d5ebf0c20dd2c5f43771fd0c1418f4b361bf52434ee670097cfa6b3a335e2eca
+        )
+        # Populate only -- the archive ships no CMakeLists.txt, so this unpacks and stops.
+        FetchContent_MakeAvailable(asiosdk)
+        set(ASIOSDK_ROOT_DIR "${asiosdk_SOURCE_DIR}" CACHE PATH "" FORCE)
+    endif()
+
+    if(ENABLE_ASIO AND EXISTS "${ASIOSDK_ROOT_DIR}/common/asio.h")
         set(PA_USE_ASIO ON CACHE BOOL "" FORCE)
         set(PA_ASIO_SDK_PATH "${ASIOSDK_ROOT_DIR}" CACHE PATH "" FORCE)
-        message(STATUS "PortAudio: ASIO SDK found at ${ASIOSDK_ROOT_DIR}")
+        message(STATUS "PortAudio: ASIO SDK at ${ASIOSDK_ROOT_DIR}")
     else()
         set(PA_USE_ASIO OFF CACHE BOOL "" FORCE)
-        message(STATUS "PortAudio: ASIO SDK not found (set ASIOSDK_ROOT_DIR to enable)")
+        message(STATUS "PortAudio: building without ASIO (ENABLE_ASIO=${ENABLE_ASIO})")
     endif()
 endif()
 
 FetchContent_MakeAvailable(portaudio)
+
+if(WIN32 AND TARGET portaudio_static)
+    # The global CMAKE_CXX_FLAGS force-includes common/compiler/vs/disable_silly_warnings.h
+    # by a path relative to the source root, so an out-of-tree target cannot resolve it.
+    # Same fix as openfx_host and tinyobjloader.
+    target_include_directories(portaudio_static PRIVATE ${CMAKE_SOURCE_DIR})
+    # PortAudio's ASIO host API and Steinberg's SDK are third-party and predate /W4 /WX by
+    # about two decades. Scoped to this target so the fork's own code keeps the strict flags.
+    #
+    # /UUNICODE /U_UNICODE for the same reason openfx_host needs it: asiolist.cpp calls the
+    # TCHAR Win32 APIs (RegOpenKey, CharLowerBuff) with char* and assumes an ANSI build, so
+    # the global UNICODE resolves them to the W variants and every call fails to convert.
+    target_compile_options(portaudio_static PRIVATE /W0 /WX- /UUNICODE /U_UNICODE)
+endif()
 
 set(SOURCES
     portaudio_module.cpp

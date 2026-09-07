@@ -1,6 +1,42 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: ASIO is actually in the build now — the licence that blocked it expired
+
+**The PortAudio module has always carried ASIO code, and none of it could run.** `API=ASIO`,
+`host_api_preference::asio`, the "try ASIO first" auto-select and the whole
+`shared_portaudio_capture` written for ASIO's one-stream-per-device rule all compiled, because
+`paASIO` is always defined — but PortAudio was built without its ASIO host API, so
+`Pa_HostApiTypeIdToHostApiIndex(paASIO)` returned −1 and every path was unreachable. `API=ASIO`
+resolved to device −1. Three docs described ASIO support the binary did not have.
+
+The blocker was licensing rather than effort. Steinberg dual-licensed the ASIO SDK under **GPLv3**
+on 2025-10-15 (SDK 2.3.4); before that it was proprietary-only, and a GPLv3 project could not ship
+a build linking it. The build now fetches the SDK by pinned URL and SHA-256 and enables
+`PA_USE_ASIO` by default on Windows. `-DENABLE_ASIO=OFF` opts out; `-DASIOSDK_ROOT_DIR=<path>`
+uses a local copy and skips the download.
+
+Measured on a DeckLink 8K Pro: `INFO PORTAUDIO` gains an `ASIO` host API offering **`Blackmagic
+Audio` with 8 channels on one device**, where WASAPI exposes the same hardware as **four separate
+2-channel devices**. That channel count is the gain. The reported latencies — 0.0200 for ASIO
+against 0.0030 for WASAPI — are **not** comparable and are not a regression: ASIO's is the
+driver's configured buffer, set in Blackmagic's ASIO control panel, and WASAPI's is its
+shared-mode default.
+
+**Behaviour change, and it is not confined to the new API being listed.** A Windows build now
+downloads an additional archive at configure time, `INFO PORTAUDIO` reports one more host API, and
+crucially **a consumer or producer with no `DEVICE` name will now open the ASIO device**:
+`get_default_output_device`/`get_default_input_device` under the default `auto_select` try
+`paASIO` *first* and fall back to WASAPI only if it is absent. That path previously reached WASAPI
+because ASIO was never present. Pin the old behaviour with `API=WASAPI` or an explicit `DEVICE`.
+
+Configurations that **do** name a device are mostly unaffected, for a reason worth writing down
+rather than trusting: `find_*_device` takes the first index whose name contains the string, and
+`auto_select` filters nothing, so index order decides. On this rig the ASIO device is index 30
+while the MME copies of the same hardware are 11–14 and DirectSound 26–29 — so a broad
+`DEVICE="Blackmagic"` still resolves to MME exactly as before. Only a string that matches the ASIO
+device's own name (`Blackmagic Audio`) and nothing earlier will now select it.
+
 ### Fixed: WebGPU was unusable in the HTML producer — two CEF DLLs were never copied
 
 **`requestDevice()` threw `DynamicLib.Open: dxil.dll Windows Error: 87` on every page that tried

@@ -7,6 +7,15 @@
 
 The PortAudio module provides professional audio I/O for CasparCG Server via the PortAudio library (v19.7.0, statically linked). It supports ASIO, WASAPI, and DirectSound host APIs on Windows, and ALSA/JACK on Linux, enabling multi-channel output to professional audio interfaces and low-latency capture from any input device.
 
+> **ASIO requires a build that has it, and builds before 2026-09-07 did not.** The Steinberg SDK
+> was proprietary-only until Steinberg added a GPLv3 option on 2025-10-15, so no GPLv3 build could
+> link it. The build now fetches the SDK automatically and enables ASIO by default on Windows;
+> `-DENABLE_ASIO=OFF` opts out and `-DASIOSDK_ROOT_DIR=<path>` uses a local copy.
+>
+> **Check before assuming, because the failure is silent-ish:** run `INFO PORTAUDIO` and look for
+> an `ASIO` host API. If it is absent, `API=ASIO` resolves to device −1 and the producer fails to
+> open — it does not fall back to another device, but nothing says the word "ASIO" either.
+
 The module provides three components:
 
 - **Consumer** — Audio output to any PortAudio-compatible device (USB interfaces, ASIO, Dante, MADI). Acts as a master synchronisation clock for the channel.
