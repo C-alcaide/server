@@ -821,6 +821,262 @@ void previz_renderer::set_camera_locked(bool locked)
     impl_->scene_.camera_locked = locked;
 }
 
+bool previz_renderer::input(const core::input_event& event, double aspect)
+{
+    using kind = core::input_event::kind;
+
+    // The gesture state. Kept HERE rather than in `previz_scene` because it is not part of the
+    // stage an operator authors or saves -- it is where the mouse happens to be mid-drag.
+    // `previz_scene` is published and persisted; this is not.
+    struct gesture
+    {
+        bool          orbiting  = false;
+        bool          panning   = false;
+        bool          dragging  = false;
+        std::string   drag_name;
+        double        last_x = 0.0, last_y = 0.0;
+        // Where on the screen the grab started, in the screen's own axes, so the screen moves
+        // WITH the pointer instead of snapping its origin to it.
+        double        grab_local_x = 0.0, grab_local_y = 0.0;
+    };
+    static thread_local gesture g;
+
+    core::previz_camera view;
+    bool                have_scene = false;
+    std::string         hovered;
+    std::string         selected_now;
+
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        have_scene = impl_->scene_.active;
+        if (!have_scene)
+            return false;
+
+        // Orbiting always uses the VIEW camera, so `has_view_override` goes true on the first
+        // gesture and the production camera -- the one `compute_frustum` reads -- is never
+        // touched. That split is the whole reason the view camera exists (SS1.2), and an
+        // interactive viewport that moved the production camera would silently re-project every
+        // mapped screen on every mouse move.
+        view = impl_->scene_.has_view_override ? impl_->scene_.view_camera : impl_->scene_.camera;
+    }
+
+    const auto pick_at = [&](double sx, double sy) {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        return core::compute_pick(view, aspect, sx, sy, impl_->scene_.screens);
+    };
+
+    switch (event.type) {
+        case kind::button: {
+            if (event.pressed) {
+                if (event.button == 2) { // right: orbit
+                    g.orbiting = true;
+                    g.last_x   = event.x;
+                    g.last_y   = event.y;
+                } else if (event.button == 1) { // middle: pan
+                    g.panning = true;
+                    g.last_x  = event.x;
+                    g.last_y  = event.y;
+                } else if (event.button == 0) { // left: select, and maybe start a drag
+                    const auto hit = pick_at(event.x, event.y);
+                    {
+                        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                        impl_->scene_.selected = hit ? hit->name : std::string();
+                    }
+                    if (hit) {
+                        g.dragging     = true;
+                        g.drag_name    = hit->name;
+                        g.grab_local_x = hit->local_x;
+                        g.grab_local_y = hit->local_y;
+                    }
+                }
+            } else {
+                if (event.button == 2)
+                    g.orbiting = false;
+                else if (event.button == 1)
+                    g.panning = false;
+                else if (event.button == 0) {
+                    g.dragging = false;
+                    g.drag_name.clear();
+                }
+            }
+            return true;
+        }
+
+        case kind::move: {
+            const double dx = event.x - g.last_x;
+            const double dy = event.y - g.last_y;
+            g.last_x        = event.x;
+            g.last_y        = event.y;
+
+            if (g.orbiting) {
+                // A full window width is 180 degrees of yaw. Pitch is clamped, because a
+                // viewport that rolls past vertical is disorientating and cannot be recovered
+                // from by dragging back.
+                auto  cam   = view;
+                cam.yaw    += static_cast<float>(dx * 180.0);
+                cam.pitch   = std::max(-89.0f, std::min(89.0f, cam.pitch + static_cast<float>(dy * 180.0)));
+                set_view_camera(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.roll, cam.fov);
+                return true;
+            }
+
+            if (g.panning) {
+                // Pan across the camera's own right/up axes, so dragging moves the scene the
+                // way it looks rather than along world axes.
+                const auto rot = mat4::rotate_y(view.yaw) * mat4::rotate_x(view.pitch) * mat4::rotate_z(view.roll);
+                const float rgt[3] = {rot.m[0], rot.m[1], rot.m[2]};
+                const float up[3]  = {rot.m[4], rot.m[5], rot.m[6]};
+
+                const float k   = 4.0f; // metres per full window width
+                auto        cam = view;
+                cam.x -= static_cast<float>(dx) * rgt[0] * k - static_cast<float>(dy) * up[0] * k;
+                cam.y -= static_cast<float>(dx) * rgt[1] * k - static_cast<float>(dy) * up[1] * k;
+                cam.z -= static_cast<float>(dx) * rgt[2] * k - static_cast<float>(dy) * up[2] * k;
+                set_view_camera(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.roll, cam.fov);
+                return true;
+            }
+
+            if (g.dragging && !g.drag_name.empty()) {
+                // Move the screen so the point the operator grabbed stays under the pointer.
+                // Re-cast against the screen's CURRENT plane, then offset by the grab point --
+                // which is why `pick` reports local coordinates at all.
+                core::screen_meta meta;
+                bool              found = false;
+                {
+                    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                    auto it = impl_->scene_.screens.find(g.drag_name);
+                    if (it != impl_->scene_.screens.end()) {
+                        meta  = it->second;
+                        found = true;
+                    }
+                }
+                if (!found) {
+                    g.dragging = false;
+                    return true;
+                }
+
+                std::map<std::string, core::screen_meta> just_this;
+                just_this[g.drag_name] = meta;
+                if (const auto hit = core::compute_pick(view, aspect, event.x, event.y, just_this)) {
+                    // The screen's own axes, so the drag stays in its plane rather than
+                    // sliding along world X/Y.
+                    const auto  rot = mat4::rotate_y(meta.rot_yaw) * mat4::rotate_x(meta.rot_pitch) *
+                                     mat4::rotate_z(meta.rot_roll);
+                    const float rgt[3] = {rot.m[0], rot.m[1], rot.m[2]};
+                    const float up[3]  = {rot.m[4], rot.m[5], rot.m[6]};
+
+                    const auto d_lx = static_cast<float>(hit->local_x - g.grab_local_x);
+                    const auto d_ly = static_cast<float>(hit->local_y - g.grab_local_y);
+
+                    set_screen_position(g.drag_name,
+                                        meta.pos_x + rgt[0] * d_lx + up[0] * d_ly,
+                                        meta.pos_y + rgt[1] * d_lx + up[1] * d_ly,
+                                        meta.pos_z + rgt[2] * d_lx + up[2] * d_ly);
+                }
+                return true;
+            }
+
+            // Not dragging: just report what is under the pointer, so a client can highlight
+            // it. Published like any other stage field.
+            const auto hit = pick_at(event.x, event.y);
+            hovered        = hit ? hit->name : std::string();
+            {
+                std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                if (impl_->scene_.hover != hovered)
+                    impl_->scene_.hover = hovered;
+            }
+            return true;
+        }
+
+        case kind::wheel: {
+            // Dolly along the view camera's forward axis. Multiplicative in distance would be
+            // nicer near an object and is not worth the asymmetry here.
+            const auto  rot = mat4::rotate_y(view.yaw) * mat4::rotate_x(view.pitch) * mat4::rotate_z(view.roll);
+            const float fwd[3] = {-rot.m[8], -rot.m[9], -rot.m[10]};
+
+            const float k   = 0.5f; // metres per wheel notch
+            auto        cam = view;
+            cam.x += fwd[0] * static_cast<float>(event.wheel_dy) * k;
+            cam.y += fwd[1] * static_cast<float>(event.wheel_dy) * k;
+            cam.z += fwd[2] * static_cast<float>(event.wheel_dy) * k;
+            set_view_camera(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.roll, cam.fov);
+            return true;
+        }
+
+        case kind::key: {
+            if (!event.pressed)
+                return true;
+
+            // Esc deselects. Arrows nudge the selection by a centimetre in its own plane --
+            // the gesture a mouse cannot do precisely.
+            std::string sel;
+            {
+                std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                sel = impl_->scene_.selected;
+            }
+
+            if (event.key == 0x1B) { // VK_ESCAPE
+                std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                impl_->scene_.selected.clear();
+                return true;
+            }
+
+            if (sel.empty())
+                return true;
+
+            double nx = 0.0, ny = 0.0;
+            switch (event.key) {
+                case 0x25: nx = -0.01; break; // VK_LEFT
+                case 0x27: nx = 0.01;  break; // VK_RIGHT
+                case 0x26: ny = 0.01;  break; // VK_UP
+                case 0x28: ny = -0.01; break; // VK_DOWN
+                default: return true;
+            }
+
+            core::screen_meta meta;
+            {
+                std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                auto it = impl_->scene_.screens.find(sel);
+                if (it == impl_->scene_.screens.end())
+                    return true;
+                meta = it->second;
+            }
+
+            const auto  rot = mat4::rotate_y(meta.rot_yaw) * mat4::rotate_x(meta.rot_pitch) *
+                             mat4::rotate_z(meta.rot_roll);
+            const float rgt[3] = {rot.m[0], rot.m[1], rot.m[2]};
+            const float up[3]  = {rot.m[4], rot.m[5], rot.m[6]};
+
+            set_screen_position(sel,
+                                meta.pos_x + rgt[0] * static_cast<float>(nx) + up[0] * static_cast<float>(ny),
+                                meta.pos_y + rgt[1] * static_cast<float>(nx) + up[1] * static_cast<float>(ny),
+                                meta.pos_z + rgt[2] * static_cast<float>(nx) + up[2] * static_cast<float>(ny));
+            return true;
+        }
+
+        case kind::leave: {
+            // Drop the hover, but KEEP the drag: a drag that leaves the window is still a
+            // drag, and `SetCapture` in the window means its button-up will still arrive.
+            //
+            // MEASURED INTERACTION WITH SYNTHETIC INPUT, 2026-09-08, and it is not a defect.
+            // `TrackMouseEvent` tracks the REAL cursor, so when input arrives by `PostMessage`
+            // with the physical pointer elsewhere, a `ReleaseCapture` at the end of a click
+            // produces a leave and clears `hover`. Hover itself works -- it read `back` 0.10 s
+            // after a posted move and still did at 1.1 s -- but it does not survive a synthetic
+            // capture cycle. A battery must therefore assert hover promptly after a move and
+            // must not expect it to persist across a posted click. `selected` is unaffected,
+            // which is why selection rather than hover is the thing worth gating.
+            std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+            impl_->scene_.hover.clear();
+            return true;
+        }
+
+        case kind::text:
+            return true; // previz has nothing to type into
+    }
+
+    return true;
+}
+
 bool previz_renderer::is_camera_locked() const
 {
     std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
@@ -1413,6 +1669,8 @@ core::stage_snapshot previz_renderer::stage_snapshot() const
     out.camera                  = sc.camera;
     out.view_camera             = sc.view_camera;
     out.scene_path              = sc.scene_path;
+    out.selected                = sc.selected;
+    out.hover                   = sc.hover;
     out.screens                 = sc.screens;
     return out;
 }

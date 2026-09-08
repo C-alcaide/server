@@ -137,6 +137,10 @@ struct stage_snapshot
     previz_camera                      view_camera; // the operator's viewport
     std::map<std::string, screen_meta> screens;
     std::string                        scene_path;
+    /// Which screen the operator has selected, and which the pointer is over. Empty for none.
+    /// Published so a client can draw a selection without owning a renderer.
+    std::string                        selected;
+    std::string                        hover;
 };
 
 // Equality is deliberately NOT defined here. Comparing these structs member by member would be a

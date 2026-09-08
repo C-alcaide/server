@@ -87,6 +87,11 @@ struct previz_scene
     // Link / nav) from the virtual production camera that drives projection.
     previz_camera                    view_camera;
     bool                             has_view_override = false;
+    // Which screen the operator has selected and which one the pointer is over, by name.
+    // Empty means none. Published, so a client can draw the selection without owning a
+    // renderer, and so `api-stage` can assert a click landed.
+    std::string                      selected;
+    std::string                      hover;
     // Operator OVERRIDE/freeze: when true the bound tracker stops driving the
     // production camera, letting the operator hand-fly it (PREVIZ CAMERA SET still
     // works).  Cleared to hand control back to the tracker.

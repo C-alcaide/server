@@ -20,6 +20,7 @@
 #pragma once
 
 #include "previz_scene.h"
+#include <core/input/input_event.h>
 
 #include <common/memory.h>
 
@@ -76,6 +77,22 @@ class previz_renderer
     /// production camera (the operator can still set it manually).
     void set_camera_locked(bool locked);
     bool is_camera_locked() const;
+
+    /// Orbit, pick and drag, from one pointer or keyboard event.
+    ///
+    /// Returns true if the event was consumed. False when no scene is loaded, so the channel
+    /// passes the event on to its layers instead -- a previz-less channel behaves exactly as
+    /// it did before this existed.
+    ///
+    /// `aspect` is the viewport's width/height, which the caller knows and this class does
+    /// not: the renderer draws into whatever target it is handed.
+    ///
+    /// Every gesture goes through the ordinary mutators (`set_view_camera`,
+    /// `set_screen_position`), never at the scene directly, because those re-apply the mesh
+    /// transform and call `update_projections()`. A drag that wrote `screen_meta` itself would
+    /// move the wireframe and leave the projection behind -- 202 and no picture, the shape of
+    /// defect this fork keeps finding.
+    bool input(const core::input_event& event, double aspect);
 
     /// Toggle visibility of a named mesh.
     void set_mesh_visible(const std::string& mesh_name, bool visible);

@@ -383,7 +383,7 @@ bool same_stage(const stage_snapshot& a, const stage_snapshot& b)
         fa.has_view_override != fb.has_view_override)
         return false;
 
-    if (a.scene_path != b.scene_path)
+    if (a.scene_path != b.scene_path || a.selected != b.selected || a.hover != b.hover)
         return false;
 
     if (!same_camera(a.camera, b.camera) || !same_camera(a.view_camera, b.view_camera))
@@ -469,6 +469,8 @@ void stage_publisher::refresh(const stage_snapshot& snap)
     st["camera_locked"]   = snap.flags.camera_locked;
     st["view_override"]   = snap.flags.has_view_override;
     st["scene_path"]      = snap.scene_path;
+    st["selected"]        = snap.selected;
+    st["hover"]           = snap.hover;
 
     // The enumeration of named children. Always published, including when empty: a screen every
     // one of whose fields happened to sit at its default would otherwise not appear at all.

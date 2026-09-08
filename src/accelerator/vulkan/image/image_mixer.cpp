@@ -1405,6 +1405,20 @@ struct image_mixer::impl
         return previz_renderer_.get();
     }
 
+    bool stage_input(const core::input_event& event)
+    {
+        // Deliberately NOT `get_previz_renderer()`, for the same reason `stage_state()` avoids
+        // it: that call CREATES the renderer, and a stray mouse move must not bring a GL device
+        // into existence on a Vulkan channel that never uses previz.
+        auto* r = previz_ready_.load(std::memory_order_acquire);
+        if (!r)
+            return false;
+
+        // `aspect_ratio_` is maintained per tick by `update_aspect_ratio`, so it is both
+        // correct and already there.
+        return r->input(event, aspect_ratio_);
+    }
+
     core::monitor::state stage_state() const
     {
         // Deliberately NOT `get_previz_renderer()`. That CREATES the renderer on first call, and
@@ -1479,6 +1493,8 @@ ogl::previz_renderer* image_mixer::get_previz_renderer()
 }
 
 core::monitor::state image_mixer::state() const { return impl_->stage_state(); }
+
+bool image_mixer::input(const core::input_event& event) { return impl_->stage_input(event); }
 
 void image_mixer::set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_reference_white, bool auto_gamut_compress, bool straight_alpha_grading, bool working_space_composite)
 {

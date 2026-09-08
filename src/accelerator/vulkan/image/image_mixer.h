@@ -29,6 +29,7 @@
 #include <core/frame/frame.h>
 #include <core/frame/pixel_format.h>
 #include <core/mixer/image/image_mixer.h>
+#include <core/input/input_event.h>
 #include <core/video_format.h>
 
 #include <future>
@@ -92,7 +93,9 @@ class image_mixer final : public core::image_mixer
     ogl::previz_renderer* get_previz_renderer();
 
     /// The previz stage, published every tick. See `core::image_mixer::state()`.
+    /// Offer a pointer or keyboard event to previz. See `core::image_mixer::input`.
     core::monitor::state state() const override;
+    bool                 input(const core::input_event& event) override;
 
     void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_reference_white, bool auto_gamut_compress, bool straight_alpha_grading, bool working_space_composite) override;
 

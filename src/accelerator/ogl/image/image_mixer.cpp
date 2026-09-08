@@ -1345,6 +1345,15 @@ core::monitor::state image_mixer::state() const
     return impl_->previz_publisher_.published();
 }
 
+bool image_mixer::input(const core::input_event& event)
+{
+    // The viewport's aspect is the CHANNEL's -- previz renders into the channel's target
+    // texture and the consumer maps its window onto that, having already removed its own
+    // letterboxing. `aspect_ratio_` is set by `update_aspect_ratio` on every tick from the
+    // channel's square pixel dimensions, so it is the right number and is already maintained.
+    return impl_->previz_renderer_.input(event, impl_->aspect_ratio_);
+}
+
 previz_renderer& image_mixer::get_previz_renderer() { return impl_->previz_renderer_; }
 
 void image_mixer::set_channel_texture_store(std::shared_ptr<channel_texture_store> store)
