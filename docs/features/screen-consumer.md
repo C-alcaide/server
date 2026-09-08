@@ -7,7 +7,8 @@
 > **Architecture:** none, deliberately — the structural point is §1 below: this is the instrument most batteries measure through
 > **Guide:** none — upstream owns the consumer's operation and it is discussed in context across six guides. **Not because the changes are internal**: §1b documents three fork-only `ADD` parameters that live nowhere else.
 > **Coverage:** used as the capture surface by `playback-scaling`, `mixer-parity`,
-> `consumer-view` and most picture batteries
+> `consumer-view` and most picture batteries. `previz-interact` is the first battery that measures
+> **the consumer itself** — its window's mouse and keyboard handling (§1c)
 
 Two files, three thousand changed lines — one of the heaviest per-file divergences in the tree, and
 it had no entry in this folder because the module is not fork-only.
@@ -48,14 +49,51 @@ steal focus and shows no cursor is otherwise six parameters, and nothing pointed
 
 ---
 
+## 1c. The window is an input surface — since 2026-09-08
+
+`<interactive>` (default `true`, or `NON_INTERACTIVE` on the `ADD` form) used to do one thing: hide
+the cursor. It now also decides whether the window's mouse and keyboard reach the channel.
+
+`win32_gl_window::WndProc` turns `WM_MOUSEMOVE`, the nine button messages, `WM_MOUSEWHEEL`,
+`WM_MOUSELEAVE` (via `TrackMouseEvent`), `WM_KEYDOWN/UP` and `WM_CHAR` into a `core::input_event`
+on a small queue, drained in the same `poll()` that runs the window pump — the render thread, with
+the GL context current. `create_consumer` holds the channel as a **`std::weak_ptr`**, because
+channel → output → consumer → channel would otherwise be a cycle.
+
+Three details that are the fork's own and are easy to get wrong:
+
+* **coordinates come from the message's `lParam`, never `GetCursorPos`.** That is what lets a
+  battery drive the window with `PostMessage` and what stops a click landing on whatever window is
+  on top. It is also load-bearing for the coverage: a sink reading the real cursor treats a posted
+  message as a silent no-op, so `previz-interact` compiles that exact fault in to prove it can fail.
+* **the picture rect is the LIVE one.** Normalisation uses `width_`/`height_` as maintained by
+  `WM_SIZE`, not the size the window had at construction — the 2015 interaction API captured it
+  once and was wrong after any resize.
+* **the letterbox is subtracted, and points in the bars are rejected.** `calculate_aspect()`
+  already computes the draw rect for `none`/`uniform`/`fill`/`uniform_to_fill`; the old API mapped
+  the bars into `[0,1]` instead.
+
+Consecutive moves coalesce at the source, with the queue capped at 256, so a fast mouse cannot
+outrun a tick or grow the queue without bound.
+
+Where the events go is `docs/features/previz.md` §2.2 — today, previz. The dispatch point
+(`video_channel::input`) tries the image mixer first and the stage second, so the same events reach
+a layer's producer when previz is not active.
+
+---
+
 ## 2. Verification
 
-There is no battery that measures the screen consumer *as the thing under test*. It is exercised
+**As of 2026-09-08 there is one**, and it covers exactly one part: `previz-interact` measures the
+window's input handling (§1c) on both mixers, including a `<interactive>false</interactive>` control
+arm that must ignore the identical messages. Everything else about the consumer is still exercised
 constantly and asserted about never.
 
-**That is the gap, and it is structural:** a battery capturing through the screen consumer cannot
-use that same capture to prove the screen consumer correct. Breaking the circularity needs a second,
-independent capture route — `consumer-view` or a DeckLink loop — compared against it.
+**That remains the gap, and it is structural:** a battery capturing through the screen consumer
+cannot use that same capture to prove the screen consumer correct. Breaking the circularity needs a
+second, independent capture route — `consumer-view` or a DeckLink loop — compared against it. Note
+that `previz-interact` escapes the circularity only because it reads the **control API**, not a
+capture.
 
 ---
 

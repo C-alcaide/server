@@ -47,6 +47,7 @@ catch its mutation cannot fail*.
 | the shader, the colour maths, a grading operator | `conformance` + `grading`, **both mixers** |
 | a new `image_transform` field | the battery owning that command, **both mixers** — and check the allowlist trap below, which no battery can see for you |
 | a **screen or previz camera** property, or anything the stage publishes | `api-stage`, **both mixers** — and add the row to `core/stage/stage_fields.*`, because a property that is not in that table is invisible to the tree, to the publisher's change detection and to the write path all three at once |
+| **the screen window's input handling**, `compute_pick`, or a previz gesture | `previz-interact`, **both mixers**. And note the constraint the whole battery rests on: the `WndProc` takes coordinates from the message's `lParam` and never `GetCursorPos`, because a sink that hit-tests from the real cursor treats a posted message as a **silent no-op** — no error, no log line — and every check would pass vacuously. Verified by compiling that exact fault in |
 | an OCIO stage | `ocio`, `ocio-display`, `ocio-look`, `ocio-lut3d`, `consumer-view` as the stage dictates |
 | the composite / blend / alpha domain | `blend-domain`, `alpha-domain`, `mix-stage` |
 | the decode path | `flat-decoded` (the only 1 LSB decode gate), `sdi-input`, `source-colorspace` |
@@ -96,7 +97,8 @@ Still uncovered, and now the priority order for coverage rather than for docs:
 
   Driven today: `SCENE`, `MAP`, `SHOW`, `GRID`, `WIREFRAME` (`preview-cost`, for COST),
   `MAP` again for its picture (`previz-picture`), and `SCREEN` and `CAMERA` for their STATE
-  (`api-stage`). **Still driven by nothing: `UNMAP`, `VIEW`, `AUTOPROJECTION`, `GIZMO`, `PRESET`,
+  (`api-stage`), and `SCREEN` plus both cameras again through the window (`previz-interact`,
+  2026-09-08). **Still driven by nothing: `UNMAP`, `VIEW`, `AUTOPROJECTION`, `GIZMO`, `PRESET`,
   `INFO`** — six, not eight.
 
   **What no battery does at all is look at WHERE a screen is.** `previz-picture` proves the right

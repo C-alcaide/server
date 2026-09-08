@@ -1,6 +1,54 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: the previz window takes the mouse and the keyboard
+
+**The screen consumer's own window is now an interactive previz surface.** Right-drag orbits the
+view camera, the wheel dollies it, middle-drag pans it, left-click picks the screen under the
+pointer, left-drag moves that screen within its own plane, and the arrow keys nudge it. `Esc`
+deselects. Gated on `<interactive>` (default `true`), which until now only hid the cursor.
+
+Nothing new renders and no second process is involved: the events are read in the same `poll()`
+that already pumped the window, on the render thread with the GL context current, and every gesture
+goes through the existing mutators — so a drag is indistinguishable downstream from
+`PREVIZ SCREEN … POSITION` or a `PUT`, and moving a screen recomputes its ICVFX projection on the
+mapped channel in the same frame.
+
+**Latency, on the frame clock: 1 frame.** One posted wheel message to the published
+`view_camera/position` change, read from `Event.frame` on the events socket. `INTERACTIVE_PREVIZ_-
+SCOPE.md`'s 80–120 ms budget was for a cross-process round trip (Spout out, AMCP back) and does not
+apply to this route.
+
+**Cost to the render thread: nothing measurable.** A/B/A/B on one binary, four channels at 1080p50,
+four screens on the stage, a left-drag held for a 12 s window at 49 posted messages per second —
+twice the frame rate, so every tick drains a move and runs the pick:
+
+| | frame period | late frames | `consume_max` |
+| :--- | :--- | :--- | :--- |
+| vulkan, idle | 39.999 ms | 1 / 3018 | 0.17–0.30 ms |
+| vulkan, dragging | 40.001 ms | 0 / 2009 | 0.16–0.26 ms |
+| ogl, idle | 40.000 ms | 1 / 3014 | 0.17–0.27 ms |
+| ogl, dragging | 39.999 ms | 0 / 2006 | 0.10–0.20 ms |
+
+Read that as headroom rather than as a period measurement: the period is paced by the consumer's
+clock and cannot rise until the thread overruns, so the discriminators are the late-frame count and
+`consume_max` — both inside their idle spread. The single late frame in each idle arm is the first
+report after warm-up, in the arm with no input at all.
+
+**Two new published fields**, `/channel/{n}/mixer/previz/{selected,hover}`, both read-only strings
+and both published unconditionally because empty is a real value. The picking itself is
+`core::compute_pick` in `core/stage/stage_math.cpp` — no GL, and checked at every server start
+alongside `compute_frustum` (83 property checks now, 15 of them new).
+
+**What is NOT included:** Linux. The SFML window ignores the mouse exactly as before; the event
+struct is platform-neutral and the missing part is one `switch` over `sf::Event`, unwritten because
+there is no display here to measure it on. Venue meshes are not pickable (screens only), and
+nothing but position can be manipulated.
+
+Measured by `previz-interact`, 16/16 on both mixers, mutation-proved: taking the pointer position
+from `GetCursorPos` instead of the message's `lParam` — the fault that would make every posted
+message a silent no-op — fails four of the checks.
+
 ### Added: ASIO is actually in the build now — the licence that blocked it expired
 
 **The PortAudio module has always carried ASIO code, and none of it could run.** `API=ASIO`,

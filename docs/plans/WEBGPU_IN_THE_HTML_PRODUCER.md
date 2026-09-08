@@ -1,6 +1,6 @@
 # WebGPU in the HTML producer — what could run, and what including it costs
 
-> **Status:** SURVEY. **Three items are measured and the rest are not.** `vgpu` 0.4.0 (§3.1),
+> **Status:** SURVEY — verified 2026-09-08. **Three items are measured and the rest are not.** `vgpu` 0.4.0 (§3.1),
 > three.js r185 (§3.2) and PlayCanvas 2.22.0 rendering 3DGS (§3.3) were run in a channel on
 > 2026-09-07; every other project here was
 > assessed from its repository and documentation and **has never been started in this server**. Star counts and dates are from the

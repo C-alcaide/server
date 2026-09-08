@@ -1,7 +1,8 @@
 # PREVIZ — 3D pre-visualisation
 
 > **State:** shipped; **cost** measured, the **mapping's picture** measured on both mixers,
-> **spatial placement** unmeasured
+> **interactive on the server's own window** since 2026-09-08 (§2.2), **spatial placement**
+> unmeasured
 > **Modules:** **not a module** — `src/accelerator/ogl/image/previz_renderer.cpp`, `previz_scene.h`,
 > `previz.frag` / `previz.vert`, with the Vulkan route through
 > `src/accelerator/vulkan/image/previz_texture_bridge.cpp`
@@ -9,7 +10,8 @@
 > **Architecture:** none — shares the ICVFX state the projection commands write; the two routes to
 > it are §5.3 below
 > **Guide:** [`../guides/PREVIZ_3D_MODULE.md`](../guides/PREVIZ_3D_MODULE.md)
-> **Coverage:** `cli.py previz-picture` — does the mapped channel arrive on the mesh, in order, on both mixers (§4). `cli.py api-stage` — screens and cameras as addressable nodes, and §4's check 3, the two routes to ICVFX state (§4.2). `cli.py preview-cost --arm previz --arm previz_spout --arm previz_screen` — what previz costs the channel, at 1080p50 and at the VP workload; the floor those shares are measured against is `cli.py raster-capacity`. The projection maths itself is checked at every server start (§4.1). **Spatial placement is still uncovered by all of them** — see §4
+> **Coverage:** `cli.py previz-picture` — does the mapped channel arrive on the mesh, in order, on both mixers (§4). `cli.py api-stage` — screens and cameras as addressable nodes, and §4's check 3, the two routes to ICVFX state (§4.2). `cli.py preview-cost --arm previz --arm previz_spout --arm previz_screen` — what previz costs the channel, at 1080p50 and at the VP workload; the floor those shares are measured against is `cli.py raster-capacity`. The projection maths itself is checked at every server start (§4.1). `cli.py previz-interact` — the window's mouse and keyboard, sixteen checks on both mixers,
+> mutation-proved (§4.3). **Spatial placement is still uncovered by all of them** — see §4
 
 Loads a 3D scene, maps channel output onto meshes in it, and renders a camera view of the result —
 so a projection design can be checked without the venue. Screens, presets and camera positions are
@@ -312,6 +314,7 @@ nothing on screen — 202 and no picture.
 | `…/screen/{name}/eye_mode` | enum `camera｜fixed` | a **closed** enum here: an unknown name is refused, where the AMCP form accepts any word as CAMERA (§5.5 defect 2) |
 | `…/screen/{name}/design_eye` | vec3 m | writable only while `eye_mode` is `fixed` — see below |
 | `…/screen/{name}/icvfx` | bool | |
+| `…/selected`, `…/hover` | string | **read-only**, always published — what §2.2's pointer picked and what it is over. Empty is a real value, so both are published unconditionally |
 
 ```
 curl http://127.0.0.1:5254/v1/tree/channel/1/mixer/previz
@@ -342,6 +345,84 @@ either backend.
   three components only when the mode is already FIXED. Set `eye_mode` first. The write comes back
   as `field_conflict` with both values rather than as a success, because the reply reports what the
   renderer **holds**, not what was asked for.
+
+### 2.2 The window is an input surface — since 2026-09-08
+
+The screen consumer's own window takes the mouse and the keyboard. No client, no second renderer,
+no round trip: the events are read in the same `poll()` that already pumps the window, on the
+render thread, with the GL context current.
+
+```
+<consumer>
+  <screen>
+    <interactive>true</interactive>   <!-- default. false = the window ignores input -->
+  </screen>
+</consumer>
+```
+
+| gesture | acts on |
+| :--- | :--- |
+| right-drag | the **view** camera's yaw and pitch (pitch clamped to ±89°) |
+| middle-drag | the view camera panned along its own right and up axes |
+| wheel | the view camera dollied along its own forward axis |
+| left-click | picks the screen under the pointer into `previz/selected`; empty space clears it |
+| left-drag | moves the selected screen within its own plane, preserving the grab offset |
+| arrow keys | nudge the selected screen 0.01 m along its own axes |
+| `Esc` | deselect |
+| pointer move | sets `previz/hover` to whatever is under it |
+
+**The production camera is never touched by any of them.** That split is the whole reason the view
+camera exists (§1.2), and it is the first thing `previz-interact` checks — a right-drag must move
+`view_camera/rotation` and leave `camera/rotation` alone, in the same check.
+
+**Everything goes through the existing mutators**, so a gesture is indistinguishable downstream
+from a `PREVIZ SCREEN … POSITION` or a `PUT /v1/value/…`. `set_screen_position` re-applies the mesh
+transform and calls `update_projections()`, which is why dragging a screen moves the ICVFX
+projection on its mapped channel within the same frame — measured, not asserted (§4.3 check 13).
+
+**The picking is pure maths in `core/stage/stage_math.cpp`**, not in the renderer:
+`compute_pick(view, aspect, sx, sy, screens)` casts a ray from the view camera through the picture
+point, intersects each screen's plane and returns the nearest hit with the point in that screen's
+own axes. Same tier as `compute_frustum` — no GL, checked at every server start (§4.1), and the
+one thing everything above depends on.
+
+**Two things about the picture geometry that are easy to get wrong, and are handled here:**
+
+* the ray is built against the **live** client rect, not the size the window had at construction;
+* the letterbox is subtracted first. `calculate_aspect()` already computes the draw rect for
+  `none`/`uniform`/`fill`/`uniform_to_fill`, so a point in the bars is **rejected** rather than
+  mapped to an edge of the picture.
+
+**What it costs the render thread: nothing measurable.** A/B/A/B on one binary, four channels at
+1080p50, four screens on the stage, a left-drag held for the whole 12 s window at 49 posted
+messages per second — twice the frame rate, so every tick drains a move and picks:
+
+| | frame period | late frames | `consume_max` |
+| :--- | :--- | :--- | :--- |
+| vulkan, idle | 39.999 ms | 1 / 3018 | 0.17–0.30 ms |
+| vulkan, dragging | 40.001 ms | 0 / 2009 | 0.16–0.26 ms |
+| ogl, idle | 40.000 ms | 1 / 3014 | 0.17–0.27 ms |
+| ogl, dragging | 39.999 ms | 0 / 2006 | 0.10–0.20 ms |
+
+**Read that as headroom, not as a period measurement.** The period is paced by the consumer's own
+clock, so it cannot rise until the thread actually overruns — the discriminators are the late-frame
+count and `consume_max`, and both sit inside their idle spread. The one late frame in each idle arm
+is the first report after warm-up, in the arm with no input at all.
+
+**Latency, measured on the frame clock: 1 frame.** One posted wheel message to the published
+`view_camera/position` change, read from the events socket's `Event.frame` rather than a wall
+clock. `INTERACTIVE_PREVIZ_SCOPE.md`'s 80–120 ms budget was for a **cross-process** round trip —
+Spout out, AMCP back — and does not apply to this route; §4 of that document now says so.
+
+**Limits, stated rather than discovered later:**
+
+* **Windows only.** The SFML path taken on Linux ignores the mouse exactly as it did before. The
+  event struct is platform-neutral and the missing part is one `switch` on `sf::Event`; it is not
+  written because there is no display here to measure it on.
+* **Screens are picked as planes.** A venue mesh loaded from glTF is drawn but not pickable — the
+  pick tests the `screen_meta` quads only.
+* **`selected` and `hover` are read-only.** Both are set by the pointer and published; there is no
+  write path, because a selection that could be set remotely would fight the operator's own.
 
 ---
 
@@ -394,10 +475,16 @@ Vulkan** — 346800 / 188232 / 188232 / 405674. So `PREVIZ MAP` delivers the rig
 right mesh with its components in order, and the two mixers agree, which is the parity §5.2 records
 as unmeasured.
 
-**Still not covered**: eight of the thirteen commands (`UNMAP`, `SCREEN`, `CAMERA`, `VIEW`,
-`AUTOPROJECTION`, `GIZMO`, `PRESET`, `INFO`), check 3 below, spatial placement — four colours prove
-four channels arrived on four meshes, not that `screen1` is the back wall — and colour accuracy,
-since the quads are lit and projected so the tolerance is deliberately wide.
+**Still not covered by `previz-picture`**: spatial placement — four colours prove four channels
+arrived on four meshes, not that `screen1` is the back wall — and colour accuracy, since the quads
+are lit and projected so the tolerance is deliberately wide.
+
+**Of the thirteen commands, six are driven by nothing**: `UNMAP`, `VIEW`, `AUTOPROJECTION`,
+`GIZMO`, `PRESET`, `INFO`. This list said **eight** until 2026-09-06 and named `SCREEN` and
+`CAMERA` among them; `api-stage` drives both now (§4.2) and `previz-interact` drives `SCREEN` and
+the two cameras through the window (§4.3). The count has been wrong in three different directions
+in three weeks, which is its own lesson — **check it against the batteries rather than against the
+last version of this paragraph.**
 
 This section read *"Nothing. No battery in the harness references PREVIZ"* until 2026-08-31, and
 was already false when the cost figures above were written into this file. The correction is worth
@@ -536,6 +623,52 @@ Two consequences:
   on every command. A GUI driving previz must ensure its mapped channels are being consumed, and
   should not treat `PREVIZ MAP`'s `202` as evidence that anything will appear.
 
+### 4.3 The window's input is measured — `previz-interact`, since 2026-09-08
+
+Sixteen checks on both mixers, driven by **`PostMessage`** to the consumer's own window from
+`core/win32_input.py`. Posted rather than physical: the position rides in `lParam`, so it needs no
+focus, cannot land on whatever window is on top, and does not fight the operator's mouse.
+
+| # | check |
+| :--- | :--- |
+| 0 | the server's pid, the window, and a client area to normalise against |
+| 1 | the stage is published at all (`screens=['back']`) |
+| 2 | a move sets `hover` to the screen under the pointer |
+| 3 | right-drag orbits `view_camera/rotation` — **and leaves `camera/rotation` alone** |
+| 4 | the wheel dollies along the camera's **own** forward axis, so X moves after a yaw |
+| 5 | left-click sets `selected`; a click on empty space clears it |
+| 6 | the arrow keys nudge the selected screen; after `Esc` they do nothing |
+| 7 | left-drag moves the screen, **and `proj_icvfx_q0x` on the mapped channel follows it** |
+| 8 | one message reaches the published state within two frames — measured at **1** |
+| 9 | a `<interactive>false</interactive>` window ignores the identical sequence |
+
+**Mutation-proved, and the mutation is the one that matters.** The whole battery rests on the
+server reading `lParam`; a `WndProc` that hit-tested from `GetCursorPos` instead would treat every
+posted message as a **silent no-op** — no error, no log line — and all sixteen checks would pass
+vacuously. So that exact fault was compiled in and measured: **four checks fail** (the orbit, the
+dolly, the selection and the arrow keys), each reporting its gesture as having had no effect.
+`win32_input` keeps `physical_click` and `cursor_over` for the day that constraint changes.
+
+**Four things had to be learned before any of it could fail honestly**, and each is a trap for the
+next battery on this surface:
+
+* **the window must be found by NAME.** Every channel gets a screen consumer and they share one
+  window class, so "find a `CasparCG_ScreenConsumer` owned by this pid" returns an arbitrary
+  channel's window. The first run drove the wrong one and read every gesture as having no effect —
+  indistinguishable from the feature not working. The fixture titles them `harness-ch{N}`.
+* **`hover` needs the real cursor, and only `hover` does.** `TrackMouseEvent` follows the physical
+  pointer, so with the cursor elsewhere Windows delivers `WM_MOUSELEAVE` in the same pump as the
+  posted move that requested tracking: hover is set and cleared inside one poll and cannot be
+  observed from outside at all. One check parks the cursor and restores it; nothing else needs to.
+* **an in-plane drag cannot change yaw or the field of view**, and that is geometry rather than a
+  defect — §4.1's `compute_frustum` takes the angles from the screen's **normal** and the fov from
+  the **perpendicular** eye-to-plane distance, both invariant under a translation within the plane.
+  Two versions of check 7 asserted `proj_yaw` and then `proj_fov`, and both failed on a drag that
+  worked perfectly. The ICVFX mask quad is the one projection output that does depend on where in
+  its plane the screen sits.
+* **latency must be one message.** Measured across a drag it read 4 frames, which was the
+  gesture's own 0.25 s of posted messages and not the server's latency at all.
+
 ---
 
 ## 5. Known gaps
@@ -663,6 +796,24 @@ screens were published they became wrong in writing.
    A channel with genuinely no previz renderer now logs a warning rather than binding a tracker
    that drives nothing. `TRACKING` still has coverage of **1 of 5 protocols and 2 of 18 commands** —
    see `camera-tracking.md` §5.
+
+### 5.6 The interaction surface, since 2026-09-08
+
+Three limits, each a consequence of a decision rather than an omission:
+
+* **Input is Windows-only.** `win32_gl_window::WndProc` produces the events; the SFML path taken
+  on Linux still falls through to `pollEvents()` and ignores the mouse. `core::input_event` is
+  platform-neutral, so the missing part is one `switch` over `sf::Event` in the same file — not
+  written because there is no display here to measure it on, and an unmeasured input path is worse
+  than a documented absence.
+* **Only screens are pickable.** `compute_pick` intersects the `screen_meta` quads. A venue mesh
+  loaded from glTF is drawn and cannot be selected or dragged, so a scene whose walls are geometry
+  rather than screens is look-only.
+* **Nothing is manipulated except position.** No rotation gizmo, no resize — and resize is blocked
+  at a lower level anyway (§2.1: `size` and `arc` have no mutator, because `add_screen_*` rebuilds
+  a fresh `screen_meta` and would discard everything else on it). The growth path is named in
+  `INTERACTIVE_PREVIZ_SCOPE.md` §5 rather than left implicit: picking, then a rotation handle, then
+  materials, each behind its own gate.
 
 ---
 

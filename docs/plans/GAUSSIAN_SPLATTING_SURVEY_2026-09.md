@@ -1,6 +1,7 @@
 # 3D Gaussian splatting — literature survey, September 2026
 
-> **Status:** SURVEY ONLY — nothing here is implemented, prototyped or measured in this tree.
+> **Status:** SURVEY — verified 2026-09-08 — nothing here is implemented, prototyped or measured
+> in this tree.
 > Every number below is an author's own claim from a **preprint**, none peer-reviewed. No code in
 > CasparVP touches 3DGS.
 > **Falsifier:** `grep -rniE 'splat|3dgs' src/` returns **0** (checked 2026-09-07) — if it ever
