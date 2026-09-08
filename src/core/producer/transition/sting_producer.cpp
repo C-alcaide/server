@@ -399,6 +399,9 @@ class sting_producer : public frame_producer
     monitor::state state() const override { return state_; }
 
     bool is_ready() override { return dst_producer_->is_ready(); }
+
+    /// To the DESTINATION, for the same reason as `transition_producer`.
+    bool input(const input_event& event) override { return dst_producer_->input(event); }
 };
 
 spl::shared_ptr<frame_producer> create_sting_producer(const frame_producer_dependencies&     dependencies,

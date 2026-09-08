@@ -23,6 +23,7 @@
 
 #include "../consumer/channel_info.h"
 #include "../fwd.h"
+#include "../input/input_event.h"
 #include "../monitor/monitor.h"
 
 #include <common/except.h>
@@ -113,6 +114,22 @@ class frame_producer
      * While this returns false, the previous producer will be left running for a limited number of frames.
      */
     virtual bool is_ready() = 0;
+
+    /// Offer a pointer or keyboard event to this producer, in ITS OWN coordinate space.
+    ///
+    /// `event.x`/`event.y` are 0..1 across the producer's own picture -- the stage has already
+    /// undone the layer's fill translation and scale, so a producer never sees the channel's
+    /// geometry and never needs to know it was scaled.
+    ///
+    /// Return **true** to consume the event. `false` means "not mine", and the stage then offers
+    /// it to the next layer down: a colour producer under an HTML page must not swallow a click
+    /// just for being on top. That is the one deliberate difference from the 2013-2018
+    /// `interaction_sink`, which delivered to the topmost hit layer and stopped there -- geometry
+    /// picks the ORDER here, and the producer decides whether it consumes.
+    ///
+    /// Called on the stage executor. A producer that has to reach another thread posts, and does
+    /// not block: the caller is the consumer's render thread.
+    virtual bool input(const input_event& event) { return false; }
 };
 
 class const_producer : public core::frame_producer

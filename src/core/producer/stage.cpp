@@ -70,6 +70,20 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     std::map<int, double>                               kf_media_time_override_; // from CALL SEEK
     std::map<int, uint32_t>                             kf_last_frame_number_;   // for override clearing
 
+    // -- Input routing (stage executor only, no mutex) --
+    //
+    // `input_capture_` latches the layer a drag belongs to. Once a button goes down on a layer,
+    // every move and the release go to THAT layer even after the pointer leaves its rectangle --
+    // otherwise a drag that starts on a slider and travels off it stops mid-gesture, which is not
+    // what any real drag does. The 2013 interaction API had this right and it is worth not losing.
+    //
+    // `input_focus_` is where a KEY or TEXT event goes: keys carry no position, so the only honest
+    // target is whatever last accepted a pointer event. The 2013 API had no keyboard at all, so
+    // there is no precedent to follow for this one.
+    int      input_capture_ = -1;
+    int      input_focus_   = -1;
+    uint32_t input_buttons_ = 0;
+
     executor   executor_{L"stage " + std::to_wstring(channel_index_)};
     std::mutex lock_;
 
@@ -726,6 +740,118 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         return executor_.begin_invoke([=, this] { return tweens_[index].fetch(); });
     }
 
+    /// Offer an event to whichever layer wants it, topmost first.
+    ///
+    /// Posted rather than blocking: the caller is the screen consumer's render thread, or the
+    /// protocol thread for `INPUT`, and neither can afford to wait on the stage executor.
+    void input(const input_event& event)
+    {
+        executor_.begin_invoke([this, event] { input_on_executor(event); });
+    }
+
+    /// The targeted form: one layer, no hit-test, no rectangle check.
+    ///
+    /// It still undoes the layer's fill transform, so a client sending 0.5 0.5 means the middle of
+    /// the LAYER either way -- what it skips is the rejection, not the conversion.
+    void input(int layer, const input_event& event)
+    {
+        executor_.begin_invoke([this, layer, event] { offer(layer, event, false); });
+    }
+
+    /// Deliver to one layer, converting the channel-relative point into the layer's own space.
+    ///
+    /// Returns whether the producer consumed it. The conversion is the INVERSE of what the mixer
+    /// does with `fill_translation` and `fill_scale`: a layer drawn at translation `t` with scale
+    /// `s` occupies `[t, t + s]` of the channel, so a channel point `x` is `(x - t) / s` in the
+    /// layer. `reject_outside` is false for a captured drag, which is the whole point of capture.
+    ///
+    /// Rotation, perspective corner-pin and crop are NOT inverted -- the same limit the 2013 API
+    /// had. A rotated layer hit-tests as its unrotated rectangle, which is wrong and is documented
+    /// as wrong rather than silently approximated.
+    bool offer(int index, const input_event& event, bool reject_outside)
+    {
+        auto it = layers_.find(index);
+        if (it == layers_.end())
+            return false;
+
+        auto producer = it->second.foreground();
+        if (producer == frame_producer::empty())
+            return false;
+
+        auto local = event;
+
+        if (event.has_position()) {
+            const auto& img = tweens_[index].fetch().image_transform;
+
+            const double sx = img.fill_scale[0];
+            const double sy = img.fill_scale[1];
+            if (sx == 0.0 || sy == 0.0)
+                return false; // a layer scaled to nothing has no interior to hit
+
+            local.x = (event.x - img.fill_translation[0]) / sx;
+            local.y = (event.y - img.fill_translation[1]) / sy;
+
+            if (reject_outside && !local.on_surface())
+                return false;
+        }
+
+        return producer->input(local);
+    }
+
+    void input_on_executor(const input_event& event)
+    {
+        // Held buttons are tracked HERE rather than read from the event's modifier bits. The
+        // source fills those from the platform's own state, and a press whose release never
+        // arrived -- a window losing capture, a caller posting a DOWN and then giving up -- would
+        // leave a drag latched forever with nothing to clear it.
+        if (event.type == input_event::kind::button) {
+            const uint32_t bit = event.button == 0   ? mod_left_button
+                                 : event.button == 1 ? mod_middle_button
+                                 : event.button == 2 ? mod_right_button
+                                                     : 0u;
+            if (event.pressed)
+                input_buttons_ |= bit;
+            else
+                input_buttons_ &= ~bit;
+        }
+
+        // A leave ends nothing. A drag that travels off the window is still a drag and its release
+        // will arrive, because the window holds capture. Only the focused layer is told, so a page
+        // can clear its own hover state.
+        if (event.type == input_event::kind::leave || event.type == input_event::kind::key ||
+            event.type == input_event::kind::text) {
+            if (input_focus_ >= 0)
+                offer(input_focus_, event, false);
+            return;
+        }
+
+        // A drag in progress belongs to the layer it started on, wherever the pointer now is.
+        if (input_capture_ >= 0) {
+            offer(input_capture_, event, false);
+            if (input_buttons_ == 0)
+                input_capture_ = -1;
+            return;
+        }
+
+        // Topmost first. `layers_` is ordered ascending by index and the mixer draws in that
+        // order, so the LAST layer is the one on top.
+        //
+        // A producer returning false does not end the search: geometry decides the ORDER, and the
+        // producer decides whether it consumes. So a colour layer sitting above an HTML page does
+        // not swallow every click for being on top -- which is what the 2013 API's "topmost hit
+        // layer wins" would have done, since every consumer carried a sink whether it wanted one
+        // or not.
+        for (auto it = layers_.rbegin(); it != layers_.rend(); ++it) {
+            if (!offer(it->first, event, true))
+                continue;
+
+            input_focus_ = it->first;
+            if (event.type == input_event::kind::button && event.pressed)
+                input_capture_ = it->first;
+            return;
+        }
+    }
+
     std::future<void> load(int index, const spl::shared_ptr<frame_producer>& producer, bool preview, bool auto_play)
     {
         return executor_.begin_invoke([=, this] { get_layer(index).load(producer, preview, auto_play); });
@@ -1069,6 +1195,8 @@ std::future<void>            stage::execute(std::function<void()> func)
     func();
     return make_ready_future();
 }
+void stage::input(const input_event& event) { impl_->input(event); }
+void stage::input(int layer, const input_event& event) { impl_->input(layer, event); }
 
 // ── Keyframe management (stage wrappers) ─────────────────────────────────
 std::future<void>                  stage::set_keyframe_data(int layer, std::shared_ptr<void> data) { return impl_->kf_set(layer, std::move(data)); }

@@ -108,6 +108,14 @@ class stage_base
     /// real implementation hit-tests layers topmost-first; see `stage::impl::input`.
     virtual void input(const input_event& event) {}
 
+    /// Deliver to ONE layer, with no hit-test and no rectangle check.
+    ///
+    /// For a caller that already knows its target -- `INPUT 1-10 ...`, or a client driving a
+    /// template it just loaded. A client that knows which layer it wants should not have its
+    /// event silently dropped because the layer happens to be scaled or translated away from
+    /// where the client thinks it is; that is the hit-test's job, not this one's.
+    virtual void input(int layer, const input_event& event) {}
+
     // Keyframe management (type-erased: void* wraps module types)
     virtual std::future<void>                  set_keyframe_data(int layer, std::shared_ptr<void> data)                      = 0;
     virtual std::future<bool>                  arm_keyframes(int layer)                                                     = 0;
@@ -174,6 +182,10 @@ class stage final : public stage_base
     std::future<std::shared_ptr<frame_producer>> background(int index) override;
 
     std::future<void>            execute(std::function<void()> k) override;
+
+    /// Route an event to the topmost layer that consumes it. See `stage::impl::input`.
+    void                         input(const input_event& event) override;
+    void                         input(int layer, const input_event& event) override;
 
     // Keyframe management
     std::future<void>                  set_keyframe_data(int layer, std::shared_ptr<void> data) override;

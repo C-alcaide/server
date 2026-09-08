@@ -136,6 +136,10 @@ class separated_producer : public frame_producer
     core::monitor::state state() const override { return state_; }
 
     bool is_ready() override { return key_producer_->is_ready() && fill_producer_->is_ready(); }
+
+    /// To the FILL only. The key is a matte generated alongside the picture; a click belongs to
+    /// the thing being shown, and delivering to both would fire every handler twice.
+    bool input(const input_event& event) override { return fill_producer_->input(event); }
 };
 
 spl::shared_ptr<frame_producer> create_separated_producer(const spl::shared_ptr<frame_producer>& fill,

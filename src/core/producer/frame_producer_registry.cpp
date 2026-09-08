@@ -138,6 +138,14 @@ class destroy_producer_proxy : public frame_producer
     draw_frame           first_frame(const core::video_field field) override { return producer_->first_frame(field); }
     core::monitor::state state() const override { return producer_->state(); }
     bool                 is_ready() override { return producer_->is_ready(); }
+
+    /// Forwarded, and this proxy wraps EVERY producer the registry creates -- so a virtual
+    /// missing here is missing from the whole server. `input` was, on its first run: `INPUT`
+    /// returned 202, the stage hit-tested correctly, the page rendered, and the default
+    /// `frame_producer::input` returned false from this class because nothing forwarded it.
+    /// The symptom was every html-input check reading the page's untouched idle colour, which
+    /// is indistinguishable from a browser that never received anything.
+    bool                 input(const input_event& event) override { return producer_->input(event); }
 };
 
 spl::shared_ptr<core::frame_producer> do_create_producer(const frame_producer_dependencies&     dependencies,
