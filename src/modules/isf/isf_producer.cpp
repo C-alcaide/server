@@ -35,7 +35,9 @@
 #include <core/frame/frame_factory.h>
 #include <core/frame/frame_visitor.h>
 #include <core/frame/pixel_format.h>
+#include <core/mixer/audio/audio_analysis.h>
 #include <core/producer/frame_producer_registry.h>
+#include <core/video_channel.h>
 
 #include <boost/algorithm/string.hpp>
 
@@ -166,6 +168,17 @@ class isf_producer : public core::frame_producer
     std::shared_ptr<core::frame_producer> source_;
     std::vector<std::uint8_t>             src_rgba_; ///< reusable RGBA (bottom-up) upload buffer
 
+    // -- ISF `audio` / `audioFFT` textures -----------------------------------------------
+    //
+    // WEAK, because an ISF layer on channel 1 reads channel 1's own audio and the channel owns
+    // the layer that owns this producer. A shared_ptr here would be a cycle.
+    std::weak_ptr<core::video_channel> audio_channel_;
+
+    //: One RGBA buffer per audio input, reused across frames. Members rather than locals because
+    //: `image_binding` holds a RAW pointer into them and the render happens after the call that
+    //: fills them returns -- a local would be a dangling read that works most of the time.
+    std::map<std::string, std::vector<std::uint8_t>> audio_bufs_;
+
     // Transition mode: blends two sources (startImage / endImage) over transition_frames_.
     std::shared_ptr<core::frame_producer> from_;
     std::shared_ptr<core::frame_producer> to_;
@@ -208,6 +221,7 @@ class isf_producer : public core::frame_producer
         fps_ = deps.format_desc.duration != 0
                    ? static_cast<double>(deps.format_desc.time_scale) / static_cast<double>(deps.format_desc.duration)
                    : 25.0;
+        capture_audio_channel(deps);
         detect_mixer();
     }
 
@@ -232,7 +246,25 @@ class isf_producer : public core::frame_producer
         fps_ = deps.format_desc.duration != 0
                    ? static_cast<double>(deps.format_desc.time_scale) / static_cast<double>(deps.format_desc.duration)
                    : 25.0;
+        capture_audio_channel(deps);
         detect_mixer();
+    }
+
+    /// Remember which channel's audio to read, for the ISF `audio` / `audioFFT` textures.
+    ///
+    /// `frame_producer_dependencies` carries the whole `channels` vector AND a `channel_info`
+    /// whose `index` says which one this producer is being created for -- both were already
+    /// there, which is why this is four lines and not a plumbing commit. The index is 1-based,
+    /// as everywhere else in AMCP.
+    ///
+    /// A shader that declares no audio input never dereferences this, so a producer created
+    /// outside a channel (a preview, a test) is not made to fail by it -- the weak pointer just
+    /// stays empty and `append_audio_bindings` returns early.
+    void capture_audio_channel(const core::frame_producer_dependencies& deps)
+    {
+        const auto idx = deps.channel_info.index;
+        if (idx >= 1 && static_cast<std::size_t>(idx) <= deps.channels.size())
+            audio_channel_ = deps.channels.at(static_cast<std::size_t>(idx) - 1);
     }
 
     /// Bits per component this producer outputs, and the shader's final pass with it.
@@ -522,6 +554,94 @@ class isf_producer : public core::frame_producer
         return core::draw_frame(std::move(frame));
     }
 
+    /// Fill this shader's `audio` / `audioFFT` inputs from its own channel's analysis.
+    ///
+    /// Appends to `out`, so the three call sites keep whatever image bindings they already
+    /// built. Does nothing for a shader that declares none, which is nearly all of them.
+    ///
+    /// THE ENCODING, and which parts are the specification and which are ours:
+    ///
+    /// From the ISF specification: the input types are named `audio` and `audioFFT`; the texture
+    /// is `<samples or bins>` wide by `<channels>` high; `MAX` caps the count; and a shader reads
+    /// it with `IMG_NORM_PIXEL`.
+    ///
+    /// OURS, and stated as ours because there is no local copy of the specification to check the
+    /// pixel format against -- the reference implementation may well use a float texture:
+    ///
+    ///   * **RGBA8**, so the existing `upload_named` path carries it and no new GL code exists to
+    ///     get wrong. The cost is 8 bits of magnitude resolution, which is 48 dB of dynamic
+    ///     range -- ample for a spectrum bar and NOT enough to read a quiet partial out of a
+    ///     loud mix. Named in the guide rather than left to be discovered.
+    ///   * **all four channels carry the same value**, so a shader reading `.r`, `.g`, `.b` or
+    ///     `.a` gets the datum either way. Shaders in the wild read all of them.
+    ///   * **height 1**, a mono downmix. ISF's height is the channel count and per-channel rows
+    ///     are a legitimate thing to want; a shader sampling `vec2(x, 0.5)` lands in the single
+    ///     row and works, which is what almost every published spectrum shader does.
+    ///   * **waveform is offset-encoded**: a sample of -1 is 0, 0 is 128, +1 is 255. A shader
+    ///     wanting the signed value subtracts 0.5 and doubles, which is the conventional read.
+    ///
+    /// AND ONE FRAME OF LAG, which is not a defect and is not avoidable here. The audio mixer
+    /// runs AFTER the stage has pulled its producers, so the analysis this reads is the previous
+    /// tick's. At 50p that is 20 ms, well under the ~21 ms analysis window itself.
+    void append_audio_bindings(std::vector<isf::image_binding>& out)
+    {
+        const auto wanted = shader_->audio_inputs();
+        if (wanted.empty())
+            return;
+
+        auto channel = audio_channel_.lock();
+        if (!channel)
+            return;
+
+        for (const auto& w : wanted) {
+            std::vector<double> data;
+
+            if (w.kind == isf::audio_input::fft) {
+                const int bins = w.max > 0 ? w.max : core::audio_analysis::native_bins();
+                data           = channel->audio_spectrum(bins);
+            } else if (w.kind == isf::audio_input::waveform) {
+                const int samples = w.max > 0 ? w.max : core::audio_analysis::native_window();
+                data              = channel->audio_waveform(samples);
+            }
+
+            // EMPTY IS NOT ZERO. Before the first analysis window completes there is no data,
+            // and a zero-filled texture is indistinguishable from digital silence -- a spectrum
+            // shader would draw a flat floor and look entirely correct. So no binding is made,
+            // the sampler reads whatever it read last (or nothing on the first frame), and the
+            // shader author's own `MAX`-sized loop simply sees no signal.
+            if (data.empty())
+                continue;
+
+            auto& buf = audio_bufs_[w.name];
+            buf.resize(data.size() * 4);
+
+            for (std::size_t i = 0; i < data.size(); ++i) {
+                double v = data[i];
+                if (w.kind == isf::audio_input::waveform)
+                    v = v * 0.5 + 0.5; // -1..1 -> 0..1
+                v = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+
+                const auto b = static_cast<std::uint8_t>(v * 255.0 + 0.5);
+                buf[i * 4 + 0] = b;
+                buf[i * 4 + 1] = b;
+                buf[i * 4 + 2] = b;
+                buf[i * 4 + 3] = b;
+            }
+
+            isf::image_binding bind;
+            bind.name   = w.name;
+            bind.rgba   = buf.data();
+            bind.width  = static_cast<int>(data.size());
+            bind.height = 1;
+            // NEITHER flipped nor swizzled: this is not a picture. A flip on a one-row texture
+            // is a no-op and a bgra swizzle would exchange three identical channels, so both
+            // are false for correctness rather than by omission.
+            bind.flip = false;
+            bind.bgra = false;
+            out.push_back(bind);
+        }
+    }
+
     core::draw_frame receive_impl(const core::video_field field, int nb_samples) override
     {
         // Transition mode: blend two sources (startImage / endImage) by progress.
@@ -549,8 +669,10 @@ class isf_producer : public core::frame_producer
                 double progress = static_cast<double>(frame_) / static_cast<double>(transition_frames_);
                 progress        = progress < 0.0 ? 0.0 : (progress > 1.0 ? 1.0 : progress);
                 shader_->set_value("progress", {progress});
+                std::vector<isf::image_binding> binds{start_bind, end_bind};
+                append_audio_bindings(binds);
                 out = produce(start_bind.width, start_bind.height, static_cast<int>(frame_),
-                              {start_bind, end_bind}, &cf_from);
+                              binds, &cf_from);
             }
             if (!out)
                 return from_frame;
@@ -583,7 +705,9 @@ class isf_producer : public core::frame_producer
                     }
                     return source_frame;
                 }
-                out = produce(in.width, in.height, static_cast<int>(source_->frame_number()), {in}, &cf);
+                std::vector<isf::image_binding> binds{in};
+                append_audio_bindings(binds);
+                out = produce(in.width, in.height, static_cast<int>(source_->frame_number()), binds, &cf);
             }
             if (!out)
                 return source_frame; // render failed -> pass the source through
@@ -595,7 +719,9 @@ class isf_producer : public core::frame_producer
         core::draw_frame out;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            out = produce(width_, height_, static_cast<int>(frame_), {}, nullptr);
+            std::vector<isf::image_binding> binds;
+            append_audio_bindings(binds);
+            out = produce(width_, height_, static_cast<int>(frame_), binds, nullptr);
         }
         if (!out)
             return core::draw_frame::empty();

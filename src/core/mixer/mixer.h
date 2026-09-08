@@ -59,6 +59,10 @@ class mixer final
     /// The audio mixer's level and spectrum for the last tick. A copy.
     struct audio_levels audio_analysis() const;
 
+    /// The last window's spectrum and waveform, reduced to the requested size.
+    std::vector<double> audio_spectrum(int bins) const;
+    std::vector<double> audio_waveform(int samples) const;
+
     /// One tick's frames: the channel's own, plus one per distinct consumer view.
     struct output_frames
     {

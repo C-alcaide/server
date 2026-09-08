@@ -94,6 +94,37 @@ class audio_analysis
     /// can label a band rather than calling it "band 2".
     std::vector<double> band_edges() const;
 
+    /// The last window's spectrum, reduced to `bins` values in 0..1. Empty until a window has
+    /// been filled.
+    ///
+    /// SEPARATE FROM `levels()` and not a member of `audio_levels`, deliberately. That struct is
+    /// COPIED on every `levels()` call -- once per tick for the published state and once more
+    /// per binding that reads the source -- so putting 512 bins and 1024 samples in it would put
+    /// about 12 KB of copying per reader on the audio path to produce numbers almost every
+    /// reader ignores. These two take the lock and return only what was asked for.
+    ///
+    /// `bins` is REDUCED from the transform's own resolution by averaging adjacent groups, not
+    /// by taking the first `bins` of them: the FFT gives `kWindow/2` usable bins covering the
+    /// whole spectrum, and truncating would silently discard everything above
+    /// `bins * sample_rate / kWindow` Hz. Asking for more bins than the transform has gives the
+    /// transform's own count -- there is nothing to interpolate from and inventing detail would
+    /// be a lie about the resolution.
+    std::vector<double> spectrum(int bins) const;
+
+    /// The last window's mono samples, most recent last, each in -1..1. At most one window's
+    /// worth; fewer if `samples` asks for fewer, taking the MOST RECENT ones.
+    ///
+    /// The most recent rather than the oldest, because a waveform display that lags by a window
+    /// is a waveform display of the past. Empty until a window has been filled.
+    std::vector<double> waveform(int samples) const;
+
+    /// How many bins the transform itself produces -- `kWindow / 2`. What `spectrum()` will
+    /// return if asked for more, and what a caller sizing a texture wants to know.
+    static int native_bins();
+
+    /// How many samples one analysis window holds. The ceiling on `waveform()`.
+    static int native_window();
+
     void set_sample_rate(int rate);
 
   private:

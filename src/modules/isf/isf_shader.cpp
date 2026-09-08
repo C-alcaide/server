@@ -346,6 +346,9 @@ struct shader::impl
 
     std::vector<input>                         inputs_;
     std::vector<std::string>                   image_names_; ///< declared image input names (order)
+    //: The declared audio texture inputs, kept apart from `image_names_` for the reason
+    //: given at `image_input_names()`.
+    std::vector<shader::audio_input_desc> audio_desc_;
     std::map<std::string, std::vector<double>> values_;
     shader_role                                role_ = shader_role::generator;
 
@@ -447,7 +450,15 @@ struct shader::impl
                 in.label = node.get<std::string>("LABEL", in.name);
                 if (in.name.empty() || in.type.empty())
                     continue;
-                in.is_image = (in.type == "image");
+                // `audio` and `audioFFT` are IMAGE inputs whose pixels are audio. Marked
+                // `is_image` so the uniform loop skips them and the sampler path picks them up,
+                // and marked with their kind so the producer knows to fill them itself.
+                if (in.type == "audio")
+                    in.audio_kind = audio_input::waveform;
+                else if (in.type == "audioFFT")
+                    in.audio_kind = audio_input::fft;
+
+                in.is_image = (in.type == "image") || in.audio_kind != audio_input::none;
                 read_num_array(node, "MIN", in.min_value);
                 read_num_array(node, "MAX", in.max_value);
                 read_num_array(node, "DEFAULT", in.default_value);
@@ -461,10 +472,18 @@ struct shader::impl
                 }
                 if (in.default_value.empty())
                     in.default_value.push_back(0.0);
-                if (in.is_image)
+                if (in.audio_kind != audio_input::none) {
+                    // NOT in `image_names_`: that list is what the producer wires source
+                    // producers from, and an audio input is filled by the channel.
+                    audio_desc_.push_back({in.name, in.audio_kind,
+                                           in.max_value.empty()
+                                               ? 0
+                                               : static_cast<int>(in.max_value.front())});
+                } else if (in.is_image) {
                     image_names_.push_back(in.name);
-                else
+                } else {
                     values_[in.name] = in.default_value;
+                }
                 inputs_.push_back(std::move(in));
             }
         }
@@ -515,6 +534,17 @@ struct shader::impl
         };
         for (const auto& n : image_names_)
             add_sampler(n);
+        // AND the audio textures. They are kept out of `image_names_` because that list is what
+        // the PRODUCER wires source producers from -- but they are still sampled by the shader,
+        // so they still need a `uniform sampler2D` declared.
+        //
+        // Conflating the two lists is the defect this comment exists for: with the audio inputs
+        // in neither list, `fftImage` was never declared, the fragment shader failed to compile,
+        // and the layer rendered NOTHING. `isf-audio` read the clip underneath it -- a flat
+        // 0x101010 -- as if it were the shader's output, which looked like a texture full of one
+        // value rather than like a shader that had not compiled.
+        for (const auto& d : audio_desc_)
+            add_sampler(d.name);
         for (const auto& d : imported_)
             add_sampler(d.name);
         for (const auto& p : passes_)
@@ -1221,6 +1251,7 @@ const std::vector<input>& shader::inputs() const { return impl_->inputs_; }
 const std::string&        shader::description() const { return impl_->description_; }
 shader_role               shader::role() const { return impl_->role_; }
 std::vector<std::string>  shader::image_input_names() const { return impl_->image_names_; }
+std::vector<shader::audio_input_desc> shader::audio_inputs() const { return impl_->audio_desc_; }
 
 bool shader::set_value(const std::string& name, const std::vector<double>& values)
 {

@@ -451,6 +451,8 @@ struct video_channel::impl final
     }
 
     struct audio_levels audio_analysis() const { return mixer_.audio_analysis(); }
+    std::vector<double> audio_spectrum(int bins) const { return mixer_.audio_spectrum(bins); }
+    std::vector<double> audio_waveform(int n) const { return mixer_.audio_waveform(n); }
 
     std::shared_ptr<core::route> route(int index = -1, route_mode mode = route_mode::foreground, bool raw = false)
     {
@@ -542,5 +544,7 @@ std::shared_ptr<const core::monitor::state> video_channel::state_snapshot() cons
 std::shared_ptr<route> video_channel::route(int index, route_mode mode, bool raw) { return impl_->route(index, mode, raw); }
 void                   video_channel::input(const input_event& event) { impl_->input(event); }
 struct audio_levels    video_channel::audio_analysis() const { return impl_->audio_analysis(); }
+std::vector<double>    video_channel::audio_spectrum(int bins) const { return impl_->audio_spectrum(bins); }
+std::vector<double>    video_channel::audio_waveform(int n) const { return impl_->audio_waveform(n); }
 
 }} // namespace caspar::core

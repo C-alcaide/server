@@ -24,15 +24,41 @@ namespace caspar { namespace isf { class gl_context; } }
 namespace caspar { namespace isf {
 
 /// One declared ISF input (from the shader's JSON header).
+/// Which kind of AUDIO texture an input wants, if it wants one.
+///
+/// ISF's `audio` and `audioFFT` are declared as INPUTS and consumed as sampler2D -- they are
+/// image inputs whose pixels are audio rather than picture. So they take the same code path as
+/// `image` all the way to the sampler, and the only thing that has to distinguish them is WHO
+/// FILLS THEM: an `image` is fed by a producer the operator names on the command line, and these
+/// two are fed by the channel itself.
+///
+/// That distinction is the whole reason this enum exists rather than a bool. `image_input_names()`
+/// is what the producer uses to decide how many source producers to wire up, so an audio input
+/// appearing in that list would make `[ISF] spectrum.fs` try to open a producer called
+/// "audioFFT" and fail to load the shader at all.
+enum class audio_input
+{
+    none,     ///< an ordinary input
+    waveform, ///< ISF `audio`: raw samples, width = samples, height = channels
+    fft,      ///< ISF `audioFFT`: per-bin magnitudes, width = bins, height = channels
+};
+
 struct input
 {
     std::string         name;
-    std::string         type;          ///< float | bool | event | long | color | point2D | image
+    std::string         type;          ///< float | bool | event | long | color | point2D | image | audio | audioFFT
     std::vector<double> default_value; ///< 1 value (float/bool/long) or 2/4 (point2D/color)
     std::vector<double> min_value;
     std::vector<double> max_value;
     std::string         label;
     bool                is_image = false;
+
+    /// `none` for everything except the two audio texture types.
+    ///
+    /// `max_value`'s first element carries ISF's `MAX` for these, which the specification defines
+    /// as a CAP on the number of samples or bins rather than as a value limit. The producer
+    /// treats it that way and nothing else reads it, so it does not need a field of its own.
+    audio_input audio_kind = audio_input::none;
 
     // "long" pop-up menu (optional).
     std::vector<long>        values;
@@ -82,7 +108,21 @@ class shader
     shader_role               role() const;
 
     /// Names of declared image inputs (order = declaration order).
+    ///
+    /// EXCLUDES `audio` and `audioFFT`, which are image inputs in every other respect. This is
+    /// the list the producer sizes its source-producer wiring from, so including them would make
+    /// `[ISF] spectrum.fs` try to open a producer named "audioFFT".
     std::vector<std::string> image_input_names() const;
+
+    /// The declared audio texture inputs: name, kind, and the `MAX` cap if one was given (0 if
+    /// not). Empty for a shader that wants no audio, which is almost all of them.
+    struct audio_input_desc
+    {
+        std::string name;
+        audio_input kind = audio_input::none;
+        int         max  = 0; ///< ISF `MAX`: a cap on samples or bins. 0 = unspecified
+    };
+    std::vector<audio_input_desc> audio_inputs() const;
 
     /// Set an input value by name (1..4 scalars). Returns false if the input is unknown.
     bool set_value(const std::string& name, const std::vector<double>& values);

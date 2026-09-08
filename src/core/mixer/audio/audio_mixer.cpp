@@ -314,6 +314,8 @@ audio_mixer::audio_mixer(spl::shared_ptr<diagnostics::graph> graph)
 }
 
 struct audio_levels audio_mixer::analysis() const { return impl_->analysis_.levels(); }
+std::vector<double> audio_mixer::spectrum(int bins) const { return impl_->analysis_.spectrum(bins); }
+std::vector<double> audio_mixer::waveform(int n) const { return impl_->analysis_.waveform(n); }
 void                 audio_mixer::push(const frame_transform& transform) { impl_->push(transform); }
 void                 audio_mixer::visit(const const_frame& frame) { impl_->visit(frame); }
 void                 audio_mixer::pop() { impl_->pop(); }

@@ -238,6 +238,8 @@ mutable_frame mixer::create_frame(const void* tag, const pixel_format_desc& desc
 }
 core::monitor::state mixer::state() const { return impl_->state_; }
 struct audio_levels  mixer::audio_analysis() const { return impl_->audio_mixer_.analysis(); }
+std::vector<double>  mixer::audio_spectrum(int bins) const { return impl_->audio_mixer_.spectrum(bins); }
+std::vector<double>  mixer::audio_waveform(int n) const { return impl_->audio_mixer_.waveform(n); }
 
 common::bit_depth mixer::depth() const { return impl_->image_mixer_->depth(); }
 

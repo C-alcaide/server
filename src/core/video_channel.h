@@ -145,6 +145,12 @@ class video_channel final
     /// This channel's audio level and spectrum, for the AUDIO binding source. A copy.
     struct audio_levels audio_analysis() const;
 
+    /// The last analysis window's spectrum and waveform, for the ISF `audioFFT` and `audio`
+    /// input textures. Empty until a window has completed, which is a real state and not an
+    /// error -- see `audio_analysis.h`.
+    std::vector<double> audio_spectrum(int bins) const;
+    std::vector<double> audio_waveform(int samples) const;
+
   private:
     struct impl;
     spl::unique_ptr<impl> impl_;

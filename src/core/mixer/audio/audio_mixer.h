@@ -56,6 +56,11 @@ class audio_mixer final : public frame_visitor
     /// analyser's buffers would hand one thread's working state to another.
     struct audio_levels analysis() const;
 
+    /// The last window's spectrum and waveform. See `audio_analysis.h` for why these are
+    /// separate accessors rather than members of `audio_levels`.
+    std::vector<double> spectrum(int bins) const;
+    std::vector<double> waveform(int samples) const;
+
     void push(const struct frame_transform& transform) override;
     void visit(const class const_frame& frame) override;
     void pop() override;

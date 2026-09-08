@@ -126,6 +126,19 @@ struct audio_analysis::impl
     std::vector<double> scratch_sq;
     std::vector<double> scratch_peak;
 
+    //: The last completed window, retained for `spectrum()` and `waveform()`.
+    //:
+    //: RETAINED rather than recomputed, because both are read from the stage executor and the
+    //: transform runs on the audio path -- so recomputing on read would put an FFT on whichever
+    //: thread happened to ask, once per reader. Retained rather than published, because a
+    //: reader that does not want them must not pay to copy them (see the header).
+    //:
+    //: `last_bins` is the magnitude per bin, normalised the same way the bands are.
+    //: `last_wave` is the window's own samples, so a waveform reader sees exactly what the
+    //: spectrum was computed from rather than a differently-aligned slice.
+    std::vector<double> last_bins;
+    std::vector<double> last_wave;
+
     impl(int rate, int bands)
         : sample_rate(rate > 0 ? rate : 48000)
         , band_count(bands > 0 ? bands : 3)
@@ -159,14 +172,28 @@ struct audio_analysis::impl
 
         fft_radix2(re, im);
 
+        // The window's samples, kept before the transform overwrites nothing (it works on `re`,
+        // a copy) -- so this is only a copy, and it is what `waveform()` returns.
+        last_wave = window;
+
         std::vector<double> out(band_count, 0.0);
+        last_bins.assign(kWindow / 2, 0.0);
         const double        bin_hz = static_cast<double>(sample_rate) / static_cast<double>(kWindow);
 
         // Only the first half of the spectrum: the input is real, so the second half is its
         // conjugate mirror and counting it would double every band.
+        // The per-bin magnitudes are normalised HERE, by the same factor the bands use, so a
+        // caller comparing a bin against a band is comparing like with like. A bin normalised
+        // differently from the band containing it would be the sort of discrepancy that reads as
+        // a defect in whichever one the reader trusts less.
+        const double bin_norm = static_cast<double>(kWindow) / 4.0;
+
         for (std::size_t k = 1; k < kWindow / 2; ++k) {
             const double f   = k * bin_hz;
             const double mag = std::sqrt(re[k] * re[k] + im[k] * im[k]);
+
+            last_bins[k] = mag / bin_norm;
+
             for (int b = 0; b < band_count; ++b) {
                 if (f >= edges[b] && f < edges[b + 1]) {
                     out[b] += mag;
@@ -283,6 +310,75 @@ std::vector<double> audio_analysis::band_edges() const
     std::lock_guard<std::mutex> g(impl_->lock);
     return impl_->edges;
 }
+
+std::vector<double> audio_analysis::spectrum(int bins) const
+{
+    std::lock_guard<std::mutex> g(impl_->lock);
+
+    const auto& src = impl_->last_bins;
+    if (src.empty() || bins <= 0)
+        return {};
+
+    // Asking for at least as many as the transform has gives the transform's own, unchanged.
+    // There is nothing to interpolate from, and inventing detail would misrepresent the
+    // resolution -- a shader drawing 1024 bars from 512 bins should draw 512 and stretch them,
+    // which is its decision and not ours to fake.
+    if (static_cast<std::size_t>(bins) >= src.size())
+        return src;
+
+    // THE PEAK of each group, not the mean and not decimation.
+    //
+    // Decimation is out for the obvious reason: taking every Nth bin aliases, and a tone landing
+    // on a skipped bin vanishes entirely.
+    //
+    // The MEAN is out for a less obvious one, and it was this function's first implementation. A
+    // pure tone occupies one or two of the group's bins, so a mean divides it by the group size:
+    // reducing 512 bins to 64 made a full-scale tone read 1/8 of its magnitude, and reducing to
+    // 32 would halve that again -- so the same signal read at two resolutions gave two answers,
+    // and at 8-bit texture precision the quieter one rounded to zero. Measured: `isf-audio`'s
+    // probes read 1 and 0 out of 255 where the direction was right and the magnitude was not.
+    //
+    // The peak is invariant under the group size for a tone, which is the property a bar wants:
+    // a bar answers "is there energy in this range", and a mean answers "how much of this range
+    // is energy" -- which is a different and less useful question at display resolutions.
+    //
+    // NOTE THIS DIFFERS FROM THE BANDS beside it, which SUM. That is deliberate and the two are
+    // not inconsistent: a band is a wide frequency range whose TOTAL energy is the quantity an
+    // operator means by "the bass", while a reduced-resolution bin is a narrow group standing in
+    // for a peak. The first version of this function averaged, which was neither -- and left a
+    // bin scaled differently from the band containing it, which is exactly the discrepancy the
+    // normalisation comment above claims to avoid.
+    std::vector<double> out(static_cast<std::size_t>(bins), 0.0);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const std::size_t lo = i * src.size() / out.size();
+        const std::size_t hi = std::max(lo + 1, (i + 1) * src.size() / out.size());
+        double            peak = 0.0;
+        for (std::size_t k = lo; k < hi && k < src.size(); ++k)
+            peak = std::max(peak, src[k]);
+        out[i] = peak;
+    }
+    return out;
+}
+
+std::vector<double> audio_analysis::waveform(int samples) const
+{
+    std::lock_guard<std::mutex> g(impl_->lock);
+
+    const auto& src = impl_->last_wave;
+    if (src.empty() || samples <= 0)
+        return {};
+
+    if (static_cast<std::size_t>(samples) >= src.size())
+        return src;
+
+    // The MOST RECENT `samples`, from the end. A waveform display fed the oldest part of the
+    // window is a display of the past, and the window is 21 ms -- visible as lag on a transient.
+    return std::vector<double>(src.end() - samples, src.end());
+}
+
+int audio_analysis::native_bins() { return static_cast<int>(kWindow / 2); }
+
+int audio_analysis::native_window() { return static_cast<int>(kWindow); }
 
 void audio_analysis::set_sample_rate(int rate)
 {
@@ -505,6 +601,149 @@ int audio_analysis_self_test()
                   "b0 " + std::to_string(bands[0]) + " b1 " + std::to_string(bands[1]) + " b2 " +
                       std::to_string(bands[2]));
         }
+    }
+
+    // ---- spectrum(n) and waveform(n): what the ISF audio textures are built from ----------
+    //
+    // These two exist for `audioFFT` and `audio`, which are TEXTURES a shader samples -- so a
+    // defect here is a wrong picture in someone else's shader rather than a wrong number in
+    // ours, and it is worth checking at boot rather than only through a fixture.
+    {
+        // A tone at a known frequency, then the bin it must land in, computed from the bin
+        // width rather than looked up: 8000 Hz at 48 kHz over a 1024 window is bin
+        // 8000 / (48000/1024) = 170.67, so bin 170 or 171.
+        audio_analysis       a(48000, 3);
+        std::vector<int32_t> buf(4096 * 2);
+        const double         hz = 8000.0;
+        for (std::size_t f = 0; f < 4096; ++f) {
+            const double v = std::sin(2.0 * kPi * hz * f / 48000.0);
+            const auto   s = static_cast<int32_t>(v * 2147483000.0);
+            buf[f * 2]     = s;
+            buf[f * 2 + 1] = s;
+        }
+        a.feed(buf.data(), 4096, 2);
+
+        const auto full = a.spectrum(audio_analysis::native_bins());
+        check(full.size() == static_cast<std::size_t>(audio_analysis::native_bins()),
+              "spectrum/native-size", std::to_string(full.size()));
+
+        if (!full.empty()) {
+            const double bin_hz   = 48000.0 / 1024.0;
+            const auto   want_bin = static_cast<std::size_t>(hz / bin_hz);
+            std::size_t  loudest  = 0;
+            for (std::size_t k = 1; k < full.size(); ++k)
+                if (full[k] > full[loudest])
+                    loudest = k;
+            // Within one bin: the tone does not sit exactly on a bin centre, so the energy
+            // legitimately splits between two and either may be the larger.
+            check(loudest + 1 >= want_bin && loudest <= want_bin + 1,
+                  "spectrum/tone-lands-in-its-own-bin",
+                  "loudest " + std::to_string(loudest) + ", want ~" + std::to_string(want_bin));
+        }
+
+        // ASKING FOR MORE than the transform has gives the transform's own count, unchanged.
+        // Interpolating would misrepresent the resolution to a shader sizing a texture from it.
+        const auto over = a.spectrum(audio_analysis::native_bins() * 4);
+        check(over.size() == full.size(), "spectrum/no-invented-resolution",
+              std::to_string(over.size()) + " vs " + std::to_string(full.size()));
+
+        // REDUCED by taking each group's PEAK, not by truncation. The two are told apart by
+        // where the tone goes: a peak keeps it at the same FRACTION of the way up the spectrum,
+        // and truncation to a quarter of the bins would drop an 8 kHz tone entirely because it
+        // sits above the first quarter.
+        const auto quarter = a.spectrum(audio_analysis::native_bins() / 4);
+        check(quarter.size() == static_cast<std::size_t>(audio_analysis::native_bins() / 4),
+              "spectrum/reduced-size", std::to_string(quarter.size()));
+        if (!quarter.empty() && !full.empty()) {
+            std::size_t loud_q = 0;
+            for (std::size_t k = 1; k < quarter.size(); ++k)
+                if (quarter[k] > quarter[loud_q])
+                    loud_q = k;
+            const double frac_full = 0.0 + static_cast<double>(
+                std::distance(full.begin(), std::max_element(full.begin() + 1, full.end())))
+                                     / static_cast<double>(full.size());
+            const double frac_q = static_cast<double>(loud_q) / static_cast<double>(quarter.size());
+            check(std::abs(frac_full - frac_q) < 0.05, "spectrum/reduced-not-truncated",
+                  "full at " + std::to_string(frac_full) + " of the way up, reduced at " +
+                      std::to_string(frac_q));
+        }
+
+        // Every value stays in range after the reduction -- a max of values in 0..1 is in
+        // 0..1, so a failure here is an indexing error rather than an arithmetic one.
+        bool in_range = true;
+        for (double v : quarter)
+            if (v < -1e-12 || v > 1.0 + 1e-12)
+                in_range = false;
+        check(in_range, "spectrum/reduced-in-range");
+
+        // THE MAGNITUDE SURVIVES THE REDUCTION, which is what tells a peak from a mean and is
+        // the check that was missing when this function averaged. A tone's own bin is unchanged
+        // by grouping under a peak; under a mean it is divided by the group size, so the same
+        // signal read at two resolutions gave two answers and the coarser one rounded to zero
+        // in an 8-bit texture.
+        //
+        // Checked at TWO reductions rather than one, because a single one cannot distinguish
+        // "the magnitude survives" from "this particular group size happens to agree".
+        if (!full.empty()) {
+            const double peak_full = *std::max_element(full.begin() + 1, full.end());
+            for (int n : {audio_analysis::native_bins() / 4, audio_analysis::native_bins() / 16}) {
+                const auto red = a.spectrum(n);
+                if (red.empty())
+                    continue;
+                const double peak_red = *std::max_element(red.begin(), red.end());
+                check(std::abs(peak_red - peak_full) < 1e-9,
+                      "spectrum/magnitude-survives-reduction/" + std::to_string(n),
+                      "full " + std::to_string(peak_full) + " reduced " + std::to_string(peak_red));
+            }
+        }
+
+        check(a.spectrum(0).empty(), "spectrum/zero-bins-is-empty");
+    }
+
+    {
+        // The waveform, from a full-scale SQUARE wave: every sample is +/-1, so every returned
+        // value must be at one extreme. A sine would leave the check unable to distinguish a
+        // correct read from a scaled one.
+        audio_analysis       a(48000, 3);
+        std::vector<int32_t> buf(2048 * 2);
+        for (std::size_t f = 0; f < 2048; ++f) {
+            const int32_t v = (f % 2) ? 2147483000 : -2147483000;
+            buf[f * 2]      = v;
+            buf[f * 2 + 1]  = v;
+        }
+        a.feed(buf.data(), 2048, 2);
+
+        const auto full = a.waveform(audio_analysis::native_window());
+        check(full.size() == static_cast<std::size_t>(audio_analysis::native_window()),
+              "waveform/native-size", std::to_string(full.size()));
+
+        bool extremes = !full.empty();
+        for (double v : full)
+            if (std::abs(std::abs(v) - 1.0) > 1e-3)
+                extremes = false;
+        check(extremes, "waveform/full-scale-square-is-at-the-extremes");
+
+        // Fewer samples takes the MOST RECENT, which is what a display wants. Checked by
+        // identity against the tail of the full window rather than by a property, because "the
+        // last N" and "the first N" are both plausible and only one is right.
+        const auto tail = a.waveform(64);
+        bool       is_tail = tail.size() == 64 && full.size() >= 64;
+        if (is_tail)
+            for (std::size_t i = 0; i < tail.size(); ++i)
+                if (tail[i] != full[full.size() - 64 + i])
+                    is_tail = false;
+        check(is_tail, "waveform/short-read-takes-the-most-recent");
+
+        check(a.waveform(0).empty(), "waveform/zero-samples-is-empty");
+
+        // Before ANY window has completed, both are empty rather than a zero-filled buffer of
+        // the right size. A shader given silence would draw a flat line and look correct, so
+        // the producer needs to be able to tell "no data yet" from "digital silence".
+        audio_analysis       fresh(48000, 3);
+        std::vector<int32_t> few(16 * 2, 0);
+        fresh.feed(few.data(), 16, 2);
+        check(fresh.spectrum(64).empty() && fresh.waveform(64).empty(),
+              "spectrum+waveform/empty-until-a-window-completes");
     }
 
     if (failures == 0)
