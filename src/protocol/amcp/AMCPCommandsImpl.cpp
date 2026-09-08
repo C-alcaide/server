@@ -5240,6 +5240,157 @@ std::wstring previz_info_command(command_context& ctx)
 // ---------------------------------------------------------------------------
 // PREVIZ SHOW <mesh_name> [1|0]
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// INPUT <ch>[-<layer>] MOUSE MOVE <x> <y>
+// INPUT <ch>[-<layer>] MOUSE DOWN|UP LEFT|MIDDLE|RIGHT <x> <y> [<modifiers>]
+// INPUT <ch>[-<layer>] MOUSE WHEEL <x> <y> <dx> <dy>
+// INPUT <ch>[-<layer>] KEY DOWN|UP <vk> [<modifiers>]
+// INPUT <ch>[-<layer>] TEXT <string>
+//
+// Synthetic pointer and keyboard input, from anywhere that speaks AMCP.
+//
+// WITH a layer the event goes to that layer with no hit-test; WITHOUT one it is hit-tested
+// topmost-first, exactly as a gesture on the screen consumer's window is. The two forms answer
+// different questions -- "deliver this to the template I just loaded" and "deliver this to
+// whatever is under 0.25, 0.75" -- and a client that knows its target should not have its event
+// dropped because the layer is scaled away from where the client thinks it is.
+//
+// COORDINATES ARE 0..1 with a TOP-LEFT origin, across the target's own picture. Not pixels: the
+// caller does not know the channel's raster, and a normalised point survives a format change.
+//
+// `<modifiers>` is the numeric mask from `core::input_modifier` -- shift 2, control 4, alt 8,
+// left button 16, middle 32, right 64 -- which is deliberately CEF's own `EVENTFLAG_*` numbering.
+// Held buttons are tracked by the stage for a drag, so a caller sending DOWN, MOVE, MOVE, UP need
+// not repeat the button bit on each move; it matters when a page distinguishes a ctrl-click.
+//
+// SECURITY POSTURE, stated rather than solved. AMCP is unauthenticated on the LAN and can already
+// `PLAY [HTML] <any url>` into a browser running with web security disabled, so synthetic input
+// adds no new capability class to that surface. The API form goes through the same auth handshake
+// as every other `/v1/action`. Neither is gated, and `html-gpu-direct.md` says so out loud.
+std::wstring input_command(command_context& ctx)
+{
+    if (ctx.parameters.empty())
+        return L"400 INPUT ERROR missing kind (MOUSE, KEY or TEXT)\r\n";
+
+    auto channel = ctx.channel.raw_channel;
+    if (!channel)
+        return L"501 INPUT FAILED\r\n";
+
+    const auto upper = [](std::wstring v) {
+        boost::to_upper(v);
+        return v;
+    };
+
+    core::input_event ev;
+    ev.source = 1; // 0 is the window; 1 is a command. Published nowhere yet, but not guessable later.
+
+    const auto kind = upper(ctx.parameters.at(0));
+
+    // A number that must parse. `boost::lexical_cast` throws on trailing junk, which is what we
+    // want: `MOVE 0.25 abc` is a mistake and reporting it beats delivering a 0.
+    const auto number = [&](size_t i, double& out) -> bool {
+        if (ctx.parameters.size() <= i)
+            return false;
+        try {
+            out = boost::lexical_cast<double>(ctx.parameters.at(i));
+            return true;
+        } catch (...) {
+            return false;
+        }
+    };
+
+    if (kind == L"MOUSE") {
+        if (ctx.parameters.size() < 2)
+            return L"400 INPUT ERROR missing mouse action (MOVE, DOWN, UP or WHEEL)\r\n";
+
+        const auto action = upper(ctx.parameters.at(1));
+
+        if (action == L"MOVE") {
+            if (!number(2, ev.x) || !number(3, ev.y))
+                return L"400 INPUT ERROR MOUSE MOVE needs <x> <y> in 0..1\r\n";
+            ev.type = core::input_event::kind::move;
+            double mods = 0;
+            if (number(4, mods))
+                ev.modifiers = static_cast<uint32_t>(mods);
+
+        } else if (action == L"DOWN" || action == L"UP") {
+            if (ctx.parameters.size() < 5)
+                return L"400 INPUT ERROR MOUSE DOWN|UP needs LEFT|MIDDLE|RIGHT <x> <y>\r\n";
+            const auto button = upper(ctx.parameters.at(2));
+            ev.button        = button == L"LEFT" ? 0 : button == L"MIDDLE" ? 1 : button == L"RIGHT" ? 2 : -1;
+            if (ev.button < 0)
+                return L"400 INPUT ERROR unknown button, expected LEFT, MIDDLE or RIGHT\r\n";
+            if (!number(3, ev.x) || !number(4, ev.y))
+                return L"400 INPUT ERROR MOUSE DOWN|UP needs <x> <y> in 0..1\r\n";
+            ev.type    = core::input_event::kind::button;
+            ev.pressed = action == L"DOWN";
+            double mods = 0;
+            if (number(5, mods))
+                ev.modifiers = static_cast<uint32_t>(mods);
+
+        } else if (action == L"WHEEL") {
+            if (!number(2, ev.x) || !number(3, ev.y))
+                return L"400 INPUT ERROR MOUSE WHEEL needs <x> <y> <dx> <dy>\r\n";
+            if (!number(4, ev.wheel_dx) || !number(5, ev.wheel_dy))
+                return L"400 INPUT ERROR MOUSE WHEEL needs <dx> <dy>\r\n";
+            ev.type = core::input_event::kind::wheel;
+
+        } else if (action == L"LEAVE") {
+            ev.type = core::input_event::kind::leave;
+
+        } else {
+            return L"400 INPUT ERROR unknown mouse action, expected MOVE, DOWN, UP, WHEEL or LEAVE\r\n";
+        }
+
+    } else if (kind == L"KEY") {
+        if (ctx.parameters.size() < 3)
+            return L"400 INPUT ERROR KEY needs DOWN|UP <virtual-key>\r\n";
+        const auto action = upper(ctx.parameters.at(1));
+        if (action != L"DOWN" && action != L"UP")
+            return L"400 INPUT ERROR KEY needs DOWN or UP\r\n";
+        double key = 0;
+        if (!number(2, key))
+            return L"400 INPUT ERROR KEY needs a numeric virtual-key code\r\n";
+        ev.type    = core::input_event::kind::key;
+        ev.pressed = action == L"DOWN";
+        ev.key     = static_cast<int>(key);
+        double mods = 0;
+        if (number(3, mods))
+            ev.modifiers = static_cast<uint32_t>(mods);
+
+    } else if (kind == L"TEXT") {
+        if (ctx.parameters.size() < 2)
+            return L"400 INPUT ERROR TEXT needs a string\r\n";
+        // One event per code unit, because that is what a keyboard produces and what CEF's CHAR
+        // event carries. Sent below in a loop rather than as one event with a string payload.
+        const auto& text = ctx.parameters.at(1);
+        if (text.empty())
+            return L"400 INPUT ERROR TEXT is empty\r\n";
+
+        for (auto ch : text) {
+            core::input_event t;
+            t.source    = 1;
+            t.type      = core::input_event::kind::text;
+            t.character = static_cast<char32_t>(ch);
+            if (ctx.layer_id >= 0)
+                ctx.channel.stage->input(ctx.layer_id, t);
+            else
+                channel->input(t);
+        }
+        return L"202 INPUT OK\r\n";
+
+    } else {
+        return L"400 INPUT ERROR unknown kind, expected MOUSE, KEY or TEXT\r\n";
+    }
+
+    if (ctx.layer_id >= 0)
+        ctx.channel.stage->input(ctx.layer_id, ev);
+    else
+        channel->input(ev);
+
+    return L"202 INPUT OK\r\n";
+}
+
 std::wstring previz_show_command(command_context& ctx)
 {
     auto* ogl_mix = get_ogl_mixer(ctx);
@@ -5865,6 +6016,8 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"OCIO_DISPLAY", ocio_display_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"OCIO_LOOK", ocio_look_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"AMF", amf_command, 1);
+
+    repo->register_channel_command(L"Input Commands",  L"INPUT",            input_command,            1);
 
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SCENE",     previz_scene_command,     0);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ MAP",       previz_map_command,       2);

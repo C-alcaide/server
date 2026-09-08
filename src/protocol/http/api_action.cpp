@@ -15,6 +15,8 @@
 #include <common/log.h>
 #include <common/utf.h>
 
+#include <boost/algorithm/string/case_conv.hpp>
+
 #include <algorithm>
 #include <cstdlib>
 #include <map>
@@ -124,6 +126,109 @@ std::wstring build_amcp(const action_target& t, const json::object& body, bool p
     return cmd.str();
 }
 
+/// `INPUT ...` from a JSON body.
+///
+/// Goes through AMCP rather than reaching the stage directly, and that is deliberate: the
+/// channel-level form has to dispatch to the image mixer FIRST (previz consumes the event when it
+/// is active) and only then to the stage, and `video_channel::input` is the single place that
+/// decides. `api_context` hands out a `stage_base`, not a channel, so a direct route here would
+/// have to duplicate that decision -- which is how two dispatch orders end up disagreeing.
+///
+/// Returns an empty string when the body is not a valid input description; the caller reports why.
+std::wstring build_input_amcp(const action_target& t, const json::object& body, std::string& why)
+{
+    const auto str = [&](const char* k) -> std::string {
+        auto* v = body.if_contains(k);
+        return v && v->is_string() ? std::string(v->as_string().c_str()) : std::string();
+    };
+    const auto num = [&](const char* k, double dflt) -> double {
+        auto* v = body.if_contains(k);
+        if (!v)
+            return dflt;
+        if (v->is_double())
+            return v->as_double();
+        if (v->is_int64())
+            return static_cast<double>(v->as_int64());
+        return dflt;
+    };
+    const auto has = [&](const char* k) { return body.if_contains(k) != nullptr; };
+
+    std::wostringstream cmd;
+    cmd << L"INPUT " << t.channel;
+    if (t.layer >= 0)
+        cmd << L"-" << t.layer;
+
+    auto type   = str("type");
+    auto action = str("action");
+    boost::to_lower(type);
+    boost::to_lower(action);
+
+    if (type == "mouse") {
+        if (action == "move" || action == "wheel") {
+            if (!has("x") || !has("y")) {
+                why = "a mouse " + action + " needs x and y in 0..1";
+                return {};
+            }
+        }
+        if (action == "move") {
+            cmd << L" MOUSE MOVE " << num("x", 0) << L" " << num("y", 0);
+            if (has("modifiers"))
+                cmd << L" " << static_cast<uint32_t>(num("modifiers", 0));
+        } else if (action == "down" || action == "up") {
+            auto button = str("button");
+            boost::to_upper(button);
+            if (button != "LEFT" && button != "MIDDLE" && button != "RIGHT") {
+                why = "button must be left, middle or right";
+                return {};
+            }
+            if (!has("x") || !has("y")) {
+                why = "a mouse " + action + " needs x and y in 0..1";
+                return {};
+            }
+            cmd << L" MOUSE " << (action == "down" ? L"DOWN " : L"UP ") << u16(button) << L" " << num("x", 0) << L" "
+                << num("y", 0);
+            if (has("modifiers"))
+                cmd << L" " << static_cast<uint32_t>(num("modifiers", 0));
+        } else if (action == "wheel") {
+            cmd << L" MOUSE WHEEL " << num("x", 0) << L" " << num("y", 0) << L" " << num("dx", 0) << L" "
+                << num("dy", 0);
+        } else if (action == "leave") {
+            cmd << L" MOUSE LEAVE";
+        } else {
+            why = "a mouse action is move, down, up, wheel or leave, not \"" + action + "\"";
+            return {};
+        }
+
+    } else if (type == "key") {
+        if (action != "down" && action != "up") {
+            why = "a key action is down or up, not \"" + action + "\"";
+            return {};
+        }
+        if (!has("key")) {
+            why = "a key event needs a numeric virtual-key code in \"key\"";
+            return {};
+        }
+        cmd << L" KEY " << (action == "down" ? L"DOWN " : L"UP ") << static_cast<int>(num("key", 0));
+        if (has("modifiers"))
+            cmd << L" " << static_cast<uint32_t>(num("modifiers", 0));
+
+    } else if (type == "text") {
+        const auto text = str("text");
+        if (text.empty()) {
+            why = "a text event needs a non-empty \"text\"";
+            return {};
+        }
+        // Quoted, because AMCP splits on whitespace and typed text routinely contains it.
+        cmd << L" TEXT \"" << u16(text) << L"\"";
+
+    } else {
+        why = "type must be mouse, key or text, not \"" + type + "\"";
+        return {};
+    }
+
+    return cmd.str();
+}
+
 /// Queue one verb against a stage and return its future WITHOUT waiting.
 ///
 /// The separation matters inside a batch and nowhere else. A batch queues its ops against
@@ -205,6 +310,30 @@ api_reply run_action(const api_context& ctx, const std::string& path, const std:
     };
 
     try {
+        if (verb == "input") {
+            if (!ctx.amcp)
+                return api_reply::fail(api_code::internal, "this build cannot deliver input through the API");
+
+            std::string why;
+            const auto  cmd = build_input_amcp(target, obj, why);
+            if (cmd.empty())
+                return api_reply::fail(api_code::bad_request, why.empty() ? "not a valid input event" : why);
+
+            const auto rep = ctx.amcp(cmd);
+            log_it(L"via-amcp " + cmd);
+
+            json::object r;
+            r["via"]  = "amcp";
+            r["sent"] = u8(cmd);
+            r["code"] = rep.code;
+            if (!rep.text.empty())
+                r["reply"] = u8(rep.text);
+            const auto code = code_from_amcp(rep.code);
+            if (code != api_code::ok)
+                return api_reply::fail(code, u8(rep.text), json::array{std::move(r)});
+            return api_reply::ok_with(std::move(r));
+        }
+
         if ((verb == "load" || verb == "play") && has_clip) {
             if (!ctx.amcp)
                 return api_reply::fail(api_code::internal, "this build cannot load clips through the API");
