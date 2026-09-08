@@ -422,6 +422,150 @@ api_reply write_stage_value(const api_context& ctx,
 
 } // namespace
 
+/// Is this the path of a producer parameter?
+///
+/// `channel/{n}/stage/layer/{m}/foreground/params/{name}` -- which is where the producer's own
+/// `state()` publishes it, so reads need nothing new and this exists only for the write.
+///
+/// `foreground/params/` rather than a `producer/` node of its own, and that is worth a line: a
+/// layer's producer state is already nested under `foreground` by `layer::impl`, so publishing
+/// the values there costs no new machinery and puts the read and the write at the SAME path. A
+/// separate `producer/` node would have needed its own publication and would have left reads
+/// and writes at two different addresses for one value.
+bool is_param_path(const std::string& path)
+{
+    const auto seg = split_path(path);
+    return seg.size() == 8 && seg[0] == "channel" && seg[2] == "stage" && seg[3] == "layer" &&
+           seg[5] == "foreground" && seg[6] == "params";
+}
+
+/// A producer-parameter write. Validated against the producer's OWN descriptor, fetched first.
+///
+/// Two executor round trips per write -- describe, then set -- and that is the right trade for a
+/// PUT. The alternative is to trust the body's type and arity and let the producer's setter
+/// refuse, which loses the reason: `set` returns a bool, and "false" cannot say whether the name
+/// was wrong, the arity was wrong or the value was out of range. A control surface needs the
+/// distinction; a frame path would not, and this is not one.
+api_reply write_param_value(const api_context& ctx,
+                            const std::string& path,
+                            const std::string& body,
+                            const std::string& peer)
+{
+    const auto seg     = split_path(path);
+    const int  channel = is_number(seg[1]) ? std::atoi(seg[1].c_str()) : 0;
+    const int  layer   = is_number(seg[4]) ? std::atoi(seg[4].c_str()) : -1;
+    const auto name    = seg[7];
+
+    if (channel <= 0)
+        return api_reply::fail(api_code::channel_not_found, "channel index is not a number: " + seg[1]);
+    if (layer < 0)
+        return api_reply::fail(api_code::unknown_path, "layer index is not a number: " + seg[4]);
+
+    json::value doc;
+    try {
+        doc = body.empty() ? json::value(json::object()) : json::parse(body);
+    } catch (...) {
+        return api_reply::fail(api_code::bad_request, "body is not valid JSON");
+    }
+    if (!doc.is_object())
+        return api_reply::fail(api_code::bad_request, "body must be a JSON object");
+    const auto& o = doc.as_object();
+
+    if (o.if_contains("duration") || o.if_contains("tween"))
+        return api_reply::fail(api_code::bad_request,
+                               "producer parameters are not tweenable: KEYFRAMES is bound to "
+                               "image_transform end to end, so a producer parameter cannot be "
+                               "animated by it. The OFX module has its own keyframe engine, "
+                               "reachable through CALL ... OFX KEY");
+
+    const std::string op =
+        o.if_contains("op") && o.at("op").is_string() ? std::string(o.at("op").as_string().c_str()) : "set";
+    if (op != "set")
+        return api_reply::fail(api_code::bad_request,
+                               "producer parameters take op: set only. `toggle`, `add` and `cas` get "
+                               "their atomicity on the mixer path from running inside one closure on "
+                               "the stage executor; a producer parameter's read and write are two "
+                               "separate executor calls, so a read-modify-write here would not be "
+                               "atomic -- and a non-atomic toggle is worse than none");
+
+    const auto* v = o.if_contains("value");
+    if (!v)
+        return api_reply::fail(api_code::field_missing, "no value in the body");
+
+    if (!ctx.stage)
+        return api_reply::fail(api_code::internal, "the API was built without access to the channels");
+    const auto stage = ctx.stage(channel);
+    if (!stage)
+        return api_reply::fail(api_code::channel_not_found, "no channel " + std::to_string(channel));
+
+    std::vector<core::param_snapshot> params;
+    try {
+        params = stage->describe_params(layer).get();
+    } catch (...) {
+        return api_reply::fail(api_code::internal, "the parameter query threw");
+    }
+
+    const core::param_snapshot* p = nullptr;
+    for (const auto& q : params) {
+        if (q.name == name) {
+            p = &q;
+            break;
+        }
+    }
+    if (!p) {
+        std::string known;
+        for (const auto& q : params)
+            known += (known.empty() ? "" : ", ") + q.name;
+        return api_reply::fail(api_code::unknown_path,
+                               "no such producer parameter: " + name +
+                                   (known.empty() ? " (this layer's producer has none)"
+                                                  : " (this layer has: " + known + ")"));
+    }
+
+    if ((static_cast<uint8_t>(p->access) & static_cast<uint8_t>(core::fields::access_t::write)) == 0)
+        return api_reply::fail(api_code::not_writable, "parameter is read-only: " + name);
+
+    // The producer's descriptor stands in for a `field_meta`. It carries the same four things
+    // the validation needs -- type, arity, range and bounding -- so the JSON conversion and the
+    // range check are the same two steps a mixer field goes through.
+    core::fields::field_meta meta{};
+    meta.path     = p->name.c_str();
+    meta.type     = p->type;
+    meta.access   = p->access;
+    meta.bounding = p->bounding;
+    meta.arity    = p->arity;
+    meta.values   = p->values.empty() ? nullptr : p->values.c_str();
+    if (p->min && p->max)
+        meta.range = core::grade_range{*p->min, *p->max};
+
+    core::monitor::vector_t operand;
+    if (auto r = json_to_value(meta, *v, operand); r.code != api_code::ok)
+        return r;
+    if (auto r = check_and_bound(meta, operand); r.code != api_code::ok)
+        return r;
+
+    bool applied = false;
+    try {
+        applied = stage->set_param(layer, name, operand).get();
+    } catch (...) {
+        return api_reply::fail(api_code::internal, "the parameter write threw");
+    }
+
+    if (!applied)
+        return api_reply::fail(api_code::unknown_path,
+                               "the producer declined the write to " + name +
+                                   ". The descriptor came from the producer itself, so this is the "
+                                   "producer refusing a value it described as legal rather than a "
+                                   "path or type error");
+
+    CASPAR_LOG(info) << L"[api] " << u16(peer) << L" PUT " << u16(path);
+
+    json::object r;
+    r["path"]  = path;
+    r["param"] = name;
+    return api_reply::ok_with(std::move(r));
+}
+
 api_reply write_value(const api_context& ctx,
                       const state_hub&,
                       const std::string& path,
@@ -430,6 +574,8 @@ api_reply write_value(const api_context& ctx,
 {
     if (is_stage_path(path))
         return write_stage_value(ctx, path, body, peer);
+    if (is_param_path(path))
+        return write_param_value(ctx, path, body, peer);
 
     write_target target;
     if (auto r = resolve_write_target(path, target); r.code != api_code::ok)

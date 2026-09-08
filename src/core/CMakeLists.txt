@@ -59,6 +59,7 @@ set(SOURCES
 		producer/frame_producer.cpp
 		producer/frame_producer_registry.cpp
 		producer/layer.cpp
+		producer/producer_params.cpp
 		producer/stage.cpp
 
 		video_channel.cpp
@@ -104,6 +105,7 @@ set(HEADERS
 
 		producer/cg_proxy.h
 		producer/frame_producer.h
+		producer/producer_params.h
 		producer/frame_producer_registry.h
 		producer/layer.h
 		producer/stage.h

@@ -402,6 +402,7 @@ class sting_producer : public frame_producer
 
     /// To the DESTINATION, for the same reason as `transition_producer`.
     bool input(const input_event& event) override { return dst_producer_->input(event); }
+    std::vector<param_desc> parameters() override { return dst_producer_->parameters(); }
 };
 
 spl::shared_ptr<frame_producer> create_sting_producer(const frame_producer_dependencies&     dependencies,

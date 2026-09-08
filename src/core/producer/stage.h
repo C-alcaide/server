@@ -24,8 +24,10 @@
 #include "../fwd.h"
 #include "../input/input_event.h"
 #include "../monitor/monitor.h"
+#include "producer_params.h"
 
 #include <common/executor.h>
+#include <common/future.h>
 #include <common/memory.h>
 #include <common/tweener.h>
 
@@ -108,6 +110,25 @@ class stage_base
     /// real implementation hit-tests layers topmost-first; see `stage::impl::input`.
     virtual void input(const input_event& event) {}
 
+    /// A layer's producer parameters, as pure data. Empty for a layer with no producer or a
+    /// producer with no parameters -- the two are indistinguishable here, deliberately: a
+    /// caller wanting to know whether a layer exists has `foreground()`.
+    ///
+    /// Snapshots rather than `param_desc`, because a `param_desc` carries two closures bound
+    /// to the producer and the callers are the API's reader threads -- exactly the ones who
+    /// would keep one past a `CLEAR`.
+    virtual std::future<std::vector<param_snapshot>> describe_params(int layer)
+    {
+        return make_ready_future(std::vector<param_snapshot>());
+    }
+
+    /// Write one parameter by name. False for an unknown name, a wrong type or arity, or a
+    /// value the producer refuses. Runs on the stage executor, like `call`.
+    virtual std::future<bool> set_param(int layer, const std::string& name, const monitor::vector_t& value)
+    {
+        return make_ready_future(false);
+    }
+
     /// Deliver to ONE layer, with no hit-test and no rectangle check.
     ///
     /// For a caller that already knows its target -- `INPUT 1-10 ...`, or a client driving a
@@ -186,6 +207,9 @@ class stage final : public stage_base
     /// Route an event to the topmost layer that consumes it. See `stage::impl::input`.
     void                         input(const input_event& event) override;
     void                         input(int layer, const input_event& event) override;
+
+    std::future<std::vector<param_snapshot>> describe_params(int layer) override;
+    std::future<bool> set_param(int layer, const std::string& name, const monitor::vector_t& value) override;
 
     // Keyframe management
     std::future<void>                  set_keyframe_data(int layer, std::shared_ptr<void> data) override;

@@ -25,6 +25,7 @@
 #include "../fwd.h"
 #include "../input/input_event.h"
 #include "../monitor/monitor.h"
+#include "producer_params.h"
 
 #include <common/except.h>
 #include <common/memory.h>
@@ -130,6 +131,17 @@ class frame_producer
     /// Called on the stage executor. A producer that has to reach another thread posts, and does
     /// not block: the caller is the consumer's render thread.
     virtual bool input(const input_event& event) { return false; }
+
+    /// This INSTANCE's parameters, described and accessible. Empty for most producers.
+    ///
+    /// Built fresh on each call rather than cached, and that is the right trade: it is called
+    /// to describe a layer and to write one parameter -- never per frame -- and an ISF shader's
+    /// input set can change under it when the shader is reloaded. A cache would be a second
+    /// place for that to go stale.
+    ///
+    /// Stage executor only, along with the accessors in the rows it returns. See
+    /// `producer_params.h` for why these are closures where a mixer field is a function pointer.
+    virtual std::vector<param_desc> parameters() { return {}; }
 };
 
 class const_producer : public core::frame_producer

@@ -167,6 +167,16 @@ class effect
     /// and was set. Triggers the plug-in's instanceChanged action.
     bool set_param_string(const std::string& name, const std::string& value, double time);
 
+    /// The CURRENT value of a numeric parameter, one element per component. Empty if there is
+    /// no such parameter or it is not numeric.
+    ///
+    /// The mirror of `set_param`, and there was no such thing until 2026-09-08: `OFX LIST`
+    /// reports each parameter's DECLARED default, min and max and never what it holds now, and
+    /// `set_param` returns only a bool. So a parameter set through `CALL ... OFX SET` could not
+    /// be read back through the server at all. That made a round-trip check impossible and a
+    /// binding -- which has to read a target before it can own it -- unbuildable.
+    std::vector<double> get_param(const std::string& name) const;
+
     /// Render a transition frame. src_from/src_to are bottom-up 8-bit RGBA (width*height*4); the
     /// plug-in blends them by the given transition value (0..1, set on the mandatory "Transition"
     /// parameter). dst_rgba receives the width*height*4 result. Returns true on success.

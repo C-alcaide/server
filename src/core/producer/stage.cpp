@@ -758,6 +758,42 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         executor_.begin_invoke([this, layer, event] { offer(layer, event, false); });
     }
 
+    std::future<std::vector<param_snapshot>> describe_params(int layer)
+    {
+        return executor_.begin_invoke([this, layer] {
+            std::vector<param_snapshot> out;
+            auto                        it = layers_.find(layer);
+            if (it == layers_.end())
+                return out;
+            auto producer = it->second.foreground();
+            if (producer == frame_producer::empty())
+                return out;
+            for (const auto& p : producer->parameters())
+                out.push_back(snapshot_of(p));
+            return out;
+        });
+    }
+
+    std::future<bool> set_param(int layer, const std::string& name, const monitor::vector_t& value)
+    {
+        return executor_.begin_invoke([this, layer, name, value] {
+            auto it = layers_.find(layer);
+            if (it == layers_.end())
+                return false;
+            auto producer = it->second.foreground();
+            if (producer == frame_producer::empty())
+                return false;
+            for (const auto& p : producer->parameters()) {
+                if (p.name != name)
+                    continue;
+                if (p.access == fields::access_t::read)
+                    return false;
+                return p.set ? p.set(value) : false;
+            }
+            return false;
+        });
+    }
+
     /// Deliver to one layer, converting the channel-relative point into the layer's own space.
     ///
     /// Returns whether the producer consumed it. The conversion is the INVERSE of what the mixer
@@ -1197,6 +1233,14 @@ std::future<void>            stage::execute(std::function<void()> func)
 }
 void stage::input(const input_event& event) { impl_->input(event); }
 void stage::input(int layer, const input_event& event) { impl_->input(layer, event); }
+std::future<std::vector<param_snapshot>> stage::describe_params(int layer)
+{
+    return impl_->describe_params(layer);
+}
+std::future<bool> stage::set_param(int layer, const std::string& name, const monitor::vector_t& value)
+{
+    return impl_->set_param(layer, name, value);
+}
 
 // ── Keyframe management (stage wrappers) ─────────────────────────────────
 std::future<void>                  stage::set_keyframe_data(int layer, std::shared_ptr<void> data) { return impl_->kf_set(layer, std::move(data)); }

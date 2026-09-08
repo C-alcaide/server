@@ -1006,6 +1006,78 @@ bool effect::set_param(const std::string& name, const std::vector<double>& value
     return ok;
 }
 
+std::vector<double> effect::get_param(const std::string& name) const
+{
+    if (!valid())
+        return {};
+
+    auto* p = impl_->instance->getParam(name);
+    if (p == nullptr)
+        return {};
+
+    // The same type ladder as `set_param`, in the same order, deliberately: the two have to
+    // agree component for component or a round trip reports a defect that is really an
+    // asymmetry between reader and writer. Any type handled there and not here would read
+    // back as absent, which the caller cannot tell from "no such parameter".
+    const std::string& type = p->getType();
+
+    try {
+        if (type == kOfxParamTypeDouble) {
+            if (auto* d = dynamic_cast<OFX::Host::Param::DoubleInstance*>(p)) {
+                double v = 0.0;
+                if (d->get(v) == kOfxStatOK)
+                    return {v};
+            }
+        } else if (type == kOfxParamTypeInteger) {
+            if (auto* d = dynamic_cast<OFX::Host::Param::IntegerInstance*>(p)) {
+                int v = 0;
+                if (d->get(v) == kOfxStatOK)
+                    return {static_cast<double>(v)};
+            }
+        } else if (type == kOfxParamTypeBoolean) {
+            if (auto* d = dynamic_cast<OFX::Host::Param::BooleanInstance*>(p)) {
+                bool v = false;
+                if (d->get(v) == kOfxStatOK)
+                    return {v ? 1.0 : 0.0};
+            }
+        } else if (type == kOfxParamTypeChoice) {
+            if (auto* d = dynamic_cast<OFX::Host::Param::ChoiceInstance*>(p)) {
+                int v = 0;
+                if (d->get(v) == kOfxStatOK)
+                    return {static_cast<double>(v)};
+            }
+        } else if (type == kOfxParamTypeRGBA) {
+            if (auto* d = dynamic_cast<OFX::Host::Param::RGBAInstance*>(p)) {
+                double r = 0, g = 0, b = 0, a = 0;
+                if (d->get(r, g, b, a) == kOfxStatOK)
+                    return {r, g, b, a};
+            }
+        } else if (type == kOfxParamTypeRGB) {
+            if (auto* d = dynamic_cast<OFX::Host::Param::RGBInstance*>(p)) {
+                double r = 0, g = 0, b = 0;
+                if (d->get(r, g, b) == kOfxStatOK)
+                    return {r, g, b};
+            }
+        } else if (type == kOfxParamTypeDouble2D) {
+            if (auto* d = dynamic_cast<OFX::Host::Param::Double2DInstance*>(p)) {
+                double x = 0, y = 0;
+                if (d->get(x, y) == kOfxStatOK)
+                    return {x, y};
+            }
+        } else if (type == kOfxParamTypeInteger2D) {
+            if (auto* d = dynamic_cast<OFX::Host::Param::Integer2DInstance*>(p)) {
+                int x = 0, y = 0;
+                if (d->get(x, y) == kOfxStatOK)
+                    return {static_cast<double>(x), static_cast<double>(y)};
+            }
+        }
+    } catch (...) {
+        CASPAR_LOG(warning) << L"[ofx] Exception reading parameter '" << u16(name) << L"'.";
+    }
+
+    return {};
+}
+
 bool effect::set_param_string(const std::string& name, const std::string& value, double time)
 {
     if (!valid())

@@ -372,6 +372,7 @@ class transition_producer : public frame_producer
     /// To the DESTINATION, which is what the operator is transitioning towards and what will be
     /// on screen when the gesture finishes. The source is on its way out.
     bool input(const input_event& event) override { return dst_producer_->input(event); }
+    std::vector<param_desc> parameters() override { return dst_producer_->parameters(); }
 };
 
 spl::shared_ptr<frame_producer> create_transition_producer(const spl::shared_ptr<frame_producer>& destination,

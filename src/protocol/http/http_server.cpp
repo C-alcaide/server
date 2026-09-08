@@ -427,10 +427,10 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
             return api_reply::ok_with(openapi(config_));
 
         if (path == "/v1/tree")
-            return api_reply::ok_with(build_tree(*hub_, config_));
+            return api_reply::ok_with(build_tree(*hub_, config_, context_));
 
         if (starts_with(path, "/v1/tree/"))
-            return tree_at(*hub_, config_, path.substr(std::string("/v1/tree").size()));
+            return tree_at(*hub_, config_, path.substr(std::string("/v1/tree").size()), context_);
 
         if (starts_with(path, "/v1/value/"))
             return read_value(*hub_, path.substr(std::string("/v1/value").size()));

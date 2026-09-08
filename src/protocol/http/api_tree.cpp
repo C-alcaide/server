@@ -199,6 +199,52 @@ json::object descriptor_leaf(const fields::field_meta& f, const core::monitor::v
     return leaf;
 }
 
+/// One producer parameter as an OSCQuery leaf.
+///
+/// **Built by borrowing `descriptor_leaf`** rather than by assembling the keys again, and that
+/// is the point of doing it this way: a producer parameter then carries EXACTLY the key set a
+/// mixer field carries -- TYPE, RANGE, CLIPMODE, VALUE, DESCRIPTION, ACCESS and the `casparcg`
+/// vendor block -- so a client that can draw a mixer field can draw an ISF input with no new
+/// code, and no future key can be added to one and forgotten on the other.
+///
+/// The `field_meta` here is a temporary VIEW of the snapshot, not a registry row: the `const
+/// char*` members point into the snapshot's own strings and are used only inside this call.
+/// That is safe because `descriptor_leaf` copies everything it reads into JSON, and it is why
+/// this takes the snapshot by const reference and returns before it can outlive it.
+json::object param_leaf(const core::param_snapshot& p, const std::string& full_path)
+{
+    fields::field_meta meta{};
+    meta.path     = p.name.c_str();
+    meta.type     = p.type;
+    meta.access   = p.access;
+    meta.bounding = p.bounding;
+    meta.arity    = p.arity;
+    meta.step     = p.step;
+    meta.unit     = p.unit.empty() ? nullptr : p.unit.c_str();
+    meta.values   = p.values.empty() ? nullptr : p.values.c_str();
+    // The parameter's own description if the format gave it one, else its label -- which every
+    // ISF input and every OFX parameter has. Never empty, so a generated control always has
+    // something to put next to the slider.
+    meta.description = p.description.empty() ? (p.label.empty() ? nullptr : p.label.c_str())
+                                             : p.description.c_str();
+    // RANGE only when the FORMAT declared one. ISF's MIN/MAX are optional and OFX's are not, so
+    // inventing 0..1 for an unbounded parameter would put a wrong slider on a control surface --
+    // and `descriptor_leaf` omits the key entirely when there is no range, which says so.
+    if (p.min && p.max)
+        meta.range = core::grade_range{*p.min, *p.max};
+    // kf_names stays null: KEYFRAMES is bound to `image_transform` end to end, so `descriptor_leaf`
+    // emits an explicit `"kf": null` and a client is told the parameter cannot be animated rather
+    // than left to guess from an absent key.
+
+    auto leaf         = descriptor_leaf(meta, p.default_value);
+    leaf["FULL_PATH"] = full_path;
+    // The DEFAULT is what `descriptor_leaf` put in VALUE; the live value overwrites it, exactly
+    // as the mixer pass overwrites a published field's descriptor default below.
+    if (!p.value.empty())
+        leaf["VALUE"] = vector_to_oscquery_value(p.value);
+    return leaf;
+}
+
 /// A whole object's descriptor node, from any of the three tables.
 template <class T>
 json::object object_template(const std::vector<fields::typed_field<T>>& table)
@@ -287,7 +333,7 @@ std::vector<int> layers_in(const core::monitor::state& snap)
 
 } // namespace
 
-json::object build_tree(const state_hub& hub, const http_config& cfg)
+json::object build_tree(const state_hub& hub, const http_config& cfg, const api_context& ctx)
 {
     const bool with_mixer = cfg.extent != L"state";
 
@@ -415,15 +461,68 @@ json::object build_tree(const state_hub& hub, const http_config& cfg)
             if (!contents_val.is_object())
                 contents_val = json::object();
             contents_val.as_object()["mixer"] = std::move(mixer);
+
+            // Source 4: the layer's PRODUCER parameters, queried from the producer itself.
+            //
+            // The one part of the tree that can come from neither a table nor the snapshot. An
+            // ISF shader declares its own `INPUTS` in its own header, so two layers running two
+            // shaders have two different parameter sets and there is nothing static to describe
+            // them with; and a parameter at its default is not published, exactly as for a mixer
+            // field, so the snapshot alone would show only the ones somebody already changed.
+            //
+            // Costs one stage-executor round trip per layer per tree request. `/v1/tree` is a
+            // discovery call, not a frame path, and `/v1/value` -- the hot one -- does not come
+            // through here. A producer with no parameters returns an empty vector and no node is
+            // created, so an ordinary channel pays the round trip and nothing else.
+            if (ctx.stage) {
+                std::vector<core::param_snapshot> params;
+                if (auto stage = ctx.stage(ch)) {
+                    try {
+                        params = stage->describe_params(layer).get();
+                    } catch (...) {
+                        // A layer that went away between the snapshot and this query. Not an
+                        // error: the tree describes a moving system, and this is the one node
+                        // built by asking rather than by reading.
+                    }
+                }
+
+                if (!params.empty()) {
+                    const std::string params_base = layer_base + "/foreground/params";
+
+                    json::object params_node;
+                    params_node["FULL_PATH"] = params_base;
+                    params_node["ACCESS"]    = 0;
+                    json::object param_contents;
+                    for (const auto& p : params)
+                        param_contents.emplace(p.name, param_leaf(p, params_base + "/" + p.name));
+                    params_node["CONTENTS"] = std::move(param_contents);
+
+                    // Merged under the EXISTING `foreground` node, which source 2 has already
+                    // created from the snapshot -- the producer publishes its name, transport and
+                    // frame count there. Replacing it would drop all of that.
+                    auto& fg = contents_val.as_object()["foreground"];
+                    if (!fg.is_object())
+                        fg = json::object();
+                    auto& fg_obj = fg.as_object();
+                    if (!fg_obj.if_contains("FULL_PATH"))
+                        fg_obj["FULL_PATH"] = layer_base + "/foreground";
+                    if (!fg_obj.if_contains("ACCESS"))
+                        fg_obj["ACCESS"] = 0;
+                    auto& fg_contents = fg_obj["CONTENTS"];
+                    if (!fg_contents.is_object())
+                        fg_contents = json::object();
+                    fg_contents.as_object()["params"] = std::move(params_node);
+                }
+            }
         }
     }
 
     return root;
 }
 
-api_reply tree_at(const state_hub& hub, const http_config& cfg, const std::string& path)
+api_reply tree_at(const state_hub& hub, const http_config& cfg, const std::string& path, const api_context& ctx)
 {
-    auto       root     = build_tree(hub, cfg);
+    auto       root     = build_tree(hub, cfg, ctx);
     const auto segments = split_path(path);
 
     json::value* cur = nullptr;

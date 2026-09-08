@@ -1231,6 +1231,12 @@ bool shader::set_value(const std::string& name, const std::vector<double>& value
     return true;
 }
 
+std::vector<double> shader::get_value(const std::string& name) const
+{
+    auto it = impl_->values_.find(name);
+    return it == impl_->values_.end() ? std::vector<double>{} : it->second;
+}
+
 void shader::set_output_depth(common::bit_depth depth)
 {
     // A PLAIN ASSIGNMENT, deliberately. The obvious implementation deletes the

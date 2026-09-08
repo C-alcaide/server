@@ -146,6 +146,7 @@ class destroy_producer_proxy : public frame_producer
     /// The symptom was every html-input check reading the page's untouched idle colour, which
     /// is indistinguishable from a browser that never received anything.
     bool                 input(const input_event& event) override { return producer_->input(event); }
+    std::vector<param_desc> parameters() override { return producer_->parameters(); }
 };
 
 spl::shared_ptr<core::frame_producer> do_create_producer(const frame_producer_dependencies&     dependencies,

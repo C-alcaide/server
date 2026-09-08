@@ -87,6 +87,15 @@ class shader
     /// Set an input value by name (1..4 scalars). Returns false if the input is unknown.
     bool set_value(const std::string& name, const std::vector<double>& values);
 
+    /// The CURRENT value of an input, or an empty vector if there is no such input.
+    ///
+    /// There was no read path at all until 2026-09-08: `ISF LIST` reports each input's
+    /// declared default, min and max and never what it is set to now, so
+    /// `CALL ... ISF SET brightness 0.5` was unverifiable through the server. A parameter that
+    /// can be written and not read cannot be described to a control surface, cannot round-trip
+    /// through a preset, and cannot be the target of a binding.
+    std::vector<double> get_value(const std::string& name) const;
+
     /// Reset all `event`-type inputs to 0 (call once per rendered frame for momentary triggers).
     void reset_events();
 

@@ -140,6 +140,10 @@ class separated_producer : public frame_producer
     /// To the FILL only. The key is a matte generated alongside the picture; a click belongs to
     /// the thing being shown, and delivering to both would fire every handler twice.
     bool input(const input_event& event) override { return fill_producer_->input(event); }
+
+    /// The fill's, for the same reason input goes there: the key is a matte of the same
+    /// picture and has no parameters of its own worth addressing separately.
+    std::vector<param_desc> parameters() override { return fill_producer_->parameters(); }
 };
 
 spl::shared_ptr<frame_producer> create_separated_producer(const spl::shared_ptr<frame_producer>& fill,

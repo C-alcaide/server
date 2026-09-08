@@ -144,7 +144,8 @@ class ofx_producer : public core::frame_producer
     effect_context             context_           = effect_context::filter;
     int                        transition_frames_ = 25; ///< frames over which the transition ramps 0->1
     std::uint32_t              frame_number_of_effect_ = 0;
-    std::mutex                 effect_mutex_;
+    //: MUTABLE, because `state()` is const and publishes the effect's parameter values.
+    mutable std::mutex         effect_mutex_;
 
     /// Per-parameter keyframe animation (decoupled from the MIXER keyframe engine, which
     /// targets image_transform). Keyframes hold one value per component; interpolation reuses
@@ -897,7 +898,30 @@ class ofx_producer : public core::frame_producer
         return core::draw_frame(std::move(out));
     }
 
-    core::monitor::state state() const override { return source_->state(); }
+    /// The source's state, plus this effect's parameter values under `params/<name>`.
+    ///
+    /// MERGED rather than replaced: the wrapped producer publishes its own transport, frame
+    /// count and format there, and dropping that to make room for parameters would take a
+    /// working clip's telemetry away from every client watching it.
+    ///
+    /// Built from `get_param` directly rather than through `parameters()`, for the reason
+    /// recorded in the ISF producer: this runs per tick per layer and that function allocates
+    /// closures. Description on demand, values per tick.
+    core::monitor::state state() const override
+    {
+        auto st = source_->state();
+        std::lock_guard<std::mutex> lock(effect_mutex_);
+        if (!effect_)
+            return st;
+        for (const auto& p : effect_->params()) {
+            core::monitor::vector_t v;
+            for (double x : effect_->get_param(p.name))
+                v.push_back(x);
+            if (!v.empty())
+                st["params"][p.name] = std::move(v);
+        }
+        return st;
+    }
 
     std::wstring print() const override { return L"ofx[" + plugin_id_ + L"|" + source_->print() + L"]"; }
 
@@ -910,6 +934,107 @@ class ofx_producer : public core::frame_producer
     bool is_ready() override
     {
         return source_->is_ready() && (context_ != effect_context::transition || source_to_->is_ready());
+    }
+
+    /// The effect's parameters, as control-API parameters.
+    ///
+    /// OFX's type strings map onto the registry's `value_type` without ambiguity, which is the
+    /// advantage of a format that declares dimension explicitly:
+    ///
+    ///     Double, Integer  -> real / integer      Boolean -> boolean
+    ///     Choice           -> enumeration (the plug-in's own option labels)
+    ///     RGB              -> vec3                RGBA    -> vec4
+    ///     Double2D, Integer2D -> vec2
+    ///     String, Group, Page, PushButton -> skipped
+    ///
+    /// String parameters are skipped because `set_param_string` is a separate entry point with
+    /// no numeric read, so publishing them here would give a control surface a field it can
+    /// describe and not round-trip. Groups, pages and push-buttons are layout and actions
+    /// rather than values.
+    ///
+    /// **The module keeps its own keyframe engine** (`OFX KEY`, `OFX CLEARKEYS`) and this does
+    /// not replace it. That makes the registry a SECOND writer of the same parameters, so a
+    /// keyframed parameter written through here is overwritten on the next frame the engine
+    /// evaluates -- the same ownership question `icvfx_auto` answers for projection state, and
+    /// deliberately not answered here: the binding layer's `field_bound` reply is where that
+    /// belongs, and it applies to every target rather than to this one module.
+    std::vector<core::param_desc> parameters() override
+    {
+        using core::fields::access_t;
+        using core::fields::value_type;
+
+        std::vector<core::param_desc> out;
+
+        std::lock_guard<std::mutex> lock(effect_mutex_);
+        if (!effect_)
+            return out;
+
+        for (const auto& p : effect_->params()) {
+            core::param_desc d;
+            d.name   = p.name;
+            d.label  = p.label.empty() ? p.name : p.label;
+            d.access = access_t::read_write;
+            d.arity  = static_cast<uint8_t>(p.dimension < 1 ? 1 : p.dimension);
+
+            if (p.type == "OfxParamTypeDouble") {
+                d.type = value_type::real;
+            } else if (p.type == "OfxParamTypeInteger") {
+                d.type = value_type::integer;
+            } else if (p.type == "OfxParamTypeBoolean") {
+                d.type  = value_type::boolean;
+                d.arity = 1;
+            } else if (p.type == "OfxParamTypeChoice") {
+                d.type  = value_type::enumeration;
+                d.arity = 1;
+                for (std::size_t i = 0; i < p.choices.size(); ++i)
+                    d.values += (i ? "," : "") + p.choices[i];
+            } else if (p.type == "OfxParamTypeRGB") {
+                d.type  = value_type::vec3;
+                d.arity = 3;
+            } else if (p.type == "OfxParamTypeRGBA") {
+                d.type  = value_type::vec4;
+                d.arity = 4;
+            } else if (p.type == "OfxParamTypeDouble2D" || p.type == "OfxParamTypeInteger2D") {
+                d.type  = value_type::vec2;
+                d.arity = 2;
+            } else {
+                continue;
+            }
+
+            if (p.has_range) {
+                d.min = p.min;
+                d.max = p.max;
+            }
+            d.default_value.push_back(p.def);
+
+            const std::string key = p.name;
+            const auto        arity = d.arity;
+            effect*           fx    = effect_.get();
+            std::mutex*       mx    = &effect_mutex_;
+            const double      time  = frame_number_of_effect_;
+
+            d.get = [fx, mx, key]() {
+                std::lock_guard<std::mutex> g(*mx);
+                core::monitor::vector_t v;
+                for (double x : fx->get_param(key))
+                    v.push_back(x);
+                return v;
+            };
+
+            d.set = [fx, mx, key, arity, time](const core::monitor::vector_t& v) {
+                if (v.size() != arity)
+                    return false;
+                std::vector<double> values;
+                if (!core::as_numbers(v, values))
+                    return false;
+                std::lock_guard<std::mutex> g(*mx);
+                return fx->set_param(key, values, time);
+            };
+
+            out.push_back(std::move(d));
+        }
+
+        return out;
     }
 
     std::future<std::wstring> call(const std::vector<std::wstring>& params) override

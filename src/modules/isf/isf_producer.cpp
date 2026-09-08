@@ -158,7 +158,9 @@ class isf_producer : public core::frame_producer
     int                                       height_;
     double                                    fps_ = 25.0;
     std::uint32_t                             frame_ = 0;
-    std::mutex                                mutex_;
+    //: MUTABLE, because `state()` is const and publishes the shader's parameter values --
+    //: which needs the same lock every other reader of `values_` takes.
+    mutable std::mutex                        mutex_;
 
     // Filter mode: wraps a source producer whose frame is fed to the shader's inputImage.
     std::shared_ptr<core::frame_producer> source_;
@@ -601,7 +603,35 @@ class isf_producer : public core::frame_producer
         return out;
     }
 
-    core::monitor::state state() const override { return {}; }
+    /// Publish every value input under `params/<name>`, so a read is an ordinary
+    /// `/v1/value` and needs no new machinery at all.
+    ///
+    /// WHY THIS DOES NOT GO THROUGH `parameters()`, even though it publishes the same set:
+    /// that function builds four `std::function`s per parameter, and this runs on every tick
+    /// of every layer -- so routing publication through it would put a handful of heap
+    /// allocations per frame on the stage thread to produce numbers it already has. The
+    /// DESCRIPTION is built on demand; the VALUES are published per tick. Two costs, two
+    /// mechanisms.
+    ///
+    /// The one thing that must stay in step is which inputs count as parameters. Both use the
+    /// same `is_image` filter and nothing else, so an input that appears in one appears in the
+    /// other -- and `producer-params` check 2 compares the tree's set against the shader's
+    /// declared INPUTS, which is what would catch a divergence.
+    core::monitor::state state() const override
+    {
+        core::monitor::state st;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& in : shader_->inputs()) {
+            if (in.is_image || in.type == "image")
+                continue;
+            core::monitor::vector_t v;
+            for (double d : shader_->get_value(in.name))
+                v.push_back(d);
+            if (!v.empty())
+                st["params"][in.name] = std::move(v);
+        }
+        return st;
+    }
     std::wstring         print() const override { return L"isf[" + name_ + L"]"; }
     std::wstring         name() const override { return L"isf"; }
     uint32_t             frame_number() const override { return frame_; }
@@ -616,6 +646,113 @@ class isf_producer : public core::frame_producer
         if (from_ && to_)
             return from_->is_ready() && to_->is_ready();
         return source_ ? source_->is_ready() : true;
+    }
+
+    /// This shader's `INPUTS`, as control-API parameters.
+    ///
+    /// The mapping is the ISF specification's own type list, and only `image` is dropped:
+    ///
+    ///     float    -> real          bool, event -> boolean
+    ///     long     -> enumeration   (VALUES in order, LABELS as the names)
+    ///     color    -> vec4          point2D     -> vec2
+    ///     image    -> not a parameter; it is a producer, wired by `[ISF] shader route://1`
+    ///
+    /// `long` becomes an enumeration rather than an integer because ISF's `VALUES`/`LABELS`
+    /// pair IS an enumeration -- a pop-up menu in the format's own words -- and publishing it
+    /// as a bare integer would throw away the labels a control surface needs to draw it.
+    /// Where a `long` input declares no VALUES it stays an integer, because then it really is
+    /// one.
+    ///
+    /// `event` is a boolean here and is cleared every frame by `reset_events()`, so writing
+    /// true is a trigger rather than a state. That asymmetry is ISF's, not ours, and it is in
+    /// the description so a reader of the tree is not surprised by a value that will not stay.
+    std::vector<core::param_desc> parameters() override
+    {
+        using core::fields::access_t;
+        using core::fields::value_type;
+
+        std::vector<core::param_desc> out;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& in : shader_->inputs()) {
+            if (in.is_image || in.type == "image")
+                continue;
+
+            core::param_desc p;
+            p.name  = in.name;
+            p.label = in.label.empty() ? in.name : in.label;
+            p.access = access_t::read_write;
+
+            if (in.type == "float") {
+                p.type  = value_type::real;
+                p.arity = 1;
+            } else if (in.type == "bool" || in.type == "event") {
+                p.type  = value_type::boolean;
+                p.arity = 1;
+                p.description = in.type == "event"
+                                    ? "an ISF event: writing true fires it once and it clears on "
+                                      "the next frame, so it will not read back as true"
+                                    : "";
+            } else if (in.type == "long") {
+                p.arity = 1;
+                if (!in.labels.empty()) {
+                    p.type = value_type::enumeration;
+                    for (std::size_t i = 0; i < in.labels.size(); ++i)
+                        p.values += (i ? "," : "") + in.labels[i];
+                } else {
+                    p.type = value_type::integer;
+                }
+            } else if (in.type == "color") {
+                p.type  = value_type::vec4;
+                p.arity = 4;
+            } else if (in.type == "point2D") {
+                p.type  = value_type::vec2;
+                p.arity = 2;
+            } else {
+                // An input type this build does not know. Skipped rather than guessed:
+                // publishing it as a real would invite a write the shader cannot use.
+                continue;
+            }
+
+            if (!in.min_value.empty())
+                p.min = in.min_value.front();
+            if (!in.max_value.empty())
+                p.max = in.max_value.front();
+
+            for (double d : in.default_value)
+                p.default_value.push_back(d);
+
+            const std::string key = in.name;
+            const auto        arity = p.arity;
+            shader*           sh    = shader_.get();
+            std::mutex*       mx    = &mutex_;
+
+            p.get = [sh, mx, key]() {
+                std::lock_guard<std::mutex> g(*mx);
+                core::monitor::vector_t v;
+                for (double d : sh->get_value(key))
+                    v.push_back(d);
+                return v;
+            };
+
+            p.set = [sh, mx, key, arity](const core::monitor::vector_t& v) {
+                if (v.size() != arity)
+                    return false;
+                // `as_numbers` rather than a `double` cast: a boolean arrives as a bool and a
+                // menu index as an int64, and `monitor::data_t` is a nine-way variant, so
+                // taking only `double` would refuse both. It converts all or nothing, so a
+                // half-applied vec4 is not a state this can reach.
+                std::vector<double> values;
+                if (!core::as_numbers(v, values))
+                    return false;
+                std::lock_guard<std::mutex> g(*mx);
+                return sh->set_value(key, values);
+            };
+
+            out.push_back(std::move(p));
+        }
+
+        return out;
     }
 
     std::future<std::wstring> call(const std::vector<std::wstring>& params) override
@@ -656,7 +793,29 @@ class isf_producer : public core::frame_producer
                 if (!shader_->set_value(u8(params.at(2)), values))
                     result = L"402 CALL ERROR (unknown ISF input)\r\n";
             }
+
+            std::promise<std::wstring> pr;
+            pr.set_value(result);
+            return pr.get_future();
         }
+
+        // NOT an ISF call: FORWARD IT TO THE SOURCE.
+        //
+        // This is a fix, not a nicety. Until 2026-09-08 the whole body above was one `if` and
+        // every non-ISF `CALL` fell out of it into an empty reply -- so `[ISF] shader video.mp4`
+        // swallowed `CALL 1-10 SEEK 100`, `LOOP 1` and `LENGTH`, returning `202 CALL OK` with an
+        // empty payload each time. A command that reports success and does nothing is the worst
+        // possible failure mode: the operator has no reason to look further.
+        //
+        // The OFX producer got this right from the start, which is what made it findable.
+        //
+        // Transition mode forwards to the DESTINATION, on the same reasoning the transition
+        // producers use for input: it is what will be on screen.
+        if (to_)
+            return to_->call(params);
+        if (source_)
+            return source_->call(params);
+
         std::promise<std::wstring> pr;
         pr.set_value(result);
         return pr.get_future();

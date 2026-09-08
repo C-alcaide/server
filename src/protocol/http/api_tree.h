@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "api_context.h"
 #include "api_status.h"
 #include "http_config.h"
 #include "state_hub.h"
@@ -49,11 +50,18 @@ std::string osc_type_tags(const core::monitor::vector_t& v);
 ///     invisible to a client trying to discover what it can set.
 ///
 /// `extent` decides whether the third source is included at all.
-json::object build_tree(const state_hub& hub, const http_config& cfg);
+/// `ctx` may be default-constructed; its `stage` is checked before use. It is here for one
+/// thing only -- a layer's PRODUCER parameters, which are per-instance and therefore in no
+/// static table and not fully in the published snapshot either. Everything else the tree
+/// needs comes from `hub` and the three field registries.
+json::object build_tree(const state_hub& hub, const http_config& cfg, const api_context& ctx = {});
 
 /// A sub-tree, addressed the way OSCQuery addresses one: `/channel/1/stage/layer/1/mixer`.
 /// Returns `unknown_path` when the path names nothing.
-api_reply tree_at(const state_hub& hub, const http_config& cfg, const std::string& path);
+api_reply tree_at(const state_hub& hub,
+                  const http_config& cfg,
+                  const std::string& path,
+                  const api_context& ctx = {});
 
 /// OSCQuery's `?HOST_INFO`. Also the capability probe: a client asks what this server can
 /// do rather than deriving it from a version number.
