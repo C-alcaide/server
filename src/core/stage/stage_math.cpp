@@ -235,4 +235,74 @@ screen_projection compute_frustum(const previz_camera& cam, const screen_meta& m
     return result;
 }
 
+std::optional<pick> compute_pick(const previz_camera&                     view,
+                                 double                                    aspect,
+                                 double                                    sx,
+                                 double                                    sy,
+                                 const std::map<std::string, screen_meta>& screens)
+{
+    // The camera's world basis, exactly as `compute_frustum` builds it for the ICVFX quad:
+    // Ry(yaw) * Rx(pitch) * Rz(roll), right = column 0, up = column 1, forward = -column 2.
+    const auto cam_rot = mat4::rotate_y(view.yaw) * mat4::rotate_x(view.pitch) * mat4::rotate_z(view.roll);
+
+    const double rgt[3] = {cam_rot.m[0], cam_rot.m[1], cam_rot.m[2]};
+    const double up[3]  = {cam_rot.m[4], cam_rot.m[5], cam_rot.m[6]};
+    const double fwd[3] = {-cam_rot.m[8], -cam_rot.m[9], -cam_rot.m[10]};
+
+    const double half_v = std::tan(view.fov * 0.5 * M_PI / 180.0);
+    const double xc     = (2.0 * sx - 1.0) * aspect * half_v;
+    // (1 - 2*sy), NOT (2*sy - 1): the renderer negates proj.m[5] so the FBO's bottom-up render
+    // arrives top-down, which puts sy = 0 at +Y in camera space. See the header.
+    const double yc = (1.0 - 2.0 * sy) * half_v;
+
+    double dir[3];
+    for (int i = 0; i < 3; ++i)
+        dir[i] = fwd[i] + rgt[i] * xc + up[i] * yc;
+
+    const double eye[3] = {view.x, view.y, view.z};
+
+    std::optional<pick> best;
+
+    for (const auto& [name, meta] : screens) {
+        // The screen's own basis, same Ry*Rx*Rz order `apply_screen_transform` and
+        // `compute_frustum` use. Normal is +Z un-rotated, i.e. column 2.
+        const auto rot = mat4::rotate_y(meta.rot_yaw) * mat4::rotate_x(meta.rot_pitch) *
+                         mat4::rotate_z(meta.rot_roll);
+
+        const double s_rgt[3] = {rot.m[0], rot.m[1], rot.m[2]};
+        const double s_up[3]  = {rot.m[4], rot.m[5], rot.m[6]};
+        const double s_nrm[3] = {rot.m[8], rot.m[9], rot.m[10]};
+
+        const double denom = dir[0] * s_nrm[0] + dir[1] * s_nrm[1] + dir[2] * s_nrm[2];
+        if (std::abs(denom) < 1e-9)
+            continue; // the ray runs along the plane
+
+        const double to_plane[3] = {meta.pos_x - eye[0], meta.pos_y - eye[1], meta.pos_z - eye[2]};
+        const double t = (to_plane[0] * s_nrm[0] + to_plane[1] * s_nrm[1] + to_plane[2] * s_nrm[2]) / denom;
+        if (t <= 0.0)
+            continue; // behind the eye
+
+        const double hit[3] = {eye[0] + dir[0] * t, eye[1] + dir[1] * t, eye[2] + dir[2] * t};
+        const double loc[3] = {hit[0] - meta.pos_x, hit[1] - meta.pos_y, hit[2] - meta.pos_z};
+
+        const double lx = loc[0] * s_rgt[0] + loc[1] * s_rgt[1] + loc[2] * s_rgt[2];
+        const double ly = loc[0] * s_up[0] + loc[1] * s_up[1] + loc[2] * s_up[2];
+
+        // The quad: origin is centre-BOTTOM, so x spans +/- width/2 and y spans 0..height.
+        if (std::abs(lx) > meta.width_m * 0.5 || ly < 0.0 || ly > meta.height_m)
+            continue;
+
+        // `dir` is not unit length -- it is forward plus the off-axis terms -- so `t` is in
+        // units of that vector, not metres. Scale it once, here, so `pick::distance` means what
+        // it says and comparing two hits compares real distances.
+        const double dir_len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+        const double dist    = t * dir_len;
+
+        if (!best || dist < best->distance)
+            best = pick{name, dist, lx, ly};
+    }
+
+    return best;
+}
+
 }} // namespace caspar::core

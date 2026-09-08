@@ -23,6 +23,9 @@
 
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <optional>
+#include <string>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -136,5 +139,48 @@ struct mat4
 ///   * eye in the screen PLANE (perpendicular distance ~0) → the total distance is substituted,
 ///     so the field of view stays finite.
 screen_projection compute_frustum(const previz_camera& cam, const screen_meta& meta);
+
+/// Which screen is under a point on the rendered viewport, and where on it.
+///
+/// `sx`/`sy` are normalised 0..1 in the DELIVERED IMAGE, top-left origin -- the same
+/// convention as `core::input_event`. `aspect` is the viewport's width/height.
+///
+/// `local_x`/`local_y` are in the screen's own axes, in metres, with the origin where the
+/// screen's own origin is: CENTRE-BOTTOM. So a hit dead centre reports `(0, height/2)`.
+struct pick
+{
+    std::string name;
+    double      distance = 0.0; //< metres from the eye along the ray
+    double      local_x  = 0.0;
+    double      local_y  = 0.0;
+};
+
+/// Ray-cast a viewport point against every screen and return the nearest hit.
+///
+/// PURE, like `compute_frustum` beside it, and for the same reason: it is the gate on every
+/// interactive gesture -- click-to-select, drag-a-screen, a grabbable gizmo -- and none of that
+/// is testable if reaching it needs a GL context. `78-client-test-plan.md` SS4 calls this the T1
+/// tier.
+///
+/// The ray is built the way the renderer builds its projection, which is not the textbook form:
+/// `previz_renderer` negates `proj.m[5]` to flip Y, because an FBO renders bottom-up and every
+/// consumer downstream expects top-left origin. So a point at `sy = 0` -- the TOP of the
+/// delivered image -- is +Y in camera space, and the mapping is `yc = (1 - 2*sy) * half_v`
+/// rather than `(2*sy - 1)`. Getting that backwards picks the mirror-image screen, which looks
+/// plausible on a symmetric stage and is why the self-test uses an asymmetric one.
+///
+/// The direction is then `forward + right * xc + up * yc`, the identical construction
+/// `compute_frustum` uses for the ICVFX mask quad -- so the two cannot disagree about which way
+/// the camera is looking.
+///
+/// A CURVED SCREEN IS TESTED AGAINST ITS CHORD PLANE, not its surface. That is the same
+/// approximation `casparcg-360-client`'s `frustum_check.py` documents for the same reason, and
+/// it means a pick near the edge of a deeply curved panel can be off by the sagitta. Named
+/// here rather than discovered later.
+std::optional<pick> compute_pick(const previz_camera&                      view,
+                                 double                                     aspect,
+                                 double                                     sx,
+                                 double                                     sy,
+                                 const std::map<std::string, screen_meta>& screens);
 
 }} // namespace caspar::core

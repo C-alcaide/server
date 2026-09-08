@@ -18,6 +18,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <string>
 
 namespace caspar { namespace core { namespace fields {
@@ -38,6 +39,7 @@ vec3 operator+(const vec3& a, const vec3& b) { return {a.x + b.x, a.y + b.y, a.z
 vec3 operator-(const vec3& a, const vec3& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 vec3 operator*(const vec3& a, double s) { return {a.x * s, a.y * s, a.z * s}; }
 double dot(const vec3& a, const vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+double len(const vec3& a) { return std::sqrt(dot(a, a)); }
 
 /// The camera's world basis, written as CLOSED-FORM TRIGONOMETRY rather than as a product of
 /// `mat4` rotations.
@@ -294,7 +296,195 @@ stage_math_report stage_math_self_test()
         }
     }
 
-    // ---- 11. A camera looking AWAY collapses the quad to zero area ----------------------
+    // ---- 11. compute_pick: which screen is under a point ------------------------------
+    //
+    // The gate on every interactive gesture. Deliberately an ASYMMETRIC stage: two screens at
+    // different distances, offset to one side, so a mirrored ray or a swapped axis lands
+    // somewhere provably wrong instead of on a plausible neighbour.
+    {
+        std::map<std::string, screen_meta> stage;
+        {
+            auto near_s   = flat(); // 2 x 2 m, centre (0, 1, 0), faces +Z
+            near_s.name   = "near";
+            near_s.pos_x  = -1.5f;  // offset LEFT
+            stage["near"] = near_s;
+
+            auto far_s     = flat();
+            far_s.name     = "far";
+            // 8 m wide, and that width is load-bearing rather than arbitrary: the ray through
+            // the near screen's centre reaches x = -3 by the time it gets to z = -6, so `far`
+            // must span past that or 11c's "nearer wins" has only ONE hit to choose from and
+            // cannot fail. It was 4 m first, and the nearest-wins mutation went undetected.
+            far_s.width_m  = 8.0f;
+            far_s.height_m = 3.0f;
+            far_s.pos_z    = -6.0f; // further from the camera
+            stage["far"]   = far_s;
+        }
+
+        // Eye at +Z looking down -Z, so both screens are in front.
+        const previz_camera eye{0.0f, 1.0f, 6.0f, 0, 0, 0, 60.0f, 0.1f, 100.0f};
+        const double        aspect = 16.0 / 9.0;
+
+        // Project a world point to (sx, sy) INDEPENDENTLY of compute_pick -- the closed-form
+        // basis, then the flipped-Y mapping inverted. If this and compute_pick disagree, one of
+        // them has the flip backwards, which is the failure a symmetric fixture cannot see.
+        auto project = [&](double wx, double wy, double wz, double& sx, double& sy) {
+            vec3 r, u, f;
+            camera_basis(eye, r, u, f);
+            const vec3   d      = vec3{wx, wy, wz} - vec3{eye.x, eye.y, eye.z};
+            const double along  = dot(d, f);
+            const double half_v = std::tan(rad(eye.fov) * 0.5);
+            sx                  = (dot(d, r) / along / (aspect * half_v) + 1.0) * 0.5;
+            sy                  = (1.0 - dot(d, u) / along / half_v) * 0.5;
+        };
+
+        // 11a. the centre of the near screen picks it, at its own origin offset
+        {
+            double sx, sy;
+            project(-1.5, 1.0, 0.0, sx, sy);
+            const auto p = compute_pick(eye, aspect, sx, sy, stage);
+            ++rep.checks;
+            if (!p || p->name != "near")
+                rep.failures.emplace_back("pick/near: expected 'near', got " +
+                                          std::string(p ? p->name : "nothing"));
+            if (p) {
+                check("pick/near/local_x", p->local_x, 0.0, 1e-3);
+                check("pick/near/local_y", p->local_y, 1.0, 1e-3); // centre = height/2
+                // The EUCLIDEAN distance from eye to that point, derived rather than typed --
+                // the near screen is offset 1.5 m to the left of an eye 6 m away, so the ray is
+                // longer than the perpendicular. Writing 6.0 here was the first version of this
+                // check and the self-test caught it.
+                check("pick/near/distance", p->distance, len(vec3{-1.5, 1.0, 0.0} - vec3{eye.x, eye.y, eye.z}),
+                      1e-3);
+            }
+        }
+
+        // 11b. a point clear of the near screen picks the far one
+        {
+            double sx, sy;
+            project(1.5, 1.5, -6.0, sx, sy);
+            const auto p = compute_pick(eye, aspect, sx, sy, stage);
+            ++rep.checks;
+            if (!p || p->name != "far")
+                rep.failures.emplace_back("pick/far: expected 'far', got " +
+                                          std::string(p ? p->name : "nothing"));
+            if (p)
+                check("pick/far/distance", p->distance,
+                      len(vec3{1.5, 1.5, -6.0} - vec3{eye.x, eye.y, eye.z}), 1e-3);
+        }
+
+        // 11c. NEARER WINS where they overlap -- the ray through the near screen carries on and
+        // does hit the far one's surface as well, so this genuinely has two candidates.
+        {
+            double sx, sy;
+            project(-1.5, 1.0, 0.0, sx, sy);
+
+            // Prove the overlap rather than assume it: the same ray must hit `far` when `near`
+            // is not there to occlude it. Without this, a fixture change that stops the ray
+            // reaching `far` would silently turn the check below into one that cannot fail.
+            std::map<std::string, screen_meta> far_only;
+            far_only["far"] = stage.at("far");
+            ++rep.checks;
+            if (!compute_pick(eye, aspect, sx, sy, far_only))
+                rep.failures.emplace_back(
+                    "pick/nearest/setup: the ray does not reach the far screen, so the "
+                    "nearest-wins check below has only one candidate and cannot fail");
+
+            const auto p = compute_pick(eye, aspect, sx, sy, stage);
+            ++rep.checks;
+            if (!p || p->name != "near")
+                rep.failures.emplace_back("pick/nearest: the farther screen won");
+        }
+
+        // 11d. empty space hits nothing, rather than the nearest anyway
+        {
+            const auto p = compute_pick(eye, aspect, 0.02, 0.98, stage);
+            ++rep.checks;
+            if (p)
+                rep.failures.emplace_back("pick/miss: a corner of empty space picked " + p->name);
+        }
+
+        // 11e. a screen BEHIND the eye is never picked, however well the ray lines up
+        {
+            std::map<std::string, screen_meta> behind;
+            auto                               b = flat();
+            b.name                                = "behind";
+            b.pos_z                               = 12.0f;
+            behind["behind"]                      = b;
+            ++rep.checks;
+            if (compute_pick(eye, aspect, 0.5, 0.5, behind))
+                rep.failures.emplace_back("pick/behind: picked a screen behind the camera");
+        }
+
+        // 11f. THE FLIP. The top of the image must hit ABOVE centre on the screen. This is the
+        // check that fails if yc is written the textbook way, and a symmetric stage would not
+        // notice because the mirrored point lands on the same screen.
+        //
+        // The step is DERIVED, not chosen: the near screen is 2 m tall at ~6.2 m through a 60
+        // degree viewport, so it spans only ~0.29 of the image height and ~0.14 above centre.
+        // The first version stepped 0.15 and landed just off the top edge -- reported as "left
+        // the screen", which reads exactly like a broken pick. A quarter of the half-extent is
+        // comfortably inside whatever the numbers are.
+        {
+            double cx, cy, tx, ty;
+            project(-1.5, 1.0, 0.0, cx, cy);
+            project(-1.5, 2.0, 0.0, tx, ty); // the screen's top edge, projected
+            const double step_y = std::abs(cy - ty) * 0.25;
+
+            const auto top = compute_pick(eye, aspect, cx, cy - step_y, stage);
+            ++rep.checks;
+            if (!top || top->name != "near") {
+                rep.failures.emplace_back("pick/flip: a point above centre left the screen");
+            } else if (!(top->local_y > 1.0)) {
+                char buf[176];
+                std::snprintf(buf, sizeof(buf),
+                              "pick/flip: sy above centre gave local_y %.4f, expected > 1.0 "
+                              "(the renderer negates proj.m[5], so the mapping is 1-2*sy)",
+                              top->local_y);
+                rep.failures.emplace_back(buf);
+            }
+        }
+
+        // 11g. and left of centre must hit LEFT on the screen
+        {
+            double cx, cy, lx2, ly2;
+            project(-1.5, 1.0, 0.0, cx, cy);
+            project(-2.5, 1.0, 0.0, lx2, ly2); // the screen's left edge, projected
+            const double step_x = std::abs(cx - lx2) * 0.25;
+
+            const auto left = compute_pick(eye, aspect, cx - step_x, cy, stage);
+            ++rep.checks;
+            if (!left || left->name != "near")
+                rep.failures.emplace_back("pick/left: a point left of centre left the screen");
+            else if (!(left->local_x < 0.0))
+                rep.failures.emplace_back("pick/left: sx left of centre gave a positive local_x");
+        }
+
+        // 11h. a rotated screen is picked through its own axes
+        {
+            std::map<std::string, screen_meta> turned;
+            auto                               t = flat();
+            t.name                                = "turned";
+            t.rot_yaw                             = 35.0f;
+            turned["turned"]                      = t;
+            const auto p = compute_pick(eye, aspect, 0.5, 0.5, turned);
+            ++rep.checks;
+            if (!p || p->name != "turned")
+                rep.failures.emplace_back("pick/rotated: a yawed screen facing the camera was missed");
+            else
+                check("pick/rotated/local_y", p->local_y, 1.0, 2e-2);
+        }
+
+        // 11i. an empty stage picks nothing rather than crashing
+        {
+            const std::map<std::string, screen_meta> none;
+            ++rep.checks;
+            if (compute_pick(eye, aspect, 0.5, 0.5, none))
+                rep.failures.emplace_back("pick/empty: picked something on an empty stage");
+        }
+    }
+
+    // ---- 12. A camera looking AWAY collapses the quad to zero area ----------------------
     {
         auto s         = flat();
         s.icvfx_enable = true;
