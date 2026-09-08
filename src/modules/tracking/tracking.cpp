@@ -73,7 +73,27 @@ static void load_config_receivers()
     try {
         auto& pt = caspar::env::properties();
 
-        for (auto& child : pt.get_child(L"configuration.tracking", boost::property_tree::wptree{})) {
+        // `get_child_optional`, NOT `get_child(path, wptree{})`.
+        //
+        // The two-argument form returns a REFERENCE to its default argument, and that default
+        // was a temporary -- destroyed at the end of the full expression, before the loop body
+        // ever ran. So on any server whose config has no `<tracking>` block, this iterated a
+        // dangling reference.
+        //
+        // It worked on Windows for as long as it existed, which is what undefined behaviour
+        // looks like when you are lucky: MSVC's freed heap happened to still read as an empty
+        // tree. Under GCC and libstdc++ it is an immediate SIGSEGV in `load_config_receivers`,
+        // and it took the server down before it could open a port -- so the first Linux build
+        // could not start, and the log's last line was the PortAudio module's, three modules
+        // earlier, because tracking logs nothing before this point. I attributed the crash to
+        // PortAudio on exactly that evidence and was wrong; a stack trace took ten seconds.
+        //
+        // The pattern appears nowhere else in the tree -- checked across every `.cpp` and `.h`.
+        const auto tracking_node = pt.get_child_optional(L"configuration.tracking");
+        if (!tracking_node)
+            return; // no <tracking> block; nothing to start
+
+        for (auto& child : *tracking_node) {
             if (!boost::iequals(std::wstring(child.first), L"receiver"))
                 continue;
 

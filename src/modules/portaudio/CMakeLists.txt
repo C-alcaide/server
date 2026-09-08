@@ -60,6 +60,28 @@ endif()
 
 FetchContent_MakeAvailable(portaudio)
 
+if(NOT WIN32)
+    # Neutralise the global -Werror for PortAudio's own sources, exactly as `openfx_host` does
+    # in Bootstrap_Linux -- same reason, same `-w`.
+    #
+    # `Bootstrap_Linux.cmake` sets `-Werror` globally, and it reaches FetchContent'd targets.
+    # PortAudio's vendored ALSA backend does not survive it on GCC 13:
+    #
+    #   pa_linux_alsa.c:1304: error: '%s' directive output may be truncated writing up to
+    #                                49 bytes into a region of size between 46 and 50
+    #                                [-Werror=format-truncation=]
+    #
+    # That is third-party BSD code with a genuinely harmless `snprintf`, and it is the last
+    # thing between the fork and a Linux build. Scoped to these targets so the fork's own code
+    # keeps every strict flag.
+    foreach(_pa_target portaudio portaudio_static)
+        if(TARGET ${_pa_target})
+            target_compile_options(${_pa_target} PRIVATE -w)
+            set_target_properties(${_pa_target} PROPERTIES FOLDER external)
+        endif()
+    endforeach()
+endif()
+
 if(WIN32 AND TARGET portaudio_static)
     # The global CMAKE_CXX_FLAGS force-includes common/compiler/vs/disable_silly_warnings.h
     # by a path relative to the source root, so an out-of-tree target cannot resolve it.
