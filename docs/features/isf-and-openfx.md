@@ -7,7 +7,8 @@
 > **Guide:** [`../guides/ISF_USER_AND_SHADER_GUIDE.md`](../guides/ISF_USER_AND_SHADER_GUIDE.md), [`../guides/OPENFX_USER_AND_PLUGIN_GUIDE.md`](../guides/OPENFX_USER_AND_PLUGIN_GUIDE.md)
 > **Coverage:** **none**; `cli.py producer-params` — an ISF shader's own INPUTS as addressable control-API
 > parameters: described in the tree, written through both facades, and gated on the
-> PICTURE at 1 LSB (§Parameters)
+> PICTURE at 1 LSB (§Parameters); `cli.py isf-audio` -- the two ISF audio input textures,
+> two probe shaders reading two bins against two tones, also from the picture
 
 Two plugin hosts. **ISF** runs Interactive Shader Format shaders as producers or effects, so a
 GLSL shader from the ISF ecosystem becomes a layer. **OpenFX** hosts OFX plugins — the standard

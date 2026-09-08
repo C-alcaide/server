@@ -133,8 +133,57 @@ void main()
 | `point2D` | `vec2` | `DEFAULT`/`MIN`/`MAX` are 2-arrays. |
 | `color` | `vec4` | `DEFAULT`/`MIN`/`MAX` are 4-arrays (RGBA). |
 | `image` | `sampler2D` | A source image (see roles below). |
+| `audio` | `sampler2D` | The channel's own waveform. `MAX` caps the sample count (§2.4). |
+| `audioFFT` | `sampler2D` | The channel's own spectrum. `MAX` caps the bin count (§2.4). |
 
-> Not yet supported: `audio` / `audioFFT` inputs.
+### 2.4 `audio` and `audioFFT` — the channel's own sound as a texture
+
+Declare either as an input and it is filled by **the channel the shader is playing on**, every
+frame. Nothing needs configuring and nothing needs wiring: they are not source images, so they
+take no producer on the `PLAY` line.
+
+```
+/*{
+    "ISFVSN": "2",
+    "INPUTS": [ { "NAME": "fftImage", "TYPE": "audioFFT", "MAX": 64 } ]
+}*/
+
+void main()
+{
+    float x = isf_FragNormCoord.x;
+    float v = IMG_NORM_PIXEL(fftImage, vec2(x, 0.5)).r;
+    gl_FragColor = vec4(vec3(step(1.0 - isf_FragNormCoord.y, v)), 1.0);
+}
+```
+
+That is a spectrum bar display in four lines. `MAX` is a **cap on the count**, not a value
+limit: 64 asks for the spectrum reduced to 64 bins, and omitting it gives the analysis's own
+512. For `audio` it caps the sample count, out of a 1024-sample window.
+
+| | |
+| :--- | :--- |
+| **layout** | `<bins or samples>` wide, **1** row. Sample at `vec2(x, 0.5)` |
+| **`audioFFT` values** | 0..1, where about 1 is a full-scale tone in that bin. Each returned bin is the PEAK of the group it stands for, so a tone reads the same magnitude whatever bin count you ask for |
+| **`audio` values** | offset-encoded: a sample of −1 is 0.0, silence is **0.5**, +1 is 1.0. Subtract 0.5 and double for the signed value |
+| **all four channels** | carry the same value, so `.r`, `.g`, `.b` and `.a` are interchangeable |
+| **before any audio** | no texture is bound at all, rather than a zero-filled one — a zero texture is indistinguishable from silence, and a spectrum shader would draw a flat floor and look correct |
+
+**Four limits, each stated because a shader author will otherwise meet them by surprise:**
+
+* **8-bit magnitude.** The texture is RGBA8, so a value has 256 levels and about 48 dB of
+  usable range. Ample for a bar or a pulse; **not** enough to pull a quiet partial out of a loud
+  mix. The ISF reference implementation may use a float texture — there is no copy of the Vidvox
+  specification in this tree to check the pixel format against, so this is our choice and is
+  named as ours.
+* **One row, a mono downmix.** ISF's height is the channel count; a shader wanting L and R
+  separately gets the mix of them.
+* **One frame of lag.** The audio mixer runs after the stage has pulled its producers, so a
+  shader reads the previous tick's analysis. 20 ms at 50p, under the ~21 ms analysis window.
+* **The channel's OWN audio**, post master volume and post clip — so a shader on a faded-out
+  channel sees silence, which is what an operator means by "the audio".
+
+The spectrum's own shape is described in `../features/reactive.md` §2.3: a 1024-sample window
+at 48 kHz, 46.9 Hz per native bin, and the reasoning for both.
 
 ### 2.3 Roles (conventions)
 
@@ -245,7 +294,7 @@ void main() {
 
 ## 3. Current limitations
 
-- `audio` / `audioFFT` inputs are not implemented.
+- ~~`audio` / `audioFFT` inputs are not implemented.~~ **Implemented 2026-09-08** — §2.4, with four stated limits. Measured by `cli.py isf-audio` on both mixers.
 - On the Vulkan mixer, rendering uses a CPU read-back (not zero-copy), and GPU-texture-backed
   sources cannot be filtered (use a CPU source).
 - 8-bit output; float precision is available only for intermediate `FLOAT` pass buffers.

@@ -299,9 +299,17 @@ cannot rise until the thread overruns, so the late count is the discriminator.
 3. **MIDI is Windows-only.** ALSA (`snd_rawmidi_open`) is the Linux equivalent and is not written.
 4. **DMX / sACN input is not a source.** The fork sends Art-Net and sACN and does not receive
    them. Same asymmetry OSC had until 2026-09-08, and the same fix would apply.
-5. **ISF `audio` and `audioFFT` input textures are still unimplemented.** The spectrum now exists
-   in `core`, so the remaining work is a texture upload per frame in the ISF producer. It is the
-   single most-used ISF feature in VJ shaders and it is the largest remaining item here.
+5. ~~**ISF `audio` and `audioFFT` input textures are still unimplemented.**~~ **CLOSED
+   2026-09-08.** `ISF_USER_AND_SHADER_GUIDE.md` §2.4 owns them; `cli.py isf-audio` measures them
+   on both mixers, from the picture. Four limits remain and are stated there: 8-bit magnitude,
+   one row (a mono downmix), one frame of lag, and the pixel format being our choice rather than
+   the specification's.
+
+   Closing it also **corrected a defect in `audio_analysis::spectrum`** that nothing else could
+   see: it averaged each group of bins where the bands beside it sum, so a tone was divided by
+   the group size and read an eighth of its magnitude at 64 bins. The reduction now takes each
+   group's peak. Only a check that compared the SAME tone at two bin counts could catch that, and
+   the self-test now does.
 6. **One binding per target, and no way to combine two sources.** A parameter driven by "audio
    band 0 *times* an LFO" needs either a second transform stage or an expression language, and
    §1.2 declines both for now.

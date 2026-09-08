@@ -1,6 +1,38 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: ISF `audio` and `audioFFT` input textures
+
+An ISF shader can declare `audio` or `audioFFT` as an input and it is filled by the channel the
+shader is playing on, every frame. Nothing to configure and nothing to wire — they are not
+source images, so they take no producer on the `PLAY` line. Both were listed as unimplemented in
+`ISF_USER_AND_SHADER_GUIDE.md`, which now documents them in §2.4; `audioFFT` is what every
+spectrum-bar and kick-pulse shader in the wild reads.
+
+`core::audio_analysis` grows `spectrum(bins)` and `waveform(samples)` for them — separate
+accessors rather than fields of `audio_levels`, which is copied on every read.
+
+**A defect fixed in the process, and only one kind of check could have found it.**
+`spectrum()`'s first implementation averaged each group of bins, while the frequency BANDS
+beside it sum — so a bin was scaled differently from the band containing it, and a pure tone
+(which occupies one or two bins of a group) was divided by the group size: at 64 bins a
+full-scale tone read an eighth of its magnitude, which at 8-bit texture precision rounded to 1
+code value out of 255. The reduction now takes each group's **peak**, which is invariant under
+the group size; the bands still sum, because a band's total energy is a different quantity from
+a narrow group standing in for a peak. The self-test gained the check that distinguishes them:
+the same tone's magnitude, at two different bin counts.
+
+**Four limits, stated in the guide rather than left to be met by surprise:** 8-bit magnitude
+(RGBA8, ~48 dB — ample for a bar, not enough to pull a quiet partial out of a loud mix); one
+row, a mono downmix; one frame of lag, because the audio mixer runs after the stage pulls its
+producers; and the pixel format being **our** choice — there is no copy of the Vidvox
+specification in this tree to check it against, and the reference implementation may use a float
+texture.
+
+Measured by `isf-audio`, 9/9 on both mixers, from the picture. Mutation-verified against the
+failure its fixture is shaped for: filling every texel from one bin fails all three of its cross
+checks, where a single probe would have passed.
+
 ### Added: reactive parameters — a value driven by a live source, evaluated in the tick
 
 Any addressable parameter can now be driven continuously by a named live source through a
