@@ -32,6 +32,14 @@ enum class api_code
     field_out_of_range,       ///< outside min/max, and the bounding rule did not absorb it
     field_missing,            ///< a required value was absent
     field_conflict,           ///< a compare-and-set whose expected value did not match
+    field_bound,              ///< the target is owned by a binding; UNBIND it first
+                              ///<
+                              ///< Distinct from `not_writable`, and the difference is the
+                              ///< whole point: `not_writable` means the field is derived and
+                              ///< never settable, while `field_bound` means it is settable
+                              ///< and something else currently owns it -- so a control
+                              ///< surface can offer `UNBIND` rather than greying the slider
+                              ///< out forever.
     channel_not_found,        ///< the address resolves to no channel
     layer_not_found,          ///< ...or to no layer
     producer_not_ready,       ///< a valid write that cannot be honoured yet

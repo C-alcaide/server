@@ -26,6 +26,8 @@
 #include "../monitor/monitor.h"
 #include "producer_params.h"
 
+#include <core/binding/binding.h>
+
 #include <common/executor.h>
 #include <common/future.h>
 #include <common/memory.h>
@@ -129,6 +131,62 @@ class stage_base
         return make_ready_future(false);
     }
 
+    // -- Bindings: a target driven by a live source, evaluated in the tick --------------
+    //
+    // Every one of these runs on the stage executor, because that is where the transform and
+    // the producers are and because the API's write path is too slow for anything continuous
+    // (a single serial thread blocking on a stage round trip per write). See
+    // `core/binding/binding.h`.
+
+    /// Create or replace a source. `SOURCE ADD`.
+    virtual std::future<void> add_source(const std::string& name, std::shared_ptr<binding::source> src)
+    {
+        return make_ready_future();
+    }
+
+    /// Remove one. Bindings that referenced it go `broken` rather than disappearing, so an
+    /// operator who removes the wrong source sees why their parameter stopped moving.
+    virtual std::future<bool> remove_source(const std::string& name) { return make_ready_future(false); }
+
+    /// Every source, as `{name, kind, description, channels}`. For `SOURCE LIST` and the tree.
+    struct source_info
+    {
+        std::string              name;
+        std::string              kind;
+        std::string              description;
+        std::vector<std::string> channels;
+    };
+    virtual std::future<std::vector<source_info>> list_sources()
+    {
+        return make_ready_future(std::vector<source_info>());
+    }
+
+    /// Create a binding. Returns its id, or 0 if the target or the source does not resolve.
+    ///
+    /// Resolved ONCE, here, rather than on every tick: a target becomes a descriptor plus a
+    /// component index and a source becomes a pointer, so the per-tick cost is arithmetic and
+    /// a write. It also means a bad target is refused at `BIND` time with a reason instead of
+    /// being a binding that runs forever and does nothing.
+    virtual std::future<int> add_binding(const binding::binding_def& def) { return make_ready_future(0); }
+
+    /// Remove the binding on a target, or every binding if `target` is empty. Returns how many.
+    virtual std::future<int> remove_bindings(int layer, const std::string& target)
+    {
+        return make_ready_future(0);
+    }
+
+    virtual std::future<std::vector<binding::binding_def>> list_bindings()
+    {
+        return make_ready_future(std::vector<binding::binding_def>());
+    }
+
+    /// Is this exact target owned by a binding? Synchronous, for a write path that has to
+    /// REFUSE rather than be silently overwritten one frame later.
+    virtual bool is_bound(int layer, const std::string& target) const { return false; }
+
+    /// Hand an input event to every source that wants one. Called from `video_channel::input`.
+    virtual void feed_sources(const input_event&) {}
+
     /// Deliver to ONE layer, with no hit-test and no rectangle check.
     ///
     /// For a caller that already knows its target -- `INPUT 1-10 ...`, or a client driving a
@@ -210,6 +268,16 @@ class stage final : public stage_base
 
     std::future<std::vector<param_snapshot>> describe_params(int layer) override;
     std::future<bool> set_param(int layer, const std::string& name, const monitor::vector_t& value) override;
+
+    std::future<void>                    add_source(const std::string& name,
+                                                    std::shared_ptr<binding::source> src) override;
+    std::future<bool>                    remove_source(const std::string& name) override;
+    std::future<std::vector<source_info>> list_sources() override;
+    std::future<int>                     add_binding(const binding::binding_def& def) override;
+    std::future<int>                     remove_bindings(int layer, const std::string& target) override;
+    std::future<std::vector<binding::binding_def>> list_bindings() override;
+    bool                                 is_bound(int layer, const std::string& target) const override;
+    void                                 feed_sources(const input_event& event) override;
 
     // Keyframe management
     std::future<void>                  set_keyframe_data(int layer, std::shared_ptr<void> data) override;

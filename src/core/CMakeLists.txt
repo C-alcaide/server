@@ -58,6 +58,9 @@ set(SOURCES
 		producer/cg_proxy.cpp
 		producer/frame_producer.cpp
 		producer/frame_producer_registry.cpp
+		binding/binding.cpp
+		binding/binding_math.cpp
+
 		producer/layer.cpp
 		producer/producer_params.cpp
 		producer/stage.cpp
@@ -105,6 +108,9 @@ set(HEADERS
 
 		producer/cg_proxy.h
 		producer/frame_producer.h
+		binding/binding.h
+		binding/binding_math.h
+
 		producer/producer_params.h
 		producer/frame_producer_registry.h
 		producer/layer.h

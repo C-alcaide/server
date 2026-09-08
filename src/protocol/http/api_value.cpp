@@ -525,6 +525,14 @@ api_reply write_param_value(const api_context& ctx,
     if ((static_cast<uint8_t>(p->access) & static_cast<uint8_t>(core::fields::access_t::write)) == 0)
         return api_reply::fail(api_code::not_writable, "parameter is read-only: " + name);
 
+    if (stage->is_bound(layer, "producer/" + name))
+        return api_reply::fail(api_code::field_bound,
+                               "producer/" + name + " is driven by a binding on this layer. A "
+                               "write would be applied and then overwritten on the next tick, "
+                               "so it is refused instead -- `UNBIND " +
+                                   std::to_string(channel) + "-" + std::to_string(layer) +
+                                   " producer/" + name + "` hands the parameter back");
+
     // The producer's descriptor stands in for a `field_meta`. It carries the same four things
     // the validation needs -- type, arity, range and bounding -- so the JSON conversion and the
     // range check are the same two steps a mixer field goes through.
@@ -646,6 +654,25 @@ api_reply write_value(const api_context& ctx,
     const auto stage = ctx.stage(target.channel);
     if (!stage)
         return api_reply::fail(api_code::channel_not_found, "no channel " + std::to_string(target.channel));
+
+    // A BOUND FIELD IS OWNED BY ITS BINDING, and a write to it is refused rather than applied
+    // and silently overwritten on the next tick.
+    //
+    // This is the `icvfx_auto` lesson as a rule. `PREVIZ AUTOPROJECTION` used to write the ICVFX
+    // block on every recompute with no ownership guard, so a hand-set `MIXER PROJECTION_ICVFX`
+    // survived exactly until the next camera move -- and with a tracker bound, that is every
+    // sample. Nobody had chosen that precedence; it was simply not thought about. Here it is
+    // chosen, and `field_bound` is a code of its own rather than `not_writable` so a control
+    // surface can offer UNBIND instead of greying the slider out forever.
+    if (stage->is_bound(target.layer, target.field->path))
+        return api_reply::fail(api_code::field_bound,
+                               std::string(target.field->path) +
+                                   " is driven by a binding on this layer. A write would be "
+                                   "applied and then overwritten on the next tick, so it is "
+                                   "refused instead -- `UNBIND " +
+                                   std::to_string(target.channel) + "-" +
+                                   std::to_string(target.layer) + " " + target.field->path +
+                                   "` hands the field back");
 
     // Everything the closure has to report back. It runs on the STAGE executor, so it
     // cannot return a status -- it fills this in and the caller reads it after the future

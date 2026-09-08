@@ -70,6 +70,18 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     std::map<int, double>                               kf_media_time_override_; // from CALL SEEK
     std::map<int, uint32_t>                             kf_last_frame_number_;   // for override clearing
 
+    // -- Bindings and sources ------------------------------------------------------------
+    //
+    // Mutated and evaluated ON THE STAGE EXECUTOR. `binding_lock_` guards ONLY the two reads
+    // that come from another thread -- `is_bound`, which a write path calls synchronously
+    // because it has to refuse rather than be overwritten a frame later, and `feed_sources`,
+    // which arrives on the consumer's render thread. Everything else is executor-only, like
+    // the keyframe state above.
+    std::map<std::string, std::shared_ptr<binding::source>> sources_;
+    std::vector<binding::binding_def>                       bindings_;
+    int                                                     next_binding_id_ = 1;
+    mutable std::mutex                                      binding_lock_;
+
     // -- Input routing (stage executor only, no mutex) --
     //
     // `input_capture_` latches the layer a drag belongs to. Once a button goes down on a layer,
@@ -276,6 +288,31 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             try {
                 for (auto& t : tweens_)
                     t.second.tick(1);
+
+                // -- Bindings, BEFORE the keyframes and before any layer is pulled ----------
+                //
+                // Before the keyframes deliberately. Both write the same transform, and a
+                // parameter cannot honestly be driven by two things at once -- so the order has
+                // to be chosen rather than left to whichever runs first. Keyframes win: a
+                // timeline is an explicit authored intent for a specific frame, and a binding is
+                // a standing rule. Running bindings first means a keyframed field overwrites the
+                // binding on that tick, which is the precedence an operator would predict.
+                //
+                // Before the layers are pulled, because the value has to be in the transform
+                // when compositing reads it. Applied after, it would land one frame late -- and
+                // for an audio-reactive parameter, a frame of lag is the artefact the whole
+                // feature exists to avoid.
+                {
+                    double fps_for_dt = 25.0;
+                    if (format_desc_.framerate.numerator() > 0 && format_desc_.framerate.denominator() > 0)
+                        fps_for_dt = static_cast<double>(format_desc_.framerate.numerator()) /
+                                     format_desc_.framerate.denominator();
+                    // The NOMINAL tick, not a measured wall-clock delta. A source driven by
+                    // real elapsed time would run faster during a dropped frame and produce a
+                    // waveform that is not reproducible -- and every gate on this feature reads
+                    // the frame clock, per the harness's own rule.
+                    evaluate_bindings(1000.0 / (fps_for_dt > 0.0 ? fps_for_dt : 25.0));
+                }
 
                   // ── Keyframe evaluation ────────────────────────────────────
                   // Compute media time per layer and interpolate armed
@@ -556,6 +593,51 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     state["layer"][p.first] = p.second.state();
                     publish_layer_transform(state, p.first);
                 }
+
+                // -- Bindings and sources, published every tick ----------------------------
+                //
+                // Published UNCONDITIONALLY when they exist, including `broken` and `value`,
+                // because there is no descriptor default for these to fall back to: a binding
+                // is not a field with a known default, and an absent key would be read as "no
+                // such binding" rather than "at its default". That is the rule the previz stage
+                // publication learned the hard way.
+                //
+                // `value` is the last value WRITTEN, after the transform and the lag -- not the
+                // source's raw sample. It is what a client needs to draw the parameter moving,
+                // and it is the number a battery can fit a waveform to.
+                for (const auto& b : bindings_) {
+                    auto node = state["binding"][std::to_string(b.id)];
+                    node["layer"]   = b.layer;
+                    node["target"]  = b.target;
+                    node["component"] = static_cast<int>(b.component);
+                    node["source"]  = b.source_name + "/" + b.source_channel;
+                    node["min"]     = b.tf.out_lo;
+                    node["max"]     = b.tf.out_hi;
+                    node["in_min"]  = b.tf.in_lo;
+                    node["in_max"]  = b.tf.in_hi;
+                    node["gain"]    = b.tf.gain;
+                    node["lag"]     = b.tf.lag_ms;
+                    node["curve"]   = std::string(binding::curve_name(b.tf.curve));
+                    node["value"]   = b.held;
+                    node["broken"]  = b.broken;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(binding_lock_);
+                    for (const auto& kv : sources_) {
+                        auto node = state["source"][kv.first];
+                        node["kind"] = kv.second->kind();
+                        // Every channel's CURRENT value, so a client can show a source moving
+                        // before anything is bound to it -- which is how an operator checks a
+                        // MIDI knob or an audio band is arriving at all.
+                        for (const auto& ch : kv.second->channels()) {
+                            double v = 0.0;
+                            if (kv.second->value(ch, v))
+                                node[ch] = v;
+                        }
+                    }
+                }
+
                 state_ = std::move(state);
             } catch (...) {
                 // Per-layer faults are handled inside the loop above; anything
@@ -733,6 +815,249 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     std::future<void> clear_transforms()
     {
         return executor_.begin_invoke([=, this] { tweens_.clear(); });
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Bindings
+    // ---------------------------------------------------------------------------------
+
+    /// Advance every source and apply every binding. Called at the TOP of the tick.
+    ///
+    /// At the top rather than the bottom, because the value has to be in the transform before
+    /// the layers are pulled and composited -- applied afterwards it would land one frame late,
+    /// which for an audio-reactive parameter is exactly the artefact the feature exists to
+    /// avoid.
+    void evaluate_bindings(double dt_ms)
+    {
+        {
+            std::lock_guard<std::mutex> lock(binding_lock_);
+            for (auto& kv : sources_)
+                kv.second->tick(dt_ms);
+        }
+
+        if (bindings_.empty())
+            return;
+
+        for (auto& b : bindings_) {
+            double raw = 0.0;
+            {
+                std::lock_guard<std::mutex> lock(binding_lock_);
+                auto it = sources_.find(b.source_name);
+                // BROKEN rather than silently 0. A source removed under a live binding, or a
+                // channel name that no longer exists, must be visible in the published state --
+                // a binding that runs forever writing zero is the 202-and-no-change failure
+                // this registry exists to prevent, and it would be indistinguishable from a
+                // source legitimately sitting at zero.
+                if (it == sources_.end() || !it->second->value(b.source_channel, raw)) {
+                    b.broken = true;
+                    continue;
+                }
+            }
+            b.broken = false;
+
+            const double target = binding::map_value(b.tf, raw);
+
+            // The lag is primed on the FIRST evaluation rather than smoothed from zero. Without
+            // this, every binding with a lag ramps up from 0 on its first frame, which for an
+            // opacity binding is a visible flash and for a position binding is a jump.
+            if (!b.primed) {
+                b.held   = target;
+                b.primed = true;
+            } else {
+                b.held = binding::apply_lag(target, b.held, b.tf.lag_ms, dt_ms);
+            }
+
+            apply_binding(b, b.held);
+        }
+    }
+
+    /// Write one binding's value to its target.
+    void apply_binding(const binding::binding_def& b, double value)
+    {
+        // A producer parameter. The target names the parameter; the producer's own setter takes
+        // it, so a bound ISF input goes through exactly the path `PUT` and `CALL ISF SET` use.
+        if (b.target.rfind("producer/", 0) == 0) {
+            const auto name = b.target.substr(9);
+
+            auto it = layers_.find(b.layer);
+            if (it == layers_.end())
+                return;
+            auto producer = it->second.foreground();
+            if (producer == frame_producer::empty())
+                return;
+
+            for (const auto& p : producer->parameters()) {
+                if (p.name != name || !p.set || !p.get)
+                    continue;
+
+                // Read-modify-write for a multi-component parameter, because a binding drives
+                // ONE number: writing a one-element vector into a vec4 would be refused by the
+                // setter's arity check, and inventing three more values would be a guess.
+                monitor::vector_t v = p.arity > 1 ? p.get() : monitor::vector_t{};
+                if (p.arity > 1) {
+                    if (v.size() != p.arity)
+                        return; // the producer's read and its declared arity disagree
+                    v[std::min<std::size_t>(b.component, v.size() - 1)] = value;
+                } else {
+                    v.push_back(value);
+                }
+                p.set(v);
+                return;
+            }
+            return;
+        }
+
+        // A mixer field. Written into the tween's DESTINATION, which is what the next `fetch()`
+        // interpolates towards -- and with a zero-duration tween, so the value is live on this
+        // very tick rather than one frame later.
+        const auto* f = fields::find(b.target);
+        if (!f || !f->set || !f->get)
+            return;
+
+        auto&           tween = tweens_[b.layer];
+        frame_transform dst   = tween.dest();
+
+        auto v = f->get(dst.image_transform);
+        if (v.size() != f->arity)
+            return;
+        v[std::min<std::size_t>(b.component, v.size() - 1)] = value;
+        if (!f->set(dst.image_transform, v))
+            return;
+
+        // The same auto-enable a `PUT` or a keyframe applies, so a bound blur radius switches
+        // blur on exactly as a written one does. Without it a binding on `blur_radius` would
+        // move a number that nothing reads.
+        fields::apply_enables(dst.image_transform, *f);
+
+        tween = tweened_transform(dst, dst, 0, tweener(L"linear"));
+    }
+
+    std::future<void> add_source(const std::string& name, std::shared_ptr<binding::source> src)
+    {
+        return executor_.begin_invoke([this, name, src] {
+            std::lock_guard<std::mutex> lock(binding_lock_);
+            sources_[name] = src;
+        });
+    }
+
+    std::future<bool> remove_source(const std::string& name)
+    {
+        return executor_.begin_invoke([this, name] {
+            std::lock_guard<std::mutex> lock(binding_lock_);
+            return sources_.erase(name) > 0;
+        });
+    }
+
+    std::future<std::vector<stage_base::source_info>> list_sources()
+    {
+        return executor_.begin_invoke([this] {
+            std::vector<stage_base::source_info> out;
+            std::lock_guard<std::mutex>          lock(binding_lock_);
+            for (const auto& kv : sources_)
+                out.push_back({kv.first, kv.second->kind(), kv.second->describe(),
+                               kv.second->channels()});
+            return out;
+        });
+    }
+
+    std::future<int> add_binding(binding::binding_def def)
+    {
+        return executor_.begin_invoke([this, def]() mutable {
+            // The target must RESOLVE now. A binding to a misspelled field would otherwise be
+            // accepted, evaluated on every tick, and do nothing -- with a 202 behind it.
+            if (def.target.rfind("producer/", 0) == 0) {
+                const auto name = def.target.substr(9);
+                auto       it   = layers_.find(def.layer);
+                if (it == layers_.end())
+                    return 0;
+                auto producer = it->second.foreground();
+                if (producer == frame_producer::empty())
+                    return 0;
+                bool found = false;
+                for (const auto& p : producer->parameters())
+                    if (p.name == name)
+                        found = true;
+                if (!found)
+                    return 0;
+            } else {
+                const auto* f = fields::find(def.target);
+                if (!f || !f->set)
+                    return 0;
+                if (def.component >= f->arity)
+                    return 0;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(binding_lock_);
+                if (sources_.find(def.source_name) == sources_.end())
+                    return 0;
+            }
+
+            // ONE binding per target, replacing any earlier one. Two bindings writing the same
+            // number would give whichever ran last, which is an ordering nobody chose -- the
+            // same class of accident as auto-projection overwriting a hand-set ICVFX block.
+            bindings_.erase(std::remove_if(bindings_.begin(), bindings_.end(),
+                                           [&](const binding::binding_def& b) {
+                                               return b.layer == def.layer &&
+                                                      b.target == def.target &&
+                                                      b.component == def.component;
+                                           }),
+                            bindings_.end());
+
+            def.id     = next_binding_id_++;
+            def.held   = 0.0;
+            def.primed = false;
+            bindings_.push_back(def);
+            return def.id;
+        });
+    }
+
+    std::future<int> remove_bindings(int layer, const std::string& target)
+    {
+        return executor_.begin_invoke([this, layer, target] {
+            const auto before = bindings_.size();
+            bindings_.erase(std::remove_if(bindings_.begin(), bindings_.end(),
+                                           [&](const binding::binding_def& b) {
+                                               if (layer >= 0 && b.layer != layer)
+                                                   return false;
+                                               if (target.empty())
+                                                   return true;
+                                               std::string field;
+                                               uint8_t     comp = 0;
+                                               binding::split_target(target, field, comp);
+                                               return b.target == field;
+                                           }),
+                            bindings_.end());
+            return static_cast<int>(before - bindings_.size());
+        });
+    }
+
+    std::future<std::vector<binding::binding_def>> list_bindings()
+    {
+        return executor_.begin_invoke([this] { return bindings_; });
+    }
+
+    bool is_bound(int layer, const std::string& target) const
+    {
+        // NOT on the executor: the caller is a write path that has to answer now. `bindings_` is
+        // a vector mutated only on the executor, so this reads under the same lock the mutators
+        // take -- which is why they take it at all.
+        std::string field;
+        uint8_t     comp = 0;
+        binding::split_target(target, field, comp);
+
+        std::lock_guard<std::mutex> lock(binding_lock_);
+        for (const auto& b : bindings_)
+            if (b.layer == layer && b.target == field)
+                return true;
+        return false;
+    }
+
+    void feed_sources(const input_event& event)
+    {
+        std::lock_guard<std::mutex> lock(binding_lock_);
+        for (auto& kv : sources_)
+            kv.second->feed(event);
     }
 
     std::future<frame_transform> get_current_transform(int index)
@@ -1241,6 +1566,20 @@ std::future<bool> stage::set_param(int layer, const std::string& name, const mon
 {
     return impl_->set_param(layer, name, value);
 }
+std::future<void> stage::add_source(const std::string& name, std::shared_ptr<binding::source> src)
+{
+    return impl_->add_source(name, std::move(src));
+}
+std::future<bool> stage::remove_source(const std::string& name) { return impl_->remove_source(name); }
+std::future<std::vector<stage_base::source_info>> stage::list_sources() { return impl_->list_sources(); }
+std::future<int>  stage::add_binding(const binding::binding_def& def) { return impl_->add_binding(def); }
+std::future<int>  stage::remove_bindings(int layer, const std::string& target)
+{
+    return impl_->remove_bindings(layer, target);
+}
+std::future<std::vector<binding::binding_def>> stage::list_bindings() { return impl_->list_bindings(); }
+bool stage::is_bound(int layer, const std::string& target) const { return impl_->is_bound(layer, target); }
+void stage::feed_sources(const input_event& event) { impl_->feed_sources(event); }
 
 // ── Keyframe management (stage wrappers) ─────────────────────────────────
 std::future<void>                  stage::set_keyframe_data(int layer, std::shared_ptr<void> data) { return impl_->kf_set(layer, std::move(data)); }

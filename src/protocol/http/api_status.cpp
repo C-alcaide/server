@@ -19,6 +19,7 @@ const char* to_string(api_code c)
         case api_code::ok: return "ok";
         case api_code::unknown_path: return "unknown_path";
         case api_code::not_writable: return "not_writable";
+        case api_code::field_bound: return "field_bound";
         case api_code::field_wrong_type: return "field_wrong_type";
         case api_code::field_out_of_range: return "field_out_of_range";
         case api_code::field_missing: return "field_missing";

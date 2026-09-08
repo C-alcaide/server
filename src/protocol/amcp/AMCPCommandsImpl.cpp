@@ -67,6 +67,7 @@
 #include <core/producer/transition/sting_producer.h>
 #include <core/producer/transition/transition_producer.h>
 #include <core/video_format.h>
+#include <core/binding/binding.h>
 #include <core/video_channel.h>
 
 #include <protocol/osc/client.h>
@@ -5267,6 +5268,230 @@ std::wstring previz_info_command(command_context& ctx)
 // `PLAY [HTML] <any url>` into a browser running with web security disabled, so synthetic input
 // adds no new capability class to that surface. The API form goes through the same auth handshake
 // as every other `/v1/action`. Neither is gated, and `html-gpu-direct.md` says so out loud.
+// ---------------------------------------------------------------------------
+// SOURCE ADD <name> LFO SINE|TRIANGLE|SAW|SQUARE|NOISE <rate-hz> [PHASE <p>]
+// SOURCE ADD <name> INPUT
+// SOURCE REMOVE <name>
+// SOURCE LIST
+//
+// A named live source on a channel. Channel-scoped rather than server-global, because every
+// other addressable thing in AMCP is -- and because an `input` source is inherently per-channel
+// (it is that channel's window). A source shared between channels is a real question and is
+// deliberately not answered here: BPM sync across a rack is the case that wants it, and it wants
+// a clock, not a shared oscillator.
+std::wstring source_command(command_context& ctx)
+{
+    if (ctx.parameters.empty())
+        return L"400 SOURCE ERROR missing verb (ADD, REMOVE or LIST)\r\n";
+
+    const auto upper = [](std::wstring v) {
+        boost::to_upper(v);
+        return v;
+    };
+
+    auto stage = ctx.channel.stage;
+    if (!stage)
+        return L"501 SOURCE FAILED\r\n";
+
+    const auto verb = upper(ctx.parameters.at(0));
+
+    if (verb == L"LIST") {
+        std::wstring result;
+        for (const auto& s : stage->list_sources().get()) {
+            result += u16(s.name) + L" " + u16(s.kind) + L" \"" + u16(s.description) + L"\" channels=";
+            for (std::size_t i = 0; i < s.channels.size(); ++i)
+                result += (i ? L"," : L"") + u16(s.channels[i]);
+            result += L"\r\n";
+        }
+        return L"201 SOURCE OK\r\n" + result;
+    }
+
+    if (verb == L"REMOVE") {
+        if (ctx.parameters.size() < 2)
+            return L"400 SOURCE ERROR REMOVE needs a name\r\n";
+        const bool gone = stage->remove_source(u8(ctx.parameters.at(1))).get();
+        return gone ? L"202 SOURCE OK\r\n" : L"404 SOURCE ERROR no such source\r\n";
+    }
+
+    if (verb != L"ADD")
+        return L"400 SOURCE ERROR unknown verb, expected ADD, REMOVE or LIST\r\n";
+
+    if (ctx.parameters.size() < 3)
+        return L"400 SOURCE ERROR ADD needs <name> <kind> ...\r\n";
+
+    const auto name = u8(ctx.parameters.at(1));
+    const auto kind = upper(ctx.parameters.at(2));
+
+    if (kind == L"INPUT") {
+        stage->add_source(name, std::make_shared<core::binding::input_source>()).get();
+        return L"202 SOURCE OK\r\n";
+    }
+
+    if (kind == L"LFO") {
+        if (ctx.parameters.size() < 5)
+            return L"400 SOURCE ERROR LFO needs a waveform and a rate in Hz\r\n";
+
+        core::binding::wave_t wave{};
+        if (!core::binding::parse_wave(u8(ctx.parameters.at(3)), wave))
+            return L"400 SOURCE ERROR unknown waveform, expected SINE, TRIANGLE, SAW, SQUARE or "
+                   L"NOISE\r\n";
+
+        double rate = 0.0;
+        try {
+            rate = boost::lexical_cast<double>(ctx.parameters.at(4));
+        } catch (...) {
+            return L"400 SOURCE ERROR the rate is not a number\r\n";
+        }
+        // A NEGATIVE rate is legal and runs the waveform backwards -- the phase accumulator does
+        // not care, and `wave_sample` is checked at boot for a negative phase. Zero is legal too:
+        // it holds the waveform at its current phase, which is how an operator parks an LFO.
+        if (!std::isfinite(rate))
+            return L"400 SOURCE ERROR the rate is not finite\r\n";
+
+        double phase = 0.0;
+        for (std::size_t i = 5; i + 1 < ctx.parameters.size(); ++i) {
+            if (boost::iequals(ctx.parameters.at(i), L"PHASE")) {
+                try {
+                    phase = boost::lexical_cast<double>(ctx.parameters.at(i + 1));
+                } catch (...) {
+                    return L"400 SOURCE ERROR the phase is not a number\r\n";
+                }
+            }
+        }
+
+        stage->add_source(name, std::make_shared<core::binding::lfo_source>(wave, rate, phase)).get();
+        return L"202 SOURCE OK\r\n";
+    }
+
+    return L"400 SOURCE ERROR unknown source kind, expected LFO or INPUT\r\n";
+}
+
+// ---------------------------------------------------------------------------
+// BIND <ch>-<layer> <target> <source>/<channel> [MIN <a>] [MAX <b>] [GAIN <g>]
+//                                               [LAG <ms>] [CURVE <name>] [IN <lo> <hi>]
+// BIND <ch> LIST
+// UNBIND <ch>[-<layer>] [<target>]
+//
+// `<target>` is a mixer field's registry path (`opacity`, `brightness`, `sat`), optionally with
+// a `.N` component suffix (`midtone.1`), or `producer/<name>` for an ISF or OFX parameter.
+//
+// The value the target receives is:
+//
+//     out = MIN + clamp01( curve( (source - IN_lo) / (IN_hi - IN_lo) ) * GAIN ) * (MAX - MIN)
+//
+// then smoothed towards over `LAG` milliseconds. `IN` defaults to 0..1, which is the range every
+// source in this build produces, so it is only needed for a source whose natural range is not
+// that -- an accumulating wheel, or an audio level in dBFS.
+//
+// A DESCENDING output range is legal: `MIN 1 MAX 0` is how an operator says "louder means
+// dimmer", and refusing it would send them to `CURVE INVERT` for something the range says.
+//
+// **A BOUND TARGET IS OWNED BY ITS BINDING.** An explicit write to it is refused rather than
+// applied and silently overwritten on the next tick. That is the `icvfx_auto` lesson as a rule:
+// auto-projection used to overwrite a hand-set ICVFX block on every camera move, and the
+// precedence had never been chosen by anybody. `UNBIND` hands the target back.
+std::wstring bind_command(command_context& ctx)
+{
+    auto stage = ctx.channel.stage;
+    if (!stage)
+        return L"501 BIND FAILED\r\n";
+
+    if (ctx.parameters.empty())
+        return L"400 BIND ERROR missing target\r\n";
+
+    if (boost::iequals(ctx.parameters.at(0), L"LIST")) {
+        std::wstring result;
+        for (const auto& b : stage->list_bindings().get()) {
+            result += std::to_wstring(b.id) + L" " + std::to_wstring(b.layer) + L"-" + u16(b.target);
+            if (b.component)
+                result += L"." + std::to_wstring(b.component);
+            result += L" <- " + u16(b.source_name) + L"/" + u16(b.source_channel);
+            result += L" min=" + std::to_wstring(b.tf.out_lo) + L" max=" + std::to_wstring(b.tf.out_hi) +
+                      L" gain=" + std::to_wstring(b.tf.gain) + L" lag=" + std::to_wstring(b.tf.lag_ms) +
+                      L" curve=" + u16(core::binding::curve_name(b.tf.curve));
+            if (b.broken)
+                result += L" BROKEN";
+            result += L"\r\n";
+        }
+        return L"201 BIND OK\r\n" + result;
+    }
+
+    if (ctx.parameters.size() < 2)
+        return L"400 BIND ERROR needs <target> <source>/<channel>\r\n";
+
+    core::binding::binding_def def;
+    def.layer = ctx.layer_index();
+
+    core::binding::split_target(u8(ctx.parameters.at(0)), def.target, def.component);
+
+    if (!core::binding::split_source_ref(u8(ctx.parameters.at(1)), def.source_name, def.source_channel))
+        return L"400 BIND ERROR the source must be <name>/<channel>, e.g. lfo1/value\r\n";
+
+    // The option pairs. Parsed by name rather than by position so the command reads the way the
+    // documentation writes it, and so a caller can give only the two they care about.
+    for (std::size_t i = 2; i < ctx.parameters.size();) {
+        const auto key = [&] {
+            auto k = ctx.parameters.at(i);
+            boost::to_upper(k);
+            return k;
+        }();
+
+        const auto number = [&](std::size_t at, double& out) {
+            if (ctx.parameters.size() <= at)
+                return false;
+            try {
+                out = boost::lexical_cast<double>(ctx.parameters.at(at));
+                return std::isfinite(out);
+            } catch (...) {
+                return false;
+            }
+        };
+
+        if (key == L"MIN" && number(i + 1, def.tf.out_lo)) {
+            i += 2;
+        } else if (key == L"MAX" && number(i + 1, def.tf.out_hi)) {
+            i += 2;
+        } else if (key == L"GAIN" && number(i + 1, def.tf.gain)) {
+            i += 2;
+        } else if (key == L"LAG" && number(i + 1, def.tf.lag_ms)) {
+            i += 2;
+        } else if (key == L"IN" && number(i + 1, def.tf.in_lo) && number(i + 2, def.tf.in_hi)) {
+            i += 3;
+        } else if (key == L"CURVE" && ctx.parameters.size() > i + 1) {
+            if (!core::binding::parse_curve(u8(ctx.parameters.at(i + 1)), def.tf.curve))
+                return L"400 BIND ERROR unknown curve, expected LINEAR, EASE_IN, EASE_OUT, EASE, "
+                       L"STEP or INVERT\r\n";
+            i += 2;
+        } else {
+            return L"400 BIND ERROR unrecognised option: " + ctx.parameters.at(i) + L"\r\n";
+        }
+    }
+
+    const int id = stage->add_binding(def).get();
+    if (id == 0)
+        return L"404 BIND ERROR the target or the source does not resolve. A target is a mixer "
+               L"field's registry name, optionally with a .N component, or producer/<name> for a "
+               L"parameter of the layer's own producer; the source must already exist (SOURCE "
+               L"LIST)\r\n";
+
+    return L"202 BIND OK\r\n";
+}
+
+std::wstring unbind_command(command_context& ctx)
+{
+    auto stage = ctx.channel.stage;
+    if (!stage)
+        return L"501 UNBIND FAILED\r\n";
+
+    // No layer and no target clears the whole channel, which is the state an operator wants
+    // after an experiment. `-1` for the layer means "any", not "layer -1".
+    const int  layer  = ctx.layer_id;
+    const auto target = ctx.parameters.empty() ? std::string() : u8(ctx.parameters.at(0));
+
+    const int removed = stage->remove_bindings(layer, target).get();
+    return removed > 0 ? L"202 UNBIND OK\r\n" : L"404 UNBIND ERROR no matching binding\r\n";
+}
+
 std::wstring input_command(command_context& ctx)
 {
     if (ctx.parameters.empty())
@@ -6018,6 +6243,10 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"AMF", amf_command, 1);
 
     repo->register_channel_command(L"Input Commands",  L"INPUT",            input_command,            1);
+
+    repo->register_channel_command(L"Binding Commands", L"BIND",             bind_command,             1);
+    repo->register_channel_command(L"Binding Commands", L"UNBIND",           unbind_command,           0);
+    repo->register_channel_command(L"Binding Commands", L"SOURCE",           source_command,           1);
 
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SCENE",     previz_scene_command,     0);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ MAP",       previz_map_command,       2);

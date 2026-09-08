@@ -432,9 +432,16 @@ struct video_channel::impl final
 
     void input(const input_event& event)
     {
-        // The mixer first. When previz is active it IS this channel's picture -- it replaces the
-        // 2D composite -- so a click belongs to the 3D view rather than to a layer nobody can
-        // see. A mixer with no previz returns false and costs a virtual call.
+        // EVERY event reaches the binding sources, whatever consumes it afterwards. A binding
+        // on `input/x` must follow the pointer while the operator is orbiting the previz view or
+        // dragging inside an HTML page -- the two are not alternatives, and making the source
+        // see only the events nobody else wanted would give it gaps it cannot explain.
+        stage_->feed_sources(event);
+
+        // Then routing, and here the mixer IS first. When previz is active it is this channel's
+        // picture -- it replaces the 2D composite -- so a click belongs to the 3D view rather
+        // than to a layer nobody can see. A mixer with no previz returns false and costs a
+        // virtual call.
         if (image_mixer_->input(event))
             return;
 
