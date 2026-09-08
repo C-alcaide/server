@@ -192,7 +192,19 @@ struct server::impl
         core::binding::binding_math_self_test();
         core::audio_analysis_self_test();
         accelerator::ogl::run_compose_self_test();
+#ifdef ENABLE_VULKAN
+        // GUARDED, because the Vulkan accelerator's sources are only compiled when
+        // `ENABLE_VULKAN` is on -- `accelerator/CMakeLists.txt` gates the whole file list on it.
+        // Called unconditionally, this is an unresolved symbol at link time in ANY build without
+        // Vulkan, on either platform. It went unnoticed because `Bootstrap_Windows` turns
+        // `ENABLE_VULKAN` on whenever it finds the SDK, and this machine has it -- so every
+        // Windows build here had the symbol and no Windows build here could fail.
+        //
+        // Found by linking on Linux, where no Vulkan SDK is present and the option therefore
+        // stays at its default of OFF. It was the ONLY unresolved symbol in the whole binary:
+        // all 294 translation units compiled.
         accelerator::vulkan::run_compose_self_test();
+#endif
 
         // Before the channels: a channel may carry <ocio-display>/<ocio-view> on a consumer,
         // and those are validated against the loaded config.
