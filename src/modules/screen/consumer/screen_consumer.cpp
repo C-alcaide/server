@@ -37,6 +37,8 @@
 
 #include <core/consumer/channel_info.h>
 #include <core/consumer/frame_consumer.h>
+#include <core/input/input_event.h>
+#include <core/video_channel.h>
 #include <core/frame/frame.h>
 #include <core/frame/geometry.h>
 #include <core/frame/pixel_format.h>
@@ -58,6 +60,8 @@
 
 #if defined(_MSC_VER)
 #include <windows.h>
+// GET_X_LPARAM / GET_Y_LPARAM -- not in windows.h itself
+#include <windowsx.h>
 #else
 #include "../util/x11_util.h"
 #endif
@@ -77,6 +81,32 @@
 
 #ifdef _MSC_VER
 // ---------------------------------------------------------------------------
+// raw_input — one window message, in CLIENT PIXELS, before anything is normalised.
+//
+// The window cannot produce a `core::input_event` directly, because that type's whole contract
+// is "normalised 0..1 in the source surface" and the surface is not the window: aspect-ratio
+// letterboxing means the picture occupies a sub-rect of the client area. Only the consumer
+// knows that rect (`calculate_aspect` computes it), so the window reports pixels and the
+// consumer maps them.
+//
+// The 2013-2018 code did NOT make that split -- the screen consumer divided by
+// `screen_width_`/`screen_height_`, which were the size at construction, and never accounted
+// for the bars. So coordinates skewed after any resize and a click on a pillarbox bar mapped
+// into the visible range as if it were on the picture.
+struct raw_input
+{
+    caspar::core::input_event::kind type   = caspar::core::input_event::kind::move;
+    int                             px     = 0;
+    int                             py     = 0;
+    int                             button = -1;
+    bool                            pressed = false;
+    double                          wheel   = 0.0;
+    int                             key     = 0;
+    char32_t                        ch      = 0;
+    uint32_t                        mods    = 0;
+    int                             clicks  = 1;
+};
+
 // win32_gl_window — lightweight Win32 + WGL window that replaces sf::Window.
 //
 // SFML2's shared-context mechanism (wglShareLists on a static singleton)
@@ -118,6 +148,37 @@ struct win32_gl_window
                     self->closed_ = true;
                 }
                 return 0;  // Don't let DefWindowProc destroy the window
+            // ---- input ------------------------------------------------------------------
+            //
+            // These messages have been arriving at this WndProc since the window existed and
+            // falling through to DefWindowProc. Nothing here is new plumbing; it is four
+            // switch arms on a pump that already runs, on the render thread, with the GL
+            // context current -- which is the thread that owns the previz renderer.
+            //
+            // COORDINATES COME FROM lParam, never from GetCursorPos. A posted message
+            // (PostMessage) carries its position in lParam and does not move the cursor, so
+            // anything reading the real cursor would treat synthetic input as a no-op --
+            // silently, with no error. That is measured behaviour on this box for another
+            // application, and it is what makes the harness's PostMessage battery valid.
+            case WM_MOUSEMOVE:
+            case WM_LBUTTONDOWN:
+            case WM_LBUTTONUP:
+            case WM_LBUTTONDBLCLK:
+            case WM_MBUTTONDOWN:
+            case WM_MBUTTONUP:
+            case WM_MBUTTONDBLCLK:
+            case WM_RBUTTONDOWN:
+            case WM_RBUTTONUP:
+            case WM_RBUTTONDBLCLK:
+            case WM_MOUSEWHEEL:
+            case WM_MOUSELEAVE:
+            case WM_KEYDOWN:
+            case WM_KEYUP:
+            case WM_CHAR:
+                if (self)
+                    self->on_input_message(msg, wParam, lParam);
+                return 0;
+
             case WM_ERASEBKGND:
                 return 1;  // Prevent flicker
             case WM_PRINTCLIENT:
@@ -163,7 +224,10 @@ struct win32_gl_window
         static const wchar_t* name = L"CasparCG_ScreenConsumer";
         std::call_once(flag, [&] {
             WNDCLASSW wc  = {};
-            wc.style      = CS_OWNDC;
+            // CS_DBLCLKS, or Windows never sends WM_*BUTTONDBLCLK at all and a page can
+            // never see a double-click. The old html producer passed a hard-coded clickCount
+            // of 1 for the same net effect, from the other end.
+            wc.style      = CS_OWNDC | CS_DBLCLKS;
             wc.lpfnWndProc  = WndProc;
             wc.hInstance    = GetModuleHandle(nullptr);
             wc.lpszClassName = name;
@@ -351,6 +415,141 @@ struct win32_gl_window
 
     // Process pending window messages; returns true if any were processed.
     // Sets resized_/closed_ flags for the caller to check.
+    // Drained by the consumer in the same poll() call that runs pollEvents(). No lock: both
+    // this and pollEvents() run on the render thread, because DispatchMessage calls WndProc
+    // synchronously on the thread that pumped the message.
+    std::vector<raw_input> input_queue_;
+    uint32_t               held_buttons_ = 0;
+    bool                   tracking_leave_ = false;
+
+    static uint32_t modifier_state()
+    {
+        uint32_t m = 0;
+        if (GetKeyState(VK_SHIFT) < 0)
+            m |= caspar::core::mod_shift;
+        if (GetKeyState(VK_CONTROL) < 0)
+            m |= caspar::core::mod_control;
+        if (GetKeyState(VK_MENU) < 0)
+            m |= caspar::core::mod_alt;
+        return m;
+    }
+
+    void push_input(raw_input ev)
+    {
+        ev.mods |= modifier_state() | held_buttons_;
+
+        // Coalesce consecutive moves. A drag generates one per mouse report -- easily 500/s on
+        // a gaming mouse -- and every one of them would otherwise cost a raycast on the render
+        // thread and, for an HTML layer, a task on CEF's UI thread. The 2013 code did this in
+        // the stage's aggregator; doing it at the source is cheaper and protects both sinks.
+        if (ev.type == caspar::core::input_event::kind::move && !input_queue_.empty() &&
+            input_queue_.back().type == caspar::core::input_event::kind::move) {
+            input_queue_.back() = ev;
+            return;
+        }
+
+        // A drag that outruns the consumer must not grow without bound. Dropping the OLDEST
+        // non-move is wrong (a button-up would vanish and the drag would never end), so cap by
+        // refusing new moves instead -- the newest position is already in the back entry.
+        if (input_queue_.size() > 256 && ev.type == caspar::core::input_event::kind::move)
+            return;
+
+        input_queue_.push_back(ev);
+    }
+
+    void on_input_message(UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        using kind = caspar::core::input_event::kind;
+
+        raw_input ev;
+        ev.px = GET_X_LPARAM(lParam);
+        ev.py = GET_Y_LPARAM(lParam);
+
+        const auto button_event = [&](int button, bool pressed, int clicks) {
+            ev.type    = kind::button;
+            ev.button  = button;
+            ev.pressed = pressed;
+            ev.clicks  = clicks;
+
+            const uint32_t bit = button == 0   ? caspar::core::mod_left_button
+                                 : button == 1 ? caspar::core::mod_middle_button
+                                               : caspar::core::mod_right_button;
+            if (pressed) {
+                held_buttons_ |= bit;
+                // Capture, so a drag that leaves the window still delivers its button-up.
+                // Without it the sink is left believing the button is still down for ever.
+                SetCapture(hwnd_);
+            } else {
+                held_buttons_ &= ~bit;
+                if (held_buttons_ == 0)
+                    ReleaseCapture();
+            }
+        };
+
+        switch (msg) {
+            case WM_MOUSEMOVE:
+                ev.type = kind::move;
+                if (!tracking_leave_) {
+                    // Ask for WM_MOUSELEAVE once; Windows sends exactly one per request.
+                    TRACKMOUSEEVENT tme{sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd_, 0};
+                    if (TrackMouseEvent(&tme))
+                        tracking_leave_ = true;
+                }
+                break;
+
+            // Buttons are renumbered to CEF's order HERE, at the source: 0 left, 1 middle,
+            // 2 right. Win32 has no numbering of its own (they are separate messages), and
+            // SFML's differs from CEF's -- which is how the old code shipped right-click and
+            // middle-click swapped for five years.
+            case WM_LBUTTONDOWN:    button_event(0, true, 1);  break;
+            case WM_LBUTTONDBLCLK:  button_event(0, true, 2);  break;
+            case WM_LBUTTONUP:      button_event(0, false, 1); break;
+            case WM_MBUTTONDOWN:    button_event(1, true, 1);  break;
+            case WM_MBUTTONDBLCLK:  button_event(1, true, 2);  break;
+            case WM_MBUTTONUP:      button_event(1, false, 1); break;
+            case WM_RBUTTONDOWN:    button_event(2, true, 1);  break;
+            case WM_RBUTTONDBLCLK:  button_event(2, true, 2);  break;
+            case WM_RBUTTONUP:      button_event(2, false, 1); break;
+
+            case WM_MOUSEWHEEL: {
+                ev.type = kind::wheel;
+                ev.wheel = static_cast<double>(GET_WHEEL_DELTA_WPARAM(wParam)) / WHEEL_DELTA;
+                // Wheel coordinates are SCREEN, not client -- the one mouse message that
+                // differs, and a silent
+                POINT p{ev.px, ev.py};
+                ScreenToClient(hwnd_, &p);
+                ev.px = p.x;
+                ev.py = p.y;
+                break;
+            }
+
+            case WM_MOUSELEAVE:
+                ev.type         = kind::leave;
+                tracking_leave_ = false;
+                break;
+
+            case WM_KEYDOWN:
+                ev.type    = kind::key;
+                ev.key     = static_cast<int>(wParam);
+                ev.pressed = true;
+                break;
+            case WM_KEYUP:
+                ev.type    = kind::key;
+                ev.key     = static_cast<int>(wParam);
+                ev.pressed = false;
+                break;
+            case WM_CHAR:
+                ev.type = kind::text;
+                ev.ch   = static_cast<char32_t>(wParam);
+                break;
+
+            default:
+                return;
+        }
+
+        push_input(ev);
+    }
+
     bool pollEvents()
     {
         resized_ = false;
@@ -500,6 +699,17 @@ struct screen_consumer
     GLuint                                    vbo_;
 
     std::atomic<bool> is_running_{true};
+
+    /// The picture's half-extents in NDC, from `calculate_aspect`. 1.0/1.0 means it fills the
+    /// client area; anything smaller is letterboxed and the difference is bars.
+    float draw_ratio_x_ = 1.0f;
+    float draw_ratio_y_ = 1.0f;
+
+    /// The channel this window is showing, so its input can be dispatched back.
+    ///
+    /// WEAK, deliberately. `video_channel` owns its `output`, which owns this consumer, so a
+    /// strong reference here is a cycle and neither would ever be destroyed.
+    std::weak_ptr<core::video_channel> channel_;
     std::thread       thread_;
 
     /// Latched by gpu_strategy when it has to upload host pixels because the VK→GL
@@ -517,11 +727,13 @@ struct screen_consumer
 
   public:
     screen_consumer(const configuration& config, const core::video_format_desc& format_desc, int channel_index,
-                    void* gl_share_context = nullptr, bool use_vulkan = false)
+                    void* gl_share_context = nullptr, bool use_vulkan = false,
+                    std::weak_ptr<core::video_channel> channel = {})
         : config_(config)
         , format_desc_(format_desc)
         , channel_index_(channel_index)
         , gl_share_context_(gl_share_context)
+        , channel_(std::move(channel))
         , strategy_((config.gpu_texture || use_vulkan) ? spl::make_shared<display_strategy, gpu_strategy>()
                                                        : spl::make_shared<display_strategy, host_strategy>())
     {
@@ -797,6 +1009,22 @@ struct screen_consumer
         if (window_.pollEvents()) {
             count = 1;
             if (window_.resized_) calculate_aspect();
+
+
+            // Drained HERE, in the same call, and that is not incidental: `pollEvents()`
+            // clears `resized_`/`closed_` on entry, so anything read on a later call has
+            // already raced it. The queue lives on the window and is touched only from this
+            // thread.
+            //
+            // After `calculate_aspect()`, so a message that arrived in the same pump as a
+            // resize is mapped through the NEW picture rect rather than the old one.
+            if (!window_.input_queue_.empty()) {
+                if (config_.interactive) {
+                    for (const auto& in : window_.input_queue_)
+                        dispatch_input(in);
+                }
+                window_.input_queue_.clear();
+            }
             if (window_.closed_ && config_.closeable) {
                 CASPAR_LOG(warning) << print() << L" Window closed by user (WM_CLOSE received).";
                 is_running_ = false;
@@ -947,6 +1175,59 @@ struct screen_consumer
 
     std::wstring print() const { return config_.name + L" " + channel_and_format(); }
 
+    /// Turn one window message into a channel-space event and dispatch it.
+    ///
+    /// Two conversions, and the old code did neither:
+    ///
+    ///   * normalise against the LIVE client size, not the size at construction. `WM_SIZE`
+    ///     updates `window_.width_`/`height_` and `calculate_aspect` follows, so a resized
+    ///     window still reports where the operator actually pointed.
+    ///   * map into the PICTURE, not the window. With `uniform` stretch the bars are part of
+    ///     the client area but not part of the image, so a point on one is off-surface and
+    ///     reported as such rather than squeezed into range.
+    void dispatch_input(const raw_input& in)
+    {
+        auto channel = channel_.lock();
+        if (!channel)
+            return;
+
+        core::input_event ev;
+        ev.type        = in.type;
+        ev.button      = in.button;
+        ev.pressed     = in.pressed;
+        ev.wheel_dy    = in.wheel;
+        ev.key         = in.key;
+        ev.character   = in.ch;
+        ev.modifiers   = in.mods;
+        ev.click_count = in.clicks;
+        ev.source      = 0; // this channel's own window
+
+        if (ev.has_position()) {
+            const int w = static_cast<int>(window_.width_);
+            const int h = static_cast<int>(window_.height_);
+            if (w <= 0 || h <= 0)
+                return;
+
+            // Client pixels -> NDC -> the picture's own 0..1.
+            const double nx = 2.0 * (static_cast<double>(in.px) / w) - 1.0;
+            const double ny = 1.0 - 2.0 * (static_cast<double>(in.py) / h);
+
+            const double rx = draw_ratio_x_ > 1e-6 ? draw_ratio_x_ : 1.0;
+            const double ry = draw_ratio_y_ > 1e-6 ? draw_ratio_y_ : 1.0;
+
+            ev.x = (nx / rx + 1.0) * 0.5;
+            ev.y = (1.0 - ny / ry) * 0.5;
+
+            // A press on a letterbox bar is not a press on the picture. Reported rather than
+            // clamped, and swallowed here rather than sent, because a sink that receives an
+            // off-surface press has no way to know it was a bar.
+            if (!ev.on_surface() && ev.type != core::input_event::kind::move)
+                return;
+        }
+
+        channel->input(ev);
+    }
+
     void calculate_aspect()
     {
         if (config_.windowed) {
@@ -964,6 +1245,12 @@ struct screen_consumer
         } else if (config_.stretch == screen::stretch::uniform_to_fill) {
             target_ratio = uniform_to_fill();
         }
+
+        // Remember the picture's half-extents in NDC. `input_at` needs them to reject a click
+        // on a pillarbox bar and to map the rest into the PICTURE's 0..1 rather than the
+        // window's -- the distinction the 2013-2018 code did not make.
+        draw_ratio_x_ = target_ratio.first;
+        draw_ratio_y_ = target_ratio.second;
 
         if (config_.sbs_key) {
             draw_coords_ = {
@@ -1645,6 +1932,17 @@ struct screen_consumer_proxy : public core::frame_consumer
     configuration                    config_;
     std::unique_ptr<screen_consumer> consumer_;
     bool                             use_vulkan_ = false;
+
+    /// The channel this consumer was created for, so its window's input can be dispatched
+    /// back into it. Weak: the channel owns the output that owns this.
+    ///
+    /// It arrives through the FACTORY, not through `initialize()`, because
+    /// `frame_consumer::initialize` receives only a `channel_info` -- an index and some format
+    /// data -- while the factory already receives the whole `channels` vector. The audit
+    /// finding that made this commit small: that vector has been passed to every consumer
+    /// factory since the interaction API was removed, and the screen consumer never
+    /// dereferenced it once.
+    std::weak_ptr<core::video_channel> channel_;
     //: Guards `config_.ocio_display` / `config_.ocio_view`, which `call()` writes from the
     //: AMCP thread and `ocio_view()` reads on the frame path.
     mutable std::mutex               ocio_mutex_;
@@ -1699,8 +1997,9 @@ struct screen_consumer_proxy : public core::frame_consumer
         return caspar::make_ready_future(true);
     }
 
-    explicit screen_consumer_proxy(configuration config)
+    explicit screen_consumer_proxy(configuration config, std::weak_ptr<core::video_channel> channel = {})
         : config_(std::move(config))
+        , channel_(std::move(channel))
     {
     }
 
@@ -1722,7 +2021,8 @@ struct screen_consumer_proxy : public core::frame_consumer
             default:                            config_.channel_transfer = 2; break; // sdr/rec709
         }
         consumer_ = std::make_unique<screen_consumer>(config_, format_desc, channel_info.index,
-                                                      channel_info.gl_share_context, use_vulkan_);
+                                                      channel_info.gl_share_context, use_vulkan_,
+                                                      channel_);
     }
 
     std::future<bool> send(core::video_field field, core::const_frame frame) override
@@ -1871,7 +2171,16 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
         config.delay = timespan{ u8(get_param(L"DELAY", params, L"")) };
     }
 
-    return spl::make_shared<screen_consumer_proxy>(config);
+    // The channel this window will show, so its input can be dispatched back into it.
+    //
+    // `channels` and `channel_info.index` have been handed to every consumer factory since the
+    // interaction API was removed in 2018, and this consumer never used either. No core API
+    // change was needed to make the window interactive -- only this lookup.
+    std::weak_ptr<core::video_channel> channel;
+    if (channel_info.index >= 1 && channel_info.index <= static_cast<int>(channels.size()))
+        channel = channels.at(static_cast<std::size_t>(channel_info.index - 1));
+
+    return spl::make_shared<screen_consumer_proxy>(config, channel);
 }
 
 spl::shared_ptr<core::frame_consumer>
@@ -1971,7 +2280,16 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
 
     config.delay = timespan{ u8(ptree.get(L"delay", L"0")) };
 
-    return spl::make_shared<screen_consumer_proxy>(config);
+    // The channel this window will show, so its input can be dispatched back into it.
+    //
+    // `channels` and `channel_info.index` have been handed to every consumer factory since the
+    // interaction API was removed in 2018, and this consumer never used either. No core API
+    // change was needed to make the window interactive -- only this lookup.
+    std::weak_ptr<core::video_channel> channel;
+    if (channel_info.index >= 1 && channel_info.index <= static_cast<int>(channels.size()))
+        channel = channels.at(static_cast<std::size_t>(channel_info.index - 1));
+
+    return spl::make_shared<screen_consumer_proxy>(config, channel);
 }
 
 }} // namespace caspar::screen
