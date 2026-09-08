@@ -416,9 +416,12 @@ Spout out, AMCP back — and does not apply to this route; §4 of that document 
 
 **Limits, stated rather than discovered later:**
 
-* **Windows only.** The SFML path taken on Linux ignores the mouse exactly as it did before. The
-  event struct is platform-neutral and the missing part is one `switch` on `sf::Event`; it is not
-  written because there is no display here to measure it on.
+* **Both platforms now**, since 2026-09-08. The SFML path translates `sf::Event` into the same
+  `raw_input` the Win32 path fills, so everything downstream -- the letterbox rejection, the live
+  client rect, the picking -- is shared rather than written twice. Verified by
+  `sfml_input_self_test`, run by hand under WSL against a real SFML window on WSLg. What that
+  covers is the TRANSLATION: the server itself is not built on Linux here, so previz end to end
+  on Linux rests on the translation being right plus everything downstream being shared.
 * **Screens are picked as planes.** A venue mesh loaded from glTF is drawn but not pickable — the
   pick tests the `screen_meta` quads only.
 * **`selected` and `hover` are read-only.** Both are set by the pointer and published; there is no
@@ -803,13 +806,19 @@ screens were published they became wrong in writing.
 
 ### 5.6 The interaction surface, since 2026-09-08
 
-Three limits, each a consequence of a decision rather than an omission:
+Two limits and one that closed, each a consequence of a decision rather than an omission:
 
-* **Input is Windows-only.** `win32_gl_window::WndProc` produces the events; the SFML path taken
-  on Linux still falls through to `pollEvents()` and ignores the mouse. `core::input_event` is
-  platform-neutral, so the missing part is one `switch` over `sf::Event` in the same file — not
-  written because there is no display here to measure it on, and an unmeasured input path is worse
-  than a documented absence.
+* ~~**Input is Windows-only.**~~ **CLOSED 2026-09-08.** Both window implementations fill the
+  same `raw_input`, and the three SFML helpers doing the translation live in
+  `sfml_input_helpers.inl` -- shared verbatim with `sfml_input_self_test.cpp`, so the test cannot
+  test a copy. 21 checks against a real SFML window on WSLg.
+
+  **And closing it found the Linux build had been broken for a day.** `raw_input` was declared
+  inside `#ifdef _MSC_VER` while the platform-neutral `dispatch_input` took one, so
+  `screen_consumer.cpp` could not compile off Windows -- ten errors, starting with `'raw_input'
+  does not name a type`. Nothing here could see it: no Linux build on this machine and no CI
+  running one. It took `g++ -fsyntax-only` under WSL, which is now the cheapest available check
+  on anything this file's guards touch.
 * **Only screens are pickable.** `compute_pick` intersects the `screen_meta` quads. A venue mesh
   loaded from glTF is drawn and cannot be selected or dragged, so a scene whose walls are geometry
   rather than screens is look-only.

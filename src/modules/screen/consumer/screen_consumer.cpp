@@ -79,9 +79,8 @@
 #include <GL/wglew.h>
 #endif
 
-#ifdef _MSC_VER
 // ---------------------------------------------------------------------------
-// raw_input — one window message, in CLIENT PIXELS, before anything is normalised.
+// raw_input — one window event, in CLIENT PIXELS, before anything is normalised.
 //
 // The window cannot produce a `core::input_event` directly, because that type's whole contract
 // is "normalised 0..1 in the source surface" and the surface is not the window: aspect-ratio
@@ -89,10 +88,16 @@
 // knows that rect (`calculate_aspect` computes it), so the window reports pixels and the
 // consumer maps them.
 //
-// The 2013-2018 code did NOT make that split -- the screen consumer divided by
-// `screen_width_`/`screen_height_`, which were the size at construction, and never accounted
-// for the bars. So coordinates skewed after any resize and a click on a pillarbox bar mapped
-// into the visible range as if it were on the picture.
+// OUTSIDE THE `_MSC_VER` GUARD, and it has to be. `dispatch_input` below is platform-neutral
+// and takes one of these, so declaring the type only for MSVC made `screen_consumer.cpp`
+// uncompilable off Windows -- `error: 'raw_input' does not name a type`, followed by nine more
+// as every member access fell apart. That was live for a day and nothing here could see it:
+// there is no Linux build on this machine and no CI running one. Proved with `g++
+// -fsyntax-only` under WSL, which is also what compiled the SFML branch below.
+//
+// The struct is the SEAM between the two window implementations. Win32 fills it from `lParam`
+// and the SFML path fills it from `sf::Event`; everything after that point is shared, which is
+// why the letterbox rejection and the live-rect normalisation did not have to be written twice.
 struct raw_input
 {
     caspar::core::input_event::kind type   = caspar::core::input_event::kind::move;
@@ -106,6 +111,16 @@ struct raw_input
     uint32_t                        mods    = 0;
     int                             clicks  = 1;
 };
+
+#ifndef _MSC_VER
+// The SFML translation helpers, shared verbatim with `sfml_input_self_test.cpp`. See that file's
+// header for how to build and run it; it is the only thing that executes this code, because the
+// harness is Windows-side and the fork does not build on Linux on this machine.
+#include "sfml_input_helpers.inl"
+#endif // !_MSC_VER
+
+#ifdef _MSC_VER
+
 
 // win32_gl_window — lightweight Win32 + WGL window that replaces sf::Window.
 //
@@ -1031,6 +1046,11 @@ struct screen_consumer
             }
         }
 #elif SFML_VERSION_MAJOR >= 3
+        // SFML 3. UNVERIFIED BY A COMPILER: both this tree and the WSL toolchain ship SFML
+        // 2.6, so this branch is written from the SFML 3 API and has never been built. The
+        // SFML 2 branch below is the one Linux actually compiles today and it IS verified.
+        // Named here rather than left implicit, because an unbuilt branch is a claim.
+        std::vector<raw_input> pending;
         while (const auto e = window_.pollEvent()) {
             count++;
             if (e->is<sf::Event::Resized>()) {
@@ -1040,10 +1060,67 @@ struct screen_consumer
                     CASPAR_LOG(warning) << print() << L" Window closed by user (WM_CLOSE received).";
                     is_running_ = false;
                 }
+            } else if (config_.interactive) {
+                raw_input in;
+                bool      have = false;
+
+                if (const auto* m = e->getIf<sf::Event::MouseMoved>()) {
+                    in.type = core::input_event::kind::move;
+                    in.px   = m->position.x;
+                    in.py   = m->position.y;
+                    have    = true;
+                } else if (const auto* b = e->getIf<sf::Event::MouseButtonPressed>()) {
+                    in.type    = core::input_event::kind::button;
+                    in.button  = sfml_button(b->button);
+                    in.pressed = true;
+                    in.px      = b->position.x;
+                    in.py      = b->position.y;
+                    have       = in.button >= 0;
+                } else if (const auto* b = e->getIf<sf::Event::MouseButtonReleased>()) {
+                    in.type    = core::input_event::kind::button;
+                    in.button  = sfml_button(b->button);
+                    in.pressed = false;
+                    in.px      = b->position.x;
+                    in.py      = b->position.y;
+                    have       = in.button >= 0;
+                } else if (const auto* w = e->getIf<sf::Event::MouseWheelScrolled>()) {
+                    in.type  = core::input_event::kind::wheel;
+                    in.wheel = w->delta * 120.0;
+                    in.px    = w->position.x;
+                    in.py    = w->position.y;
+                    have     = true;
+                } else if (e->is<sf::Event::MouseLeft>()) {
+                    in.type = core::input_event::kind::leave;
+                    have    = true;
+                } else if (const auto* k = e->getIf<sf::Event::KeyPressed>()) {
+                    in.type    = core::input_event::kind::key;
+                    in.pressed = true;
+                    in.key     = sfml_vk(static_cast<int>(k->code));
+                    have       = in.key != 0;
+                } else if (const auto* k = e->getIf<sf::Event::KeyReleased>()) {
+                    in.type    = core::input_event::kind::key;
+                    in.pressed = false;
+                    in.key     = sfml_vk(static_cast<int>(k->code));
+                    have       = in.key != 0;
+                } else if (const auto* t = e->getIf<sf::Event::TextEntered>()) {
+                    in.type = core::input_event::kind::text;
+                    in.ch   = static_cast<char32_t>(t->unicode);
+                    have    = in.ch >= 32; // control characters arrive as key events
+                }
+
+                if (have) {
+                    in.mods = sfml_modifiers();
+                    coalesce_into(pending, in);
+                }
             }
         }
+        for (const auto& in : pending)
+            dispatch_input(in);
 #else
-        sf::Event e;
+        // SFML 2 -- the branch Linux builds today, and the one verified with `g++
+        // -fsyntax-only` under WSL against the real SFML 2.6 headers.
+        std::vector<raw_input> pending;
+        sf::Event              e;
         while (window_.pollEvent(e)) {
             count++;
             if (e.type == sf::Event::Resized) {
@@ -1053,8 +1130,82 @@ struct screen_consumer
                     CASPAR_LOG(warning) << print() << L" Window closed by user (WM_CLOSE received).";
                     is_running_ = false;
                 }
+            } else if (config_.interactive) {
+                raw_input in;
+                bool      have = false;
+
+                switch (e.type) {
+                    case sf::Event::MouseMoved:
+                        in.type = core::input_event::kind::move;
+                        in.px   = e.mouseMove.x;
+                        in.py   = e.mouseMove.y;
+                        have    = true;
+                        break;
+
+                    case sf::Event::MouseButtonPressed:
+                    case sf::Event::MouseButtonReleased:
+                        in.type    = core::input_event::kind::button;
+                        in.button  = sfml_button(e.mouseButton.button);
+                        in.pressed = e.type == sf::Event::MouseButtonPressed;
+                        in.px      = e.mouseButton.x;
+                        in.py      = e.mouseButton.y;
+                        have       = in.button >= 0;
+                        break;
+
+                    case sf::Event::MouseWheelScrolled:
+                        // Vertical only. SFML reports a horizontal wheel through the same event
+                        // with a different `wheel` field, and `input_event` carries `wheel_dx`
+                        // for it -- but nothing consumes horizontal scroll, so forwarding it
+                        // would be an untested path rather than a feature.
+                        if (e.mouseWheelScroll.wheel != sf::Mouse::VerticalWheel)
+                            break;
+                        in.type  = core::input_event::kind::wheel;
+                        // x120, to match `WM_MOUSEWHEEL`'s `WHEEL_DELTA` units. SFML reports
+                        // notches as a float and Win32 reports 120 per notch, and a sink that
+                        // saw different magnitudes per platform would need to know which it
+                        // was talking to.
+                        in.wheel = e.mouseWheelScroll.delta * 120.0;
+                        in.px    = e.mouseWheelScroll.x;
+                        in.py    = e.mouseWheelScroll.y;
+                        have     = true;
+                        break;
+
+                    case sf::Event::MouseLeft:
+                        in.type = core::input_event::kind::leave;
+                        have    = true;
+                        break;
+
+                    case sf::Event::KeyPressed:
+                    case sf::Event::KeyReleased:
+                        in.type    = core::input_event::kind::key;
+                        in.pressed = e.type == sf::Event::KeyPressed;
+                        in.key     = sfml_vk(static_cast<int>(e.key.code));
+                        have       = in.key != 0;
+                        break;
+
+                    case sf::Event::TextEntered:
+                        in.type = core::input_event::kind::text;
+                        in.ch   = static_cast<char32_t>(e.text.unicode);
+                        // Control characters (backspace, enter, tab) arrive as KeyPressed too,
+                        // and delivering both would double them. 32 is the first printable.
+                        have = in.ch >= 32;
+                        break;
+
+                    default:
+                        break;
+                }
+
+                if (have) {
+                    in.mods = sfml_modifiers();
+                    coalesce_into(pending, in);
+                }
             }
         }
+        // Dispatched AFTER the pump, for the same reason the Windows path drains after
+        // `calculate_aspect()`: a `Resized` in the same batch must move the picture rect
+        // before anything is mapped through it.
+        for (const auto& in : pending)
+            dispatch_input(in);
 #endif
         return count > 0;
     }
@@ -1185,6 +1336,21 @@ struct screen_consumer
     ///   * map into the PICTURE, not the window. With `uniform` stretch the bars are part of
     ///     the client area but not part of the image, so a point on one is off-surface and
     ///     reported as such rather than squeezed into range.
+    /// The window's client area in pixels -- the surface `dispatch_input` normalises against.
+    ///
+    /// The one thing the two window implementations do not agree on. `win32_gl_window` keeps
+    /// `width_`/`height_` updated from `WM_SIZE` (which is what makes the Windows path use the
+    /// LIVE rect rather than the size at construction), and `sf::Window` answers `getSize()`.
+    std::pair<int, int> client_size() const
+    {
+#ifdef _MSC_VER
+        return {static_cast<int>(window_.width_), static_cast<int>(window_.height_)};
+#else
+        const auto sz = window_.getSize();
+        return {static_cast<int>(sz.x), static_cast<int>(sz.y)};
+#endif
+    }
+
     void dispatch_input(const raw_input& in)
     {
         auto channel = channel_.lock();
@@ -1203,8 +1369,9 @@ struct screen_consumer
         ev.source      = 0; // this channel's own window
 
         if (ev.has_position()) {
-            const int w = static_cast<int>(window_.width_);
-            const int h = static_cast<int>(window_.height_);
+            const auto size = client_size();
+            const int  w    = size.first;
+            const int  h    = size.second;
             if (w <= 0 || h <= 0)
                 return;
 

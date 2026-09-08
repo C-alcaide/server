@@ -1,6 +1,60 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: the Linux build could not compile the screen consumer
+
+`raw_input` was declared inside `#ifdef _MSC_VER` while `dispatch_input`, which takes one, sits
+outside every guard. So `screen_consumer.cpp` failed on any non-MSVC compiler with `error:
+'raw_input' does not name a type` followed by nine more as every member access fell apart.
+Introduced with the window's input handling and live for a day.
+
+**Nothing in this repository could see it.** There is no Linux build on the reference machine and
+no CI running one, so the Windows build stayed green throughout. It took `g++ -fsyntax-only`
+under WSL against the real headers — which is now recorded in `CLAUDE.md` as the cheapest check
+on anything that file's platform guards touch.
+
+`raw_input` is the SEAM between the two window implementations and now sits above the guard where
+it belongs.
+
+### Added: the SFML window produces the same input events
+
+The screen consumer's Linux window is interactive. `sf::Event` is translated into the same
+`raw_input` the Win32 path fills, so the letterbox rejection, the live client rect and the picking
+are shared rather than written twice — and `previz` gestures, `INPUT` routing and HTML delivery
+all work off the one seam.
+
+Three things the SFML side needs that Win32 gets for free, and each is one of the defects the
+2013-2018 interaction API shipped with:
+
+* **the button order is TRANSLATED, not cast.** SFML orders Left/Right/Middle and `input_event`
+  orders Left/Middle/Right. The old code cast between the two enums and exchanged right with
+  middle for five years.
+* **the modifier mask is QUERIED.** An `sf::Event::MouseMoved` carries a position and nothing
+  about what is held, so `sf::Keyboard::isKeyPressed`/`sf::Mouse::isButtonPressed` are read. The
+  old code never set modifiers, which is why no in-page drag ever worked while every click did.
+* **key codes are mapped to WINDOWS virtual keys**, because `INPUT ... KEY DOWN <vk>` documents a
+  numeric virtual key, CEF's `windows_key_code` is windows-style on every platform including
+  Linux, and `previz_renderer::input` compares against `VK_LEFT`. Passing SFML's enum through
+  would make `KEY DOWN 37` the left arrow on Windows and `sf::Keyboard::B` on Linux. Unmapped
+  keys report 0 and the event is dropped: a partial table is honest, and a fallthrough passing
+  the raw code would put a wrong keystroke into a page.
+
+**Verified, and precisely what is verified matters here.** `sfml_input_self_test.cpp` is a
+standalone program — not a boot self-test, because the thing under test is what a window manager
+and SFML actually deliver — that drives a real SFML window with XTest injection. 21 checks, all
+passing under WSL on WSLg, including the two 2013 defects against real injected input: X button 3
+arriving as `input_event`'s button 2, and a *move* reporting the held left button.
+
+It shares the translation with the consumer through `sfml_input_helpers.inl` rather than copying
+it, because a copy would test the copy and would agree with the original until one of them
+changed.
+
+**What is NOT verified: the server on Linux.** It does not build on this machine, so previz,
+`INPUT` and HTML delivery on Linux rest on the translation being right plus everything downstream
+being shared — not on a running channel. The SFML 3 branch is also unbuilt: both this tree and the
+WSL toolchain ship SFML 2.6, so only the SFML 2 branch is compiled and exercised, and the SFML 3
+one is written from the API and named as unverified at the code.
+
 ### Added: ISF `audio` and `audioFFT` input textures
 
 An ISF shader can declare `audio` or `audioFFT` as an input and it is filled by the channel the

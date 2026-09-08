@@ -217,6 +217,11 @@ producers (to the destination, which is what will be on screen).
   nothing about WebGPU, gpu-direct or the shared-texture path — see §5 gap 1.
 * **`WasResized()` is still never called on the browser**, so a page cannot re-lay-out when the
   channel's format changes. Unrelated to input and unchanged by it.
+* **the SFML window path is verified only as a TRANSLATION.** Since 2026-09-08 the Linux window
+  produces the same events (`screen-consumer.md` §1c), checked by `sfml_input_self_test` against
+  a real SFML window under WSL -- but the server does not build on Linux on this machine, so "an
+  HTML page on Linux receives a click" rests on that translation plus everything downstream being
+  shared, rather than on a running channel.
 
 **The elevation preflight is INCONCLUSIVE, never FAIL.** `CefInitialize` returns false when the
 server runs elevated — one log line — and the server otherwise starts perfectly: every consumer

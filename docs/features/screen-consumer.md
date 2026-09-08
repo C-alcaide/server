@@ -76,6 +76,34 @@ Three details that are the fork's own and are easy to get wrong:
 Consecutive moves coalesce at the source, with the queue capped at 256, so a fast mouse cannot
 outrun a tick or grow the queue without bound.
 
+**Both window implementations, since 2026-09-08.** `win32_gl_window` fills `raw_input` from
+`lParam`; the SFML path fills the same struct from `sf::Event`. Everything after that point is
+shared -- which is why the letterbox rejection and the live-rect normalisation exist once rather
+than twice.
+
+The SFML side needs three things Win32 gets for free, and each is one of the defects the
+2013-2018 API shipped with:
+
+* **the button order is translated, not cast.** SFML orders Left/Right/Middle and `input_event`
+  orders Left/Middle/Right (CEF's), so `sfml_button` is a `switch`. The old code cast between the
+  two enums and exchanged right with middle for five years.
+* **the modifier mask is QUERIED.** An `sf::Event::MouseMoved` carries a position and nothing
+  about what is held, so `sfml_modifiers` reads `sf::Keyboard::isKeyPressed` and
+  `sf::Mouse::isButtonPressed`. The old code never set modifiers at all, which is why no in-page
+  drag ever worked while every click did.
+* **key codes are mapped to WINDOWS virtual keys.** `INPUT <ch> KEY DOWN <vk>` documents a numeric
+  virtual key, CEF's `windows_key_code` is windows-style on every platform including Linux, and
+  `previz_renderer::input` compares against `VK_LEFT`. Passing SFML's own enum through would make
+  `KEY DOWN 37` mean the left arrow on Windows and `sf::Keyboard::B` on Linux. Unmapped keys
+  report 0 and the event is dropped -- a partial table is honest, and a fallthrough passing the
+  raw code would put a wrong keystroke into a page.
+
+The three live in `sfml_input_helpers.inl`, included by the consumer AND by
+`sfml_input_self_test.cpp` -- a standalone program that drives a real SFML window with XTest
+injection on an X display. 21 checks, run by hand under WSL; its own header carries the build
+command. XTest rather than `XSendEvent` because the modifier query reads the X server's real
+pointer state, which a synthetic event does not update.
+
 Where the events go is `docs/features/previz.md` §2.2 — today, previz. The dispatch point
 (`video_channel::input`) tries the image mixer first and the stage second, so the same events reach
 a layer's producer when previz is not active.
