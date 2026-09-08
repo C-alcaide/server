@@ -5,7 +5,9 @@
 > **Commands:** none of their own — producers named `isf` and `ofx`
 > **Architecture:** [`../architecture/OPENFX_IMPLEMENTATION.md`](../architecture/OPENFX_IMPLEMENTATION.md)
 > **Guide:** [`../guides/ISF_USER_AND_SHADER_GUIDE.md`](../guides/ISF_USER_AND_SHADER_GUIDE.md), [`../guides/OPENFX_USER_AND_PLUGIN_GUIDE.md`](../guides/OPENFX_USER_AND_PLUGIN_GUIDE.md)
-> **Coverage:** **none**
+> **Coverage:** **none**; `cli.py producer-params` — an ISF shader's own INPUTS as addressable control-API
+> parameters: described in the tree, written through both facades, and gated on the
+> PICTURE at 1 LSB (§Parameters)
 
 Two plugin hosts. **ISF** runs Interactive Shader Format shaders as producers or effects, so a
 GLSL shader from the ISF ecosystem becomes a layer. **OpenFX** hosts OFX plugins — the standard

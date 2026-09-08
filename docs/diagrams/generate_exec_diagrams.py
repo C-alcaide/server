@@ -657,6 +657,90 @@ def audio():
     _save(fig, "exec_audio.png")
 
 
+def reactive():
+    """A parameter that follows something. The point is that the middle box is the only new part.
+
+    Laid out as three columns rather than a flow, because the reader's question is "what can
+    drive what", and a left-to-right flow of six sources into one transform into two targets
+    answers it in one glance where a sequence diagram would not.
+    """
+    lay, fig, ax = _new((13, 7.0))
+    _head(lay, "A parameter that follows the room, not a script",
+          "everything on the left was already arriving; the middle column is what was missing")
+
+    # ---- the sources -------------------------------------------------------------------
+    # Bottom at 30, not 14: the footnotes below live at 22 and lower, and the generator's own
+    # layout check refuses text that sits on a panel -- which is exactly the overlap a renderer
+    # would draw without complaint.
+    lay.panel("src", 4, 29, 28, 47, fc=PANEL, ec=BORDER, lw=1.4)
+    lay.text("srch", 18, 71.5, "Live sources", parent="src", color=TITLE, size=10.5,
+             weight="bold", ha="center")
+
+    rows = [
+        ("Audio", "level, and three frequency bands", SUCCESS_T),
+        ("MIDI", "any controller's knobs and pads", WARNING_T),
+        ("OSC", "a phone, a surface, a lighting desk", SUCCESS_T),
+        ("Mouse / keyboard", "the server's own window", SUCCESS_T),
+        ("Oscillators", "sine, triangle, saw, square, noise", SUCCESS_T),
+        ("Camera tracking, timecode", "already arriving, drove one thing each", WARNING_T),
+    ]
+    y = 64.5
+    for i, (name, sub, col) in enumerate(rows):
+        lay.text(f"s{i}a", 6.5, y, name, parent="src", color=col, size=9.0, weight="bold")
+        lay.text(f"s{i}b", 6.5, y - 2.9, sub, parent="src", color=MUTED, size=7.6, style="italic")
+        y -= 6.2
+
+    # ---- the transform ------------------------------------------------------------------
+    lay.panel("xf", 37, 30, 26, 30, fc=PANEL, ec=ACCENT, lw=1.8)
+    lay.text("xfh", 50, 55, "Shape the response", parent="xf", color=TITLE, size=10.5,
+             weight="bold", ha="center")
+    lay.text("xf1", 50, 49.5, "input range   ·   output range", parent="xf", color=TEXT,
+             size=8.6, ha="center")
+    lay.text("xf2", 50, 45.5, "gain   ·   smoothing   ·   curve", parent="xf", color=TEXT,
+             size=8.6, ha="center")
+    lay.text("xf3", 50, 39.5, "no programming, and no expression", parent="xf", color=MUTED,
+             size=8.0, ha="center", style="italic")
+    lay.text("xf4", 50, 35.5, "language to learn", parent="xf", color=MUTED, size=8.0,
+             ha="center", style="italic")
+
+    lay.arrow((32, 45), (37, 45), color=ACCENT, lw=1.8)
+    lay.arrow((63, 45), (68, 45), color=ACCENT, lw=1.8)
+
+    # ---- the targets --------------------------------------------------------------------
+    lay.panel("tgt", 68, 26, 28, 38, fc=PANEL, ec=ACCENT_HOVER, lw=1.6)
+    lay.text("tgth", 82, 59, "Any addressable parameter", parent="tgt", color=TITLE,
+             size=10.5, weight="bold", ha="center")
+    lay.text("t1", 70.5, 52.5, "178 mixer parameters", parent="tgt", color=TEXT, size=9.0,
+             weight="bold")
+    lay.text("t1b", 70.5, 48.8, "grade, blur, geometry, projection", parent="tgt",
+             color=MUTED, size=7.8, style="italic")
+    lay.text("t2", 70.5, 42.0, "every effect's own inputs", parent="tgt", color=TEXT,
+             size=9.0, weight="bold")
+    lay.text("t2b", 70.5, 38.3, "ISF shaders and OpenFX plug-ins", parent="tgt",
+             color=MUTED, size=7.8, style="italic")
+    lay.text("t3", 70.5, 31.5, "evaluated inside the frame", parent="tgt", color=SUCCESS_T,
+             size=8.6, weight="bold")
+
+    lay.text("note", 50, 22,
+             "The value is applied on the frame it belongs to, not sent as a command and "
+             "waited for.",
+             parent=None, color=TEXT, size=8.8, ha="center")
+    lay.text("note2", 50, 18.2,
+             "A bound parameter is OWNED by what drives it: a conflicting change is refused "
+             "rather than silently undone a frame later.",
+             parent=None, color=TEXT, size=8.8, ha="center")
+    lay.text("note3", 50, 12.2,
+             "Measured: an oscillator fitted to its own waveform at 0.0000 worst-case error; "
+             "audio level agreeing with an independent",
+             parent=None, color=MUTED, size=8.2, ha="center", style="italic")
+    lay.text("note4", 50, 8.4,
+             "measurement to 0.02 dB; 32 continuous bindings on four channels with no dropped "
+             "frame.  MIDI has no test -- there is no controller here.",
+             parent=None, color=MUTED, size=8.2, ha="center", style="italic")
+    lay.check(name="reactive")
+    _save(fig, "exec_reactive.png")
+
+
 if __name__ == "__main__":
     scope()
     direct_display()
@@ -667,5 +751,6 @@ if __name__ == "__main__":
     replay()
     audio()
     control_api()
+    reactive()
     cover_bg()
     to_production()

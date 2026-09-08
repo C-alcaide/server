@@ -572,6 +572,66 @@ Two practical notes:
 What you **cannot** do from the window: rotate or resize a screen, or select the venue
 mesh. Position only, and screens only.
 
+### Reactive parameters — making something follow the music, a knob or the clock
+
+Any parameter you can set can instead be told to **follow** something. Two commands: one to
+create the source, one to attach it.
+
+```
+SOURCE 1 ADD aud AUDIO
+BIND 1-10 brightness aud/rms MIN 0.3 MAX 1.0 IN 0 0.4 LAG 120
+```
+
+That is "layer 10's brightness follows the channel's audio level: silence gives 0.3, a level of
+0.4 or above gives 1.0, and it takes about 120 ms to get there". `UNBIND 1-10 brightness` stops
+it and hands the parameter back.
+
+**What can drive something:**
+
+| `SOURCE <ch> ADD <name> …` | channels | what it is |
+| :--- | :--- | :--- |
+| `AUDIO` | `rms` `dbfs` `peak` `band/0..2` | the channel's own audio — level, and low/mid/high |
+| `MIDI <n>` | `cc/<n>` `note/<n>` `pitch` | a controller. `SOURCE 1 ADD k MIDI` with no number lists the devices |
+| `OSC <port>` | whatever is sent | a phone, a control surface, a lighting desk |
+| `LFO SINE 0.5` | `value` `phase` | an oscillator. Also `TRIANGLE`, `SAW`, `SQUARE`, `NOISE`. **Rate 0 parks it** |
+| `INPUT` | `x` `y` `buttons` `wheel` | the server's own previz window |
+| `TRACKING <cam>` | `pan` `tilt` `roll` `x` `y` `z` `zoom` `focus` | a tracked camera, in degrees and metres |
+| `TIMECODE` | `valid` `frame` `seconds` | house LTC |
+
+**What can be driven:** any mixer parameter by its name (`opacity`, `brightness`, `hue_shift`,
+`fill_translation.0` for the X of a fill), or `producer/<name>` for an input of the ISF shader or
+OpenFX plug-in on that layer. `BIND 1 LIST` shows what is attached; `SOURCE 1 LIST` shows what is
+available and whether it is receiving anything.
+
+**Shaping the response** — these are the only five, and between them they are what the VJ tools
+offer:
+
+| | |
+| :--- | :--- |
+| `IN <lo> <hi>` | the part of the source's range you care about. Default `0 1`, which suits everything except `audio/dbfs` (try `IN -40 -6`) and an accumulating `input/wheel` |
+| `MIN <a> MAX <b>` | where the parameter ends up. **`MIN 1 MAX 0` is legal** and inverts it — "louder means dimmer" |
+| `GAIN <g>` | multiplies before the output range, and saturates rather than overshooting |
+| `LAG <ms>` | smoothing. The number is the time to cover about two-thirds of the distance, so 200 feels like a slow follow and 20 like a fast one |
+| `CURVE <name>` | `LINEAR`, `EASE_IN`, `EASE_OUT`, `EASE`, `STEP`, `INVERT`. A misspelling is **refused** rather than quietly becoming linear |
+
+> **A bound parameter is owned by what drives it.** Setting it by hand — from a panel, a script
+> or `MIXER` — is **refused** with `field_bound` rather than accepted and then undone on the next
+> frame. That is deliberate: a change that succeeds and lasts one frame is worse than one that
+> tells you why it cannot. `UNBIND` first.
+
+Two practical notes:
+
+* **`BIND 1 LIST` marks a binding `BROKEN`** when its source or channel is not producing
+  anything — a controller not plugged in, a MIDI knob not yet turned, no LTC signal. That is
+  information, not a fault: `SOURCE 1 LIST` shows the same thing from the other side, and every
+  source that can be silent publishes a `valid`, `present`, `packets` or `messages` channel you
+  can read to tell "not connected" from "not moving".
+* **32 continuous bindings across four channels cost no dropped frames**, measured. Around 128
+  they start to. If you need more than that, spread them over more servers rather than more
+  channels — the cost follows the total, not the distribution.
+
+`docs/features/reactive.md` has the full model, what is measured and what is not.
+
 ### Sending input to a template
 
 A page loaded with `PLAY [HTML]` or `CG ADD` can be driven from anywhere that speaks AMCP:

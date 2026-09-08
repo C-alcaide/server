@@ -1,6 +1,100 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: reactive parameters — a value driven by a live source, evaluated in the tick
+
+Any addressable parameter can now be driven continuously by a named live source through a
+transform. `docs/features/reactive.md` is the reference.
+
+```
+SOURCE 1 ADD lfo1 LFO SINE 0.5
+BIND 1-10 brightness lfo1/value MIN 0.2 MAX 0.8 CURVE EASE
+UNBIND 1-10 brightness
+```
+
+Sources: `LFO` (sine/triangle/saw/square/noise), `INPUT` (the screen consumer's own pointer and
+keyboard), `AUDIO` (RMS, dBFS, peak and three frequency bands of what leaves the channel), `OSC`
+(a UDP receiver — the server has spoken OSC outbound forever and never listened), `MIDI`
+(Windows, via `winmm`), and read-only `TIMECODE` and `TRACKING`. Targets: any of the 178 mixer
+fields with an optional `.N` component, or `producer/<name>` for an ISF or OFX parameter.
+
+The transform is `IN`/`MIN`/`MAX`/`GAIN`/`LAG`/`CURVE` — Resolume's entire animation menu and
+nothing more. No expression language.
+
+**Behaviour change, and it is the one to read.** A bound field is **owned by its binding**: an
+explicit write to it is refused with the new `field_bound` status rather than applied and
+overwritten on the next tick. Nothing is bound unless somebody binds it, so nothing that works
+today changes — but a client that writes a field it has also bound now gets a refusal where it
+previously got a success that did not last. `UNBIND` hands the field back. This is the
+`icvfx_auto` lesson as a rule: auto-projection used to overwrite a hand-set ICVFX block on every
+camera move and nobody had chosen that precedence.
+
+**Evaluated on the stage executor at the top of the tick** — before the keyframes (a timeline is
+an authored intent for a frame, a binding is a standing rule, so keyframes win) and before any
+layer is pulled (the value must be in the transform when compositing reads it; applied afterwards
+it lands a frame late). The tick length used is the NOMINAL one, not a measured wall-clock delta:
+a source paced by real elapsed time runs fast through a dropped frame and produces a waveform
+that is not reproducible.
+
+**Two new self-tests run at every server start**, beside `compose_self_test` and
+`stage_math_self_test`: `binding_math_self_test` (curves checked monotone as a property, the
+range map on an asymmetric range in both directions, a zero-width input range that must give the
+floor and not a NaN, the lag's frame-rate independence, every waveform periodic and in range,
+and every parser name round-tripping with a typo refused) and `audio_analysis_self_test` (the
+FFT against DC, an on-bin sinusoid, Parseval's theorem, and the level's independence from the
+channel layout).
+
+**Also new, and separable:** RMS, dBFS and an N-band spectrum on the audio mixer at
+`/channel/{n}/mixer/audio/{rms,dbfs,peak,band/N}`. The fork's entire audio measurement was a
+per-channel peak. The FFT is written in `core` rather than taken from FFmpeg's `av_tx`, because
+`core` deliberately does not link FFmpeg and 60 lines of radix-2 arithmetic is not worth
+inverting that.
+
+**Cost, measured A/B/A/B on one binary, four channels at 1080p50:** 32 continuous bindings cost
+**no late frames** however they are distributed; 128 cost about 8%. Where the 128-binding cost
+goes is **not established** — 128 range maps cannot plausibly be 8% of a 40 ms frame, so
+something around the write is the expense, and that needs a profile.
+
+**What is NOT measured:** MIDI's happy path (no controller on this machine — the device list,
+the open failure and the resulting `BROKEN` binding are exercised, a knob turning a parameter is
+not), `TIMECODE`'s happy path (no LTC source here), and `CURVE`/`GAIN`/`LAG` end to end (covered
+at boot as arithmetic; only `LINEAR` with no lag is driven by a battery). And a defect worth
+knowing about because every existing check missed it: binding a channel whose NAME contains a
+slash — `cc/7`, `band/0`, `rgb/2` — was broken for one commit, because the reference parser split
+on the last slash rather than the first. Every binding check used an unslashed channel.
+
+Measured by `binding-lfo`, `binding-input`, `binding-owner`, `binding-audio`, `binding-osc`,
+`binding-cost` and `tracking-previz`, all on both mixers, each mutation-proved.
+
+### Added: ISF and OFX parameters are addressable, described and renderable at 1 LSB
+
+`/channel/{n}/stage/layer/{m}/foreground/params/{name}` — an ISF input or an OFX parameter, in
+the tree with its type, range, default and labels, readable through `/v1/value` and writable
+through `PUT`. Previously reachable only as `CALL ... ISF SET <name> <v>` with `CALL ... ISF LIST`
+to discover them and a reply parsed out of formatted text.
+
+**And there was no read path at all**: `ISF LIST` and `OFX LIST` report each parameter's DECLARED
+default, min and max and never what it holds now, and both setters return a bare bool. So a write
+could not be verified through the server, a parameter could not round-trip through a preset, and
+nothing could be a binding target. `shader::get_value` and `effect::get_param` are that half.
+
+An ISF `long` with `VALUES`/`LABELS` becomes an **enumeration** carrying its labels rather than a
+bare integer; an `event` is a boolean whose description says it will not read back, because
+`reset_events()` clears it every frame; an `image` input is not a parameter at all — it is a
+producer, wired by `[ISF] shader route://1`.
+
+**Fixed at the same time: `isf_producer::call()` swallowed every non-ISF `CALL`.** `[ISF] shader
+video.mp4` returned `202 CALL OK` with an empty payload for `SEEK`, `LOOP` and `LENGTH` — a
+command reporting success and doing nothing, which is the worst failure mode available because
+the operator has no reason to look further. It now forwards to its source. The OFX producer got
+this right from the start, which is what made it findable.
+
+Measured by `producer-params`, 15/15 on both mixers, with the picture gated at **1 LSB** — the
+fixture shader renders a flat fill computed from its own parameters, so the expected colour is
+closed-form. Mutation-proved against the class it exists for: with the setter accepting and
+dropping the value, every description and round-trip check still passes and only the three
+picture checks fail.
+
 ### Added: `INPUT` — mouse and keyboard reach a producer, and HTML pages are interactive again
 
 **The interaction API removed in 2018 is back, in a different shape and with all five of its

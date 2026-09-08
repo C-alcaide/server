@@ -602,6 +602,51 @@ FEATURES = [
                  "resolving · 172 parameters written and read back through two interfaces · "
                  "200 concurrent edits with no lost update · two channels changed on one frame",
     ),
+    dict(
+        n=20, title="Reacting to what is happening",
+        lead="Any parameter can follow the music, a knob, a mouse or a clock, instead of "
+             "following a script.",
+        img="exec_reactive.png",
+        buys=[
+            "A grade, a blur or an effect parameter that follows the AUDIO — the level, or one "
+            "of three frequency bands — so a look moves with the music rather than being "
+            "keyframed against it in advance.",
+            "A hardware controller drives the server directly. Any MIDI desk, any OSC surface, "
+            "a phone app; the operator turns a knob and a parameter follows it, with no script "
+            "in between.",
+            "The operator can shape the response without programming: an input range, an output "
+            "range, a gain, a smoothing time and a curve — which is the whole of what the "
+            "VJ tools offer for this, and enough to make a raw signal usable.",
+            "A tracked camera or house timecode can drive anything, not only the things somebody "
+            "wired them to. Both were already arriving and both fed exactly one consumer.",
+        ],
+        earns="It is the difference between a playout server and an instrument. Everything the "
+              "fork had built — every parameter addressable, described, with its type and its "
+              "limits — could only be set to a CONSTANT or stepped through a timeline. This is "
+              "the half that makes the other half live, and it is what the VJ and live-visuals "
+              "market takes as given: it is the single most-used feature of the products this "
+              "was measured against.",
+        gap="MIDI is implemented and UNMEASURED — there is no controller on the reference "
+            "machine, so the knob-turns-a-parameter path rests on reading the code rather than "
+            "on a test. Timecode is in the same position for the same reason. Beyond hardware: "
+            "the 3D stage's own properties cannot yet be driven this way (a tracker can move the "
+            "previz camera by an older route, but not a screen), nothing can combine two sources "
+            "into one parameter, and DMX arrives nowhere — the server sends lighting protocols "
+            "and does not listen to them.",
+        market="Every product in this class treats this as the core of what it is: Resolume gives "
+               "each parameter an animation source with an audio FFT among them, TouchDesigner "
+               "exports a live channel onto any parameter, Hippotizer does the same through its "
+               "pins. A media server that can only be scripted is a different tool from one that "
+               "can be played, and the vocabulary here is deliberately theirs so an operator who "
+               "knows one knows this.",
+        next='Measure MIDI on real hardware, and let the 3D stage be a target',
+        covers=['reactive'],
+        status=PARTIAL,
+        evidence="six automated checks across both renderers, all passing · an oscillator fitted "
+                 "to its own waveform with a worst-case error of 0.0000 · audio level agreeing "
+                 "with an independent measurement to 0.02 dB · 32 continuous bindings on four "
+                 "channels with no dropped frame · every one of six deliberate faults caught",
+    ),
 ]
 
 

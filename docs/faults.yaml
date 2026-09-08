@@ -65,6 +65,19 @@ status_codes:
       Re-read, decide whether to overwrite, and either retry or tell the operator that
       something else moved the value.
 
+  - code: field_bound
+    meaning: >
+      The path exists and is writable, and a BINDING currently owns it -- a live source is
+      driving it every tick. Nothing was written, deliberately: the write would have been
+      applied and then overwritten on the next frame, which is worse than a refusal because
+      it succeeds and does not last.
+    do: >
+      `UNBIND <ch>-<layer> <field>` hands the field back, and an explicit write then sticks.
+      Distinct from `not_writable` on purpose: that one means the field is derived and never
+      settable, so a control surface should grey the slider out, while this one means something
+      else has it and the surface can offer to take it back. `BIND <ch> LIST` says what owns
+      what.
+
   - code: channel_not_found
     meaning: The channel index does not exist on this server.
     do: >
