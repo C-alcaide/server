@@ -69,6 +69,7 @@
 #include <core/video_format.h>
 #include <core/binding/binding.h>
 #include <core/mixer/audio/audio_analysis.h>
+#include "../midi/midi_source.h"
 #include "../osc/osc_source.h"
 #include <core/video_channel.h>
 
@@ -5449,7 +5450,39 @@ std::wstring source_command(command_context& ctx)
         return L"202 SOURCE OK\r\n";
     }
 
-    return L"400 SOURCE ERROR unknown source kind, expected LFO, INPUT or AUDIO\r\n";
+    if (kind == L"MIDI") {
+        if (ctx.parameters.size() < 4) {
+            // The device LIST as the error, rather than "missing argument". An operator who has
+            // to guess an index will guess wrong, and the names are the only way to tell two
+            // identical controllers apart.
+            std::wstring result = L"400 SOURCE ERROR MIDI needs a device index. Available:\r\n";
+            const auto   devices = protocol::midi::input_devices();
+            if (devices.empty())
+                result += L"  (the system reports no MIDI input devices)\r\n";
+            for (std::size_t i = 0; i < devices.size(); ++i)
+                result += L"  " + std::to_wstring(i) + L" \"" + u16(devices[i]) + L"\"\r\n";
+            return result;
+        }
+
+        long index = 0;
+        try {
+            index = boost::lexical_cast<long>(ctx.parameters.at(3));
+        } catch (...) {
+            return L"400 SOURCE ERROR the MIDI device must be an index; SOURCE ADD <name> MIDI "
+                   L"with no index lists them\r\n";
+        }
+
+        auto src = std::make_shared<protocol::midi::midi_source>(static_cast<int>(index));
+        stage->add_source(name, src).get();
+
+        if (!src->listening())
+            return L"202 SOURCE OK (the device could not be opened -- see the log; bindings to "
+                   L"this source will report BROKEN)\r\n";
+
+        return L"202 SOURCE OK\r\n";
+    }
+
+    return L"400 SOURCE ERROR unknown source kind, expected LFO, INPUT, AUDIO, OSC or MIDI\r\n";
 }
 
 // ---------------------------------------------------------------------------

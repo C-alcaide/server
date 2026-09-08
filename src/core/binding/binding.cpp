@@ -125,7 +125,19 @@ std::vector<std::string> input_source::channels() const { return {"x", "y", "but
 
 bool split_source_ref(const std::string& ref, std::string& source, std::string& channel)
 {
-    const auto slash = ref.rfind('/');
+    // THE FIRST slash, not the last, and this was a defect for exactly one commit.
+    //
+    // A source NAME cannot contain a slash -- it is a single token in `SOURCE ADD` -- but a
+    // CHANNEL name routinely does: `audio`'s bands are `band/0`, an OSC multi-argument message
+    // gives `rgb/0`, and MIDI's whole vocabulary is `cc/7` and `note/60`. Splitting on the last
+    // slash read `m/cc/7` as the source `m/cc`, which does not exist, so `BIND 1-10 brightness
+    // m/cc/7` came back 404 "the source does not resolve" -- naming the source as the problem
+    // when the parse was.
+    //
+    // It made every slashed channel in the build unbindable: MIDI entirely, the audio spectrum,
+    // and an OSC message with more than one argument. Found by driving MIDI on a machine with no
+    // MIDI device, which is worth noting -- the failure path found the parser.
+    const auto slash = ref.find('/');
     if (slash == std::string::npos || slash == 0 || slash + 1 >= ref.size())
         return false;
     source  = ref.substr(0, slash);

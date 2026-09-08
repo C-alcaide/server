@@ -17,6 +17,7 @@ set(SOURCES
 
 		osc/client.cpp
 		osc/osc_source.cpp
+		midi/midi_source.cpp
 
 		util/AsyncEventServer.cpp
 		util/lock_container.cpp
@@ -47,6 +48,7 @@ set(HEADERS
 
 		osc/client.h
 		osc/osc_source.h
+		midi/midi_source.h
 
 		util/AsyncEventServer.h
 		util/ClientInfo.h
@@ -76,6 +78,12 @@ source_group(sources\\util util/*)
 source_group(sources ./*)
 
 target_link_libraries(protocol PRIVATE common core accelerator)
+if(MSVC)
+	# winmm, for `midiInOpen` in midi/midi_source.cpp. Windows' own multimedia library, no
+	# download and no version to pin -- which is most of why it was chosen over a portable
+	# MIDI wrapper for a source whose Linux half is unwritten anyway.
+	target_link_libraries(protocol PRIVATE winmm)
+endif()
 
 # The control API. A sibling library rather than part of `protocol`; see its CMakeLists.
 add_subdirectory(http)
