@@ -1,6 +1,63 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: `INPUT` — mouse and keyboard reach a producer, and HTML pages are interactive again
+
+**The interaction API removed in 2018 is back, in a different shape and with all five of its
+defects fixed.** `frame_producer::input` (default `false`) is the sink; the screen consumer's
+window and a new `INPUT` command are the two sources; `video_channel::input` is the one dispatch
+point, trying the image mixer first — previz consumes when active — and the stage second.
+
+```
+INPUT <ch>[-<layer>] MOUSE MOVE <x> <y> [<modifiers>]
+INPUT <ch>[-<layer>] MOUSE DOWN|UP LEFT|MIDDLE|RIGHT <x> <y> [<modifiers>]
+INPUT <ch>[-<layer>] MOUSE WHEEL <x> <y> <dx> <dy>
+INPUT <ch>[-<layer>] MOUSE LEAVE
+INPUT <ch>[-<layer>] KEY DOWN|UP <virtual-key> [<modifiers>]
+INPUT <ch>[-<layer>] TEXT "<string>"
+```
+
+and `POST /v1/action/channel/{n}[/stage/layer/{m}]/input` with the same shape as JSON.
+Coordinates are 0..1 across the target's own picture, top-left origin — not pixels, so they
+survive a format change. Naming a layer delivers straight to it; omitting the layer hit-tests
+topmost-first, exactly as a gesture on the window does.
+
+**The five 2013 defects, and how each is answered.** Every one was a property of the SFML→CEF
+conversion rather than of the routing, which is why none of the old shape is reused:
+
+| | |
+| :--- | :--- |
+| `SendMouseMoveEvent` from the **stage thread**, where CEF's host is `TID_UI`-only | posted through `html::begin_invoke` |
+| SFML's button enum **cast** to CEF's, exchanging right and middle | `input_event.button` is defined in CEF's order at the source |
+| `e.modifiers` **never set**, so no in-page drag ever worked | `input_modifier` is bit-for-bit `EVENTFLAG_*` |
+| `clickCount` hard-coded to **1** | counted at the source; plumbed, not measured |
+| **no keyboard at all** | `SendKeyEvent`, a separate CHAR event for text, `SetFocus(true)` once |
+
+Two of those five are measured failing: reintroducing the button cast fails `html-input`'s check
+4 with the two permutation colours reading as each other's values, and zeroing the modifier mask
+fails check 5 with the dragging reading identical to the released one at the same coordinates.
+
+**Behaviour change worth reading if you composite HTML.** An HTML layer is now **opaque to
+pointer input** for the layers beneath it, within its rectangle — `html_producer::input` returns
+true unconditionally, because a truthful answer would need a round trip into the browser per
+event on the render thread. Nothing sent input before this release, so nothing that works today
+stops working; but a stack of HTML layers now behaves like a stack of full-screen divs. Put the
+interactive page on top, or scale it so its rectangle covers only what it should own.
+
+**Not inverted in the hit-test:** rotation, perspective corner-pin and crop. A rotated layer
+hit-tests as its unrotated rectangle. Same limit as the 2013 API, and a limit rather than an
+approximation — the numbers are simply not used.
+
+**And a trap that cost the first run of the battery.** `destroy_producer_proxy` wraps every
+producer the registry creates and forwards each base-class virtual by hand, one line apiece. A
+new virtual missing from that list has no symptom of its own: `INPUT` returned `202`, the stage
+hit-tested correctly, the page rendered, and the default returned false — eight of eleven checks
+read the page's untouched idle colour, indistinguishable from a browser that never received
+anything. Four core wrappers forward it now: that proxy, `separated_producer` (to the fill; the
+key is a matte) and both transition producers (to the destination).
+
+Measured by `html-input`, 11/11 on both mixers, verdict read from the rendered picture.
+
 ### Added: the previz window takes the mouse and the keyboard
 
 **The screen consumer's own window is now an interactive previz surface.** Right-drag orbits the

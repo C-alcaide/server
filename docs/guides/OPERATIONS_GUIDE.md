@@ -541,6 +541,68 @@ media folder.
 > attach every couple of seconds until the consumer appears. If it stays blank,
 > confirm the server is actually rendering previz on that channel.
 
+### Driving the server's previz window directly — since 2026-09-08
+
+The server's own screen-consumer window is now interactive, so you can manipulate the
+stage on the machine that renders it without a client at all. **The whole gesture set is
+on the window itself:**
+
+| gesture | what it does |
+| :--- | :--- |
+| right-drag | orbit the **view** camera (the operator's viewpoint) |
+| middle-drag | pan the view camera |
+| scroll | dolly the view camera along its own forward axis |
+| left-click | select the screen under the pointer; a click on empty space clears it |
+| left-drag | move the selected screen **within its own plane** |
+| arrow keys | nudge the selected screen 0.01 m along its own axes |
+| `Esc` | deselect |
+
+**None of these touch the production camera**, which is the camera the projections are
+computed from. Moving the view camera changes what you see and nothing that goes to the
+wall — that is the split, and it is deliberate.
+
+Two practical notes:
+
+* **Response is one frame.** Measured, on the frame clock. This is not the client's
+  round trip; the events are handled on the render thread.
+* **Turn it off with `<interactive>false</interactive>`** (or `NON_INTERACTIVE` on the
+  `ADD` form) on a confidence monitor nobody should be able to alter. That element used
+  to only hide the cursor; it now also decides whether the window accepts input at all.
+
+What you **cannot** do from the window: rotate or resize a screen, or select the venue
+mesh. Position only, and screens only.
+
+### Sending input to a template
+
+A page loaded with `PLAY [HTML]` or `CG ADD` can be driven from anywhere that speaks AMCP:
+
+```
+INPUT 1-10 MOUSE MOVE 0.25 0.75
+INPUT 1-10 MOUSE DOWN LEFT 0.25 0.75
+INPUT 1-10 MOUSE UP LEFT 0.25 0.75
+INPUT 1-10 KEY DOWN 13
+INPUT 1-10 TEXT "hello"
+```
+
+Coordinates are **0..1 across the target's own picture, top-left origin** — not pixels, so
+they survive a format change. Naming the layer delivers straight to it; leaving the layer
+off (`INPUT 1 MOUSE MOVE …`) hit-tests the channel topmost-first, exactly as a click on the
+window does.
+
+The same thing over HTTP:
+
+```bash
+curl -X POST -d '{"type":"mouse","action":"move","x":0.25,"y":0.75}' \
+     http://127.0.0.1:5254/v1/action/channel/1/stage/layer/10/input
+```
+
+> **An HTML layer is opaque to input.** Everything under it stops receiving pointer events
+> within its rectangle, like a full-screen div. Put the interactive page on the top layer,
+> or scale it so its rectangle covers only the area it should own.
+
+`docs/features/html-gpu-direct.md` §4 has the full grammar, the modifier mask and what is
+not covered.
+
 ### ICVFX — the inner frustum
 
 In-Camera VFX renders the **inner frustum** (the camera's exact field of view)

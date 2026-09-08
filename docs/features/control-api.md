@@ -3,7 +3,7 @@
 > **State:** partial
 > **Modules:** `src/protocol/http`, `src/core/frame/transform_fields.h`
 > **Commands:** 1 fork-specific AMCP command — `MIXER FIELD`, the registry's own projection onto AMCP
-> **Coverage:** `api-tree`, `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`, `api-stage`
+> **Coverage:** `api-tree`, `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`, `api-stage`, `html-input` -- which is the only coverage of the input action (§2)
 
 An HTTP interface that exposes what the server publishes as an **addressable, self-describing
 tree**, in the OSCQuery format. A client fetches `/v1/tree` once and knows every parameter that
@@ -33,7 +33,7 @@ word "API".
 | `<auth>password</auth>` -- challenge/response, SHA-256 | implemented | `auth_state` in `api_auth.cpp`, `sha256` in `common/sha256.h` |
 | `PUT /v1/value/.../mixer/{field}` -- validated, with `duration` and `tween` | implemented | `write_value` in `api_value.cpp` |
 | `op`: `set`, `toggle`, `add`, `cas` -- one closure on the stage executor | implemented | same |
-| `POST /v1/action/.../{verb}` -- transport, clear; clip loads delegated to AMCP | implemented | `run_action` in `api_action.cpp` |
+| `POST /v1/action/.../{verb}` -- transport, clear, **input**; clip loads and input delegated to AMCP | implemented | `run_action` in `api_action.cpp` |
 | `POST /v1/batch` -- validate-all-then-apply, one frame across channels | implemented | `run_batch`, same file |
 | `GET /v1/openapi.json` -- generated, and `GET /v1/docs` | implemented | `openapi` and `docs_page` in `api_openapi.cpp` |
 | `at_frame` / `in_frames` on a batch | implemented | `park_batch` and `drain_batches` in `http_server.cpp` |
@@ -210,18 +210,33 @@ answer to a different question.
 ### Actions
 
 `POST /v1/action/channel/{n}/stage/layer/{m}/{verb}` -- `play`, `stop`, `pause`, `resume`,
-`preview`, `clear`, `clear_transforms`. `POST /v1/action/channel/{n}/{verb}` takes `clear` and
-`clear_transforms` for the whole channel.
+`preview`, `clear`, `clear_transforms`, `input`. `POST /v1/action/channel/{n}/{verb}` takes
+`clear`, `clear_transforms` and `input` for the whole channel.
 
 ```bash
 curl -X POST .../v1/action/channel/1/stage/layer/10/play -d '{"clip":"AMB","loop":true}'
 curl -X POST .../v1/action/channel/1/stage/layer/10/pause
 curl -X POST .../v1/action/channel/1/clear
+curl -X POST .../v1/action/channel/1/stage/layer/10/input      -d '{"type":"mouse","action":"move","x":0.25,"y":0.75}'
 ```
 
+**`input`** -- synthetic pointer and keyboard events, since 2026-09-08. The body's `type` is
+`mouse`, `key` or `text`; a mouse `action` is `move`, `down`, `up`, `wheel` or `leave`, with
+`x`/`y` in **0..1 across the target's own picture, top-left origin**, an optional `modifiers`
+mask, `button` for a press, and `dx`/`dy` for a wheel. A key takes `action` plus a numeric
+`key`; text takes `text`.
+
+With a layer the event goes to that layer; **without one it is hit-tested topmost-first**, which
+is the same path a gesture on the screen consumer's own window takes. `docs/features/html-gpu-direct.md`
+§4 owns the full grammar and what is not covered.
+
 Everything the API can do through `stage_base` it does directly -- the same object AMCP's handlers
-call. The two forms that need a producer built from a string, `play` and `load` **with a clip**,
-are delegated to AMCP and say so in the reply:
+call. Three forms are delegated to AMCP instead and say so in the reply: `play` and `load` **with
+a clip**, because they need a producer built from a string, and **`input`**, for a different
+reason worth stating. A channel-level input must try the image mixer before the stage -- previz
+consumes the event when it is active -- and `video_channel::input` is the single place that
+decides. `api_context` hands out a `stage_base` rather than a channel, so a direct route here
+would have to duplicate that decision, which is how two dispatch orders come to disagree.
 
 ```json
 {"status":{"code":"ok","message":""},"server":"stage-left",
