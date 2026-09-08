@@ -69,6 +69,7 @@
 #include <core/video_format.h>
 #include <core/binding/binding.h>
 #include <core/mixer/audio/audio_analysis.h>
+#include "../osc/osc_source.h"
 #include <core/video_channel.h>
 
 #include <protocol/osc/client.h>
@@ -5418,6 +5419,33 @@ std::wstring source_command(command_context& ctx)
         }
 
         stage->add_source(name, std::make_shared<core::binding::lfo_source>(wave, rate, phase)).get();
+        return L"202 SOURCE OK\r\n";
+    }
+
+    if (kind == L"OSC") {
+        if (ctx.parameters.size() < 4)
+            return L"400 SOURCE ERROR OSC needs a UDP port\r\n";
+
+        long port = 0;
+        try {
+            port = boost::lexical_cast<long>(ctx.parameters.at(3));
+        } catch (...) {
+            return L"400 SOURCE ERROR the port is not a number\r\n";
+        }
+        if (port < 1 || port > 65535)
+            return L"400 SOURCE ERROR the port must be 1..65535\r\n";
+
+        auto src = std::make_shared<protocol::osc::osc_source>(name, static_cast<unsigned short>(port));
+        stage->add_source(name, src).get();
+
+        // 202 EVEN IF THE BIND FAILED, and the reply says which. The source exists either way
+        // and every channel reads as absent, so a binding to it reports BROKEN -- which is
+        // visible. Refusing here would be defensible too, but it would mean an operator who
+        // typed a busy port has no source to inspect and nothing in the tree to explain why.
+        if (!src->listening())
+            return L"202 SOURCE OK (the port could not be bound -- see the log; bindings to this "
+                   L"source will report BROKEN)\r\n";
+
         return L"202 SOURCE OK\r\n";
     }
 

@@ -16,6 +16,7 @@ set(SOURCES
 		osc/oscpack/OscTypes.cpp
 
 		osc/client.cpp
+		osc/osc_source.cpp
 
 		util/AsyncEventServer.cpp
 		util/lock_container.cpp
@@ -45,6 +46,7 @@ set(HEADERS
 		osc/oscpack/OscTypes.h
 
 		osc/client.h
+		osc/osc_source.h
 
 		util/AsyncEventServer.h
 		util/ClientInfo.h
