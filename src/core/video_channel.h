@@ -22,6 +22,7 @@
 #pragma once
 
 #include "fwd.h"
+#include "input/input_event.h"
 #include "video_format.h"
 
 #include "frame/pixel_format.h"
@@ -121,6 +122,25 @@ class video_channel final
     [[nodiscard]] channel_info get_channel_info() const;
 
     std::shared_ptr<core::route> route(int index = -1, route_mode mode = route_mode::foreground, bool raw = false);
+
+    /// Offer a pointer or keyboard event to this channel.
+    ///
+    /// THE ONE DISPATCH POINT, and `video_channel` is where it belongs because it is the only
+    /// object that owns both halves: the image mixer (where previz renders) and the stage
+    /// (where layers and their producers live). It is also in `core`, which the accelerator
+    /// and the modules may both depend on.
+    ///
+    /// The mixer is offered the event FIRST. When previz is active it is the whole picture on
+    /// this channel -- it replaces the 2D output -- so a click belongs to the 3D view and not
+    /// to a layer the operator cannot see. If the mixer declines, the stage hit-tests its
+    /// layers (see `stage_base::input`).
+    ///
+    /// This deliberately does NOT reinstate the 2013-2018 shape, where an `interaction_sink*`
+    /// was threaded through EVERY consumer factory -- seven modules had to declare and ignore
+    /// the argument to serve one real user, which is visibly why it was deleted. A consumer
+    /// that wants to produce events already receives the channel vector and its own
+    /// `channel_info.index`; it needs nothing from this interface but this method.
+    void input(const input_event& event);
 
   private:
     struct impl;

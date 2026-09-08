@@ -25,6 +25,7 @@
 #include <core/frame/frame_factory.h>
 #include <core/frame/frame_visitor.h>
 #include <core/frame/pixel_format.h>
+#include <core/input/input_event.h>
 #include <core/monitor/monitor.h>
 
 #include <cstdint>
@@ -128,6 +129,19 @@ class image_mixer
     /// Default is empty, so a backend with nothing to say costs nothing: assigning an empty state
     /// writes no keys at all.
     virtual monitor::state state() const { return {}; }
+
+    /// Offer this backend a pointer or keyboard event. Returns true if it consumed it.
+    ///
+    /// The WRITE direction of the `state()` seam directly above, and it exists for the same
+    /// reason: previz lives inside the mixer, `core` may not see the accelerator, and a
+    /// `dynamic_cast` in the channel tick would invert the dependency. A backend that returns
+    /// false has not looked at the event and the channel passes it on to the stage, so a
+    /// channel with no previz behaves exactly as it did before this existed.
+    ///
+    /// Called on the CONSUMER's thread, not the channel tick -- the implementation is
+    /// responsible for its own locking. `previz_renderer` already takes a scene mutex for
+    /// every mutator, which is what makes that safe here.
+    virtual bool input(const input_event&) { return false; }
 
     virtual std::future<render_output> render(const struct video_format_desc& format_desc) = 0;
 

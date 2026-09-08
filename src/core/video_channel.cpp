@@ -430,6 +430,17 @@ struct video_channel::impl final
         thread_.join();
     }
 
+    void input(const input_event& event)
+    {
+        // The mixer first. When previz is active it IS this channel's picture -- it replaces the
+        // 2D composite -- so a click belongs to the 3D view rather than to a layer nobody can
+        // see. A mixer with no previz returns false and costs a virtual call.
+        if (image_mixer_->input(event))
+            return;
+
+        stage_->input(event);
+    }
+
     std::shared_ptr<core::route> route(int index = -1, route_mode mode = route_mode::foreground, bool raw = false)
     {
         std::lock_guard<std::mutex> lock(routes_mutex_);
@@ -518,5 +529,6 @@ std::shared_ptr<const core::monitor::state> video_channel::state_snapshot() cons
 }
 
 std::shared_ptr<route> video_channel::route(int index, route_mode mode, bool raw) { return impl_->route(index, mode, raw); }
+void                   video_channel::input(const input_event& event) { impl_->input(event); }
 
 }} // namespace caspar::core

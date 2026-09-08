@@ -22,6 +22,7 @@
 #pragma once
 
 #include "../fwd.h"
+#include "../input/input_event.h"
 #include "../monitor/monitor.h"
 
 #include <common/executor.h>
@@ -99,6 +100,13 @@ class stage_base
     swap_layer(int index, int other_index, const std::shared_ptr<stage_base>& other, bool swap_transforms) = 0;
 
     virtual std::future<void> execute(std::function<void()> k) = 0;
+
+    /// Offer a pointer or keyboard event to whichever layer wants it.
+    ///
+    /// Default is a no-op, so a stage implementation that does not route input -- and
+    /// `stage_delayed`, which exists only to defer writes inside a batch -- needs nothing. The
+    /// real implementation hit-tests layers topmost-first; see `stage::impl::input`.
+    virtual void input(const input_event& event) {}
 
     // Keyframe management (type-erased: void* wraps module types)
     virtual std::future<void>                  set_keyframe_data(int layer, std::shared_ptr<void> data)                      = 0;

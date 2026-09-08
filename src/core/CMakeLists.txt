@@ -108,6 +108,8 @@ set(HEADERS
 		producer/layer.h
 		producer/stage.h
 
+		input/input_event.h
+
 		stage/stage_model.h
 		stage/stage_math.h
 		stage/stage_math_self_test.h
@@ -158,6 +160,7 @@ source_group(sources\\mixer mixer/*)
 source_group(sources\\mixer\\audio mixer/audio/*)
 source_group(sources\\mixer\\image mixer/image/*)
 source_group(sources\\stage stage/*)
+source_group(sources\\input input/*)
 source_group(sources\\producer\\color producer/color/*)
 source_group(sources\\producer\\route producer/route/*)
 source_group(sources\\producer\\transition producer/transition/*)
