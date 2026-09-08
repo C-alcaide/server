@@ -352,6 +352,131 @@ pathlib.Path(r'd:\Github\CasparVP\src\modules\ffmpeg\util\av_util.cpp').touch()
 
 ---
 
+## Building on Linux, under WSL — and why it is worth doing from Windows
+
+**This is not for shipping a Linux build. It is the cheapest defect-finder in the tree.**
+
+Three real defects were found the first time anyone compiled this fork with GCC, and all three
+were invisible on Windows with a completely green build:
+
+| defect | why Windows could not see it |
+| :--- | :--- |
+| `raw_input` declared inside `#ifdef _MSC_VER` while the platform-neutral `dispatch_input` took one | ten compile errors off MSVC; MSVC compiles the guarded branch |
+| `shell/server.cpp` calling `accelerator::vulkan::run_compose_self_test()` unguarded | an unresolved symbol in any build without Vulkan. `Bootstrap_Windows` auto-enables Vulkan when it finds the SDK, and this box has it |
+| `accelerator/ogl/image/shader.frag` starting with a UTF-8 BOM | NVIDIA's GLSL compiler accepts a BOM, Mesa refuses it. A RUNTIME fault, and total: the OGL mixer cannot create its shader |
+| `tracking.cpp` iterating `get_child(path, wptree{})` — a reference to a destroyed temporary | undefined behaviour that MSVC's freed heap happened to make benign. SIGSEGV under libstdc++ on every config with no `<tracking>` block |
+
+Two of those four are **platform-guard mistakes that a syntax check alone catches in seconds**,
+which is why the rule in `CLAUDE.md` is to run one after touching any `#ifdef` in
+`src/modules/screen`. The other two needed a real link and a real run.
+
+### The cheap check: no Linux build required
+
+A syntax check of one file needs nothing but GCC and the headers the *Windows* build already
+fetched:
+
+```bash
+wsl.exe -d Ubuntu-24.04 -e bash -lc 'cd /mnt/d/Github/CasparVP && B=build; \
+  INC="-Isrc -I$B/modules/screen -I$B/boost-prefix/src/boost/include/boost-1_83 \
+       -I$B/ffmpeg-lib-prefix/src/ffmpeg-lib/include"; \
+  g++ -std=c++20 -fsyntax-only $INC src/modules/screen/consumer/screen_consumer.cpp'
+```
+
+Exit 0 is a pass. `-I$B/modules/screen` is not optional — that is where `bin2c` writes the
+generated shader headers, and without it the file stops at `consumer_screen_fragment.h`.
+
+### The full build
+
+```bash
+sudo apt-get install -y libboost-all-dev libavformat-dev libglew-dev libtbb-dev \
+    libopenal-dev libsfml-dev libx11-dev libxrandr-dev libxcursor-dev libxi-dev \
+    libudev-dev libfreetype-dev libfontconfig1-dev libssl-dev libasound2-dev
+
+mkdir -p /tmp/blx && cd /tmp/blx
+cmake /mnt/d/Github/CasparVP/src -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DENABLE_HTML=OFF -DENABLE_VULKAN=OFF -DBUILD_CUDA_MODULES=OFF
+ninja
+```
+
+Ubuntu 24.04 satisfies almost all of it out of the box, including **Boost 1.83** — exactly the
+version `Bootstrap_Linux` requires. It ships **FFmpeg 6.1** where the Windows build fetches 8.1,
+and that is fine: the fork's FFmpeg code is already guarded (`#if LIBAVUTIL_VERSION_MAJOR >= 60`).
+
+| flag | why |
+| :--- | :--- |
+| `-DENABLE_VULKAN=OFF` | the default on **both** platforms. No Vulkan SDK in WSL, so the Vulkan mixer, `vulkan_output` and the whole GPU-interop surface are out of reach here |
+| `-DENABLE_HTML=OFF` | only to skip the CEF download. `Bootstrap_Linux` fetches a Linux CEF perfectly well; turn it on when you want the HTML module |
+| `-DBUILD_CUDA_MODULES=OFF` | auto-detects off anyway; no CUDA toolkit in WSL |
+
+`replay`, `flash`, `bluefish` and `spout` are already MSVC-gated in `modules/CMakeLists.txt` and
+need nothing. `libDeckLinkAPI.so` is absent, which the module logs and survives.
+
+### Running it
+
+```bash
+cd /tmp/blx/shell
+mkdir -p media log data template
+# ... write a casparcg.config with <paths>, one channel and a <screen> consumer ...
+setsid ./casparcg < /dev/null > /tmp/srv.log 2>&1 &
+```
+
+**Three things that will otherwise hang or mislead you**, all measured:
+
+* **`stdin` must be `/dev/null`.** The server runs a "Type q to close" read loop; with stdin
+  inherited from `wsl.exe` the invocation never returns.
+* **`setsid`**, or the server sits in `wsl.exe`'s process group and the whole call waits on it.
+  Kill it with `pkill -9 -x casparcg` and do **not** `wait` — it does not exit promptly on TERM.
+* **match the process as `-x casparcg`, not by path.** It is launched as `./casparcg` from its own
+  directory, so `pgrep -f` on the build path matches nothing — which once reported "SERVER DIED"
+  about a server that was up and listening on both ports.
+
+It renders through **Mesa/llvmpipe** (software), so it is slow and useless for any timing
+measurement. It is entirely adequate for correctness.
+
+### Driving it from the Windows harness
+
+**AMCP and the control API are TCP, and WSL2 forwards localhost** — so a client on the Windows
+side reaches a server in WSL with no tunnel. Verified: `VERSION` and `INFO` answered from Windows
+Python against the WSL server.
+
+That makes a Linux arm for the API and binding batteries mostly plumbing rather than new
+measurement design: `ServerManager` would need to launch through `wsl.exe` and generate Linux
+paths. `previz-interact` needs more — its `PostMessage` injection is Win32-only, and the Linux
+equivalent is XTest, already written and proven in `sfml_input_self_test.cpp`.
+
+**Getting files in and out is the fiddly part**, and the working route is the `\\wsl$` share from
+the Windows side, **not** `wsl.exe -e cp`:
+
+```bash
+cp local.config "//wsl$/Ubuntu-24.04/tmp/blx/shell/casparcg.config"
+```
+
+Git Bash rewrites `/tmp` and `/mnt` arguments into Windows paths, and `wsl.exe` treats a `--` in
+a path (the scratchpad's own name contains one) as end-of-options. Both fail silently. For the
+same reason, put multi-step work in a **script file** copied through the share rather than a
+`bash -lc '...'` one-liner: `&`, `<` and `>` do not survive the trip.
+
+### What a Linux run actually verifies
+
+Measured on the first working build — all four boot self-tests, then thirteen feature checks over
+AMCP and the control API:
+
+```
+[core] stage math self-test: 83 checks, 0 divergences.
+[binding-math] self-test: all checks passed
+[audio-analysis] self-test: all checks passed
+[core] compose self-test: opengl 178 fields, 256 iterations, 0 divergences.
+```
+
+and the producer-parameter registry, the ISF `audioFFT` texture, an LFO binding moving a mixer
+field inside its declared range, `field_bound` ownership, and the OSC receiver — 13/13.
+
+**What it does NOT verify**: anything Vulkan, anything CUDA, any timing figure (llvmpipe), the
+DeckLink and HTML modules as configured above, and any picture comparison — the harness's capture
+path is Windows-side. Those remain Windows-only measurements.
+
+---
+
 ## CUDA module (cuda_prores)
 
 The CUDA module is **not** included in the `ffmpeg` or `decklink` targets. It has its own CMakeLists.txt. To build it:
