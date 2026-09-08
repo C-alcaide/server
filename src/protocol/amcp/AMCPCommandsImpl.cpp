@@ -70,6 +70,8 @@
 #include <core/binding/binding.h>
 #include <core/mixer/audio/audio_analysis.h>
 #include "../midi/midi_source.h"
+#include <modules/ltc/ltc_input.h>
+#include <modules/tracking/tracker_registry.h>
 #include "../osc/osc_source.h"
 #include <core/video_channel.h>
 
@@ -5482,7 +5484,121 @@ std::wstring source_command(command_context& ctx)
         return L"202 SOURCE OK\r\n";
     }
 
-    return L"400 SOURCE ERROR unknown source kind, expected LFO, INPUT, AUDIO, OSC or MIDI\r\n";
+    if (kind == L"TIMECODE") {
+        // READ-ONLY EXPOSURE of `ltc::LTCInput`, which four consumers already read and which
+        // drives nothing else. Nothing here starts or configures it -- `INFO LTC` and the LTC
+        // configuration own that -- so a source on a server with no LTC signal reports
+        // `valid` 0 and every other channel absent, and a binding to it reads BROKEN.
+        //
+        // `fps` is taken from the CHANNEL, so `frame` is an absolute frame number on this
+        // channel's own grid. Asking the operator for it would be asking them to restate
+        // something the server knows, and getting it wrong would silently scale the number.
+        int fps = 25;
+        if (ctx.channel.raw_channel) {
+            const auto fd  = ctx.channel.raw_channel->stage()->video_format_desc();
+            const auto num = fd.framerate.numerator();
+            const auto den = fd.framerate.denominator();
+            if (den > 0)
+                fps = static_cast<int>(num / den);
+        }
+
+        std::vector<std::string> chans{"valid", "frame", "seconds"};
+
+        stage
+            ->add_source(name,
+                         std::make_shared<core::binding::function_source>(
+                             "timecode",
+                             "timecode (valid frame seconds) at " + std::to_string(fps) + " fps",
+                             chans,
+                             [fps](const std::string& channel, double& out) {
+                                 auto& ltc = caspar::ltc::LTCInput::instance();
+                                 const bool valid = ltc.is_valid();
+
+                                 if (channel == "valid") {
+                                     // ALWAYS answers, even when there is no signal: this is the
+                                     // channel an operator reads to find out whether the others
+                                     // mean anything, so it must not itself be absent.
+                                     out = valid ? 1.0 : 0.0;
+                                     return true;
+                                 }
+                                 if (!valid)
+                                     return false;
+
+                                 const auto frame = ltc.get_current_frame_number(fps);
+                                 if (channel == "frame") {
+                                     out = static_cast<double>(frame);
+                                     return true;
+                                 }
+                                 if (channel == "seconds") {
+                                     out = fps > 0 ? static_cast<double>(frame) / fps : 0.0;
+                                     return true;
+                                 }
+                                 return false;
+                             }))
+            .get();
+        return L"202 SOURCE OK\r\n";
+    }
+
+    if (kind == L"TRACKING") {
+        if (ctx.parameters.size() < 4)
+            return L"400 SOURCE ERROR TRACKING needs a camera id\r\n";
+
+        long camera = 0;
+        try {
+            camera = boost::lexical_cast<long>(ctx.parameters.at(3));
+        } catch (...) {
+            return L"400 SOURCE ERROR the camera id is not a number\r\n";
+        }
+
+        // READ-ONLY EXPOSURE of `tracker_registry`, and the emphasis matters: the existing
+        // `TRACKING BIND` closures that drive a previz camera or a projection are left exactly
+        // alone. This is a second READER of the same data, so a tracker can drive a grade or a
+        // producer parameter without touching what it already drives.
+        //
+        // POSITION IS CONVERTED TO METRES here. `camera_data` carries millimetres, because that
+        // is what FreeD and its relatives send -- and every other length in the binding layer
+        // and in the previz stage is metres, so leaving it in mm would make one source's
+        // `IN` range differ from the rest by a factor of a thousand with nothing to say so.
+        std::vector<std::string> chans{"present", "pan", "tilt", "roll", "x", "y", "z", "zoom", "focus"};
+
+        stage
+            ->add_source(name,
+                         std::make_shared<core::binding::function_source>(
+                             "tracking",
+                             "tracking camera " + std::to_string(camera) +
+                                 " (present pan tilt roll x y z zoom focus; angles in degrees, "
+                                 "position in metres)",
+                             chans,
+                             [camera](const std::string& channel, double& out) {
+                                 const auto data =
+                                     caspar::tracking::tracker_registry::instance().get_latest_data(
+                                         static_cast<int>(camera));
+
+                                 if (channel == "present") {
+                                     out = data ? 1.0 : 0.0;
+                                     return true;
+                                 }
+                                 if (!data)
+                                     return false;
+
+                                 constexpr double to_deg = 57.29577951308232; // 180/pi
+                                 constexpr double mm_to_m = 0.001;
+
+                                 if (channel == "pan") { out = data->pan * to_deg; return true; }
+                                 if (channel == "tilt") { out = data->tilt * to_deg; return true; }
+                                 if (channel == "roll") { out = data->roll * to_deg; return true; }
+                                 if (channel == "x") { out = data->x * mm_to_m; return true; }
+                                 if (channel == "y") { out = data->y * mm_to_m; return true; }
+                                 if (channel == "z") { out = data->z * mm_to_m; return true; }
+                                 if (channel == "zoom") { out = static_cast<double>(data->zoom); return true; }
+                                 if (channel == "focus") { out = static_cast<double>(data->focus); return true; }
+                                 return false;
+                             }))
+            .get();
+        return L"202 SOURCE OK\r\n";
+    }
+
+    return L"400 SOURCE ERROR unknown source kind, expected LFO, INPUT, AUDIO, OSC, MIDI, TIMECODE or TRACKING\r\n";
 }
 
 // ---------------------------------------------------------------------------
