@@ -156,6 +156,9 @@ class html_client
 
     CefRefPtr<CefBrowser> browser_;
 
+    //: whether `SetFocus(true)` has been sent. CEF UI thread only, like `browser_`.
+    bool focused_ = false;
+
 #ifdef _WIN32
     /// Non-null only when the GPU-direct path was set up successfully, which is
     /// decided before the browser exists (CEF binds the paint callback at
@@ -322,6 +325,104 @@ class html_client
     {
         std::lock_guard<std::mutex> lock(frames_mutex_);
         return !frames_.empty() || last_frame_;
+    }
+
+    /// Turn a `core::input_event` into CEF's own events, on CEF's own thread.
+    ///
+    /// EVERY ONE OF THE 2013-2018 API'S FIVE DEFECTS IS ADDRESSED HERE, because each was a
+    /// property of this conversion rather than of the routing:
+    ///
+    /// 1. `SendMouseMoveEvent` was called from the STAGE thread. CEF's browser host is
+    ///    `TID_UI`-only; calling it from anywhere else is undefined and was the reason the old
+    ///    API was flaky rather than broken. Everything below is posted through
+    ///    `html::begin_invoke`, which is that thread, and posted rather than invoked -- the
+    ///    caller is a render or protocol thread and must not wait on a browser.
+    /// 2. `sf::Mouse::Button` was CAST to `MouseButtonType`. SFML's order is Left/Right/Middle
+    ///    and CEF's is Left/Middle/Right, so every right-click arrived as a middle-click and
+    ///    vice versa. `input_event.button` is DEFINED in CEF's order at the source, so there is
+    ///    nothing to convert and nothing to get wrong.
+    /// 3. `e.modifiers` was never set, so `SendMouseMoveEvent` always reported no buttons held
+    ///    and no in-page drag ever worked -- a page cannot tell a drag from a hover without it.
+    ///    `input_modifier` is deliberately bit-for-bit CEF's `EVENTFLAG_*` (shift 1<<1, control
+    ///    1<<2, alt 1<<3, left 1<<4, middle 1<<5, right 1<<6), so the mask passes straight
+    ///    through. If CEF ever renumbers those, this is the line that breaks.
+    /// 4. `clickCount` was hard-coded to 1, so no page ever saw a double-click. The source
+    ///    counts them (`CS_DBLCLKS` on the window class) and `input_event.click_count` carries it.
+    /// 5. There was NO KEYBOARD AT ALL -- `interaction_event.h` had three mouse events and
+    ///    nothing else. `SendKeyEvent` is below, and `SetFocus(true)` on the first input, without
+    ///    which a windowless browser routes nothing to the focused element.
+    void send_input(const core::input_event& event)
+    {
+        html::begin_invoke([this, event] {
+            auto host = get_browser_host();
+            if (!host)
+                return;
+
+            if (!focused_) {
+                // A windowless browser starts unfocused, and an unfocused page delivers key
+                // events nowhere. Once, on the first input, rather than per event: SetFocus is
+                // not free and re-focusing mid-gesture can reset a page's selection.
+                host->SetFocus(true);
+                focused_ = true;
+            }
+
+            // The browser's CSS pixel space is the format's SQUARE raster, whatever the layer's
+            // on-screen scale -- so this multiplication is the only geometry the producer does.
+            // The layer's fill translation and scale were already undone by `stage::impl::offer`,
+            // which is why a scaled-down HTML layer still gets the page's own coordinates.
+            CefMouseEvent m;
+            m.x         = static_cast<int>(event.x * format_desc_.square_width);
+            m.y         = static_cast<int>(event.y * format_desc_.square_height);
+            m.modifiers = event.modifiers;
+
+            switch (event.type) {
+                case core::input_event::kind::move:
+                    host->SendMouseMoveEvent(m, false);
+                    break;
+
+                case core::input_event::kind::leave:
+                    host->SendMouseMoveEvent(m, true);
+                    break;
+
+                case core::input_event::kind::button: {
+                    if (event.button < 0 || event.button > 2)
+                        break;
+                    const auto type = static_cast<cef_mouse_button_type_t>(event.button);
+                    host->SendMouseClickEvent(m, type, !event.pressed, event.click_count);
+                    break;
+                }
+
+                case core::input_event::kind::wheel:
+                    host->SendMouseWheelEvent(
+                        m, static_cast<int>(event.wheel_dx), static_cast<int>(event.wheel_dy));
+                    break;
+
+                case core::input_event::kind::key: {
+                    CefKeyEvent k;
+                    k.type              = event.pressed ? KEYEVENT_RAWKEYDOWN : KEYEVENT_KEYUP;
+                    k.modifiers         = event.modifiers;
+                    k.windows_key_code  = event.key;
+                    k.native_key_code   = event.key;
+                    host->SendKeyEvent(k);
+                    break;
+                }
+
+                case core::input_event::kind::text: {
+                    // A CHAR event, which is a SEPARATE event from the key that produced it --
+                    // sending only RAWKEYDOWN types nothing into an input field, and sending only
+                    // CHAR leaves keydown handlers unfired. The source produces both.
+                    CefKeyEvent k;
+                    k.type                  = KEYEVENT_CHAR;
+                    k.modifiers             = event.modifiers;
+                    k.character             = static_cast<char16_t>(event.character);
+                    k.unmodified_character  = static_cast<char16_t>(event.character);
+                    k.windows_key_code      = static_cast<int>(event.character);
+                    k.native_key_code       = static_cast<int>(event.character);
+                    host->SendKeyEvent(k);
+                    break;
+                }
+            }
+        });
     }
 
     void execute_javascript(const std::wstring& javascript)
@@ -782,6 +883,26 @@ class html_producer : public core::frame_producer
         }
 
         return make_ready_future(std::wstring());
+    }
+
+    bool input(const core::input_event& event) override
+    {
+        if (client_ == nullptr)
+            return false;
+
+        client_->send_input(event);
+
+        // TRUE unconditionally, and this is a judgement rather than an oversight. The stage reads
+        // false as "not mine, try the layer below", and a page's own hit-testing happens inside
+        // CEF on another thread -- so a truthful answer would need a round trip to the browser
+        // per event, on the render thread. A page that ignores a click is indistinguishable from
+        // one that handles it and does nothing, which is also true in a browser.
+        //
+        // The consequence to know about: an HTML layer is opaque to input for the layers beneath
+        // it, exactly like a full-screen div. Put the page on the top layer, or scale it so its
+        // rectangle covers only what it should receive -- `stage::impl::offer` rejects anything
+        // outside that rectangle before this is ever called.
+        return true;
     }
 
     std::wstring print() const override { return L"html[" + url_ + L"]"; }
