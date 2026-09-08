@@ -479,12 +479,16 @@ as unmeasured.
 arrived on four meshes, not that `screen1` is the back wall — and colour accuracy, since the quads
 are lit and projected so the tolerance is deliberately wide.
 
-**Of the thirteen commands, six are driven by nothing**: `UNMAP`, `VIEW`, `AUTOPROJECTION`,
-`GIZMO`, `PRESET`, `INFO`. This list said **eight** until 2026-09-06 and named `SCREEN` and
-`CAMERA` among them; `api-stage` drives both now (§4.2) and `previz-interact` drives `SCREEN` and
-the two cameras through the window (§4.3). The count has been wrong in three different directions
-in three weeks, which is its own lesson — **check it against the batteries rather than against the
-last version of this paragraph.**
+**Of the thirteen commands, three are driven by nothing**: `GIZMO`, `PRESET`, `INFO`. `UNMAP` and
+`AUTOPROJECTION` are driven by `api-stage`; `VIEW` and `AUTOPROJECTION` again by `previz-interact`;
+`SCREEN` and both cameras by both.
+
+**This count has now been wrong in FOUR directions**, and the fourth was self-inflicted. It said
+**eight** until 2026-09-06, naming `SCREEN` and `CAMERA` among them. It said **six** until
+2026-09-08 — written in the same commit that added `previz-interact`, which drives `VIEW` and
+`AUTOPROJECTION`, so it was stale the moment it was written. The lesson is not that the number
+keeps changing; it is that a number in prose next to a list of batteries will always be checked
+against the prose. **Grep `PREVIZ` in the harness's `core/*.py` and count.**
 
 This section read *"Nothing. No battery in the harness references PREVIZ"* until 2026-08-31, and
 was already false when the cost figures above were written into this file. The correction is worth
