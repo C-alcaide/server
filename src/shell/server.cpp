@@ -49,6 +49,7 @@
 #include <accelerator/ogl/image/image_mixer.h>
 #include <accelerator/ogl/image/previz_renderer.h>
 #include <core/binding/binding_math.h>
+#include <core/mixer/audio/audio_analysis.h>
 #include <core/stage/stage_math_self_test.h>
 
 #include <protocol/http/http_server.h>
@@ -189,6 +190,7 @@ struct server::impl
         core::fields::log_stage_fields();
         core::fields::run_stage_math_self_test();
         core::binding::binding_math_self_test();
+        core::audio_analysis_self_test();
         accelerator::ogl::run_compose_self_test();
         accelerator::vulkan::run_compose_self_test();
 

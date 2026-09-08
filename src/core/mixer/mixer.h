@@ -56,6 +56,9 @@ class mixer final
                    bool                                        straight_alpha_grading = false,
                    bool                                        working_space_composite = false);
 
+    /// The audio mixer's level and spectrum for the last tick. A copy.
+    struct audio_levels audio_analysis() const;
+
     /// One tick's frames: the channel's own, plus one per distinct consumer view.
     struct output_frames
     {

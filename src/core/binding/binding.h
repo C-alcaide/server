@@ -51,6 +51,7 @@
 #include <core/input/input_event.h>
 #include <core/monitor/monitor.h>
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -168,6 +169,48 @@ struct binding_def
     /// Set when the last evaluation could not find the source or the channel. Published, so a
     /// misspelled name is visible rather than being a binding that quietly does nothing.
     bool broken = false;
+};
+
+/// A source whose channels come from a caller-supplied closure.
+///
+/// The escape hatch for anything the binding layer must not depend on. The AUDIO source is the
+/// case it exists for: level and spectrum are computed in `core::audio_mixer`, and a
+/// `binding::source` subclass reaching into the mixer would put a mixer dependency into a header
+/// every producer includes. `video_channel` owns both halves and can close over one to make the
+/// other -- which is the same reason `api_context` takes functions rather than objects.
+///
+/// The closure is called ON THE STAGE EXECUTOR, once per binding per tick, so whatever it reads
+/// must be safe from there. `audio_mixer::analysis()` returns a copy under its own lock for
+/// exactly this.
+class function_source final : public source
+{
+  public:
+    using reader = std::function<bool(const std::string& channel, double& out)>;
+
+    function_source(std::string kind,
+                    std::string description,
+                    std::vector<std::string> channels,
+                    reader read)
+        : kind_(std::move(kind))
+        , description_(std::move(description))
+        , channels_(std::move(channels))
+        , read_(std::move(read))
+    {
+    }
+
+    bool value(const std::string& channel, double& out) const override
+    {
+        return read_ ? read_(channel, out) : false;
+    }
+    std::vector<std::string> channels() const override { return channels_; }
+    std::string              kind() const override { return kind_; }
+    std::string              describe() const override { return description_; }
+
+  private:
+    std::string              kind_;
+    std::string              description_;
+    std::vector<std::string> channels_;
+    reader                   read_;
 };
 
 /// Split `<source>/<channel>` -- `lfo1/value`, `input/x`. A missing channel is an error rather

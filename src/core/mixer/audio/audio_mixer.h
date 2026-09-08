@@ -49,6 +49,13 @@ class audio_mixer final : public frame_visitor
     float                get_master_volume();
     core::monitor::state state() const;
 
+    /// Level and spectrum of the last mixed tick.
+    ///
+    /// A COPY, taken under the analyser's own lock. The mixer runs on the channel's tick and a
+    /// binding source reads from the stage executor, so returning a reference into the
+    /// analyser's buffers would hand one thread's working state to another.
+    struct audio_levels analysis() const;
+
     void push(const struct frame_transform& transform) override;
     void visit(const class const_frame& frame) override;
     void pop() override;

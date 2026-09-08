@@ -68,6 +68,7 @@
 #include <core/producer/transition/transition_producer.h>
 #include <core/video_format.h>
 #include <core/binding/binding.h>
+#include <core/mixer/audio/audio_analysis.h>
 #include <core/video_channel.h>
 
 #include <protocol/osc/client.h>
@@ -5327,6 +5328,63 @@ std::wstring source_command(command_context& ctx)
         return L"202 SOURCE OK\r\n";
     }
 
+    if (kind == L"AUDIO") {
+        // A `function_source` over the channel, not a `binding::source` subclass that knows
+        // about the audio mixer. The analysis lives in `core::audio_mixer`, and a subclass
+        // reaching into it would put a mixer dependency into a header every producer includes --
+        // so `video_channel` (which owns both halves) is closed over instead. The same reasoning
+        // as `api_context` taking functions rather than objects.
+        //
+        // A WEAK pointer: the channel is torn down at shutdown and a live shared_ptr held by a
+        // source would keep it alive past that.
+        std::weak_ptr<core::video_channel> weak = ctx.channel.raw_channel;
+
+        // Three bands -- Resolume's low/mid/high, and `audio_analysis`'s own default. A
+        // configurable count is a real want (an ISF `audioFFT` texture wants sixteen or more)
+        // and it needs the analyser to be reconfigurable per channel, which it is not yet.
+        std::vector<std::string> chans{"rms", "dbfs", "peak", "band/0", "band/1", "band/2"};
+
+        stage
+            ->add_source(name,
+                         std::make_shared<core::binding::function_source>(
+                             "audio",
+                             "audio (rms dbfs peak band/0..2)",
+                             chans,
+                             [weak](const std::string& channel, double& out) {
+                                 auto ch = weak.lock();
+                                 if (!ch)
+                                     return false;
+                                 const auto lv = ch->audio_analysis();
+                                 if (channel == "rms") {
+                                     out = lv.rms;
+                                     return true;
+                                 }
+                                 if (channel == "dbfs") {
+                                     out = lv.dbfs;
+                                     return true;
+                                 }
+                                 if (channel == "peak") {
+                                     out = lv.peak;
+                                     return true;
+                                 }
+                                 if (channel.rfind("band/", 0) == 0) {
+                                     const auto idx = std::atoi(channel.c_str() + 5);
+                                     // FALSE for a band that does not exist yet, which is a real
+                                     // state rather than an error: the first spectrum arrives
+                                     // after a full analysis window (~21 ms at 48 kHz), so a
+                                     // binding created in the same breath as a PLAY reads no
+                                     // bands for a tick or two and is marked `broken` for them.
+                                     if (idx < 0 || static_cast<std::size_t>(idx) >= lv.bands.size())
+                                         return false;
+                                     out = lv.bands[idx];
+                                     return true;
+                                 }
+                                 return false;
+                             }))
+            .get();
+        return L"202 SOURCE OK\r\n";
+    }
+
     if (kind == L"LFO") {
         if (ctx.parameters.size() < 5)
             return L"400 SOURCE ERROR LFO needs a waveform and a rate in Hz\r\n";
@@ -5363,7 +5421,7 @@ std::wstring source_command(command_context& ctx)
         return L"202 SOURCE OK\r\n";
     }
 
-    return L"400 SOURCE ERROR unknown source kind, expected LFO or INPUT\r\n";
+    return L"400 SOURCE ERROR unknown source kind, expected LFO, INPUT or AUDIO\r\n";
 }
 
 // ---------------------------------------------------------------------------

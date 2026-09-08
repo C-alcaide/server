@@ -58,6 +58,8 @@ set(SOURCES
 		producer/cg_proxy.cpp
 		producer/frame_producer.cpp
 		producer/frame_producer_registry.cpp
+		mixer/audio/audio_analysis.cpp
+
 		binding/binding.cpp
 		binding/binding_math.cpp
 
@@ -108,6 +110,8 @@ set(HEADERS
 
 		producer/cg_proxy.h
 		producer/frame_producer.h
+		mixer/audio/audio_analysis.h
+
 		binding/binding.h
 		binding/binding_math.h
 

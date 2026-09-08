@@ -142,6 +142,9 @@ class video_channel final
     /// `channel_info.index`; it needs nothing from this interface but this method.
     void input(const input_event& event);
 
+    /// This channel's audio level and spectrum, for the AUDIO binding source. A copy.
+    struct audio_levels audio_analysis() const;
+
   private:
     struct impl;
     spl::unique_ptr<impl> impl_;

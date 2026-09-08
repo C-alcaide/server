@@ -23,6 +23,8 @@
 
 #include "audio_mixer.h"
 
+#include "audio_analysis.h"
+
 #include <core/frame/frame.h>
 #include <core/frame/frame_transform.h>
 #include <core/monitor/monitor.h>
@@ -60,6 +62,10 @@ struct audio_mixer::impl
     std::map<const void*, double>               previous_volumes_; // For audio transitions
     video_format_desc                           format_desc_;
     std::atomic<float>                          master_volume_{1.0f};
+
+    // The channel's own level and spectrum. Owned here because this is the one place
+    // that already has the mixed samples; every reader takes a copy.
+    audio_analysis analysis_;
     spl::shared_ptr<diagnostics::graph>         graph_;
     size_t                                      max_expected_cadence_samples_{0};
     size_t                                      max_buffer_size_{0};
@@ -272,6 +278,29 @@ struct audio_mixer::impl
 
         state_["volume"] = std::move(max);
 
+        // -- Level and spectrum, from the samples this tick just produced -------------------
+        //
+        // Fed AFTER the master volume and the clip, so the analysis is of what actually leaves
+        // the channel rather than of what the layers offered. That is the quantity an operator
+        // means by "the audio": a binding to `audio/rms` on a channel faded out must read
+        // silence, and one fed pre-fader would not.
+        analysis_.feed(result.data(), result.size() / channels_, channels_);
+
+        // At this state's TOP level, not under a further "audio" key: `mixer::impl` already
+        // nests the whole of this state under `audio`, so `state_["audio"]["rms"]` here would
+        // publish `channel/N/mixer/audio/audio/rms`. The doubled segment is invisible from
+        // inside this file and is exactly what the first run of `binding-audio` reported as
+        // "the channel publishes no audio level".
+        const auto lv = analysis_.levels();
+        state_["rms"]  = lv.rms;
+        state_["dbfs"] = lv.dbfs;
+        state_["peak"] = lv.peak;
+        // Published only once a full window has been filled. Absent is a real state here and
+        // not a default to fall back on: at 48 kHz the first spectrum arrives after ~21 ms, so
+        // a client reading in the first tick after a PLAY legitimately sees no bands.
+        for (std::size_t b = 0; b < lv.bands.size(); ++b)
+            state_["band"][static_cast<int>(b)] = lv.bands[b];
+
         graph_->set_value("volume",
                           static_cast<double>(*boost::max_element(max)) / std::numeric_limits<int32_t>::max());
 
@@ -283,6 +312,8 @@ audio_mixer::audio_mixer(spl::shared_ptr<diagnostics::graph> graph)
     : impl_(new impl(std::move(graph)))
 {
 }
+
+struct audio_levels audio_mixer::analysis() const { return impl_->analysis_.levels(); }
 void                 audio_mixer::push(const frame_transform& transform) { impl_->push(transform); }
 void                 audio_mixer::visit(const const_frame& frame) { impl_->visit(frame); }
 void                 audio_mixer::pop() { impl_->pop(); }

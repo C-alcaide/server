@@ -23,6 +23,8 @@
 
 #include "mixer.h"
 
+#include "audio/audio_analysis.h"
+
 #include <core/frame/frame_visitor.h>
 
 #include <core/frame/frame_metadata.h>
@@ -235,6 +237,7 @@ mutable_frame mixer::create_frame(const void* tag, const pixel_format_desc& desc
     return impl_->image_mixer_->create_frame(tag, desc);
 }
 core::monitor::state mixer::state() const { return impl_->state_; }
+struct audio_levels  mixer::audio_analysis() const { return impl_->audio_mixer_.analysis(); }
 
 common::bit_depth mixer::depth() const { return impl_->image_mixer_->depth(); }
 

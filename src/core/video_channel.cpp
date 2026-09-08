@@ -24,6 +24,8 @@
 #include "common/os/thread.h"
 #include "video_channel.h"
 
+#include "mixer/audio/audio_analysis.h"
+
 #include <chrono>
 #include <sstream>
 
@@ -448,6 +450,8 @@ struct video_channel::impl final
         stage_->input(event);
     }
 
+    struct audio_levels audio_analysis() const { return mixer_.audio_analysis(); }
+
     std::shared_ptr<core::route> route(int index = -1, route_mode mode = route_mode::foreground, bool raw = false)
     {
         std::lock_guard<std::mutex> lock(routes_mutex_);
@@ -537,5 +541,6 @@ std::shared_ptr<const core::monitor::state> video_channel::state_snapshot() cons
 
 std::shared_ptr<route> video_channel::route(int index, route_mode mode, bool raw) { return impl_->route(index, mode, raw); }
 void                   video_channel::input(const input_event& event) { impl_->input(event); }
+struct audio_levels    video_channel::audio_analysis() const { return impl_->audio_analysis(); }
 
 }} // namespace caspar::core
