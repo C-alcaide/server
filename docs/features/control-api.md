@@ -424,9 +424,8 @@ key for:
   "TYPE": "d",
   "VALUE": [0.0],
   "RANGE": [{ "MIN": 0.0, "MAX": 1.0 }],
-  "CLIPMODE": "both",
   "casparcg": {
-    "type": "real", "bounding": "clip", "compose": "max", "kind": "continuous",
+    "type": "real", "bounding": "refuse", "compose": "max", "kind": "continuous",
     "arity": 1, "default": [0.0], "writable": true, "kf": ["chroma_min_bright"]
   }
 }
@@ -448,10 +447,38 @@ that `curl -f` does not fail on an application error, which surprises people onc
 node carrying unknown top-level keys, and ossia and Vezér both extend the format exactly this way.
 The cost is one level of nesting for the fork-specific half of every descriptor.
 
-**`CLIPMODE` is emitted only for `clip`.** OSCQuery's vocabulary is `none|low|high|both`; `wrap`
-and `fold` are ossia's `bounding`, not OSCQuery's. Saying `both` for a hue rotation would tell a
-standard client to clamp a value that is periodic. Wrapped fields therefore report `CLIPMODE:
-"none"` and their real rule in `casparcg.bounding`.
+**`CLIPMODE` is OMITTED for a `refuse` field, and that is a correction made 2026-09-09.** It used
+to be *"emitted only for `clip`"*, mapping `clip` to `"both"` — and §2's own line above,
+**"out of range is refused, never clipped"**, was already the truth. So the documentation was right
+and the descriptor was the liar: **74 ranged fields advertised `clip`, and both facades refused
+them.** That mattered more through `CLIPMODE` than through `bounding`, because `bounding` is ours
+and a reader can check it against the code, while `CLIPMODE` is a standard field a third-party
+OSCQuery client branches on.
+
+All four OSCQuery values describe a value that gets **used** — `none` is explicitly *"the OSC
+method will try to use any value you send it"* — so refusal has no member of the vocabulary.
+`clipmode_name` now returns `nullptr` for it and the leaf omits the key, because the
+specification's own rule for a missing optional attribute (*"assume that no clipping will be
+performed"*) is at least not a claim about clamping. `free` and `wrap` keep `"none"`, where it is
+true: the value as sent, or as wrapped, is the value stored.
+
+**`bounding` lost `clip` and `fold` in the same change.** Neither was ever honoured by any code
+path, and a vocabulary value that no code path honours is a trap for the next reader. The three
+that remain each have one: `free` (no range declared), `wrap` (normalised into range), `refuse`
+(rejected, with the limits in the error).
+
+**Clamping is deliberately not offered, and the reason is where clamping belongs.** A client never
+needs to send out of range for a slider drag — `RANGE` is published, so the widget is built from it
+and stops at the bound. What is left is a script typo, a client that ignored the descriptor, or a
+*computed* value, and computed values are already clamped upstream: `compose_clamps` for
+composition, and a binding's own `MIN`/`MAX` for modulation. Clamping at the boundary would add
+nothing and would cost the error signal, write idempotence, and authored intent in a timeline whose
+tracks are these fields.
+
+**One place does clamp, and it is not an inconsistency:** `MIXER CDL_FILE` clamps the ten values it
+reads out of an ASC CDL file, because *"a file is operator-supplied ... so a file cannot reach a
+state the numeric command refuses"*. **An imported document clamps; a typed command refuses.** A
+client loading a preset should expect the former and a client setting a value the latter.
 
 **A field with no limits declares `bounding: free`, and gets no `RANGE` key at all.** This was
 wrong on its first outing and the failure is worth recording: seventeen rows — `opacity`,

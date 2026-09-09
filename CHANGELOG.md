@@ -1,6 +1,55 @@
 CasparVP — Unreleased
 ==========================================
 
+### Changed: `bounding` now names a behaviour the server has, and `CLIPMODE` is omitted where none fits
+
+**The control API's descriptor advertised a clamp the server never performed.** 74 of the 115
+ranged registry fields declared `bounding: clip` -- every gain, level, blur radius, chroma
+threshold and ICVFX term -- and **no code path clamped anything**: the HTTP write path handles
+`wrap` and then refuses anything still out of range, and AMCP's shared `grade_param` refuses at
+81 call sites. `fold` had no implementation either.
+
+`docs/features/control-api.md` §2 already said *"out of range is refused, never clipped"*, so the
+documentation was right and the descriptor was the liar.
+
+**The vocabulary is now `free` | `wrap` | `refuse`.** `clip` and `fold` are removed rather than
+left, because a value no code path honours is a trap for the next reader. 95 declaration sites
+relabelled, plus both `producer_params.h` defaults; measured through the API afterwards as **93 of
+178 published mixer fields reporting `refuse`, 0 outside the vocabulary, on both mixers.**
+
+**The more harmful half was `CLIPMODE`, not `bounding`.** `clipmode_name` mapped `clip` to
+`"both"`, so the server told every standards-compliant OSCQuery client that those fields clamp.
+`bounding` is the fork's own key and a reader can check it against the source; **`CLIPMODE` is a
+standard field a third-party client branches on.** All four OSCQuery values (`none|low|high|both`)
+describe a value that gets *used* -- `none` is explicitly *"the OSC method will try to use any
+value you send it"* -- so a refusing field has no member of the vocabulary and the key is now
+**omitted**, which the specification's own rule for a missing optional attribute makes the
+harmless direction to be wrong in.
+
+**Clamping is deliberately not offered, and the reason is where clamping belongs.** A client never
+needs to send out of range for a slider drag: `RANGE` is published, so the widget is built from it
+and stops at the bound. What is left is a script typo, a client that ignored the descriptor, or a
+*computed* value -- and computed values are already clamped upstream, by `compose_clamps` for
+composition and by a binding's own `MIN`/`MAX` for modulation. Clamping at the boundary would add
+nothing and would cost the error signal, write idempotence, and authored intent in a timeline whose
+tracks are these fields.
+
+**Two things left alone, both because their own comments show they were considered.** Seven fields
+declare `wrap` with no range (the projection angles), so nothing normalises them and a yaw of
+7.5 rad stays 7.5 rad -- which is what AMCP stores too, so the facades agree. And `MIXER CDL_FILE`
+clamps the ten values it reads out of an ASC CDL file, because *"a file is operator-supplied ... so
+a file cannot reach a state the numeric command refuses"*. **An imported document clamps; a typed
+command refuses**, and that distinction is now written down rather than mistaken for an
+inconsistency.
+
+**Measured**: `api-tree` **15/15 on both mixers**, with four checks added to it for this — the
+vocabulary, no `CLIPMODE` on a refusing field, nothing claiming a clamp, and a guard that the
+vocabulary is actually exercised so a run of all-`free` cannot pass vacuously. **The third of
+those failed on its first run, on both mixers**, and caught a defect in this very change: the six
+enumerations still carried `CLIPMODE: "none"` because `clipmode_name` tested `!has_range` before it
+tested the behaviour. That is why the check exists rather than a note saying the emission looked
+right.
+
 ### Fixed: the Linux build could not compile the screen consumer
 
 `raw_input` was declared inside `#ifdef _MSC_VER` while `dispatch_input`, which takes one, sits

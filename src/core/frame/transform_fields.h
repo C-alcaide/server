@@ -70,16 +70,31 @@ enum class access_t : uint8_t
     read_write = 3,
 };
 
-/// What happens to a value outside [min, max]. `free` has no bounds; `clip` saturates;
-/// `wrap` is periodic (a hue rotation of 200 is -160); `fold` reflects. The fork's
-/// parameters are clip or wrap; fold is here because ossia has it and a generated control
-/// must be able to say which one it is.
+/// What the server does with a write that falls outside `range`. Every value here is
+/// honoured by a code path; `clip` and `fold` were removed on 2026-09-09 because neither
+/// ever was -- 74 fields advertised `clip` while both facades refused, and `fold` had no
+/// implementation at all.
+///
+/// **Clamping is deliberately NOT one of the options**, and the reason is where clamping
+/// belongs rather than whether it is useful. A client never needs to send an out-of-range
+/// value for a slider drag: `range` is published, so the widget is built from it and stops
+/// at the bound. What is left is a script typo, a client that ignored the descriptor, or a
+/// COMPUTED value -- and computed values are already clamped upstream, by
+/// `field_desc::compose_clamps` for composition and by a binding's own MIN/MAX for
+/// modulation. Clamping here would add nothing and would cost the error signal, write
+/// idempotence, and authored intent in a timeline whose tracks are these fields.
 enum class bounding_t : uint8_t
 {
+    /// No range is declared, so nothing is enforced. `opacity`, `brightness`, `saturation`
+    /// and the projection geometry: a range would be a lie about what the shader accepts.
     free,
-    clip,
+    /// Periodic. The value is normalised into the range before it is stored, so 400 degrees
+    /// is a legal way to say 40 rather than an error.
+    ///
+    /// Seven fields declare this with NO range -- the projection angles -- so nothing
+    /// normalises them and a yaw of 7.5 rad stays 7.5 rad. That is deliberate and matches
+    /// what AMCP stores, so the two facades agree; see `check_and_bound`.
     wrap,
-    fold,
     /// The value is REJECTED rather than adjusted. Added 2026-09-09 because the other four all
     /// promise the server will make an out-of-range value usable, and for a field validated by
     /// name -- an enumeration -- there is nothing to clamp toward: an unknown name is an error,
@@ -87,7 +102,12 @@ enum class bounding_t : uint8_t
     /// could never happen.
     ///
     /// A client should read this as *do not send it* rather than *send it and see*: a control
-    /// bound to a `refuse` field offers only the legal set.
+    /// bound to a `refuse` field is built from `range` and cannot produce an illegal value.
+    ///
+    /// This is what 74 ranged fields and every enumeration actually do, on both facades.
+    /// **It has no OSCQuery `CLIPMODE`** -- that vocabulary is `none|low|high|both`, all four
+    /// of which promise the value will be used -- so `clipmode_name` omits the attribute for
+    /// these rather than asserting a false one.
     refuse,
 };
 

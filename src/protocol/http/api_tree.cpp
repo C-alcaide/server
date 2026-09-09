@@ -192,7 +192,11 @@ json::object descriptor_leaf(const fields::field_meta& f, const core::monitor::v
     // presence as "this is bounded" and then finds no MIN or MAX to bound it with.
     if (auto range = range_for(f); !range.empty())
         leaf["RANGE"] = std::move(range);
-    leaf["CLIPMODE"] = clipmode_name(f.bounding, f.range.has_value());
+    // OMITTED for a `refuse` field rather than filled with a value that would mislead --
+    // see `clipmode_name`. A standard client reads absence as "no clipping", which is wrong
+    // in a harmless direction; `"both"` was wrong in a harmful one.
+    if (const char* cm = clipmode_name(f.bounding))
+        leaf["CLIPMODE"] = cm;
     if (f.description)
         leaf["DESCRIPTION"] = f.description;
     leaf["casparcg"] = vendor_block(f, def);

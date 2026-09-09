@@ -260,9 +260,9 @@ using C = previz_camera;
 const std::vector<screen_field>& screen_table()
 {
     static const std::vector<screen_field> t = {
-        SV2F(S, "size", width_m, height_m, 1.0, 1.0, R_SIZE, clip, "m",
+        SV2F(S, "size", width_m, height_m, 1.0, 1.0, R_SIZE, refuse, "m",
              "Physical width and height of the screen surface."),
-        SV3(S, "position", pos_x, pos_y, pos_z, 0.0, 0.0, 0.0, R_POS, clip, "m",
+        SV3(S, "position", pos_x, pos_y, pos_z, 0.0, 0.0, 0.0, R_POS, refuse, "m",
             "World position of the screen's origin, which is its CENTRE-BOTTOM rather than its "
             "centre: a screen standing on the floor has y = 0."),
         SV3(S, "rotation", rot_yaw, rot_pitch, rot_roll, 0.0, 0.0, 0.0, R_ANG, wrap, "deg",
@@ -272,11 +272,11 @@ const std::vector<screen_field>& screen_table()
               "width / 2 / sin(arc / 2). The radius argument to PREVIZ SCREEN ADD ... CURVED is "
               "accepted and then discarded, so a layout file round-trips through a re-derived "
               "value. 0 means flat."),
-        SF(S, "arc", arc_deg, 0.0, R_ARC, clip, "deg",
+        SF(S, "arc", arc_deg, 0.0, R_ARC, refuse, "deg",
            "Horizontal arc the screen subtends. Non-zero with a radius makes it curved."),
-        SF(S, "arc_v", arc_v_deg, 0.0, R_ARC_V, clip, "deg",
+        SF(S, "arc_v", arc_v_deg, 0.0, R_ARC_V, refuse, "deg",
            "Vertical arc. 0 leaves a single-curved cylinder; non-zero makes it doubly curved."),
-        SV2I(S, "resolution", res_w, res_h, 0, 0, R_RES, clip, "px",
+        SV2I(S, "resolution", res_w, res_h, 0, 0, R_RES, refuse, "px",
              "Pixel resolution of the panel. INERT: stored, persisted to the layout file, and "
              "read by no renderer path and no projection calculation. 0 means unset."),
         SI(S, "channel", channel, -1,
@@ -286,7 +286,7 @@ const std::vector<screen_field>& screen_table()
         SE(S, "eye_mode", eye_mode, 0, "camera,fixed",
            "Where the eye sits for curve compensation and field of view. 'camera' follows the "
            "production virtual camera (in-camera VFX); 'fixed' sits at design_eye."),
-        SV3(S, "design_eye", design_eye_x, design_eye_y, design_eye_z, 0.0, 1.5, 3.0, R_POS, clip, "m",
+        SV3(S, "design_eye", design_eye_x, design_eye_y, design_eye_z, 0.0, 1.5, 3.0, R_POS, refuse, "m",
             "The audience design eye position, used only when eye_mode is 'fixed'. It is also "
             "only WRITABLE then: the renderer's mutator stores these three components solely "
             "when the mode is already 'fixed', so set eye_mode first or the write is declined."),
@@ -301,10 +301,10 @@ const std::vector<screen_field>& screen_table()
 const std::vector<camera_field>& camera_table()
 {
     static const std::vector<camera_field> t = {
-        SV3(C, "position", x, y, z, 0.0, 1.5, 5.0, R_POS, clip, "m", "World position of the camera."),
+        SV3(C, "position", x, y, z, 0.0, 1.5, 5.0, R_POS, refuse, "m", "World position of the camera."),
         SV3(C, "rotation", yaw, pitch, roll, 0.0, 0.0, 0.0, R_ANG, wrap, "deg",
             "Yaw, pitch and roll, applied Ry*Rx*Rz. An unrotated camera looks along -Z."),
-        SF(C, "fov", fov, 60.0, R_FOV, clip, "deg", "Vertical field of view."),
+        SF(C, "fov", fov, 60.0, R_FOV, refuse, "deg", "Vertical field of view."),
         SF_RO(C, "near_clip", near_clip, 0.1, "m",
               "Near clip plane. Read-only: hard-coded by set_camera and not carried in the "
               "layout file, so there is nothing that could persist a change."),

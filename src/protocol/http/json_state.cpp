@@ -131,9 +131,7 @@ const char* bounding_name(core::fields::bounding_t b)
     using core::fields::bounding_t;
     switch (b) {
         case bounding_t::free: return "free";
-        case bounding_t::clip: return "clip";
         case bounding_t::wrap: return "wrap";
-        case bounding_t::fold: return "fold";
         case bounding_t::refuse: return "refuse";
     }
     return "free";
@@ -168,14 +166,35 @@ const char* kind_name(core::fields::kf_kind k)
     return "continuous";
 }
 
-const char* clipmode_name(core::fields::bounding_t b, bool has_range)
+const char* clipmode_name(core::fields::bounding_t b)
 {
     using core::fields::bounding_t;
-    if (!has_range)
-        return "none";
-    // Only `clip` maps. `wrap` and `fold` are ossia's vocabulary, not OSCQuery's -- see
-    // the header for why they deliberately report `none` here.
-    return b == bounding_t::clip ? "both" : "none";
+    // NOTHING WE DO MAPS TO CLIPMODE ANY MORE, and returning nullptr so the caller omits the
+    // attribute is the point of this function now.
+    //
+    // It used to map `clip` to `"both"`, which was the worst of the `clip` mislabelling: the
+    // `bounding` name is ours and a reader can check it against the code, but CLIPMODE is a
+    // STANDARD field that a third-party OSCQuery client branches on -- so the server told
+    // every such client that 74 fields clamp while both facades refused them.
+    //
+    // OSCQuery's vocabulary is `none|low|high|both`, and all four describe a value that gets
+    // USED: `none` is explicitly *"the OSC method will try to use any value you send it"*.
+    // Refusal is outside it. The specification's own rule for a missing optional attribute --
+    // *"software that expects it should assume that no clipping will be performed"* -- is at
+    // least not a claim about clamping, so omission is the honest emission.
+    //
+    // `free` and `wrap` keep `"none"`, where it is true: the value as sent, or as wrapped, is
+    // the value stored.
+    //
+    // REFUSE IS TESTED FIRST, and the order is the whole correctness of this function. Written
+    // with the `!has_range` short-circuit ahead of it, the six ENUMERATIONS -- `blend_mode`,
+    // `blur_type`, `proj_curve_type` and three more -- fell through to `"none"`: they refuse an
+    // unknown name and carry no range, so the range test answered before the behaviour test did.
+    // `api-tree`'s "no CLIPMODE on a refusing field" caught it on its first run, on both mixers,
+    // which is the reason that check exists rather than a note saying the emission looks right.
+    if (b == bounding_t::refuse)
+        return nullptr; // caller omits CLIPMODE entirely -- no member of the vocabulary fits
+    return "none";
 }
 
 }}} // namespace caspar::protocol::http

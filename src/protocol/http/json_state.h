@@ -51,9 +51,18 @@ const char* bounding_name(core::fields::bounding_t b);
 const char* compose_name(core::fields::compose_t c);
 const char* kind_name(core::fields::kf_kind k);
 /// OSCQuery's CLIPMODE, which is `none|low|high|both` -- NOT the same vocabulary as
-/// `bounding`. `wrap` and `fold` have no CLIPMODE, and saying `both` for them would tell a
-/// standard client to clamp a hue rotation. They report `none` here and their real rule in
-/// the vendor block.
-const char* clipmode_name(core::fields::bounding_t b, bool has_range);
+/// `bounding`, and since 2026-09-09 not a total function onto it either.
+///
+/// **Returns `nullptr` when no CLIPMODE is honest**, and the caller must then OMIT the
+/// attribute rather than substitute a default. All four OSCQuery values describe a value
+/// that gets USED -- `none` is explicitly *"the OSC method will try to use any value you
+/// send it"* -- so a `refuse` field has no member of the vocabulary. It used to report
+/// `both`, which told every standard client that 74 fields clamp while both facades
+/// refused them: the `bounding` name is ours and checkable, but CLIPMODE is a standard
+/// field a third-party client acts on, so that was the more harmful of the two labels.
+///
+/// `free` and `wrap` keep `none`, where it is true: the value as sent (or as wrapped) is
+/// the value stored. Their real rule stays in the vendor block.
+const char* clipmode_name(core::fields::bounding_t b);
 
 }}} // namespace caspar::protocol::http

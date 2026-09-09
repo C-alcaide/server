@@ -59,7 +59,7 @@ struct param_desc
     std::optional<double> min;
     std::optional<double> max;
 
-    fields::bounding_t bounding = fields::bounding_t::clip;
+    fields::bounding_t bounding = fields::bounding_t::refuse;
 
     /// Human-facing. `label` is the format's own display name where it has one; ISF calls it
     /// LABEL and OFX calls it the label too.
@@ -100,7 +100,7 @@ struct param_snapshot
     fields::access_t      access = fields::access_t::read_write;
     std::optional<double> min;
     std::optional<double> max;
-    fields::bounding_t    bounding = fields::bounding_t::clip;
+    fields::bounding_t    bounding = fields::bounding_t::refuse;
     std::string           label;
     std::string           unit;
     std::string           values;

@@ -356,7 +356,7 @@ const std::vector<field_desc>& all()
         F("brightness",        brightness,        1.0, std::nullopt,        free, multiply, none, nullptr, "", "brightness",        continuous),
         F("contrast",          contrast,          1.0, std::nullopt,        free, multiply, none, nullptr, "", "contrast",          continuous),
         F("saturation",        saturation,        1.0, std::nullopt,        free, multiply, none, nullptr, "", "saturation",        continuous),
-        F("exposure",          exposure,          1.0, lim::exposure,       clip, multiply, none, nullptr, "", nullptr,             continuous),
+        F("exposure",          exposure,          1.0, lim::exposure,       refuse, multiply, none, nullptr, "", nullptr,             continuous),
 
         // ---- geometry (composed elsewhere; here to be described and animated) -----------
         A("anchor",            anchor,            2, ({0.0, 0.0}), std::nullopt, free, none, none, "enable_geometry_modifiers", "", "anchor_x,anchor_y",       continuous),
@@ -378,63 +378,63 @@ const std::vector<field_desc>& all()
         B("enable_geometry_modifiers", enable_geometry_modifiers, false, none, none, nullptr, "enable_geometry"),
 
         // ---- levels (master): ranges intersect, gamma multiplies ------------------------
-        F("levels_min_input",  levels.min_input,  0.0, lim::level,          clip, max_,     none, nullptr, "", "levels_min_in",     continuous),
-        F("levels_max_input",  levels.max_input,  1.0, lim::level,          clip, min_,     none, nullptr, "", "levels_max_in",     continuous),
-        FU("levels_gamma",      levels.gamma,      1.0, lim::level_gamma,    clip, multiply, none, nullptr, "", "levels_gamma",      continuous),
-        F("levels_min_output", levels.min_output, 0.0, lim::level,          clip, max_,     none, nullptr, "", "levels_min_out",    continuous),
-        F("levels_max_output", levels.max_output, 1.0, lim::level,          clip, min_,     none, nullptr, "", "levels_max_out",    continuous),
+        F("levels_min_input",  levels.min_input,  0.0, lim::level,          refuse, max_,     none, nullptr, "", "levels_min_in",     continuous),
+        F("levels_max_input",  levels.max_input,  1.0, lim::level,          refuse, min_,     none, nullptr, "", "levels_max_in",     continuous),
+        FU("levels_gamma",      levels.gamma,      1.0, lim::level_gamma,    refuse, multiply, none, nullptr, "", "levels_gamma",      continuous),
+        F("levels_min_output", levels.min_output, 0.0, lim::level,          refuse, max_,     none, nullptr, "", "levels_min_out",    continuous),
+        F("levels_max_output", levels.max_output, 1.0, lim::level,          refuse, min_,     none, nullptr, "", "levels_max_out",    continuous),
 
         // ---- white balance / tone -------------------------------------------------------
-        F("temperature",       temperature,       0.0, lim::temperature,    clip, add,      none, nullptr, "", "temperature",       continuous),
-        F("tint",              tint,              0.0, lim::tint,           clip, add,      none, nullptr, "", "tint",              continuous),
-        F("shadows",           shadows,           0.0, lim::tone,           clip, add,      none, nullptr, "", "shadows",           continuous),
-        F("highlights",        highlights,        0.0, lim::tone,           clip, add,      none, nullptr, "", "highlights",        continuous),
+        F("temperature",       temperature,       0.0, lim::temperature,    refuse, add,      none, nullptr, "", "temperature",       continuous),
+        F("tint",              tint,              0.0, lim::tint,           refuse, add,      none, nullptr, "", "tint",              continuous),
+        F("shadows",           shadows,           0.0, lim::tone,           refuse, add,      none, nullptr, "", "shadows",           continuous),
+        F("highlights",        highlights,        0.0, lim::tone,           refuse, add,      none, nullptr, "", "highlights",        continuous),
 
         // ---- lift / midtone / gain ------------------------------------------------------
-        A("lift",              lift,              3, ({0.0, 0.0, 0.0}), lim::lift,    clip, add,      none, nullptr, "", "lift_r,lift_g,lift_b",    continuous),
-        A("midtone",           midtone,           3, ({1.0, 1.0, 1.0}), lim::midtone, clip, multiply, none, nullptr, "", "mid_r,mid_g,mid_b",       continuous),
-        A("gain",              gain,              3, ({1.0, 1.0, 1.0}), lim::gain,    clip, multiply, none, nullptr, "", "gain_r,gain_g,gain_b",    continuous),
+        A("lift",              lift,              3, ({0.0, 0.0, 0.0}), lim::lift,    refuse, add,      none, nullptr, "", "lift_r,lift_g,lift_b",    continuous),
+        A("midtone",           midtone,           3, ({1.0, 1.0, 1.0}), lim::midtone, refuse, multiply, none, nullptr, "", "mid_r,mid_g,mid_b",       continuous),
+        A("gain",              gain,              3, ({1.0, 1.0, 1.0}), lim::gain,    refuse, multiply, none, nullptr, "", "gain_r,gain_g,gain_b",    continuous),
 
         // Hue rotation WRAPS rather than clamping: 200 degrees is -160, not 180. The shader
         // rotates with fract() so rotation is already periodic; wrapping is what bounds the
         // accumulation, which keeps precision and keeps "is this effect active" honest --
         // an accumulated 360 is exactly identity but reads as active and pays for the branch.
         F("hue_shift",         hue_shift,         0.0, lim::hue_shift,      wrap, add,      none, nullptr, "deg", "hue_shift",      angular),
-        F("linear_saturation", linear_saturation, 1.0, lim::cdl_saturation, clip, multiply, none, nullptr, "", "linear_saturation", continuous),
+        F("linear_saturation", linear_saturation, 1.0, lim::cdl_saturation, refuse, multiply, none, nullptr, "", "linear_saturation", continuous),
 
         // ---- ASC CDL ---------------------------------------------------------------------
-        A("cdl_slope",         cdl_slope,         3, ({1.0, 1.0, 1.0}), lim::cdl_slope,  clip, multiply, none, nullptr, "", "cdl_slope_r,cdl_slope_g,cdl_slope_b",    continuous),
-        A("cdl_offset",        cdl_offset,        3, ({0.0, 0.0, 0.0}), lim::cdl_offset, clip, add,      none, nullptr, "", "cdl_offset_r,cdl_offset_g,cdl_offset_b", continuous),
-        A("cdl_power",         cdl_power,         3, ({1.0, 1.0, 1.0}), lim::cdl_power,  clip, multiply, none, nullptr, "", "cdl_power_r,cdl_power_g,cdl_power_b",    continuous),
-        F("cdl_saturation",    cdl_saturation,    1.0, lim::cdl_saturation, clip, multiply, none, nullptr, "", "cdl_saturation",   continuous),
+        A("cdl_slope",         cdl_slope,         3, ({1.0, 1.0, 1.0}), lim::cdl_slope,  refuse, multiply, none, nullptr, "", "cdl_slope_r,cdl_slope_g,cdl_slope_b",    continuous),
+        A("cdl_offset",        cdl_offset,        3, ({0.0, 0.0, 0.0}), lim::cdl_offset, refuse, add,      none, nullptr, "", "cdl_offset_r,cdl_offset_g,cdl_offset_b", continuous),
+        A("cdl_power",         cdl_power,         3, ({1.0, 1.0, 1.0}), lim::cdl_power,  refuse, multiply, none, nullptr, "", "cdl_power_r,cdl_power_g,cdl_power_b",    continuous),
+        F("cdl_saturation",    cdl_saturation,    1.0, lim::cdl_saturation, refuse, multiply, none, nullptr, "", "cdl_saturation",   continuous),
 
         // ---- split toning: colours add, the balance is a group rule (see compose_colour) --
-        A("split_shadow_color",    split_shadow_color,    3, ({0.0, 0.0, 0.0}), lim::split_color, clip, add, none, nullptr, "", "split_shadow_r,split_shadow_g,split_shadow_b",          continuous),
-        A("split_highlight_color", split_highlight_color, 3, ({0.0, 0.0, 0.0}), lim::split_color, clip, add, none, nullptr, "", "split_highlight_r,split_highlight_g,split_highlight_b", continuous),
-        F("split_balance",     split_balance,     0.5, lim::split_balance,  clip, custom, split_active, nullptr, "", "split_balance", continuous),
+        A("split_shadow_color",    split_shadow_color,    3, ({0.0, 0.0, 0.0}), lim::split_color, refuse, add, none, nullptr, "", "split_shadow_r,split_shadow_g,split_shadow_b",          continuous),
+        A("split_highlight_color", split_highlight_color, 3, ({0.0, 0.0, 0.0}), lim::split_color, refuse, add, none, nullptr, "", "split_highlight_r,split_highlight_g,split_highlight_b", continuous),
+        F("split_balance",     split_balance,     0.5, lim::split_balance,  refuse, custom, split_active, nullptr, "", "split_balance", continuous),
 
         // ---- gamut compression -------------------------------------------------------------
         B("gamut_compress",    gamut_compress,    false, or_, none, nullptr, "gamut_compress"),
-        F("gc_cyan",           gc_cyan,           1.147, lim::gamut_limit,  clip, innermost_wins, gamut_compress, nullptr, "", "gc_cyan",    continuous),
-        F("gc_magenta",        gc_magenta,        1.264, lim::gamut_limit,  clip, innermost_wins, gamut_compress, nullptr, "", "gc_magenta", continuous),
-        F("gc_yellow",         gc_yellow,         1.312, lim::gamut_limit,  clip, innermost_wins, gamut_compress, nullptr, "", "gc_yellow",  continuous),
+        F("gc_cyan",           gc_cyan,           1.147, lim::gamut_limit,  refuse, innermost_wins, gamut_compress, nullptr, "", "gc_cyan",    continuous),
+        F("gc_magenta",        gc_magenta,        1.264, lim::gamut_limit,  refuse, innermost_wins, gamut_compress, nullptr, "", "gc_magenta", continuous),
+        F("gc_yellow",         gc_yellow,         1.312, lim::gamut_limit,  refuse, innermost_wins, gamut_compress, nullptr, "", "gc_yellow",  continuous),
 
         // ---- image effects -------------------------------------------------------------------
-        FU("sharpen_amount",    sharpen_amount,    0.0, lim::sharpen_amount,  clip, add,            none,               nullptr, "",   "sharpen_amount",  continuous),
-        F("sharpen_radius",    sharpen_radius,    1.0, lim::sharpen_radius,  clip, innermost_wins, sharpen_radius_set, nullptr, "px", "sharpen_radius",  continuous),
-        FU("grain_intensity",   grain_intensity,   0.0, lim::grain_intensity, clip, add,            none,               nullptr, "",   "grain_intensity", continuous),
-        F("grain_size",        grain_size,        1.0, lim::grain_size,      clip, innermost_wins, grain_size_set,     nullptr, "",   "grain_size",      continuous),
+        FU("sharpen_amount",    sharpen_amount,    0.0, lim::sharpen_amount,  refuse, add,            none,               nullptr, "",   "sharpen_amount",  continuous),
+        F("sharpen_radius",    sharpen_radius,    1.0, lim::sharpen_radius,  refuse, innermost_wins, sharpen_radius_set, nullptr, "px", "sharpen_radius",  continuous),
+        FU("grain_intensity",   grain_intensity,   0.0, lim::grain_intensity, refuse, add,            none,               nullptr, "",   "grain_intensity", continuous),
+        F("grain_size",        grain_size,        1.0, lim::grain_size,      refuse, innermost_wins, grain_size_set,     nullptr, "",   "grain_size",      continuous),
 
         // ---- blur --------------------------------------------------------------------------
         // The whole blur struct is replaced as a group (see compose_colour); the rows exist
         // so each parameter can be described, animated and written individually.
         B("blur_enable",       blur.enable,       false, or_, none, nullptr, "blur_enable"),
-        F("blur_radius",       blur.radius,       0.0, lim::blur_radius,    clip, innermost_wins, blur_enable, "blur.enable", "px",  "blur_radius", continuous),
+        F("blur_radius",       blur.radius,       0.0, lim::blur_radius,    refuse, innermost_wins, blur_enable, "blur.enable", "px",  "blur_radius", continuous),
         E("blur_type",         blur.type,         blur_type, blur_type::gaussian, BLUR_TYPES, innermost_wins, blur_enable, "blur_type"),
         F("blur_angle",        blur.angle,        0.0, lim::blur_angle,     wrap, innermost_wins, blur_enable, "blur.enable", "deg", "blur_angle",  angular),
-        A("blur_center",       blur.center,       2, ({0.5, 0.5}), lim::unit, clip, innermost_wins, blur_enable, "blur.enable", "",  "blur_center_x,blur_center_y", continuous),
-        F("blur_tilt_y",       blur.tilt_y,       0.5, lim::unit,           clip, innermost_wins, blur_enable, "blur.enable", "",    "blur_tilt_y", continuous),
-        F("blur_tilt_h",       blur.tilt_h,       0.2, lim::unit,           clip, innermost_wins, blur_enable, "blur.enable", "",    "blur_tilt_h", continuous),
+        A("blur_center",       blur.center,       2, ({0.5, 0.5}), lim::unit, refuse, innermost_wins, blur_enable, "blur.enable", "",  "blur_center_x,blur_center_y", continuous),
+        F("blur_tilt_y",       blur.tilt_y,       0.5, lim::unit,           refuse, innermost_wins, blur_enable, "blur.enable", "",    "blur_tilt_y", continuous),
+        F("blur_tilt_h",       blur.tilt_h,       0.2, lim::unit,           refuse, innermost_wins, blur_enable, "blur.enable", "",    "blur_tilt_h", continuous),
 
         // ---- per-channel RGB levels ----------------------------------------------------------
         // The whole per-channel block is composed by ONE group rule in `compose_colour`,
@@ -444,66 +444,66 @@ const std::vector<field_desc>& all()
         // not -- it came out squared. 116 of 256 iterations, on both mixers, and only the
         // three gamma rows named, which is exactly what a double-apply looks like.
         B("rgb_levels_enable", per_channel_levels.enable, false, none, none, nullptr, "rgb_enable"),
-        F("rgb_r_min_input",   per_channel_levels.r.min_input,  0.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_min_in",  continuous),
-        F("rgb_r_max_input",   per_channel_levels.r.max_input,  1.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_max_in",  continuous),
-        FU("rgb_r_gamma",       per_channel_levels.r.gamma,      1.0, lim::level_gamma, clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_gamma",   continuous),
-        F("rgb_r_min_output",  per_channel_levels.r.min_output, 0.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_min_out", continuous),
-        F("rgb_r_max_output",  per_channel_levels.r.max_output, 1.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_max_out", continuous),
-        F("rgb_g_min_input",   per_channel_levels.g.min_input,  0.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_min_in",  continuous),
-        F("rgb_g_max_input",   per_channel_levels.g.max_input,  1.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_max_in",  continuous),
-        FU("rgb_g_gamma",       per_channel_levels.g.gamma,      1.0, lim::level_gamma, clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_gamma",   continuous),
-        F("rgb_g_min_output",  per_channel_levels.g.min_output, 0.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_min_out", continuous),
-        F("rgb_g_max_output",  per_channel_levels.g.max_output, 1.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_max_out", continuous),
-        F("rgb_b_min_input",   per_channel_levels.b.min_input,  0.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_min_in",  continuous),
-        F("rgb_b_max_input",   per_channel_levels.b.max_input,  1.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_max_in",  continuous),
-        FU("rgb_b_gamma",       per_channel_levels.b.gamma,      1.0, lim::level_gamma, clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_gamma",   continuous),
-        F("rgb_b_min_output",  per_channel_levels.b.min_output, 0.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_min_out", continuous),
-        F("rgb_b_max_output",  per_channel_levels.b.max_output, 1.0, lim::level,       clip, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_max_out", continuous),
+        F("rgb_r_min_input",   per_channel_levels.r.min_input,  0.0, lim::level,       refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_min_in",  continuous),
+        F("rgb_r_max_input",   per_channel_levels.r.max_input,  1.0, lim::level,       refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_max_in",  continuous),
+        FU("rgb_r_gamma",       per_channel_levels.r.gamma,      1.0, lim::level_gamma, refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_gamma",   continuous),
+        F("rgb_r_min_output",  per_channel_levels.r.min_output, 0.0, lim::level,       refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_min_out", continuous),
+        F("rgb_r_max_output",  per_channel_levels.r.max_output, 1.0, lim::level,       refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_r_max_out", continuous),
+        F("rgb_g_min_input",   per_channel_levels.g.min_input,  0.0, lim::level,       refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_min_in",  continuous),
+        F("rgb_g_max_input",   per_channel_levels.g.max_input,  1.0, lim::level,       refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_max_in",  continuous),
+        FU("rgb_g_gamma",       per_channel_levels.g.gamma,      1.0, lim::level_gamma, refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_gamma",   continuous),
+        F("rgb_g_min_output",  per_channel_levels.g.min_output, 0.0, lim::level,       refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_min_out", continuous),
+        F("rgb_g_max_output",  per_channel_levels.g.max_output, 1.0, lim::level,       refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_g_max_out", continuous),
+        F("rgb_b_min_input",   per_channel_levels.b.min_input,  0.0, lim::level,       refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_min_in",  continuous),
+        F("rgb_b_max_input",   per_channel_levels.b.max_input,  1.0, lim::level,       refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_max_in",  continuous),
+        FU("rgb_b_gamma",       per_channel_levels.b.gamma,      1.0, lim::level_gamma, refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_gamma",   continuous),
+        F("rgb_b_min_output",  per_channel_levels.b.min_output, 0.0, lim::level,       refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_min_out", continuous),
+        F("rgb_b_max_output",  per_channel_levels.b.max_output, 1.0, lim::level,       refuse, none,     rgb_levels_enable, "per_channel_levels.enable", "", "rgb_b_max_out", continuous),
 
         // ---- secondary qualifier (a group; see compose_colour) ---------------------------------
         B("qualifier_enable",  qualifier_enable,  false, or_, none, nullptr, "qualifier_enable"),
-        F("qual_target_hue",   qual_target_hue,   0.0, lim::unit,      clip, innermost_wins, qualifier_enable, nullptr, "",    "qual_target_hue", continuous),
-        F("qual_hue_width",    qual_hue_width,    0.1, lim::unit,      clip, innermost_wins, qualifier_enable, nullptr, "",    "qual_hue_width",  continuous),
-        F("qual_min_sat",      qual_min_sat,      0.2, lim::unit,      clip, innermost_wins, qualifier_enable, nullptr, "",    "qual_min_sat",    continuous),
-        F("qual_max_sat",      qual_max_sat,      1.0, lim::unit,      clip, innermost_wins, qualifier_enable, nullptr, "",    "qual_max_sat",    continuous),
-        F("qual_min_lum",      qual_min_lum,      0.0, lim::unit,      clip, innermost_wins, qualifier_enable, nullptr, "",    "qual_min_lum",    continuous),
-        F("qual_max_lum",      qual_max_lum,      1.0, lim::unit,      clip, innermost_wins, qualifier_enable, nullptr, "",    "qual_max_lum",    continuous),
-        F("qual_softness",     qual_softness,     0.1, lim::unit,      clip, innermost_wins, qualifier_enable, nullptr, "",    "qual_softness",   continuous),
-        F("qual_exposure",     qual_exposure,     0.0, lim::offset,    clip, innermost_wins, qualifier_enable, nullptr, "",    "qual_exposure",   continuous),
-        F("qual_sat_offset",   qual_sat_offset,   0.0, lim::offset,    clip, innermost_wins, qualifier_enable, nullptr, "",    "qual_sat_offset", continuous),
+        F("qual_target_hue",   qual_target_hue,   0.0, lim::unit,      refuse, innermost_wins, qualifier_enable, nullptr, "",    "qual_target_hue", continuous),
+        F("qual_hue_width",    qual_hue_width,    0.1, lim::unit,      refuse, innermost_wins, qualifier_enable, nullptr, "",    "qual_hue_width",  continuous),
+        F("qual_min_sat",      qual_min_sat,      0.2, lim::unit,      refuse, innermost_wins, qualifier_enable, nullptr, "",    "qual_min_sat",    continuous),
+        F("qual_max_sat",      qual_max_sat,      1.0, lim::unit,      refuse, innermost_wins, qualifier_enable, nullptr, "",    "qual_max_sat",    continuous),
+        F("qual_min_lum",      qual_min_lum,      0.0, lim::unit,      refuse, innermost_wins, qualifier_enable, nullptr, "",    "qual_min_lum",    continuous),
+        F("qual_max_lum",      qual_max_lum,      1.0, lim::unit,      refuse, innermost_wins, qualifier_enable, nullptr, "",    "qual_max_lum",    continuous),
+        F("qual_softness",     qual_softness,     0.1, lim::unit,      refuse, innermost_wins, qualifier_enable, nullptr, "",    "qual_softness",   continuous),
+        F("qual_exposure",     qual_exposure,     0.0, lim::offset,    refuse, innermost_wins, qualifier_enable, nullptr, "",    "qual_exposure",   continuous),
+        F("qual_sat_offset",   qual_sat_offset,   0.0, lim::offset,    refuse, innermost_wins, qualifier_enable, nullptr, "",    "qual_sat_offset", continuous),
         F("qual_hue_offset",   qual_hue_offset,   0.0, lim::hue_shift, wrap, innermost_wins, qualifier_enable, nullptr, "deg", "qual_hue_offset", angular),
 
         // ---- chroma key --------------------------------------------------------------------------
         B("chroma_enable",     chroma.enable,     false, or_, none, nullptr, "chroma_enable"),
         B("chroma_show_mask",  chroma.show_mask,  false, or_, none, nullptr, "chroma_show_mask"),
-        F("chroma_target_hue",     chroma.target_hue,     0.0, lim::hue_degrees, clip, max_, none, nullptr, "deg", "chroma_target_hue", continuous),
-        F("chroma_hue_width",      chroma.hue_width,      0.0, lim::hue_width,   clip, max_, none, nullptr, "deg", "chroma_hue_width",  continuous),
-        F("chroma_min_saturation", chroma.min_saturation, 0.0, lim::unit,        clip, max_, none, nullptr, "",    "chroma_min_sat",    continuous),
-        F("chroma_min_brightness", chroma.min_brightness, 0.0, lim::unit,        clip, max_, none, nullptr, "",    "chroma_min_bright", continuous),
-        F("chroma_softness",       chroma.softness,       0.0, lim::unit,        clip, max_, none, nullptr, "",    "chroma_softness",   continuous),
-        F("chroma_spill_suppress", chroma.spill_suppress, 0.0, lim::unit,        clip, max_, none, nullptr, "",    "chroma_spill",      continuous),
-        F("chroma_spill_suppress_saturation", chroma.spill_suppress_saturation, 1.0, lim::unit, clip, min_, none, nullptr, "", "chroma_spill_sat", continuous),
+        F("chroma_target_hue",     chroma.target_hue,     0.0, lim::hue_degrees, refuse, max_, none, nullptr, "deg", "chroma_target_hue", continuous),
+        F("chroma_hue_width",      chroma.hue_width,      0.0, lim::hue_width,   refuse, max_, none, nullptr, "deg", "chroma_hue_width",  continuous),
+        F("chroma_min_saturation", chroma.min_saturation, 0.0, lim::unit,        refuse, max_, none, nullptr, "",    "chroma_min_sat",    continuous),
+        F("chroma_min_brightness", chroma.min_brightness, 0.0, lim::unit,        refuse, max_, none, nullptr, "",    "chroma_min_bright", continuous),
+        F("chroma_softness",       chroma.softness,       0.0, lim::unit,        refuse, max_, none, nullptr, "",    "chroma_softness",   continuous),
+        F("chroma_spill_suppress", chroma.spill_suppress, 0.0, lim::unit,        refuse, max_, none, nullptr, "",    "chroma_spill",      continuous),
+        F("chroma_spill_suppress_saturation", chroma.spill_suppress_saturation, 1.0, lim::unit, refuse, min_, none, nullptr, "", "chroma_spill_sat", continuous),
 
         // ---- shape mask ---------------------------------------------------------------------------
         B("shape_enable",      shape.enable,      false, or_, none, nullptr, "shape_enable"),
         E("shape_type",        shape.type,        shape_type,      shape_type::rect,       SHAPE_TYPES, innermost_wins, shape_enable, "shape_type"),
         E("shape_fill_type",   shape.fill_type,   shape_fill_type, shape_fill_type::solid, FILL_TYPES,  innermost_wins, shape_enable, "shape_fill_type"),
-        A("shape_center",      shape.center,      2, ({0.5, 0.5}), lim::unit, clip, innermost_wins, shape_enable, "shape.enable", "", "shape_center_x,shape_center_y", continuous),
-        A("shape_size",        shape.size,        2, ({0.5, 0.5}), lim::unit, clip, innermost_wins, shape_enable, "shape.enable", "", "shape_size_x,shape_size_y",     continuous),
-        F("shape_corner_radius",  shape.corner_radius,  0.0,   lim::unit,       clip, innermost_wins, shape_enable, "shape.enable", "",    "shape_corner_radius",  continuous),
-        F("shape_edge_softness",  shape.edge_softness,  0.005, lim::unit,       clip, innermost_wins, shape_enable, "shape.enable", "",    "shape_edge_softness",  continuous),
+        A("shape_center",      shape.center,      2, ({0.5, 0.5}), lim::unit, refuse, innermost_wins, shape_enable, "shape.enable", "", "shape_center_x,shape_center_y", continuous),
+        A("shape_size",        shape.size,        2, ({0.5, 0.5}), lim::unit, refuse, innermost_wins, shape_enable, "shape.enable", "", "shape_size_x,shape_size_y",     continuous),
+        F("shape_corner_radius",  shape.corner_radius,  0.0,   lim::unit,       refuse, innermost_wins, shape_enable, "shape.enable", "",    "shape_corner_radius",  continuous),
+        F("shape_edge_softness",  shape.edge_softness,  0.005, lim::unit,       refuse, innermost_wins, shape_enable, "shape.enable", "",    "shape_edge_softness",  continuous),
         F("shape_gradient_angle", shape.gradient_angle, 0.0,   lim::blur_angle, wrap, innermost_wins, shape_enable, "shape.enable", "deg", "shape_gradient_angle", angular),
-        A("shape_gradient_center", shape.gradient_center, 2, ({0.5, 0.5}), lim::unit, clip, innermost_wins, shape_enable, "shape.enable", "", "shape_gradient_cx,shape_gradient_cy", continuous),
+        A("shape_gradient_center", shape.gradient_center, 2, ({0.5, 0.5}), lim::unit, refuse, innermost_wins, shape_enable, "shape.enable", "", "shape_gradient_cx,shape_gradient_cy", continuous),
         // Follows the rest of the shape block rather than OR-ing on its own: the mixers
         // replace `shape` wholesale when the INNER layer has `shape.enable`, so a stroke
         // flag on a layer whose shape is off must not leak upward. `shape_enable` itself
         // can stay `or_` because OR and the whole-struct replacement agree for it; this one
         // is where they part company, which is what the self-test reported.
         B_G("shape_stroke_enable", shape.stroke_enable, false, innermost_wins, shape_enable, nullptr, "shape_stroke_enable"),
-        F("shape_stroke_width",   shape.stroke_width,   0.0, lim::unit, clip, innermost_wins, shape_enable, "shape.enable", "", "shape_stroke_width", continuous),
-        A("shape_color1",      shape.color1,      4, ({1.0, 1.0, 1.0, 1.0}), lim::unit, clip, innermost_wins, shape_enable, "shape.enable", "", "shape_color1_r,shape_color1_g,shape_color1_b,shape_color1_a", continuous),
-        A("shape_color2",      shape.color2,      4, ({0.0, 0.0, 0.0, 0.0}), lim::unit, clip, innermost_wins, shape_enable, "shape.enable", "", "shape_color2_r,shape_color2_g,shape_color2_b,shape_color2_a", continuous),
-        A("shape_stroke_color", shape.stroke_color, 4, ({1.0, 1.0, 1.0, 1.0}), lim::unit, clip, innermost_wins, shape_enable, "shape.enable", "", "shape_stroke_r,shape_stroke_g,shape_stroke_b,shape_stroke_a", continuous),
+        F("shape_stroke_width",   shape.stroke_width,   0.0, lim::unit, refuse, innermost_wins, shape_enable, "shape.enable", "", "shape_stroke_width", continuous),
+        A("shape_color1",      shape.color1,      4, ({1.0, 1.0, 1.0, 1.0}), lim::unit, refuse, innermost_wins, shape_enable, "shape.enable", "", "shape_color1_r,shape_color1_g,shape_color1_b,shape_color1_a", continuous),
+        A("shape_color2",      shape.color2,      4, ({0.0, 0.0, 0.0, 0.0}), lim::unit, refuse, innermost_wins, shape_enable, "shape.enable", "", "shape_color2_r,shape_color2_g,shape_color2_b,shape_color2_a", continuous),
+        A("shape_stroke_color", shape.stroke_color, 4, ({1.0, 1.0, 1.0, 1.0}), lim::unit, refuse, innermost_wins, shape_enable, "shape.enable", "", "shape_stroke_r,shape_stroke_g,shape_stroke_b,shape_stroke_a", continuous),
 
         // ---- projection: 360 virtual camera -----------------------------------------------------------
         B("proj_enable",       projection.enable, false, or_, none, nullptr, "proj_enable"),
@@ -536,10 +536,10 @@ const std::vector<field_desc>& all()
         B("proj_icvfx_auto",   projection.icvfx_auto, true,  innermost_wins, icvfx_enable, nullptr, nullptr),
 
         // ---- projection: edge blending (a GROUP gate; see compose_colour) -----------------------------
-        F("proj_edge_blend_left",   projection.edge_blend_left,   0.0, lim::unit,    clip, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_left",   continuous),
-        F("proj_edge_blend_right",  projection.edge_blend_right,  0.0, lim::unit,    clip, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_right",  continuous),
-        F("proj_edge_blend_top",    projection.edge_blend_top,    0.0, lim::unit,    clip, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_top",    continuous),
-        F("proj_edge_blend_bottom", projection.edge_blend_bottom, 0.0, lim::unit,    clip, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_bottom", continuous),
+        F("proj_edge_blend_left",   projection.edge_blend_left,   0.0, lim::unit,    refuse, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_left",   continuous),
+        F("proj_edge_blend_right",  projection.edge_blend_right,  0.0, lim::unit,    refuse, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_right",  continuous),
+        F("proj_edge_blend_top",    projection.edge_blend_top,    0.0, lim::unit,    refuse, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_top",    continuous),
+        F("proj_edge_blend_bottom", projection.edge_blend_bottom, 0.0, lim::unit,    refuse, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_bottom", continuous),
         F("proj_edge_blend_gamma",  projection.edge_blend_gamma,  2.2, std::nullopt, free, innermost_wins, edge_blend_any, nullptr, "", "proj_edge_blend_gamma",  continuous),
 
         // ---- projection: ICVFX inner/outer frustum ------------------------------------------------------
@@ -561,15 +561,15 @@ const std::vector<field_desc>& all()
         F("proj_icvfx_q2y",          projection.icvfx_q2y,         -1.0,           std::nullopt, free, innermost_wins, icvfx_enable, nullptr, "",    nullptr,            continuous),
         F("proj_icvfx_q3x",          projection.icvfx_q3x,         -1.0,           std::nullopt, free, innermost_wins, icvfx_enable, nullptr, "",    nullptr,            continuous),
         F("proj_icvfx_q3y",          projection.icvfx_q3y,         -1.0,           std::nullopt, free, innermost_wins, icvfx_enable, nullptr, "",    nullptr,            continuous),
-        F("proj_icvfx_feather",      projection.icvfx_feather,      0.05, lim::unit, clip, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_feather",   continuous),
-        F("proj_icvfx_outer_dim",    projection.icvfx_outer_dim,    1.0,  lim::unit, clip, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_outer_dim", continuous),
-        F("proj_icvfx_inner_dim",    projection.icvfx_inner_dim,    1.0,  lim::unit, clip, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_inner_dim", continuous),
-        F("proj_icvfx_inner_gain_r", projection.icvfx_inner_gain_r, 1.0,  lim::gain, clip, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_inner_gain_r", continuous),
-        F("proj_icvfx_inner_gain_g", projection.icvfx_inner_gain_g, 1.0,  lim::gain, clip, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_inner_gain_g", continuous),
-        F("proj_icvfx_inner_gain_b", projection.icvfx_inner_gain_b, 1.0,  lim::gain, clip, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_inner_gain_b", continuous),
-        F("proj_icvfx_outer_gain_r", projection.icvfx_outer_gain_r, 1.0,  lim::gain, clip, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_outer_gain_r", continuous),
-        F("proj_icvfx_outer_gain_g", projection.icvfx_outer_gain_g, 1.0,  lim::gain, clip, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_outer_gain_g", continuous),
-        F("proj_icvfx_outer_gain_b", projection.icvfx_outer_gain_b, 1.0,  lim::gain, clip, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_outer_gain_b", continuous),
+        F("proj_icvfx_feather",      projection.icvfx_feather,      0.05, lim::unit, refuse, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_feather",   continuous),
+        F("proj_icvfx_outer_dim",    projection.icvfx_outer_dim,    1.0,  lim::unit, refuse, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_outer_dim", continuous),
+        F("proj_icvfx_inner_dim",    projection.icvfx_inner_dim,    1.0,  lim::unit, refuse, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_inner_dim", continuous),
+        F("proj_icvfx_inner_gain_r", projection.icvfx_inner_gain_r, 1.0,  lim::gain, refuse, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_inner_gain_r", continuous),
+        F("proj_icvfx_inner_gain_g", projection.icvfx_inner_gain_g, 1.0,  lim::gain, refuse, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_inner_gain_g", continuous),
+        F("proj_icvfx_inner_gain_b", projection.icvfx_inner_gain_b, 1.0,  lim::gain, refuse, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_inner_gain_b", continuous),
+        F("proj_icvfx_outer_gain_r", projection.icvfx_outer_gain_r, 1.0,  lim::gain, refuse, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_outer_gain_r", continuous),
+        F("proj_icvfx_outer_gain_g", projection.icvfx_outer_gain_g, 1.0,  lim::gain, refuse, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_outer_gain_g", continuous),
+        F("proj_icvfx_outer_gain_b", projection.icvfx_outer_gain_b, 1.0,  lim::gain, refuse, innermost_wins, icvfx_enable, nullptr, "", "proj_icvfx_outer_gain_b", continuous),
 
         // ---- colour management -------------------------------------------------------------------------
         B("color_grade_enable", color_grade.enable, false, or_, none, nullptr, "color_grade_enable"),
@@ -578,7 +578,7 @@ const std::vector<field_desc>& all()
         I("color_grade_tone_mapping",    color_grade.tone_mapping,    0, innermost_wins, color_grade_enable, "color_grade_tone_mapping"),
         I("color_grade_output_gamut",    color_grade.output_gamut,    0, innermost_wins, color_grade_enable, "color_grade_output_gamut"),
         I("color_grade_output_transfer", color_grade.output_transfer, 0, innermost_wins, color_grade_enable, "color_grade_output_transfer"),
-        FL("color_grade_exposure", color_grade.exposure, 1.0f, lim::exposure, clip, innermost_wins, color_grade_enable, nullptr, "", "color_grade_exposure", continuous),
+        FL("color_grade_exposure", color_grade.exposure, 1.0f, lim::exposure, refuse, innermost_wins, color_grade_enable, nullptr, "", "color_grade_exposure", continuous),
         B("ocio_enable",       ocio.enable,       false, or_, none, nullptr, nullptr),
         S("ocio_source_space", ocio.source_space, ocio_enable),
 
@@ -597,7 +597,7 @@ const std::vector<field_desc>& all()
 
         // ---- owned blobs: present/absent, loaded by their own commands --------------------------------------
         BLOB("lut3d",          lut3d,             lut3d_present),
-        FL("lut3d_strength",   lut3d_strength,    1.0f, lim::lut3d_strength, clip, innermost_wins, lut3d_present, nullptr, "", "lut3d_strength", continuous),
+        FL("lut3d_strength",   lut3d_strength,    1.0f, lim::lut3d_strength, refuse, innermost_wins, lut3d_present, nullptr, "", "lut3d_strength", continuous),
         BLOB("hue_curves",     hue_curves,        hue_curves_present),
         BLOB("blend_mask",     blend_mask,        blend_mask_present),
         BLOB("grade_nodes",    grade_nodes,       grade_nodes_present),
