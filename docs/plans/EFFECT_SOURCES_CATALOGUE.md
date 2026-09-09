@@ -160,6 +160,65 @@ npm, so it can be bundled into a template like any other dependency rather than 
 low-risk — a gradient declaration is barely copyrightable — but generated *shader or JS* code is
 not, and several of these are freemium, where the free tier commonly restricts commercial use.
 
+### 5.2 Three checked individually, and one is worth real attention
+
+| source | shape | licence | verdict |
+| :--- | :--- | :--- | :--- |
+| [`lersent001/orb`](https://github.com/lersent001/orb) | **WebGPU shader** + editor | **MIT** (×2, see below) | **The one worth pursuing** — §5.3 |
+| [bookofshapes.com](https://bookofshapes.com) | SVG pattern generator | **explicitly commercial-OK** | Good. Runtime asset per §5.1 |
+| [geometric-art.com](https://geometric-art.com) | PNG / MP4 exporter | **unstated** | Asset generator, and terms are silent — the §1 "no licence" case |
+
+**bookofshapes has the clearest terms in this whole document**, which is worth saying because
+almost nothing else here does: *"Whatever you generate on this site is yours to use. Commercial or
+not, modified or as it comes."* Attribution not required. Two limits: a pattern *"can be part of
+what you sell. It cannot be the thing you sell"* — so no reselling the collection — and three
+patterns derived from the Joy Division cover and a Müller-Brockmann poster are excluded. Combined
+with §5.1's measurement that SVG animates live in a template, this is a genuinely usable source.
+
+**geometric-art.com** turns photos and video into geometric abstractions and exports PNG/MP4, all
+on-device. Proprietary, no stated terms, EASY/PRO tiers. An asset generator whose licence is
+silent — which §1 says means all rights reserved. Fine to play with, not to build a show on until
+someone reads the terms.
+
+### 5.3 `lersent001/orb` — a WGSL generator that already emits a key
+
+648★, 73 forks, **MIT**, pushed 2026-08-29. Presented as a "liquid glass orb editor"; what matters
+is what is in the repository root:
+
+* **`effect.wgsl`, 1236 lines, self-contained.** One binding — `@group(0) @binding(0) var<uniform>
+  u: Uniforms` — and **zero textures**. It is a pure procedural generator, so it cannot filter
+  video, but it also depends on nothing but a uniform buffer.
+* **63 uniform fields**, all floats and RGBA colours: `time`, `speed`, `radius`, `zoom`, `warp`,
+  `exposure`, `style`, `edgeSoftness`, `edgeGlow`, the `metal*` / `ribbon*` / `particle*` groups,
+  eleven colours and twelve palette stops.
+* **`effect.metal`** beside it — the same effect already ported once, which says the author treats
+  the shader as portable rather than as app internals.
+* Two MIT licence files: `LICENSE` (© LerSent001) and `TOOLCRAFT_LICENSE.md` (© Pixel Point), so
+  there is vendored third-party code. Both MIT; **keep both notices**.
+
+**The detail that makes it immediately relevant here is the alpha.** Its final lines are explicit:
+
+> *The ball's own edge, and nothing outside it — everything the effect does not paint must be
+> exactly 0 so the page shows through.*
+
+It returns `vec4(finalColor, finalAlpha)` with a considered `sphereAlpha`/`emissionAlpha` split.
+**HTML is how this fork renders fill + key lower thirds** (§3 of `../features/html-gpu-direct.md`),
+and a generator that already produces a correct key is rarer than one that looks good.
+
+**Two routes, and the trade is real:**
+
+| | cost | what you get |
+| :--- | :--- | :--- |
+| **A — run it in the HTML producer** | ~none; WebGPU works as of `5177908db` | Works today. Parameters from JS, reachable by the `INPUT` command family. Costs a CEF layer per instance |
+| **B — port `effect.wgsl` to ISF** | a WGSL→GLSL port of 1236 lines | Native mixer execution, no browser, and the 63 uniforms map almost mechanically onto ISF `INPUTS` — giving `CALL 1-1 ISF SET <name>`, keyframing and the grading chain |
+
+Route B is attractive precisely because the parameter set is flat floats and colours, which is
+exactly ISF's `INPUTS` model. It is mechanical work, not clever work, and it ends with a fork of
+someone else's shader to maintain.
+
+**Not run.** Everything above is read from the repository; no part of it has been executed in this
+server. Route A is a couple of hours to find out.
+
 ## 6. MEASURED — what actually loads and renders, 2026-09-09
 
 Every shader and plugin below was played into a real channel on the OpenGL mixer at 720p25 and
