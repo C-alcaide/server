@@ -62,7 +62,7 @@ it**, which takes out the whole blur/glow family — 38 of 327 — until that is
 
 **The practical recommendation for ISF is short:** take the 327 MIT files from `Vidvox/ISF-Files`
 as the working library — **314 of them render today, measured**, and the browsable list by
-category is [`data/isf_working_by_category.md`](data/isf_working_by_category.md) (§6.1) — add CC0 sources
+category is `docs/plans/data/isf_working_by_category.md` (§6.1) — add CC0 sources
 freely, and treat everything else as needing a per-file licence check before it touches a show.
 
 ## 3. OFX — free and open, with one licence nuance worth understanding
