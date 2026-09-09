@@ -134,6 +134,7 @@ const char* bounding_name(core::fields::bounding_t b)
         case bounding_t::clip: return "clip";
         case bounding_t::wrap: return "wrap";
         case bounding_t::fold: return "fold";
+        case bounding_t::refuse: return "refuse";
     }
     return "free";
 }

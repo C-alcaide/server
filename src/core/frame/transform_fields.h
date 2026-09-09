@@ -80,6 +80,15 @@ enum class bounding_t : uint8_t
     clip,
     wrap,
     fold,
+    /// The value is REJECTED rather than adjusted. Added 2026-09-09 because the other four all
+    /// promise the server will make an out-of-range value usable, and for a field validated by
+    /// name -- an enumeration -- there is nothing to clamp toward: an unknown name is an error,
+    /// not a number to move. Those fields declared `clip` before, which claimed a clamp that
+    /// could never happen.
+    ///
+    /// A client should read this as *do not send it* rather than *send it and see*: a control
+    /// bound to a `refuse` field offers only the legal set.
+    refuse,
 };
 
 /// How a layer's value combines with the accumulated one during composition. This is the

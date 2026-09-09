@@ -204,7 +204,7 @@ bool as_str(const monitor::data_t& d, std::string& out)
 #define SE(T, NAME, MEMBER, DEF, NAMES, DESC)                                                                          \
     typed_field<T>                                                                                                     \
     {                                                                                                                  \
-        NAME, value_type::enumeration, access_t::read_write, std::nullopt, bounding_t::clip, compose_t::none,           \
+        NAME, value_type::enumeration, access_t::read_write, std::nullopt, bounding_t::refuse, compose_t::none,           \
             guard_t::none, nullptr, "", NAMES, DESC, nullptr, kf_kind::discrete, 1.0, 1, false,                         \
             [](const T& s) {                                                                                           \
                 const auto names = split_list(NAMES);                                                                  \

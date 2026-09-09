@@ -256,7 +256,7 @@ bool guard_holds(guard_t g, const IT& o)
 #define E(NAME, MEMBER, ENUMT, DEF, NAMES, RULE, GUARD, KF)                                                            \
     field_desc                                                                                                         \
     {                                                                                                                  \
-        NAME, value_type::enumeration, access_t::read_write, std::nullopt, bounding_t::clip, compose_t::RULE,           \
+        NAME, value_type::enumeration, access_t::read_write, std::nullopt, bounding_t::refuse, compose_t::RULE,           \
             guard_t::GUARD, nullptr, "", NAMES, nullptr, KF, kf_kind::discrete, 1.0, 1, true,                           \
             [](const IT& t) {                                                                                          \
                 const auto names = split_list(NAMES);                                                                  \

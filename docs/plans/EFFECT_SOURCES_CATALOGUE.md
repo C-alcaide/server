@@ -227,13 +227,18 @@ theirs rather than a reimplementation. Played as an HTML layer at 1280×720:
 | renders | **yes** — the Siri-style liquid glass orb, spectral bands, clean edge |
 | surface format | `bgra8unorm`, `alphaMode: "premultiplied"` |
 | **key** | **correct.** Outside the orb is RGBA **(0, 0, 0, 0)**; centre opaque; **242 distinct alpha values**, so a real soft matte rather than a binary cutout; 10.4% frame coverage |
-| **frame rate** | **22 fps steady state** into a 25 fps channel — see below |
+| **frame rate** | **25.0 / 25 — it holds rate.** Measured from outside; see the correction below |
 
-**It does not quite hold rate.** 22 against 25 means roughly one frame in eight is a repeat, and by
-§2 of `WEBGPU_IN_THE_HTML_PRODUCER.md` **nothing in the channel's timing will report that** —
-`late_frames` stays 0 and the period stays nominal. Its 63 uniforms include a `radius`, so a
-smaller orb is the obvious lever before anything cleverer. Measured at default `initialParams`,
-one style, on an RTX A4000, with nothing else on the box.
+**Correction, 2026-09-09: it DOES hold rate, and the first reading here was wrong.** The page's
+own `requestAnimationFrame` counter reported 22 fps, and this section said that meant roughly one
+frame in eight was a repeat. Measured from *outside* with `cli.py html-cadence` — which records the
+channel losslessly and hashes every frame, so a repeat is bit-identical — the orb delivers **0 of
+199 consecutive frames duplicated: a full 25.0 fps to air**.
+
+**So a page's self-report is not what reaches the channel**, and that is the argument for measuring
+from outside rather than instrumenting the page. Both bounds of the instrument were validated
+first: a page that provably changes every frame (it draws its own frame counter in binary, read
+back off the recording — every delta exactly 1) measures 0.0%, and a static page measures 97.5%.
 
 Two practical notes for anyone repeating it: the exports are `orbShaderSource` (not
 `shaderSource`), `stylePresets[name]` **is** the params object rather than wrapping one, and the

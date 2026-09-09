@@ -279,6 +279,14 @@ api_reply check_and_bound(const fields::field_meta& f, core::monitor::vector_t& 
             }
         }
 
+        // NOT IMPLEMENTED HERE, DELIBERATELY, and the reason is a facade split rather than an
+        // oversight -- see `docs/features/control-api.md` §bounding. 74 of the 115 ranged fields
+        // declare `bounding = clip`, and clamping them HERE alone would make the two facades
+        // disagree on every one of them: AMCP's shared `grade_param` REFUSES at 81 call sites
+        // (with a message naming the range), and only `MIXER CDL`'s four limits clamp, at 10.
+        // So the descriptor's `clip` is a promise neither facade keeps, and making this one keep
+        // it is a divergence rather than a fix. Tracked, not silently left.
+
         if (!f.range->contains(d))
             details.push_back(range_detail(f, i, d));
     }
