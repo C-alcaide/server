@@ -35,9 +35,14 @@ Three things the descriptor was missing are now published:
 
 **Measured 2026-09-09**, Natron plugin set, OpenGL mixer: 505/506 grouped across 38/40 plugins;
 0 arity/default mismatches over 506 parameters; `Transform` publishing `TYPE "dd"`, per-component
-`RANGE`, the plugin's own hint as `DESCRIPTION` and `group: "Controls"`. **No battery covers any of
-this** — the six API batteries walk the tree and none of them loads an ISF shader or an OFX plugin,
-so a regression here fails no check. Recorded as gap 0 in `docs/features/control-api.md` §5.
+`RANGE`, the plugin's own hint as `DESCRIPTION` and `group: "Controls"`.
+
+**Now covered**, by an OFX arm added to the harness's `producer-params` in the same sitting —
+**23/23 on both mixers**. That battery already had fourteen green checks on this node and they
+were all ISF: the two producers build their descriptors in different files, so ISF passing said
+nothing about OFX. `ACCESS == 3` is the load-bearing check, because the producer sets read_write
+and the fallback leaf is read-only, so that one bit says which source answered. It is opt-in on
+`--ofx-plugins <dir>` and **reports its own absence as a failure** rather than skipping.
 
 ### Added: `structure_revision`, so a client can tell the address space changed
 

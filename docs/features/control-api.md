@@ -3,7 +3,8 @@
 > **State:** partial
 > **Modules:** `src/protocol/http`, `src/core/frame/transform_fields.h`
 > **Commands:** 1 fork-specific AMCP command — `MIXER FIELD`, the registry's own projection onto AMCP
-> **Coverage:** `api-tree`, `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`, `api-stage`, `html-input` -- which is the only coverage of the input action (§2)
+> **Coverage:** `api-tree`, `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`, `api-stage`, `html-input` -- which is the only coverage of the input action (§2) --
+> and `producer-params`, the only one that reads the `params/*` sub-tree (§2)
 
 An HTTP interface that exposes what the server publishes as an **addressable, self-describing
 tree**, in the OSCQuery format. A client fetches `/v1/tree` once and knows every parameter that
@@ -519,9 +520,12 @@ grouped; **0 arity/default mismatches over 506 parameters**; and openfx-misc's `
 RGBA parameters reporting their own declared travel — gain `0..4`, offset `-1..1`, defaults
 `[1,1,1,1]` and `[0,0,0,0]` — rather than the 0..1 a colour would get by convention.
 
-**What is NOT covered.** No battery drives this. It is measured by hand, on one plugin set, on
-the OpenGL mixer only, and nothing would fail if it regressed — which is exactly how it stayed
-broken -- §5 has the account.
+**Covered by `producer-params`**, both mixers, since 2026-09-09 — the ISF half from the start,
+the OFX half added once this was found. What it still does not cover: **one plugin, of one
+third-party set, and no picture**. The arm gates the descriptor's shape, so a parameter that
+describes itself perfectly and renders nothing passes it — the `MIXER EXPOSURE` class, which the
+ISF half catches with a flat-fill fixture and the OFX half has no equivalent for. §5 has the
+account of how it came to be broken.
 
 ---
 
@@ -774,8 +778,12 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
    `param_desc`'s size. A full sweep and rebuild ended it. Both halves are worth keeping: the
    build trap makes the corruption, and the bare `catch (...)` decides whether you ever see it.
 
-   Still open: **nothing gates `params/*`.** The six batteries walk the tree and none of them
-   loads an ISF shader or an OFX plugin, so a regression here fails no check.
+   **Closed the same day.** `producer-params` gains an OFX arm — seven checks on the descriptor's
+   shape, `ACCESS == 3` load-bearing because it is the one bit that says which source answered,
+   23/23 on both mixers. Still open underneath it: the OFX arm reads no PICTURE, so a parameter
+   that describes itself correctly and renders nothing passes; and **no AMCP command enumerates
+   plug-ins** (`OFX LIST` answers 400), so the battery discovers them by parsing the server log —
+   and a control surface cannot ask this server what plug-ins it has at all.
 
 1. ~~**No battery.**~~ **CLOSED.** Six batteries run on both mixers — `api-tree`,
    `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`. This item read

@@ -1,6 +1,6 @@
 # Where to get effects — ISF, OFX, HTML, and the licensing that decides it
 
-> **Status:** CATALOGUE, compiled 2026-09-09. **§5.3, §5.6 and §6 are measured** — the orb effect was
+> **Status:** SURVEY — compiled 2026-09-09. **§5.3, §5.6 and §6 are measured** — the orb effect was
 > built and played as a layer (§5.3), and — 327 ISF shaders and 147 OFX
 > plugins were played into a real channel and judged from the captured picture. The rest is desk
 > research and says so.
@@ -353,8 +353,10 @@ nothing was measured for frame rate.
 
 Every shader and plugin below was played into a real channel on the OpenGL mixer at 720p25 and
 **judged from the captured picture**, not from the AMCP reply. Inventories:
-[`data/isf_inventory_2026-09-09.json`](data/isf_inventory_2026-09-09.json),
-[`data/ofx_inventory_2026-09-09.json`](data/ofx_inventory_2026-09-09.json).
+`docs/plans/data/isf_inventory_2026-09-09.json` and
+`docs/plans/data/ofx_inventory_2026-09-09.json` — repo paths rather than links, because
+`build_html.py` renders markdown and copies no data files, so a link to either is broken in the
+built manual and correct only in the source tree.
 
 ### 6.1 ISF — 314 of 327 render after a fix this sweep found
 
