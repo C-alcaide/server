@@ -627,6 +627,22 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     for (const auto& kv : sources_) {
                         auto node = state["source"][kv.first];
                         node["kind"] = kv.second->kind();
+                        // WHERE IT LISTENS AND WHETHER IT IS LISTENING, which `kind` cannot say
+                        // and which a client cannot otherwise find out. `describe()` has existed
+                        // on every source since they were introduced and was reachable only
+                        // through `SOURCE LIST` over AMCP:
+                        //
+                        //   osc udp/7411 /casparcg/source/knobs/... (listening, 42 accepted, 0 dropped)
+                        //   midi 1 "nanoKONTROL2" (listening, 1180 messages)
+                        //   lfo sine 0.5 Hz
+                        //
+                        // So an OSC source's PORT was undiscoverable over the control API: an
+                        // operator had to be told out of band where to send. Note this is
+                        // deliberately NOT OSCQuery's `HOST_INFO.OSC_PORT` -- that assumes ONE
+                        // OSC server for the whole address space, and there are N receivers here,
+                        // one per `SOURCE ADD`, per channel, on arbitrary ports. A single
+                        // `OSC_PORT` would have to name one of them arbitrarily.
+                        node["describe"] = kv.second->describe();
                         // Every channel's CURRENT value, so a client can show a source moving
                         // before anything is bound to it -- which is how an operator checks a
                         // MIDI knob or an audio band is arriving at all.

@@ -1,6 +1,35 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: a binding source publishes WHERE it listens, not just that it exists
+
+`SOURCE ADD 1 knobs OSC 7411` created a receiver whose **port was undiscoverable over the control
+API**. The stage's source publisher emitted `kind` (`"osc"`) and each channel's current value, so a
+client could see that a source existed and watch it move, and still had no way to learn where to
+send. An operator had to be told out of band.
+
+Every source has implemented `describe()` since they were introduced, and it was reachable only
+through `SOURCE LIST` over AMCP:
+
+```
+osc udp/7411 /casparcg/source/knobs/... (listening, 42 accepted, 0 dropped)
+midi 1 "nanoKONTROL2" (listening, 1180 messages)
+lfo sine 0.5 Hz
+```
+
+It is now published at `channel/{n}/stage/source/{name}/describe`, which carries the port, the
+address prefix and **whether the socket actually bound** — a source that could not bind still
+exists and reports every channel as absent, so a binding to it goes `broken`.
+
+**Deliberately not OSCQuery's `HOST_INFO.OSC_PORT`.** That attribute assumes one OSC server for the
+whole address space, and there are N receivers here — one per `SOURCE ADD`, per channel, on
+arbitrary ports — so a single `OSC_PORT` would have to name one of them arbitrarily. The per-source
+node is the honest place for it.
+
+**Measured**: `binding-osc` 8/8 on both mixers, with the check added to it reading `describe`
+**through the API**. The battery's existing bind check reads `SOURCE LIST` over AMCP and therefore
+passes whether or not the API publishes anything — which is why it could not have caught this.
+
 ### Changed: `bounding` now names a behaviour the server has, and `CLIPMODE` is omitted where none fits
 
 **The control API's descriptor advertised a clamp the server never performed.** 74 of the 115
