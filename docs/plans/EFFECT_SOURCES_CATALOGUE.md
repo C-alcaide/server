@@ -61,7 +61,8 @@ it**, which takes out the whole blur/glow family — 38 of 327 — until that is
 | VJ-shop bundles (e.g. [headsta.sh](https://www.headsta.sh/shop)) | claims 868+ | unstated per item, includes "Shadertoy ports" | **no, until proven** | A bundle advertising Shadertoy ports is advertising CC-BY-NC-SA content unless each author relicensed. Treat the count as a warning, not a feature |
 
 **The practical recommendation for ISF is short:** take the 327 MIT files from `Vidvox/ISF-Files`
-as the working library — **276 of them render today, measured** (§6.1) — add CC0 sources
+as the working library — **314 of them render today, measured**, and the browsable list by
+category is [`data/isf_working_by_category.md`](data/isf_working_by_category.md) (§6.1) — add CC0 sources
 freely, and treat everything else as needing a per-file licence check before it touches a show.
 
 ## 3. OFX — free and open, with one licence nuance worth understanding
@@ -273,6 +274,39 @@ it runs on the mixer over live video, takes parameters through `CALL 1-1 ISF SET
 keyframed. A website that exports a PNG cannot do any of that. The same applies to `CMYK Halftone`,
 `RGB Halftone` and `Dither-Bayer`, all of which render. **Check the 314 first** — it is the
 cheapest question in this document and it answers a surprising number of these.
+
+### 5.5 A wider sweep — and the licence pattern is the finding
+
+Searching for more of the same shape turned up one thing worth taking, one worth knowing about,
+and a pattern that matters more than either.
+
+| source | ★ | licence | verdict |
+| :--- | ---: | :--- | :--- |
+| [pmndrs/postprocessing](https://github.com/pmndrs/postprocessing) | 2852 | **Zlib** | **The gem. 35 ready-made effects for three.js** |
+| [enonforetsam/fluid](https://github.com/enonforetsam/fluid) | 66 | **MIT** | §5.4 — drop-in WebGL background |
+| [jonradoff/shadervine](https://github.com/jonradoff/shadervine) | 24 | **MIT** | WebGPU shader editor that **exports raw WGSL** |
+| [glslViewer](https://github.com/patriciogonzalezvivo/glslViewer) | 5324 | BSD-3 | Console GLSL sandbox — for *authoring*, not playout |
+| [hydra](https://github.com/hydra-synth/hydra) | 2707 | **AGPL-3.0** | Live-coding video synth. AGPL needs legal thought before it goes near a product |
+| [ybouane/liquidglass](https://github.com/ybouane/liquidglass) | **463** | **NO LICENCE** | Cannot use |
+| [jeantimex/glass-effect-webgpu](https://github.com/jeantimex/glass-effect-webgpu) | 63 | **NO LICENCE** | Cannot use |
+| [grigM/ISF-shaders-collection](https://github.com/grigM/ISF-shaders-collection) | 33 | **NO LICENCE** | **995 `.fs` files** — and unusable |
+
+**`pmndrs/postprocessing` is the one to take.** 2852★, **Zlib** (permissive, MIT-shaped), pushed
+today, **35 effects** — bloom, depth of field, glitch, chromatic aberration, scanlines, god rays,
+outline, pixelation and the rest. It targets **three.js**, which §3.2 already measured rendering
+into a channel at 1 LSB, so the integration question is answered before it is asked. This is a far
+better return than any single-effect site in this document.
+
+**The pattern, and it is the real finding: popularity is uncorrelated with usability.**
+`ybouane/liquidglass` has **463 stars and no licence file**; `grigM/ISF-shaders-collection` has
+**995 shaders and no licence file** — nearly three times Vidvox's collection, and all of it
+off-limits. Meanwhile the usable things here are a 66-star library and a 24-star editor. §1 says
+absence is not permission; this section is what that costs in practice. **Check the licence before
+the star count**, every time.
+
+**One to think about rather than dismiss:** `hydra` (2707★) is **AGPL-3.0**. That is not the same
+question as the GPL-2 plugin boundary in §3 — AGPL's network clause is a different animal, and a
+broadcast facility putting it in front of a service deserves a lawyer's opinion rather than mine.
 
 ## 6. MEASURED — what actually loads and renders, 2026-09-09
 
