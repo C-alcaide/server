@@ -1,6 +1,6 @@
 # Where to get effects — ISF, OFX, HTML, and the licensing that decides it
 
-> **Status:** CATALOGUE, compiled 2026-09-09. **§5.3 and §6 are measured** — the orb effect was
+> **Status:** CATALOGUE, compiled 2026-09-09. **§5.3, §5.6 and §6 are measured** — the orb effect was
 > built and played as a layer (§5.3), and — 327 ISF shaders and 147 OFX
 > plugins were played into a real channel and judged from the captured picture. The rest is desk
 > research and says so.
@@ -308,6 +308,42 @@ the star count**, every time.
 question as the GPL-2 plugin boundary in §3 — AGPL's network clause is a different animal, and a
 broadcast facility putting it in front of a service deserves a lawyer's opinion rather than mine.
 
+### 5.6 `pmndrs/postprocessing` — MEASURED in a channel, and it is the best return here
+
+35 effects, **Zlib**, 2852★. Run through the HTML producer 2026-09-09.
+
+**It is WebGL, not WebGPU** — zero references to `WebGPURenderer` in the repository, and its
+README uses `WebGLRenderer`. So it runs on a *different* path from §3.2's measured
+`WebGPURenderer`, and like everything else needs `<enable-gpu>true`, since a default config has
+neither WebGL nor WebGPU. Peer range `three >= 0.168 < 0.186`; r185 fits.
+
+| stage | patch | vs identity | |
+| :--- | :--- | ---: | :--- |
+| **identity** (composer, no effects) | (204.0, 115.0, 51.0) | — | **0.0 LSB against the closed-form source** |
+| BrightnessContrast | (255.0, 202.0, 109.0) | 140 | changed |
+| ChromaticAberration | (204.0, 115.0, 51.0) | 140 | **unchanged at centre, 140 at the edges — correct for a radial effect** |
+| Scanline | (152.9, 73.2, 32.5) | 255 | changed |
+| DotScreen | (221.0, 79.6, 10.6) | 255 | changed, halftone visible |
+
+**The identity row is the one that matters.** An `EffectComposer` with only a `RenderPass` is
+**byte-exact** against the source colour, so the composer introduces no colour error of its own —
+which is what makes every effect above it attributable. That check cost nothing and is the
+difference between "the effects look right" and "the chain is clean".
+
+Two things to set, both learned here: `renderer.outputColorSpace = THREE.LinearSRGBColorSpace`
+(**`NoColorSpace` is valid on `WebGPURenderer` and throws on `WebGLRenderer`** —
+`_getDrawingBufferColorSpace` has no config for it) and `toneMapping = NoToneMapping`, which is
+postprocessing's own documented advice.
+
+**Why this is the best return in the document:** 35 effects for one bundle step, on a host already
+measured, including `LUT1DEffect`, `LUT3DEffect`, `GammaCorrectionEffect` and `ToneMappingEffect`
+— which are the fork's own colour vocabulary, arriving in a browser layer.
+
+**What is not established:** only four of the 35 were driven, none against a model — the gate was
+"differs from identity", not "computes the right thing". `SSAOEffect`, `DepthOfFieldEffect` and
+`GodRaysEffect` need real geometry and a depth buffer, which a flat quad does not provide. And
+nothing was measured for frame rate.
+
 ## 6. MEASURED — what actually loads and renders, 2026-09-09
 
 Every shader and plugin below was played into a real channel on the OpenGL mixer at 720p25 and
@@ -399,10 +435,13 @@ Recorded because both produced confident wrong numbers:
 
 ## 7. What this catalogue does not establish
 
-* **"Renders" means a picture came out, not that it is CORRECT.** No output was compared against
-  a reference — a shader applying the wrong maths, the wrong channel order or the wrong gamma
-  passes §6 exactly as a right one does. That is a much weaker claim than the 1 LSB gates
-  elsewhere in this tree, and the gap is the whole distance between "loads" and "usable".
+* **"Renders" means a picture came out, not that it is CORRECT** — and that gap is now partly
+  closed by a battery rather than a caveat. `cli.py isf-conformance` gates the *implementation*:
+  a custom `.vs` reading `RENDERSIZE` and its own INPUTS (mutation-proved — reverting CasparVP
+  `1a4121267` turns it black at 191 LSB while its five siblings still pass), one channel of an
+  asymmetric colour inverted so no r/g/b permutation passes, and `pow(in,1/g)` at 1 LSB. 6/6 on
+  **both** mixers with identical numbers. **What it still does not say is whether any particular
+  third-party shader is right** — three fixtures are not 314 shaders, and that remains open.
 * **Each entry was judged from ONE frame** after ~1.1 s. Anything that animates in, accumulates
   over frames, or uses a persistent buffer may have been caught mid-warm-up.
 * **The openfx-misc compatibility warning is only partly answered.** Nothing was rejected and 143
