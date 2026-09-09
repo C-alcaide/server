@@ -226,6 +226,27 @@ json::object openapi(const http_config& cfg)
     }
     {
         json::object p;
+        p["get"] = op("What this server can be asked to PLAY",
+                      "Installed OFX plug-ins and the ISF shaders under the media folder, each with its "
+                      "id -- exactly what PLAY takes -- its label, its section and what the format "
+                      "declares about it. The counterpart of .../foreground/params, which describes a "
+                      "producer that is ALREADY running: this says what exists to run, so a client can "
+                      "offer the choice and then draw the panel with no per-effect knowledge. Built on "
+                      "demand, because a .fs can be dropped into the media folder while the server runs.",
+                      {});
+        paths["/v1/catalog"] = std::move(p);
+    }
+    {
+        json::object p;
+        p["get"] = op("One format's catalogue",
+                      "The same, narrowed to `ofx` or `isf`. An unknown kind is unknown_path rather than "
+                      "an empty list, because an empty list is what a server with none installed "
+                      "correctly returns and the two must not look the same.",
+                      json::array{path_param("kind", "ofx or isf")});
+        paths["/v1/catalog/{kind}"] = std::move(p);
+    }
+    {
+        json::object p;
         p["get"] = op("A sub-tree",
                       "The same, rooted at a path such as /channel/1/stage/layer/10/mixer.",
                       json::array{path_param("path", "A tree path, e.g. channel/1/stage/layer/10/mixer")});
@@ -401,6 +422,8 @@ std::string docs_page(const http_config& cfg)
     };
     static const row rows[] = {
         {"GET", "/v1/tree", "The whole address space"},
+        {"GET", "/v1/catalog", "What can be PLAYed: installed OFX plug-ins and ISF shaders"},
+        {"GET", "/v1/catalog/{kind}", "The same, narrowed to ofx or isf"},
         {"GET", "/v1/tree/{path}", "A sub-tree"},
         {"GET", "/v1/value/{path}", "One value; an unpublished mixer or stage field reads as its default"},
         {"PUT", "/v1/value/{path}", "Write one value; op set|toggle|add|cas, with duration and tween"},

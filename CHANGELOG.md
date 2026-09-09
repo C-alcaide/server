@@ -1,6 +1,53 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: a client can ask what effects are installed — `/v1/catalog`, `INFO OFX`, `INFO ISF`
+
+Nothing enumerated either effect format. `CLS` lists media and `TLS` lists templates; an `.ofx`
+bundle and a `.fs` are neither. `/v1/tree/.../foreground/params` describes a producer that is
+*already playing* — "what does this have", never "what is there" — so a control surface could
+draw a panel for an effect an operator had already chosen and **had no way to offer the choice**.
+
+The only enumeration in the product was the server's own startup log, which the test harness
+genuinely had to parse to pick a plug-in. A log line is a diagnostic, not an interface: written
+once at startup, unavailable to a client that connects later, and free to change format.
+
+```
+GET /v1/catalog        ->  { "ofx": {"count": 167, "entries": […]},
+                             "isf": {"count": 327, "entries": […]} }
+GET /v1/catalog/isf    ->  one section
+INFO OFX / INFO ISF    ->  the same, as XML, for an AMCP client
+```
+
+`id` is exactly what `PLAY` takes, so a client lists and then plays with nothing in between.
+For OFX each entry carries the **contexts**, which is what says whether a plug-in needs a source
+— a Filter must be given one and a Generator must not — and which a client would otherwise
+discover by trying it and reading the error. For ISF the JSON header is parsed and **nothing is
+compiled**: no GL context, no device, so listing 327 shaders is 327 file reads rather than 327
+shader compilations on the mixer.
+
+Three decisions worth stating:
+
+* **Not in the tree.** The tree is live state; an installed plug-in has no value to read or
+  write. A 167-entry list would also ride along on every full-tree fetch, and the tree is what a
+  client re-walks whenever `structure_revision` moves.
+* **Built on demand.** An operator installs a shader by dropping a `.fs` in while the server
+  runs — exactly the case a client refreshes for, and exactly the case a startup snapshot gets
+  wrong.
+* **An unknown kind is `unknown_path`, not an empty list.** A server with nothing installed
+  correctly answers with an empty list, so answering a typo the same way would tell an operator
+  "nothing is installed" when the truth is "no such format".
+
+A shader whose header will not parse is **listed with an `error`** rather than dropped: omitting
+it shows an operator 313 of 314 with no sign of the missing one. A plain GLSL fragment shader
+with no ISF header is not an error — the producer plays it, it simply declares no inputs.
+
+**Measured 2026-09-09** against Vidvox's collection: 327 shaders found recursively, all 327 with
+categories, 118 with a description, 56 multi-pass, and **38 with a `.vs` sibling** — exactly the
+38 that the vertex-stage fix in `1a4121267` repaired, reached here by an independent path.
+Covered by `producer-params`, **34/34 on both mixers**, including that a plug-in the run just
+played is in the catalogue the same server serves.
+
 ### Fixed: an OFX plugin's parameters reached the control API stripped of everything a client needs
 
 `/v1/tree/.../foreground/params` is what a client reads to **generate** a control surface rather

@@ -977,6 +977,7 @@ sub-command reaches the server.
 | Previz | `PREVIZ <ch> CAMERA/VIEW/SCREEN/SHOW/GRID/WIREFRAME/GIZMO` |
 | Tracking | `TRACKING <ch>-<l> BIND/UNBIND/OFFSET/SCALE/ZERO/INFO`, `TRACKING LIST` |
 | Calibration | `CALIBRATION <ch> LUT/BYPASS/CLEAR/INFO` |
+| Effects | `PLAY <ch>-<l> [ISF] <shader>`, `PLAY <ch>-<l> [OFX] <plugin-id>`, and `INFO ISF` / `INFO OFX` to find out **what is installed** — `CLS` lists media and `TLS` lists templates, and a `.fs` and an `.ofx` bundle are neither, so without these two an operator has to know the name already |
 | Consumers | `ADD <ch> <NAME> …`, `REMOVE <ch> <NAME>` — see the preview senders below |
 | Any mixer field | `MIXER <ch>-<l> FIELD <name> [values] [duration] [tween]` — see below |
 | System | `INFO`, `RESTART`, `SHUTDOWN` |

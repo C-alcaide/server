@@ -13,6 +13,7 @@
 
 #include "api_action.h"
 #include "api_auth.h"
+#include "api_catalog.h"
 #include "api_events.h"
 #include "api_openapi.h"
 #include "api_status.h"
@@ -425,6 +426,16 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
 
         if (path == "/v1/openapi.json")
             return api_reply::ok_with(openapi(config_));
+
+        // The CATALOGUE, and it is deliberately not part of the tree. The tree is this
+        // server's live STATE, and everything in it has a value that can be read and often
+        // written; an installed plug-in has neither. Putting a 167-entry plug-in list inside
+        // `/v1/tree` would also make every full-tree fetch carry it, and the tree is what a
+        // client re-walks whenever `structure_revision` moves.
+        if (path == "/v1/catalog")
+            return catalog(context_, "");
+        if (starts_with(path, "/v1/catalog/"))
+            return catalog(context_, path.substr(std::string("/v1/catalog/").size()));
 
         if (path == "/v1/tree")
             return api_reply::ok_with(build_tree(*hub_, config_, context_));

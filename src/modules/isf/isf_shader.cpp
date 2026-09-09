@@ -16,6 +16,7 @@
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
 
+#include <common/env.h>
 #include <common/log.h>
 #include <common/utf.h>
 
@@ -31,6 +32,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <set>
@@ -42,6 +44,11 @@ namespace {
 
 /// Extract the ISF JSON header (the first {...} block, which lives inside a leading /* */ comment).
 /// Brace counting is string-aware so that braces inside JSON string values do not unbalance it.
+/// The extensions `load_shader` will open, so a listing offers exactly what a `PLAY` accepts.
+/// `.vs` is deliberately absent: a vertex shader is a SIBLING of a `.fs`, not a shader in its
+/// own right, and listing one would offer a client something that cannot be played.
+const char* const kShaderExtensions[] = {".fs", ".frag", ".glsl", ".isf"};
+
 std::string extract_json(const std::string& source)
 {
     const auto open = source.find('{');
@@ -1392,6 +1399,111 @@ bool shader::render_into_shared(gl_context&                       ctx,
         return false;
     return impl_->render_into_shared(
         width, height, time, time_delta, frame_index, images, static_cast<GLuint>(dst_gl_texture));
+}
+
+std::vector<shader_info> discover_shaders()
+{
+    namespace fs = std::filesystem;
+
+    std::vector<shader_info> out;
+
+    const auto root = fs::path(u8(env::media_folder()));
+    std::error_code ec;
+    if (!fs::is_directory(root, ec))
+        return out;
+
+    // RECURSIVE, because every published collection ships subdirectories -- Vidvox's is filed
+    // by category -- and a flat scan would find almost nothing on a real install.
+    //
+    // The error_code overloads throughout: a media folder can contain a junction to a share
+    // that has gone away, and a listing that throws on one bad entry reports NOTHING. A
+    // catalogue is the wrong place to be all-or-nothing.
+    fs::recursive_directory_iterator it(root, ec), end;
+    if (ec)
+        return out;
+
+    for (; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        if (!fs::is_regular_file(it->path(), ec))
+            continue;
+
+        auto ext = it->path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (std::find_if(std::begin(kShaderExtensions), std::end(kShaderExtensions),
+                         [&](const char* e) { return ext == e; }) == std::end(kShaderExtensions))
+            continue;
+
+        shader_info info;
+        info.name = it->path().filename().string();
+        info.path = fs::relative(it->path(), root, ec).generic_string();
+        if (ec) {
+            info.path = info.name;
+            ec.clear();
+        }
+
+        // A `.vs` SIBLING, which is the one piece of a shader's shape that is not in its own
+        // header. It matters to a client because a custom vertex shader is the case that was
+        // broken until 1a4121267 -- all 38 of them in Vidvox's collection -- so "does this one
+        // have one" is worth being able to see without opening the file.
+        auto vs = it->path();
+        vs.replace_extension(".vs");
+        info.has_vertex_shader = fs::is_regular_file(vs, ec);
+        ec.clear();
+
+        std::string source;
+        try {
+            std::ifstream f(it->path(), std::ios::binary);
+            source.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        } catch (...) {
+            info.error = "could not be read";
+            out.push_back(std::move(info));
+            continue;
+        }
+
+        const auto json = extract_json(source);
+        if (json.empty()) {
+            // NOT an error, and this is the distinction that makes the listing useful: a plain
+            // GLSL fragment shader with no ISF header is still playable by this producer, it
+            // simply declares no inputs. Reporting it as broken would hide a working shader.
+            out.push_back(std::move(info));
+            continue;
+        }
+
+        boost::property_tree::ptree pt;
+        try {
+            std::istringstream is(json);
+            boost::property_tree::read_json(is, pt);
+        } catch (const std::exception& e) {
+            info.error = std::string("the ISF header is not valid JSON: ") + e.what();
+            out.push_back(std::move(info));
+            continue;
+        }
+
+        info.description = pt.get<std::string>("DESCRIPTION", "");
+        info.credit      = pt.get<std::string>("CREDIT", "");
+        info.isf_version = pt.get<std::string>("ISFVSN", "");
+
+        if (auto cats = pt.get_child_optional("CATEGORIES"))
+            for (const auto& kv : *cats)
+                if (const auto c = kv.second.get_value<std::string>(); !c.empty())
+                    info.categories.push_back(c);
+
+        if (auto inputs = pt.get_child_optional("INPUTS"))
+            info.inputs = static_cast<int>(inputs->size());
+
+        if (auto passes = pt.get_child_optional("PASSES"))
+            info.multipass = passes->size() > 1;
+
+        out.push_back(std::move(info));
+    }
+
+    std::sort(out.begin(), out.end(),
+              [](const shader_info& a, const shader_info& b) { return a.path < b.path; });
+    return out;
 }
 
 }} // namespace caspar::isf

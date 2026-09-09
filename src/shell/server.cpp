@@ -56,6 +56,8 @@
 #include <protocol/http/state_hub.h>
 #include <core/video_format.h>
 
+#include <modules/ofx/host/ofx_host.h>
+#include <modules/isf/isf_shader.h>
 #include <modules/image/consumer/image_consumer.h>
 
 #ifdef ENABLE_VULKAN
@@ -872,6 +874,63 @@ struct server::impl
                     return channels->at(static_cast<std::size_t>(index - 1)).raw_channel->stage();
                 };
                 api_ctx.channel_count = [channels] { return static_cast<int>(channels->size()); };
+
+                // THE CATALOGUE. Bridged here for the same reason `stage` above is: the OFX
+                // host is in `modules/ofx` and the ISF scanner in `modules/isf`, and
+                // `protocol_http` links `common` and `core` only. The shell links every module.
+                //
+                // Built ON DEMAND rather than cached at startup, because a `.fs` can be dropped
+                // into the media folder while the server runs -- which is how an operator
+                // actually installs one -- and a catalogue that answered from a startup snapshot
+                // would be stale in exactly the case a client refreshes it for.
+                api_ctx.catalog = []() -> std::vector<http::catalog_entry> {
+                    std::vector<http::catalog_entry> out;
+
+                    for (const auto& p : ofx::global_host().plugins()) {
+                        http::catalog_entry e;
+                        e.kind  = "ofx";
+                        e.id    = p.identifier;
+                        e.label = p.label;
+                        e.group = p.grouping;
+                        e.properties.emplace_back("version", std::to_string(p.version_major) + "." +
+                                                                 std::to_string(p.version_minor));
+                        e.properties.emplace_back("bundle", p.bundle_path);
+                        // The CONTEXTS decide whether `PLAY [OFX] <id>` needs a source: a
+                        // Filter must be given one and a Generator must not. Without this a
+                        // client has to try it and read the error to find out.
+                        std::string contexts;
+                        for (const auto& c : p.contexts)
+                            contexts += (contexts.empty() ? "" : ",") + c;
+                        e.properties.emplace_back("contexts", contexts);
+                        out.push_back(std::move(e));
+                    }
+
+                    for (const auto& s : isf::discover_shaders()) {
+                        http::catalog_entry e;
+                        e.kind  = "isf";
+                        e.id    = s.name;
+                        e.label = s.name;
+                        for (const auto& c : s.categories)
+                            e.group += (e.group.empty() ? "" : ",") + c;
+                        e.properties.emplace_back("path", s.path);
+                        e.properties.emplace_back("description", s.description);
+                        e.properties.emplace_back("credit", s.credit);
+                        e.properties.emplace_back("isf-version", s.isf_version);
+                        e.properties.emplace_back("inputs", std::to_string(s.inputs));
+                        if (s.multipass)
+                            e.properties.emplace_back("multipass", "true");
+                        if (s.has_vertex_shader)
+                            e.properties.emplace_back("vertex-shader", "true");
+                        // REPORTED rather than dropped: a listing that silently omits a shader
+                        // whose header will not parse tells the one person who can fix it
+                        // nothing at all, and shows an operator 313 of 314 with no sign of it.
+                        if (!s.error.empty())
+                            e.properties.emplace_back("error", s.error);
+                        out.push_back(std::move(e));
+                    }
+
+                    return out;
+                };
 
                 // The re-entrant AMCP bridge, for the two actions that need a producer
                 // built from a string. Same shape as `cluster.cpp`'s scheduler executor:

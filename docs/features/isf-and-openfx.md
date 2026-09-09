@@ -2,7 +2,8 @@
 
 > **State:** shipped, unmeasured
 > **Modules:** `src/modules/isf`, `src/modules/ofx`
-> **Commands:** none of their own — producers named `isf` and `ofx`
+> **Commands:** 2 fork-only — `INFO OFX` and `INFO ISF`, which enumerate what is installed;
+> the effects themselves are producers named `isf` and `ofx`
 > **Architecture:** [`../architecture/OPENFX_IMPLEMENTATION.md`](../architecture/OPENFX_IMPLEMENTATION.md)
 > **Guide:** [`../guides/ISF_USER_AND_SHADER_GUIDE.md`](../guides/ISF_USER_AND_SHADER_GUIDE.md), [`../guides/OPENFX_USER_AND_PLUGIN_GUIDE.md`](../guides/OPENFX_USER_AND_PLUGIN_GUIDE.md)
 > **Coverage:** **none**; `cli.py producer-params` — an ISF shader's own INPUTS as addressable control-API
@@ -147,6 +148,40 @@ PLAY 1-1 "[OFX] plugin_id"
 ```
 
 Parameter syntax — how a shader's or plugin's own parameters are set — is in the two guides.
+
+### Finding out what is installed
+
+```
+INFO OFX      ->  201 INFO OFX OK   + XML: id, label, grouping, version, bundle, contexts
+INFO ISF      ->  201 INFO ISF OK   + XML: name, path, description, credit, categories,
+                                            inputs, multipass, vertex-shader
+GET /v1/catalog        ->  both formats, as JSON
+GET /v1/catalog/isf    ->  one of them
+```
+
+**Why these exist.** `CLS` lists media and `TLS` lists templates; an `.ofx` bundle and a `.fs`
+are neither, so **nothing enumerated either format**. `/v1/tree/.../foreground/params` describes
+a producer that is *already playing* — "what does this have", never "what is there" — so a
+control surface could draw a panel for an effect the operator had already chosen, and had no way
+to offer the choice. The only enumeration was the server's own startup log, which the test
+harness genuinely had to parse. A log line is a diagnostic, not an interface: written once at
+startup, unavailable to a client that connected later, and free to change format.
+
+`id` is exactly what `PLAY` takes, so a client can list and then play with nothing in between.
+For OFX, `contexts` is what says whether a plug-in needs a source — a Filter must be given one
+and a Generator must not — which a client would otherwise discover by trying it and reading the
+error. For ISF, the header is parsed and **nothing is compiled**: no GL context, no device, so
+listing 327 shaders is a file read each rather than 327 shader compilations on the mixer.
+
+A shader whose ISF header will not parse is **listed with an `error`** rather than dropped. A
+listing that silently omits it shows an operator 313 of 314 with no sign of the missing one, and
+tells the person who wrote the header nothing at all. A plain GLSL fragment shader with no ISF
+header is not an error — this producer plays it, it simply declares no inputs.
+
+Measured 2026-09-09 against Vidvox's collection: **327 shaders found recursively**, all 327
+carrying categories, 118 with a description, 56 multi-pass, **38 with a `.vs` sibling** — which
+is exactly the 38 that the vertex-stage fix in `1a4121267` repaired, arrived at here by an
+independent path.
 
 ---
 

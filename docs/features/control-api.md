@@ -477,6 +477,51 @@ NOT raise it"* — and it is the check that makes the others mean anything.
 
 ---
 
+### `/v1/catalog` — what can be PLAYed, as opposed to what is playing
+
+The tree describes this server's live **state**. A plug-in sitting in a bundle directory and a
+`.fs` sitting in the media folder are not state: they have no value to read and none to write,
+and they exist whether or not anything is on air. So they are not in the tree, and until
+2026-09-09 they were in nothing else either.
+
+```
+GET /v1/catalog        ->  { "ofx": {"count": 167, "entries": [...]},
+                             "isf": {"count": 327, "entries": [...]} }
+GET /v1/catalog/isf    ->  just that section
+GET /v1/catalog/nope   ->  unknown_path
+```
+
+```json
+{ "id": "net.sf.openfx.TransformPlugin", "label": "Transform", "group": "Transform",
+  "version": "2.0", "contexts": "OfxImageEffectContextFilter,OfxImageEffectContextGeneral",
+  "bundle": "…/Misc.ofx.bundle" }
+```
+
+**`id` is exactly what `PLAY` takes**, so a client lists and then plays with no translation step
+in between — and `producer-params` gates precisely that, by checking that the plug-in it just
+played is in the catalogue the same server serves.
+
+**Why it is not in the tree.** Three reasons, and the third is the one that decides it: an
+installed plug-in has no value, so every node would be a leaf with nothing to read; a 167-entry
+list would ride along on every full-tree fetch; and the tree is what a client re-walks whenever
+`structure_revision` moves, which is frequently and for reasons that have nothing to do with
+what is installed.
+
+**Built on demand, not cached at startup.** An operator installs a shader by dropping a `.fs`
+into the media folder while the server runs, which is exactly the case a client refreshes for. A
+catalogue answering from a startup snapshot would be stale in that one case and correct in every
+case nobody needs it for. The ISF side parses each header and compiles nothing — no GL context,
+no device — so 327 shaders is 327 file reads rather than 327 shader compilations on the mixer.
+
+**An unknown kind is `unknown_path`, not an empty list.** A server with no plug-ins installed
+correctly answers `/v1/catalog/ofx` with an empty list, so answering a typo the same way would
+show an operator "nothing is installed" when the truth is "you asked for a format that does not
+exist". The two must not look the same.
+
+The AMCP siblings are `INFO OFX` and `INFO ISF`, which answer the same thing as XML.
+
+---
+
 ### `params/*` — enough to GENERATE a control surface, not merely to drive one
 
 A client that already knows a plugin can drive it from `/v1/value`. A client that has never seen
@@ -521,11 +566,16 @@ RGBA parameters reporting their own declared travel — gain `0..4`, offset `-1.
 `[1,1,1,1]` and `[0,0,0,0]` — rather than the 0..1 a colour would get by convention.
 
 **Covered by `producer-params`**, both mixers, since 2026-09-09 — the ISF half from the start,
-the OFX half added once this was found. What it still does not cover: **one plugin, of one
-third-party set, and no picture**. The arm gates the descriptor's shape, so a parameter that
-describes itself perfectly and renders nothing passes it — the `MIXER EXPOSURE` class, which the
-ISF half catches with a flat-fill fixture and the OFX half has no equivalent for. §5 has the
-account of how it came to be broken.
+the OFX half added once this was found. It gates the descriptor's shape **and renders**: an
+asymmetric colour into a Constant generator, then its own red/blue exchange, at **1 LSB on the
+mirror rather than on a value**. Both pictures pass through the same display encoding, so they
+must be exact mirrors of each other whatever that encoding is — which is why no absolute number
+is asserted here: writing (0.80, 0.45, 0.20) renders (231, 179, 124), and none of sRGB, gamma
+2.2 or the Rec.709 OETF predicts all three within a code value. A grey would satisfy the check
+while a channel exchange was live, which is why the colour is asymmetric.
+
+What it still does not cover: **one plug-in, of one third-party set**. §5 has the account of how
+this came to be broken.
 
 ---
 
@@ -778,12 +828,16 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
    `param_desc`'s size. A full sweep and rebuild ended it. Both halves are worth keeping: the
    build trap makes the corruption, and the bare `catch (...)` decides whether you ever see it.
 
-   **Closed the same day.** `producer-params` gains an OFX arm — seven checks on the descriptor's
-   shape, `ACCESS == 3` load-bearing because it is the one bit that says which source answered,
-   23/23 on both mixers. Still open underneath it: the OFX arm reads no PICTURE, so a parameter
-   that describes itself correctly and renders nothing passes; and **no AMCP command enumerates
-   plug-ins** (`OFX LIST` answers 400), so the battery discovers them by parsing the server log —
-   and a control surface cannot ask this server what plug-ins it has at all.
+   **Closed the same day**, and then twice more. `producer-params` gained an OFX arm — seven
+   checks on the descriptor's shape, `ACCESS == 3` load-bearing because it is the one bit that
+   says which source answered — then a **picture** check for the render half, and then a
+   **catalogue** check. **34/34 on both mixers.**
+
+   Both follow-on gaps this bullet named are now closed as well: the arm renders (the
+   mirror check above), and `/v1/catalog`, `INFO OFX` and `INFO ISF` enumerate what is
+   installed, so nothing has to parse the server log any more. What remains is narrow and
+   worth stating: the render check drives **one generator**, so it proves the write path
+   reaches the kernel for a colour and says nothing about the other parameter types.
 
 1. ~~**No battery.**~~ **CLOSED.** Six batteries run on both mixers — `api-tree`,
    `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`. This item read

@@ -29,6 +29,8 @@
 
 #include "../../modules/ltc/ltc_input.h"
 #include "../../modules/portaudio/util/portaudio_device.h"
+#include "../../modules/isf/isf_shader.h"
+#include "../../modules/ofx/host/ofx_host.h"
 
 #include <common/env.h>
 
@@ -4839,6 +4841,88 @@ std::wstring info_portaudio_command(command_context& ctx)
     return replyString.str();
 }
 
+/// Every OFX plug-in this server discovered, and every ISF shader under the media folder.
+///
+/// THE GAP THESE CLOSE. `foreground/params` describes a producer that is ALREADY PLAYING, so
+/// the API could answer "what does this have" and not "what is there". A control surface could
+/// therefore draw a panel for an effect the operator had already chosen, and had no way to
+/// offer the choice -- there is no `CLS` for either format, because `CLS` lists media and `TLS`
+/// lists templates and neither an `.ofx` bundle nor a `.fs` is either of those.
+///
+/// Discovery was possible only by reading the SERVER LOG, which the harness had to resort to.
+/// A log line is a diagnostic, not an interface: it is written once at startup, it is not
+/// available to a client that connected afterwards, and its format is free to change.
+std::wstring info_ofx_command(command_context& ctx)
+{
+    boost::property_tree::wptree info;
+
+    const auto& plugins = caspar::ofx::global_host().plugins();
+    info.add(L"ofx.count", plugins.size());
+
+    for (const auto& p : plugins) {
+        boost::property_tree::wptree node;
+        node.put(L"id", caspar::u16(p.identifier));
+        node.put(L"label", caspar::u16(p.label));
+        node.put(L"grouping", caspar::u16(p.grouping));
+        node.put(L"version", std::to_wstring(p.version_major) + L"." + std::to_wstring(p.version_minor));
+        node.put(L"bundle", caspar::u16(p.bundle_path));
+        // The CONTEXTS decide whether `PLAY [OFX] <id>` needs a source: a Filter must be given
+        // one and a Generator must not. Without this a client has to try and read the error.
+        std::wstring contexts;
+        for (const auto& c : p.contexts)
+            contexts += (contexts.empty() ? L"" : L",") + caspar::u16(c);
+        node.put(L"contexts", contexts);
+        info.add_child(L"ofx.plugin", node);
+    }
+
+    std::wstringstream replyString;
+    replyString << L"201 INFO OFX OK\r\n";
+
+    pt::xml_writer_settings<std::wstring> w(' ', 3);
+    pt::xml_parser::write_xml(replyString, info, w);
+
+    replyString << L"\r\n";
+    return replyString.str();
+}
+
+std::wstring info_isf_command(command_context& ctx)
+{
+    boost::property_tree::wptree info;
+
+    const auto shaders = caspar::isf::discover_shaders();
+    info.add(L"isf.count", shaders.size());
+
+    for (const auto& s : shaders) {
+        boost::property_tree::wptree node;
+        node.put(L"name", caspar::u16(s.name));
+        node.put(L"path", caspar::u16(s.path));
+        node.put(L"description", caspar::u16(s.description));
+        node.put(L"credit", caspar::u16(s.credit));
+        node.put(L"isf-version", caspar::u16(s.isf_version));
+        node.put(L"inputs", s.inputs);
+        node.put(L"multipass", s.multipass);
+        node.put(L"vertex-shader", s.has_vertex_shader);
+        std::wstring cats;
+        for (const auto& c : s.categories)
+            cats += (cats.empty() ? L"" : L",") + caspar::u16(c);
+        node.put(L"categories", cats);
+        // REPORTED rather than dropped. A listing that silently omits a shader whose header
+        // will not parse tells the one person who can fix it nothing at all.
+        if (!s.error.empty())
+            node.put(L"error", caspar::u16(s.error));
+        info.add_child(L"isf.shader", node);
+    }
+
+    std::wstringstream replyString;
+    replyString << L"201 INFO ISF OK\r\n";
+
+    pt::xml_writer_settings<std::wstring> w(' ', 3);
+    pt::xml_parser::write_xml(replyString, info, w);
+
+    replyString << L"\r\n";
+    return replyString.str();
+}
+
 std::wstring ltc_load_command(command_context& ctx)
 {
     if (ctx.parameters.size() < 1)
@@ -6518,6 +6602,8 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_command(L"Query Commands", L"INFO OCIO", info_ocio_command, 0);
     repo->register_command(L"Query Commands", L"INFO LTC", info_ltc_command, 0);
     repo->register_command(L"Query Commands", L"INFO PORTAUDIO", info_portaudio_command, 0);
+    repo->register_command(L"Query Commands", L"INFO OFX", info_ofx_command, 0);
+    repo->register_command(L"Query Commands", L"INFO ISF", info_isf_command, 0);
     repo->register_command(L"LTC Commands", L"LTC LOAD", ltc_load_command, 1);
     repo->register_command(L"Query Commands", L"GL INFO", gl_info_command, 0);
     repo->register_command(L"Query Commands", L"GL GC", gl_gc_command, 0);

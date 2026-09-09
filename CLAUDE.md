@@ -80,7 +80,11 @@ Two rules that outrank the table:
   running the nearest battery. That sentence is what turns a gap into a tracked item; the
   Vulkan-consumer-metadata gap below was found exactly that way.
 
-**Closed 2026-08-27: all 91 fork-specific AMCP commands are documented.** This block used to name
+**Closed 2026-08-27: all fork-specific AMCP commands are documented** — 91 then, **93 now**
+(`INFO OFX` and `INFO ISF` landed 2026-09-09). And the count is checked mechanically rather than
+remembered: `tests/test_docs_claims.py::test_every_fork_command_appears_in_some_doc` in the
+harness failed on both of them the moment they were registered, which is the only reason this
+paragraph is right. This block used to name
 nineteen that were documented nowhere — the twelve `PREVIZ *` commands, `INFO PORTAUDIO`, `MIXER
 FLIP` and five `MIXER PROJECTION_*`. Re-checked mechanically on 2026-08-27, against the same
 `d:\Github\server-upstream` diff that produced the fork-only set: **0 of 91 undocumented.**

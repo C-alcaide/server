@@ -199,4 +199,48 @@ class shader
     std::unique_ptr<impl> impl_;
 };
 
+/// One ISF shader FOUND ON DISK, described without compiling it.
+///
+/// The counterpart of `ofx::plugin_info`, and it exists for the same reason: a client that has
+/// to be told what it can run. `foreground/params` describes a producer that is ALREADY
+/// PLAYING, which answers "what does this have" and not "what is there" -- so a control surface
+/// could draw a panel for a shader an operator had already chosen and had no way to offer the
+/// choice. There is no `CLS` for shaders: `CLS` lists media and `TLS` lists templates, and a
+/// `.fs` is neither.
+struct shader_info
+{
+    /// What `PLAY 1-1 [ISF] <this>` takes -- the file name, extension included. `load_shader`
+    /// resolves an extensionless token too, but a name that is already resolvable is one less
+    /// thing for a client to guess at.
+    std::string name;
+
+    /// Relative to the media folder, so a client can show a tree and a `.fs` in a subdirectory
+    /// is distinguishable from one of the same name at the top.
+    std::string path;
+
+    std::string description; ///< the header's DESCRIPTION, or empty
+    std::string credit;      ///< the header's CREDIT, or empty
+    std::string isf_version; ///< the header's ISFVSN, or empty -- absent means ISF 1
+
+    /// The header's CATEGORIES, which is how every published collection organises itself.
+    std::vector<std::string> categories;
+
+    int  inputs    = 0;     ///< how many INPUTS it declares, image inputs included
+    bool multipass = false; ///< true when it declares PASSES
+    bool has_vertex_shader = false; ///< a sibling `.vs` exists, so it overrides the pass-through
+
+    /// Set when the file was read but its header could not be parsed as JSON, with the reason.
+    /// A shader is REPORTED with this rather than dropped: a client showing 313 of 314 with no
+    /// sign of the missing one is worse than showing it as broken, and the operator who wrote
+    /// the header is the only person who can fix it.
+    std::string error;
+};
+
+/// Every ISF shader under the media folder, recursively, sorted by path.
+///
+/// Parses the JSON header and NOTHING else -- no GL context, no compilation, no device. That is
+/// what makes it callable from a protocol thread: compiling 327 shaders to answer a listing
+/// would need the mixer's context and would take seconds.
+std::vector<shader_info> discover_shaders();
+
 }} // namespace caspar::isf

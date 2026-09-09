@@ -18,6 +18,8 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace caspar { namespace protocol { namespace http {
 
@@ -29,8 +31,38 @@ namespace caspar { namespace protocol { namespace http {
 /// command layer on this library's include path to obtain one `stage_base` pointer, and
 /// would make the API depend on AMCP in exactly the direction the design is trying to
 /// avoid -- the two façades are meant to be siblings over one state, not a stack.
+/// One thing the server can be asked to PLAY, described without playing it.
+///
+/// The counterpart of the `params/*` sub-tree, which describes a producer that is already
+/// running. That answers "what does this have"; nothing answered "what is there", so a control
+/// surface could draw a panel for an effect an operator had already chosen and had no way to
+/// offer the choice. `CLS` lists media and `TLS` lists templates; an `.ofx` bundle and a `.fs`
+/// are neither, and were discoverable only by reading the server's startup log.
+///
+/// FLAT KEY/VALUE for everything past the four common fields, deliberately. OFX and ISF do not
+/// describe themselves in the same terms -- OFX has contexts and a bundle path, ISF has a
+/// category list and a pass count -- and a struct wide enough for both would be half empty for
+/// each, with no way for a reader to tell "this format has no such concept" from "this entry
+/// left it blank". A property that is absent is absent.
+struct catalog_entry
+{
+    std::string kind;  ///< `"ofx"` or `"isf"`
+    std::string id;    ///< exactly what `PLAY <ch>-<layer> [OFX|ISF] <this>` takes
+    std::string label; ///< the format's own display name
+    std::string group; ///< OFX's menu grouping, ISF's CATEGORIES -- a section for a browser
+
+    std::vector<std::pair<std::string, std::string>> properties;
+};
+
 struct api_context
 {
+    /// Everything installed, both formats, or empty when the shell wired nothing.
+    ///
+    /// A function for the reason the rest of this file is functions: the OFX host lives in
+    /// `modules/ofx` and the ISF scanner in `modules/isf`, and `protocol_http` links `common`
+    /// and `core` only. The shell links every module and can bridge it in a dozen lines.
+    std::function<std::vector<catalog_entry>()> catalog;
+
     /// The stage for a 1-based channel index, or nullptr if there is no such channel.
     std::function<std::shared_ptr<core::stage_base>(int)> stage;
 
