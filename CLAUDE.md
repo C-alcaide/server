@@ -107,14 +107,22 @@ Still uncovered, and now the priority order for coverage rather than for docs:
   Driven today: `SCENE`, `MAP`, `SHOW`, `GRID`, `WIREFRAME` (`preview-cost`, for COST),
   `MAP` again for its picture (`previz-picture`), and `SCREEN` and `CAMERA` for their STATE
   (`api-stage`), and `SCREEN` plus both cameras again through the window (`previz-interact`,
-  2026-09-08). **Still driven by nothing: `GIZMO`, `PRESET`, `INFO`** -- three, not six. `UNMAP`
-  and `AUTOPROJECTION` are driven by `api-stage`, and `VIEW` and `AUTOPROJECTION` again by
-  `previz-interact`.
+  2026-09-08). `UNMAP` and `AUTOPROJECTION` are driven by `api-stage`, and `VIEW` and
+  `AUTOPROJECTION` again by `previz-interact`.
 
-  **This bullet has now been wrong in FOUR directions**, and the fourth was self-inflicted: the
-  commit that added `previz-interact` drove `VIEW` and `AUTOPROJECTION` and left this line saying
-  six. So the rule stands and is worth restating -- **verify the count against the batteries, by
-  grepping `PREVIZ` in `core/*.py`, not against the last version of this paragraph.**
+  **Still driven by nothing: `GIZMO` and `PRESET` -- TWO, re-measured 2026-09-10.** The line
+  above said *"`GIZMO`, `PRESET`, `INFO` -- three"* and `INFO` is driven now. Measured the way
+  this paragraph tells you to, which is the only reason it was caught:
+
+      grep -rhoE 'PREVIZ [0-9{]*[- ]*[A-Z_]+' core/*.py | grep -oE '[A-Z_]+$' | sort -u
+
+  Twelve come back: `AUTOPROJECTION CAMERA GRID INFO MAP RENDER SCENE SCREEN SHOW UNMAP VIEW
+  WIREFRAME`.
+
+  **This bullet has now been wrong in FIVE directions**, and the fifth is the same shape as the
+  fourth: a battery gained a command and nobody edited this line. So the rule stands and is worth
+  restating once more -- **verify the count by running that grep, not by reading the last version
+  of this paragraph.** It has never once been right for longer than a few days.
 
   **What no battery does at all is look at WHERE a screen is.** `previz-picture` proves the right
   channel arrives on the right mesh — four asymmetric colours, identical pixel counts on both
