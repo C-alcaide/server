@@ -85,6 +85,14 @@ shader should not fail to load over a precision hint.
 
 ### The automatic variables must reach the VERTEX stage too
 
+**Checked against the specification, not inferred.** A local mirror of the ISF spec and primer
+lives at `D:p-docs\isf\` (`media-server-docs`), and it is a **conformance** reference: where
+it and `src/modules/isf` disagree, the fork has the defect. Its chapter 6, *Convolution Filters*,
+puts `vec2 d = 1.0/RENDERSIZE` inside a `.vs` — so `RENDERSIZE` in the vertex stage is the
+documented pattern. `ref/isf-reference.md` §"Vertex Shaders and isf_vertShaderInit" confirms the
+rest of the contract this module implements: a `.vs` beside the `.fs` with the same base name, and
+`isf_vertShaderInit()` as the first call in `main`.
+
 `build_common_decls()` emits `RENDERSIZE`, `TIME`, `PASSINDEX`, the samplers and the shader's own
 INPUTS into **both** stages, because ISF 2.0 makes them available in both and a custom `.vs` is
 where they are most used — convolution and multi-pass shaders compute neighbour coordinates from

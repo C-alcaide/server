@@ -567,10 +567,15 @@ struct shader::impl
 
     /// The automatic variables, samplers and INPUTS, for BOTH stages.
     ///
-    /// ISF 2.0 makes these available in the vertex shader as well as the fragment one, and a
-    /// custom `.vs` is where they are most used: the convolution and multi-pass shaders compute
-    /// neighbour coordinates from `RENDERSIZE` and branch on `PASSINDEX` there, precisely so the
-    /// fragment stage does not repeat it per pixel. Emitting them only into the fragment stage
+    /// The specification's own primer puts `RENDERSIZE` inside a `.vs`: chapter 6, Convolution
+    /// Filters, computes eight neighbour coordinates as `vec2 d = 1.0/RENDERSIZE` in the vertex
+    /// shader precisely so the fragment stage does not repeat it per pixel. So the automatic
+    /// variables belong in both stages, by the document rather than by inference.
+    ///
+    /// The INPUTS are the weaker half of that claim and are declared here anyway: no spec text
+    /// found says a shader's own inputs reach the vertex stage, but Vidvox's *own* shipped
+    /// collection relies on it -- `Multi Pass Gaussian Blur.vs` reads `blurAmount` -- so the
+    /// reference implementation evidently provides them. Emitting them only into the fragment stage
     /// failed *every* shader shipping a `.vs` with
     ///
     ///     error C1503: undefined variable "RENDERSIZE" / "PASSINDEX" / <input name>
