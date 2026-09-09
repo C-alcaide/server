@@ -83,6 +83,20 @@ shader should not fail to load over a precision hint.
 **What this does not do.** `channel_info` also carries the gamut and the transfer function, and
 **no producer reads either yet**. The plumbing is there; only the depth is wired to it.
 
+### The automatic variables must reach the VERTEX stage too
+
+`build_common_decls()` emits `RENDERSIZE`, `TIME`, `PASSINDEX`, the samplers and the shader's own
+INPUTS into **both** stages, because ISF 2.0 makes them available in both and a custom `.vs` is
+where they are most used — convolution and multi-pass shaders compute neighbour coordinates from
+`RENDERSIZE` and branch on `PASSINDEX` there rather than per pixel.
+
+Emitting them into the fragment stage only failed **every** shader shipping a `.vs`, with
+`error C1503: undefined variable "RENDERSIZE"`. Measured over Vidvox's collection before the fix:
+all 38 shaders with a `.vs` failed and every one of the 276 that rendered had none. Afterwards all
+38 compile. Only `isf_FragNormCoord` differs between the stages — `out` in the vertex shader, `in`
+in the fragment one — so it is declared by each caller before the shared block, which the `IMG_*`
+macros reference.
+
 ### Two traps in the implementation
 
 * **`set_output_depth` must not free the final-pass texture.** It runs on the producer's
@@ -159,6 +173,21 @@ the interesting behaviour belongs to third-party code. What is *ours* and testab
 ---
 
 ## 5. Known gaps
+
+0. **Multi-pass rendering is wrong above a low pass count.** Found 2026-09-09 while sweeping
+   Vidvox's 327-shader collection, and previously *masked* by the vertex-shader defect below —
+   these shaders could not compile at all, so nobody had seen their output. Measured against a
+   textured source, captured through the IMAGE consumer:
+
+   | shader | `PASSES` | output |
+   | :--- | ---: | :--- |
+   | Soft Blur | 3 | correct — differs from source, std 84.9 → 61.6 as a blur should |
+   | Bloom | 7 | **byte-identical to the source** — the effect never reaches the picture |
+   | Multi Pass Gaussian Blur | 11 | differs, but flat green — not a blur of the input |
+
+   Three passes work and seven do not, so this looks like the ping-pong or persistent-buffer
+   handling rather than `PASSES` parsing. **16 of the collection's shaders are multi-pass** and
+   their correctness is unestablished; the blur/glow family is the bulk of it.
 
 1. **No coverage.** §4.1 is a self-contained check needing only a fixture shader.
 2. **The `eUndefined` layout fix is unverified on both paths.**

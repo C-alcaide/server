@@ -134,13 +134,13 @@ Every shader and plugin below was played into a real channel on the OpenGL mixer
 [`data/isf_inventory_2026-09-09.json`](data/isf_inventory_2026-09-09.json),
 [`data/ofx_inventory_2026-09-09.json`](data/ofx_inventory_2026-09-09.json).
 
-### 6.1 ISF — 276 of 327 render, and the 51 that do not have one dominant cause
+### 6.1 ISF — 314 of 327 render after a fix this sweep found
 
-| | generators | filters | transitions | total |
-| :--- | ---: | ---: | ---: | ---: |
-| **render** | 41 | 167 | 68 | **276** |
-| no picture | 8 | 43 | 0 | 51 |
-| **rejected** | 0 | 0 | 0 | **0** |
+| | before the fix | after |
+| :--- | ---: | ---: |
+| **render** | 276 | **314** |
+| no picture | 51 | 13 |
+| **rejected** | **0** | **0** |
 
 **Nothing was rejected.** All 327 loaded and played; the question was only whether a picture came
 out.
@@ -167,8 +167,12 @@ cause is in the log:
 only.** ISF 2.0 makes `RENDERSIZE`, `PASSINDEX` and the declared inputs available in **both**
 stages, so any shader supplying a custom vertex shader fails to compile it. This is why the
 collection's entire blur/glow family is dark — those are the multi-pass shaders, and multi-pass
-shaders ship a `.vs` to set up per-pass coordinates. **Fixing this one thing should take ISF from
-276 to roughly 314 of 327**, and it is a defect in this fork rather than in the shaders.
+shaders ship a `.vs` to set up per-pass coordinates. **Fixed the same day.** Both stages now share one declaration block; the collection went
+**276 → 314 of 327, +38, zero regressions**. Two cautions on that number: only the **22
+single-pass** ones are verified working, and the **16 multi-pass** ones now render but sit on a
+*second* defect this fix uncovered — `Bloom` (7 passes) returns its source byte-identically and
+`Multi Pass Gaussian Blur` (11) renders flat green, while `Soft Blur` (3) is correct. See
+`../features/isf-and-openfx.md` §5.0.
 
 The other **13** failures each need an input the test never supplied, and are not evidence of
 anything broken: `FFT Spectrogram` and `Radial Spectrogram` (audio), `Cursor`, `Random Shape`,

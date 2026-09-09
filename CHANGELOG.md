@@ -286,6 +286,35 @@ Measured by `previz-interact`, 16/16 on both mixers, mutation-proved: taking the
 from `GetCursorPos` instead of the message's `lParam` — the fault that would make every posted
 message a silent no-op — fails four of the checks.
 
+### Fixed: every ISF shader with its own vertex shader failed to compile
+
+**38 of the 327 shaders in Vidvox's standard collection rendered nothing, and the cross-tabulation
+was unambiguous: all 38 that ship a `.vs` failed, and every one of the 276 that rendered had
+none.** The log said why —
+
+    [isf] vertex shader compile failed: 0(19) : error C1503: undefined variable "PASSINDEX"
+                                        0(20) : error C1503: undefined variable "RENDERSIZE"
+
+`build_fragment()` declared the automatic variables, the samplers and the shader's own INPUTS;
+`build_vertex()` declared none of them. ISF 2.0 makes them available in **both** stages, and a
+custom `.vs` is where they are most used: convolution and multi-pass shaders compute neighbour
+coordinates from `RENDERSIZE` and branch on `PASSINDEX` there rather than per pixel. The
+declarations now come from one `build_common_decls()` used by both; only `isf_FragNormCoord`
+differs, `out` in the vertex stage and `in` in the fragment one.
+
+**Measured over the whole collection, before and after, judged from the captured picture:
+276 → 314 of 327 render, +38, with zero regressions.** `Edges` was verified by eye as a correct
+edge-enhance of a textured source, and `Sharpen RGB` raises image variance (std 84.9 → 119.3) as
+sharpening should.
+
+**This exposed a second defect that the first was hiding**, now recorded in
+`docs/features/isf-and-openfx.md` §5.0: **multi-pass rendering is wrong above a low pass count**.
+`Soft Blur` (3 passes) is a correct blur; `Bloom` (7 passes) comes back **byte-identical to its
+source**, so the effect never reaches the picture; `Multi Pass Gaussian Blur` (11 passes) renders
+flat green. Those shaders could not compile before this change, so nobody had seen their output.
+**So of the +38, the 22 single-pass ones are working and the 16 multi-pass ones now render but are
+not verified correct.**
+
 ### Added: ASIO is actually in the build now — the licence that blocked it expired
 
 **The PortAudio module has always carried ASIO code, and none of it could run.** `API=ASIO`,

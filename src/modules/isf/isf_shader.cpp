@@ -565,34 +565,47 @@ struct shader::impl
 
     // -- fragment / program ----------------------------------------------------------------------
 
-    std::string build_fragment() const
+    /// The automatic variables, samplers and INPUTS, for BOTH stages.
+    ///
+    /// ISF 2.0 makes these available in the vertex shader as well as the fragment one, and a
+    /// custom `.vs` is where they are most used: the convolution and multi-pass shaders compute
+    /// neighbour coordinates from `RENDERSIZE` and branch on `PASSINDEX` there, precisely so the
+    /// fragment stage does not repeat it per pixel. Emitting them only into the fragment stage
+    /// failed *every* shader shipping a `.vs` with
+    ///
+    ///     error C1503: undefined variable "RENDERSIZE" / "PASSINDEX" / <input name>
+    ///
+    /// Measured 2026-09-09 over Vidvox's 327-shader collection: all 38 shaders with a `.vs`
+    /// failed and every one of the 276 that rendered had none -- so this block being
+    /// fragment-only was the single cause of the whole blur/glow family being dark.
+    ///
+    /// The caller declares `isf_FragNormCoord` FIRST, with the right direction for its stage
+    /// (`out` in the vertex shader, `in` in the fragment one), because the macros below
+    /// reference it.
+    std::string build_common_decls() const
     {
-        std::ostringstream f;
-        f << "#version 330 core\n"
-             "uniform vec2 RENDERSIZE;\n"
+        std::ostringstream d;
+        d << "uniform vec2 RENDERSIZE;\n"
              "uniform float TIME;\n"
              "uniform float TIMEDELTA;\n"
              "uniform int FRAMEINDEX;\n"
              "uniform int PASSINDEX;\n"
              "uniform vec4 DATE;\n";
         for (const auto& n : sampler_names_) {
-            f << "uniform sampler2D " << n << ";\n";
-            f << "uniform vec2 _" << n << "_imgSize;\n";
-            f << "uniform vec4 _" << n << "_imgRect;\n";
-            f << "uniform bool _" << n << "_flip;\n";
-            f << "uniform bool _" << n << "_bgra;\n";
+            d << "uniform sampler2D " << n << ";\n";
+            d << "uniform vec2 _" << n << "_imgSize;\n";
+            d << "uniform vec4 _" << n << "_imgRect;\n";
+            d << "uniform bool _" << n << "_flip;\n";
+            d << "uniform bool _" << n << "_bgra;\n";
         }
         for (const auto& in : inputs_) {
             if (const char* t = gl_type_of(in.type))
-                f << "uniform " << t << " " << in.name << ";\n";
+                d << "uniform " << t << " " << in.name << ";\n";
         }
-        f << "in vec2 isf_FragNormCoord;\n"
-             "out vec4 isf_out_color;\n"
-             "vec4 _isf_fetch(sampler2D s, vec2 nc, bool flp, bool bgr) {\n"
+        d << "vec4 _isf_fetch(sampler2D s, vec2 nc, bool flp, bool bgr) {\n"
              "  vec4 c = texture(s, flp ? vec2(nc.x, 1.0 - nc.y) : nc);\n"
              "  return bgr ? c.bgra : c;\n"
              "}\n"
-             "#define gl_FragColor isf_out_color\n"
              "#define vv_FragNormCoord isf_FragNormCoord\n"
              "#define isf_FragCoord (isf_FragNormCoord * RENDERSIZE)\n"
              "#define IMG_SIZE(image) (_ ## image ## _imgSize)\n"
@@ -600,7 +613,18 @@ struct shader::impl
              "_bgra)\n"
              "#define IMG_PIXEL(image, pc) IMG_NORM_PIXEL(image, (pc) / IMG_SIZE(image))\n"
              "#define IMG_THIS_NORM_PIXEL(image) IMG_NORM_PIXEL(image, isf_FragNormCoord)\n"
-             "#define IMG_THIS_PIXEL(image) IMG_THIS_NORM_PIXEL(image)\n"
+             "#define IMG_THIS_PIXEL(image) IMG_THIS_NORM_PIXEL(image)\n";
+        return d.str();
+    }
+
+    std::string build_fragment() const
+    {
+        std::ostringstream f;
+        f << "#version 330 core\n"
+             "in vec2 isf_FragNormCoord;\n"
+          << build_common_decls()
+          << "out vec4 isf_out_color;\n"
+             "#define gl_FragColor isf_out_color\n"
              "#line 1\n"
           << source_;
         return f.str();
@@ -609,9 +633,11 @@ struct shader::impl
     std::string build_vertex() const
     {
         std::ostringstream v;
+        // `out` here, `in` in the fragment stage -- the one line that cannot be shared.
         v << "#version 330 core\n"
              "out vec2 isf_FragNormCoord;\n"
-             "void isf_vertShaderInit() {\n"
+          << build_common_decls()
+          << "void isf_vertShaderInit() {\n"
              "  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
              "  isf_FragNormCoord = p;\n"
              "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"

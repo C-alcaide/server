@@ -2,1963 +2,2290 @@
  {
   "name": "3d Rotate",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "ASCII Art",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Angular",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Apply Alpha",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Audio Waveform Shape",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "Auto Color Tone",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 3
  },
  {
   "name": "Auto Colors Histogram",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 3
  },
  {
   "name": "Auto Levels",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 6
  },
  {
   "name": "Bad TV",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Basic Shape",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Bloom",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 7
  },
  {
   "name": "Bordered Box",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Bounce",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Bow Tie Horizontal",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Bow Tie Vertical",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Boxinator",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Brick Pattern",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Bright",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Broken LCD",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Bump Distortion",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Burn",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Butterfly Wave Scrawler",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "CMYK Halftone",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "CMYK Halftone-Lookaround",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Channel Slide",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Checkerboard",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Chroma Desaturation Mask",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 5
  },
  {
   "name": "Chroma Mask",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 5
  },
  {
   "name": "Chroma Zoom",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Chromatic Aberration",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Circle",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Circle Crop",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Circle Open",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Circle Splash Distortion",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Circle Trails",
   "kind": "generator",
   "verdict": "empty",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Circle Warp",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Circle Wrap Distortion",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Circular Feedback Mask",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "Circular Screen",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "City Lights",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 8
  },
  {
   "name": "Collage",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Color Bars",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Color Blowout",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 3
  },
  {
   "name": "Color Controls",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Color History",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Color Invert",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Color Levels",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Color Monochrome",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Color Organ Polyphonic",
   "kind": "generator",
   "verdict": "empty",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Color Phase",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Color Posterize",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Color Relookup",
   "kind": "filter",
   "verdict": "flat",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Color Replacement",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 5
  },
  {
   "name": "Color Scales",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Color Schemes",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Color Test Grid",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Colour Distance",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Comet Tails",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "ConstantAlpha",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Convergence",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Corner Color Tint",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Corner Colors",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Crazy Parametric Fun",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Crop and Feather",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "CrossZoom",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Crosshatch",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Crosswarp",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Cubic Warp",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Cursor",
   "kind": "generator",
   "verdict": "empty",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Cursor Overlay",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Deinterlace",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Diagonal Blur",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Diagonalize",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Digital Clock",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "Dilate",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Dilate-Fast",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 4
  },
  {
   "name": "Directional",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Directional Warp",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Directional Wipe",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Dirty Lens",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Displace",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Displacement",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Dither-Bayer",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Doodler",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Doodler Overlay",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 3
  },
  {
   "name": "Doom Screen Transition",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Doorway",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Dot Screen",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Double Vision",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Dreamy",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Dreamy Zoom",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Dual Side Scroller And Flip",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Duotone",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Duotone From Histogram",
   "kind": "filter",
   "verdict": "flat",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 3
  },
  {
   "name": "Echo Trace",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Edge Blowout",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Edge Blur",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 7
  },
  {
   "name": "Edge Distort",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Edge Trace",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Edges",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Emboss",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Erode",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Erode-Fast",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 4
  },
  {
   "name": "Etch-a-Sketch",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Exposure Adjust",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "FFT Color Lines",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "FFT Filled Waveform",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "FFT Spectrogram",
   "kind": "generator",
   "verdict": "empty",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Fade",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Fade Color",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Fade Gray Scale",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "False Color",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Fast Blur",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 7
  },
  {
   "name": "FastMosh",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 2
  },
  {
   "name": "Film Burn",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Flip H",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Flip V",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Flipbook",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 3
  },
  {
   "name": "Fly Eye",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Freeze Frame",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "Frosted Glass",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Gamma Correction",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Ghosting",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Glitch Displace",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Glitch Memories",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Glitch Shifter",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Gloom",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 7
  },
  {
   "name": "Glow",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 10
  },
  {
   "name": "Glow-Fast",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 7
  },
  {
   "name": "God Rays",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Graph Paper",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Grid Flip",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Grid Warp",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "HSVtoRGB",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Hatch Blur",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Heart",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Heart Transition",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Hexagonalize",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Highlighter Overlay",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Histogram Viewer",
   "kind": "filter",
   "verdict": "empty",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "HorizVertHold",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Hyperspace",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Interlace",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Interlace Mirror",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Inverted Page Curl",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "JPEG Block Corruption",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Kaleidoscope",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Kaleidoscope Tile",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Kaleidoscope Transition",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Key Frame Artifacts",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 4
  },
  {
   "name": "LGG",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Layer Mask",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Layer Position",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Lens Flare",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 4
  },
  {
   "name": "Life",
   "kind": "generator",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 1
  },
  {
   "name": "Line Group",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Line Screen",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Linear Blur",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Linear Gradient",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Lines",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Long Exposure",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Luma Transition",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Luminance Melt",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Luminance Posterize",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Maximum Component",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Median",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Meta Image",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Micro Buffer",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 10
  },
  {
   "name": "Micro Buffer RGB",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 10
  },
  {
   "name": "Minimum Component",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Mirror",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Mirror Edge",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Morph",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Mosaic",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Motion Heat Map",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 3
  },
  {
   "name": "Motion Mask",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 7
  },
  {
   "name": "Multi Gradient",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Multi Hue Shift",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Multi Pass Gaussian Blur",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 11
  },
  {
   "name": "Multi-Pixellate",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "MultiFrame 2x2",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 4
  },
  {
   "name": "MultiFrame 3x3",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 9
  },
  {
   "name": "Multiply Blend",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Neon",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Night Vision",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Noise",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Noise Adapt",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Noise Displace",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Noise Pixellate",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Optical Flow Distort",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 3
  },
  {
   "name": "Optical Flow Generator",
   "kind": "filter",
   "verdict": "flat",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 3
  },
  {
   "name": "Pattern Glitch",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "Perlin Transition",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Pinwheel",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Pixel Shifter",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Pixelize",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Pixellate",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Polar Function",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Polka Dots Curtain",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Poly Glitch",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Poly Star",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Posterize",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Power Warp",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Quad Mask",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Quad Tile",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "RE RGB Gradient Generator",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "RGB EQ",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "RGB Halftone",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "RGB Halftone-lookaround",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "RGB Invert",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "RGB Strobe",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "RGB Trails 3.0",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "RGBA Swap",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "RGBtoHSV",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Radial",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Radial Gradient",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Radial Replicate",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Radial Spectrogram",
   "kind": "generator",
   "verdict": "flat",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 3
  },
  {
   "name": "Random Characters",
   "kind": "generator",
   "verdict": "empty",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Random Checkerboard",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Random Freeze",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "Random Lines",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Random Shape",
   "kind": "generator",
   "verdict": "empty",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Random Shape Blast",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "Random Squares",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Random Squares Mask",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Random Stripes",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Replicate",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Replicate Random",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Resize Glitch",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Ridgelines",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Ripple Transition",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Ripples",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Rotate",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Rotate Scale Fade",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Saturation Bleed",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 3
  },
  {
   "name": "Sepia Tone",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Set Alpha",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Shake",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Shape Mask",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Shape Morph Feedback Mask",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "Shape Morph Wrap",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Sharpen Luminance",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Sharpen RGB",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Shockwave",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Shockwave Pulse",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Show Alpha",
   "kind": "filter",
   "verdict": "flat",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Side Scroller And Flip",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Simple Zoom Transition",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Simplex Noise",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Sine Warp Gradient",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Sine Warp Tile",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Sketch",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Sliding Strips",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Slit Scan",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "Slit Scan Mask",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Smoke Screen",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Smudged Lens",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 3
  },
  {
   "name": "Soft Blur",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 3
  },
  {
   "name": "Soft Flip",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Solarize",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Solid Color",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Sorting Smear",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 1
  },
  {
   "name": "Sphere Map",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Spiral",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Squares Wire",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Squeeze",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Star",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Stereo Viewer",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Stripes",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Strobe",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Stylize Glitch",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "Swap Transition",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Swirl",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "TV Static",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Test Pattern Generator",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Thermal Camera",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Time Glitch RGB",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 10
  },
  {
   "name": "Tiny Date Time Overlay",
   "kind": "filter",
   "verdict": "empty",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Toon",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Trail Mask",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "Trapezoid Distortion",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Triangle",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Triangle Mosaic",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Triangle Warp",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Triangles",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Trio Tone",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Triple Rotate",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Truchet Tile",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Twirl",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Undulating Burn Out",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Unsharp Mask",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "VHS Glitch",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "VU Meter",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "VVMotionBlur 3.0",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 2
  },
  {
   "name": "Vertex Manipulator",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "Vertical Tearing",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 3
  },
  {
   "name": "Vibrance",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Video Bricks",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Video Snake",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 3
  },
  {
   "name": "Water Drop",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Waveform Displace",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "White Point Adjust",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Wind",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Window Blinds",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Window Slice",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Wipe Down",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Wipe Left",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Wipe Right",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Wipe Up",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Worley Cells",
   "kind": "generator",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "XYZoom",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Y-C Time Blur",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "Zoom",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Zoom In Circles",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "Zooming Feedback",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 1
  },
  {
   "name": "cube",
   "kind": "transition",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "v002 Bleach Bypass",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "v002 Crosshatch",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "v002 Dilate",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "v002 Erode",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "v002 Glitch Analog",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "v002 Light Leak",
   "kind": "filter",
-  "verdict": "empty",
-  "has_vs": true
+  "verdict": "renders",
+  "has_vs": true,
+  "passes": 0
  },
  {
   "name": "v002 Technicolor",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "v002 Vignette",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "v002-CRT-Displacement",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  },
  {
   "name": "v002-CRT-Mask",
   "kind": "filter",
   "verdict": "renders",
-  "has_vs": false
+  "has_vs": false,
+  "passes": 0
  }
 ]
