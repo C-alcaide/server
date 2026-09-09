@@ -127,6 +127,39 @@ what formats does it export, at what bit depth, and with what alpha.
 
 ---
 
+### 5.1 Tool DIRECTORIES are a third thing again
+
+`designminis.com` is not a tool, it is a **curated directory of ~48 tools by independent
+designers** — colour pickers, easing editors, shadow and gradient generators, SVG builders. So
+"checking it" means checking forty-eight separate things, each with its own author, its own terms
+and its own free/freemium line. **A directory confers no licence on anything it lists.**
+
+Sorted by what this server can actually do with the output, which is the only sort that matters:
+
+| what it emits | examples from that directory | value here |
+| :--- | :--- | :--- |
+| **CSS / JS code** | Easings (cubic-bezier editor), Gradient Builder, Gradlab, Gradient studio, Dot Grid Builder, Springs Studio, Design System Studio | **Runtime effect.** Paste into an HTML template and it is evaluated per frame, parameterisable, keyframable |
+| **SVG** | Shape Divider, Sinwaver, bookofshapes, Durves, GeoLogo, Spherium, Cursor Lab, HalftonePro | **Also runtime — see below.** The interesting category, and the non-obvious one |
+| **raster / 3D / video** | Shatter, Refract, Prisma, Marbler, Weaver, Hatchery, paperlab, Orby, Frametic | Asset generator, exactly as §5 describes |
+
+**SVG is not a baked asset here, and that is measured.** An inline SVG in an HTML template renders
+*and animates* in the producer — verified 2026-09-09 with a page carrying a linear gradient and two
+SMIL `<animate>` elements, captured three times through the IMAGE consumer: max channel delta 120
+and 124 between frames, so the animation is genuinely advancing rather than a static first paint.
+
+That makes an SVG generator worth more than a raster one for this pipeline: the output stays
+resolution-independent, recolourable by CSS, and animatable — a *runtime* asset rather than a
+picture of one. It is the one thing on that directory worth going out of the way for.
+
+**One library rather than a web toy:** `ShaderGradient` (2402★) ships as `@shadergradient/react` on
+npm, so it can be bundled into a template like any other dependency rather than copy-pasted.
+**Licence discrepancy to resolve first:** npm declares **MIT**, its GitHub repository declares
+**none**. Absence is not permission (§1), so establish which governs before it goes near a show.
+
+**And the licence reality for the rest:** per-tool, unstated by the directory. CSS output is
+low-risk — a gradient declaration is barely copyrightable — but generated *shader or JS* code is
+not, and several of these are freemium, where the free tier commonly restricts commercial use.
+
 ## 6. MEASURED — what actually loads and renders, 2026-09-09
 
 Every shader and plugin below was played into a real channel on the OpenGL mixer at 720p25 and
