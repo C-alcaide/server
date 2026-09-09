@@ -1,6 +1,8 @@
 # Where to get effects — ISF, OFX, HTML, and the licensing that decides it
 
-> **Status:** CATALOGUE, compiled 2026-09-09. **Nothing here has been loaded into this server.**
+> **Status:** CATALOGUE, compiled 2026-09-09. **§6 is measured** — 327 ISF shaders and 147 OFX
+> plugins were played into a real channel and judged from the captured picture. Everything outside
+> §6 is desk research.
 > Star counts, dates and licences are from the GitHub API and vendor pages on that date and go
 > stale — a licence especially, since a repository can gain or change one.
 > **Falsifier:** this file assumes `src/modules/isf` and `src/modules/ofx` exist and load
@@ -44,7 +46,8 @@ So the taxonomy that matters is not open-source vs proprietary. It is:
 ## 2. ISF — the strongest option, and it is already supported
 
 The fork's `src/modules/isf` implements ISF 2.0 including multi-pass `PASSES` and `IMPORTED`
-images, so it takes real-world shaders rather than only trivial ones. Guides:
+images. **But see §6.1: every shader that ships its own vertex shader currently fails to compile
+it**, which takes out the whole blur/glow family — 38 of 327 — until that is fixed. Guides:
 `../guides/ISF_USER_AND_SHADER_GUIDE.md`, feature doc `../features/isf-and-openfx.md`.
 
 | source | size | licence | commercial | notes |
@@ -57,8 +60,8 @@ images, so it takes real-world shaders rather than only trivial ones. Guides:
 | VJ-shop bundles (e.g. [headsta.sh](https://www.headsta.sh/shop)) | claims 868+ | unstated per item, includes "Shadertoy ports" | **no, until proven** | A bundle advertising Shadertoy ports is advertising CC-BY-NC-SA content unless each author relicensed. Treat the count as a warning, not a feature |
 
 **The practical recommendation for ISF is short:** take the 327 MIT files from `Vidvox/ISF-Files`
-as the working library, add CC0 sources freely, and treat everything else as needing a per-file
-licence check before it touches a show.
+as the working library — **276 of them render today, measured** (§6.1) — add CC0 sources
+freely, and treat everything else as needing a per-file licence check before it touches a show.
 
 ## 3. OFX — free and open, with one licence nuance worth understanding
 
@@ -80,7 +83,8 @@ about for using them in-house.
 
 **One warning carried from openfx-misc's own README:** it says its plugins should *not* be used in
 DaVinci Resolve or Fusion, because some use OFX features Blackmagic's hosts do not implement.
-Whether this fork's host implements them is **unknown and untested** — see §6.
+Measured in §6: nothing was rejected and 143 of 147 rendered, so whatever those
+features are, they are present enough. Silent degradation is still untested.
 
 ## 4. HTML — the gratis-but-proprietary side
 
@@ -121,14 +125,106 @@ licensing question from an effect's source licence.
 If a generator list is wanted it should be its own file, and its acceptance test is different:
 what formats does it export, at what bit depth, and with what alpha.
 
-## 6. What this catalogue does not establish
+---
 
-* **Nothing here has been loaded.** Not one ISF file or OFX plugin in this document has been run
-  in this server. The ISF module implements `PASSES` and `IMPORTED`, so the 327-file collection
-  *should* mostly work — "should" is the word doing the work.
-* **The openfx-misc compatibility warning is unresolved.** Its README says some plugins use OFX
-  features Blackmagic's hosts lack. Whether this fork's host implements them is untested, and the
-  failure mode of a missing OFX suite is not documented here.
+## 6. MEASURED — what actually loads and renders, 2026-09-09
+
+Every shader and plugin below was played into a real channel on the OpenGL mixer at 720p25 and
+**judged from the captured picture**, not from the AMCP reply. Inventories:
+[`data/isf_inventory_2026-09-09.json`](data/isf_inventory_2026-09-09.json),
+[`data/ofx_inventory_2026-09-09.json`](data/ofx_inventory_2026-09-09.json).
+
+### 6.1 ISF — 276 of 327 render, and the 51 that do not have one dominant cause
+
+| | generators | filters | transitions | total |
+| :--- | ---: | ---: | ---: | ---: |
+| **render** | 41 | 167 | 68 | **276** |
+| no picture | 8 | 43 | 0 | 51 |
+| **rejected** | 0 | 0 | 0 | **0** |
+
+**Nothing was rejected.** All 327 loaded and played; the question was only whether a picture came
+out.
+
+**The 51 failures are almost entirely one defect.** Cross-tabulating against whether a shader
+ships its own vertex shader:
+
+```
+                renders   no picture
+  has .vs             0           38
+  no  .vs           276           13
+```
+
+**Every one of the 38 shaders with a `.vs` fails, and every shader that renders has none.** The
+cause is in the log:
+
+```
+[isf] vertex shader compile failed: 0(12) : error C1503: undefined variable "blurAmount"
+                                    0(19) : error C1503: undefined variable "PASSINDEX"
+                                    0(20) : error C1503: undefined variable "RENDERSIZE"
+```
+
+**The fork declares ISF's automatic variables and the shader's own INPUTS in the fragment stage
+only.** ISF 2.0 makes `RENDERSIZE`, `PASSINDEX` and the declared inputs available in **both**
+stages, so any shader supplying a custom vertex shader fails to compile it. This is why the
+collection's entire blur/glow family is dark — those are the multi-pass shaders, and multi-pass
+shaders ship a `.vs` to set up per-pass coordinates. **Fixing this one thing should take ISF from
+276 to roughly 314 of 327**, and it is a defect in this fork rather than in the shaders.
+
+The other **13** failures each need an input the test never supplied, and are not evidence of
+anything broken: `FFT Spectrogram` and `Radial Spectrogram` (audio), `Cursor`, `Random Shape`,
+`Circle Trails` (mouse/point2D), `Histogram Viewer`, `Duotone From Histogram`,
+`Color Organ Polyphonic`, `Color Relookup`, `Optical Flow Generator`, `Random Characters`,
+`Show Alpha`, `Tiny Date Time Overlay`.
+
+### 6.2 OFX — 143 of 147 render, and the 4 that do not are explainable
+
+Natron 2.6.0-alpha1's Windows build was used for compiled bundles, because **neither
+openfx-misc nor openfx-arena publishes Windows binaries** — their releases carry no assets, and
+Natron's own latest release is macOS-only.
+
+The host initialised cleanly: `[ofx] OpenFX host initialised (image-effect API v1); discovered
+167 plug-in(s)` — 147 unique ids after de-duplication.
+
+| bundle | renders | no picture | total |
+| :--- | ---: | ---: | ---: |
+| Misc (openfx-misc) | 113 | 4 | 117 |
+| CImg | 30 | 0 | 30 |
+| **total** | **143** | **4** | **147** |
+
+The four: `Solid` (renders a solid colour — flat *is* its output), `ConstantPlugin`, `FrameRange`
+and `LayerContactSheetOFX` (need parameters or several inputs the test does not wire). **No
+plugin was rejected, and openfx-misc's own warning about hosts lacking OFX features did not
+bite** — see §7 for what that does and does not prove.
+
+**Only 2 of the 6 bundles contributed anything.** `GMIC`, `Arena`, `IO` and `Shadertoy` produced
+**zero** ids. Most likely their runtime dependencies — ImageMagick and friends, which Natron ships
+outside `Plugins/OFX/` — rather than a host fault, but that is unverified.
+
+### 6.3 Two flaws in the first version of this measurement
+
+Recorded because both produced confident wrong numbers:
+
+* **327/327 "rejected" against a working server.** The check was `reply.startswith("202")`, and the
+  harness AMCP client **parses the status code off and raises on 4xx/5xx** — so every success
+  returns a bare `PLAY OK`. Success is "it did not raise". This trap is already written down in
+  this project's notes, and it still caught this sweep.
+* **A flat colour is the wrong input for a filter.** Edge, halftone, dither and blur filters
+  correctly produce nothing from a featureless image. Re-running the ambiguous cases against a
+  textured pattern recovered **25 ISF and 4 OFX** entries that the first pass called broken.
+
+## 7. What this catalogue does not establish
+
+* **"Renders" means a picture came out, not that it is CORRECT.** No output was compared against
+  a reference — a shader applying the wrong maths, the wrong channel order or the wrong gamma
+  passes §6 exactly as a right one does. That is a much weaker claim than the 1 LSB gates
+  elsewhere in this tree, and the gap is the whole distance between "loads" and "usable".
+* **Each entry was judged from ONE frame** after ~1.1 s. Anything that animates in, accumulates
+  over frames, or uses a persistent buffer may have been caught mid-warm-up.
+* **The openfx-misc compatibility warning is only partly answered.** Nothing was rejected and 143
+  of 147 rendered, so the features it warns about are evidently present enough to run these
+  plugins. Whether any of them silently degrades is untested.
+* **Four of the six OFX bundles loaded nothing** and the reason is assumed (missing runtime
+  dependencies) rather than established.
 * **Licences were read from repository metadata and vendor pages, not from file headers.** For ISF
   in particular the per-file header is authoritative and often differs from the repository's
   declared licence, because the files are collected from many authors.

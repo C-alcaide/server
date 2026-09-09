@@ -1,0 +1,590 @@
+[
+ {
+  "id": "eu.cimg.CImgMatrix3x3",
+  "verdict": "renders"
+ },
+ {
+  "id": "eu.cimg.CImgMatrix5x5",
+  "verdict": "renders"
+ },
+ {
+  "id": "eu.cimg.Distance",
+  "verdict": "renders"
+ },
+ {
+  "id": "eu.cimg.EdgeDetect",
+  "verdict": "renders"
+ },
+ {
+  "id": "eu.cimg.EdgeExtend",
+  "verdict": "renders"
+ },
+ {
+  "id": "eu.cimg.ErodeBlur",
+  "verdict": "renders"
+ },
+ {
+  "id": "eu.cimg.Inpaint",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgBilateral",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgBilateralGuided",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgBloom",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgBlur",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgChromaBlur",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgDenoise",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgDilate",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgEqualize",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgErode",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgErodeSmooth",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgExpression",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgGuided",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgHistEQ",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgLaplacian",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgMedian",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgNoise",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgPlasma",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgRollingGuidance",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgSharpen",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgSharpenInvDiff",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgSharpenShock",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgSmooth",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.cimg.CImgSoften",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.AddPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.AdjustRoDPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.AppendClip",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Card3D",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.CheckerBoardPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.ChromaKeyerPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Clamp",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.ClipTestPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.ColorBars",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.ColorCorrectPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.ColorLookupPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.ColorMatrixPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.ColorSuppress",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.ColorWheel",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.ConstantPlugin",
+  "verdict": "empty"
+ },
+ {
+  "id": "net.sf.openfx.ContactSheetOFX",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.CopyRectanglePlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.CornerPinMaskedPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.CornerPinPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.CropPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Deinterlace",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.DenoiseSharpen",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Despill",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.DifferencePlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.DirBlur",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.DissolvePlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.FrameBlend",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.FrameHold",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.FrameRange",
+  "verdict": "empty"
+ },
+ {
+  "id": "net.sf.openfx.GammaPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.GodRays",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.GradePlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.HSIToRGB",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.HSLToRGB",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.HSVToRGB",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.HSVToolPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.HueCorrect",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.HueKeyer",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.IDistort",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.ImageStatistics",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Invert",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.KeyMix",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.KeyerPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.LabToRGB709",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.LabToXYZ",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.LayerContactSheetOFX",
+  "verdict": "empty"
+ },
+ {
+  "id": "net.sf.openfx.LensDistortion",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Log2Lin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MatteMonitorPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MergeDifference",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MergeIn",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MergeMatte",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MergeMax",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MergeMin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MergeMultiply",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MergeOut",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MergePlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MergePlus",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MergeRoto",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MergeScreen",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Mirror",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.MultiplyPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.NoOpPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.NoTimeBlurPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Noise",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.PIK",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.PLogLin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Position",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Premult",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Quantize",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.RGB709ToLab",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.RGB709ToXYZ",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.RGBToHSI",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.RGBToHSL",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.RGBToHSV",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.RGBToYCbCr601",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.RGBToYCbCr709",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.RGBToYPbPr601",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.RGBToYPbPr709",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.RGBToYUV601",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.RGBToYUV709",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Radial",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Ramp",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Rectangle",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Reformat",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Retime",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.RotoPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.STMap",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.SaturationPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.ShufflePlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.SlitScan",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Solid",
+  "verdict": "flat"
+ },
+ {
+  "id": "net.sf.openfx.SpriteSheet",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.TimeBlur",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.TimeDissolvePlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.TrackerPM",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.TransformMaskedPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.TransformPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.Unpremult",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.VectorToColorPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.XYZToLab",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.XYZToRGB709",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.XYZToxyY",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.YCbCrToRGB601",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.YCbCrToRGB709",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.YPbPrToRGB601",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.YPbPrToRGB709",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.YUVToRGB601",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.YUVToRGB709",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.anaglyphPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.joinViewsPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.mixViewsPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.oneViewPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.sideBySidePlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.switchPlugin",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.timeOffset",
+  "verdict": "renders"
+ },
+ {
+  "id": "net.sf.openfx.xyYToXYZ",
+  "verdict": "renders"
+ }
+]
