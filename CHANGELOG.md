@@ -45,8 +45,9 @@ with no ISF header is not an error — the producer plays it, it simply declares
 **Measured 2026-09-09** against Vidvox's collection: 327 shaders found recursively, all 327 with
 categories, 118 with a description, 56 multi-pass, and **38 with a `.vs` sibling** — exactly the
 38 that the vertex-stage fix in `1a4121267` repaired, reached here by an independent path.
-Covered by `producer-params`, **34/34 on both mixers**, including that a plug-in the run just
-played is in the catalogue the same server serves.
+Covered by `producer-params`, **38/38 on both mixers**, including that a plug-in the run just
+played is in the catalogue the same server serves — and that a colour, a boolean and a real all
+reach the kernel, measured from the picture. Enumeration remains described and not rendered.
 
 ### Fixed: an OFX plugin's parameters reached the control API stripped of everything a client needs
 

@@ -574,8 +574,16 @@ is asserted here: writing (0.80, 0.45, 0.20) renders (231, 179, 124), and none o
 2.2 or the Rec.709 OETF predicts all three within a code value. A grey would satisfy the check
 while a channel exchange was live, which is why the colour is asymmetric.
 
-What it still does not cover: **one plug-in, of one third-party set**. §5 has the account of how
-this came to be broken.
+It renders the other parameter types too, because a client's panel is mostly checkboxes and
+sliders and the colour proved neither. `Invert` over a flat asymmetric source is the fixture:
+each per-channel boolean returns **exactly one channel to exactly the source's code value**, so
+the expected picture is the source itself — no model — and a boolean wired to the wrong channel
+fails as loudly as one wired to nothing. Its `mix` supplies a real whose 0 end is closed form
+(a full mix to the unprocessed source *is* the source, gated at 1 LSB) and monotonic in between.
+
+What it still does not cover: **enumeration**, which no available fixture renders distinctly, and
+2D as *geometry* — though a multi-component parameter's components are already proved to reach
+the kernel in the right order by the colour mirror, which is the routing half of that.
 
 ---
 
@@ -835,9 +843,12 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
 
    Both follow-on gaps this bullet named are now closed as well: the arm renders (the
    mirror check above), and `/v1/catalog`, `INFO OFX` and `INFO ISF` enumerate what is
-   installed, so nothing has to parse the server log any more. What remains is narrow and
-   worth stating: the render check drives **one generator**, so it proves the write path
-   reaches the kernel for a colour and says nothing about the other parameter types.
+   installed, so nothing has to parse the server log any more. The render half now drives
+   colour, boolean and real. **38/38 on both mixers.**
+
+   What remains is narrow and worth stating: **enumeration is described and not rendered**.
+   No generator in the openfx-misc set changes its picture distinctly enough with a choice
+   parameter to gate on, and inventing a plugin to test one would be testing the fixture.
 
 1. ~~**No battery.**~~ **CLOSED.** Six batteries run on both mixers — `api-tree`,
    `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`. This item read
