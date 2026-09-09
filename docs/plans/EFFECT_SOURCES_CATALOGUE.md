@@ -1,8 +1,9 @@
 # Where to get effects — ISF, OFX, HTML, and the licensing that decides it
 
-> **Status:** CATALOGUE, compiled 2026-09-09. **§6 is measured** — 327 ISF shaders and 147 OFX
-> plugins were played into a real channel and judged from the captured picture. Everything outside
-> §6 is desk research.
+> **Status:** CATALOGUE, compiled 2026-09-09. **§5.3 and §6 are measured** — the orb effect was
+> built and played as a layer (§5.3), and — 327 ISF shaders and 147 OFX
+> plugins were played into a real channel and judged from the captured picture. The rest is desk
+> research and says so.
 > Star counts, dates and licences are from the GitHub API and vendor pages on that date and go
 > stale — a licence especially, since a repository can gain or change one.
 > **Falsifier:** this file assumes `src/modules/isf` and `src/modules/ofx` exist and load
@@ -216,8 +217,62 @@ Route B is attractive precisely because the parameter set is flat floats and col
 exactly ISF's `INPUTS` model. It is mechanical work, not clever work, and it ends with a fork of
 someone else's shader to maintain.
 
-**Not run.** Everything above is read from the repository; no part of it has been executed in this
-server. Route A is a couple of hours to find out.
+**Route A RUN AND MEASURED, 2026-09-09.** Not the editor — a 87 KB bundle of the effect alone,
+reusing the project's own `orbShaderSource` and `writeOrbUniforms` so the 136-float layout is
+theirs rather than a reimplementation. Played as an HTML layer at 1280×720:
+
+| | |
+| :--- | :--- |
+| renders | **yes** — the Siri-style liquid glass orb, spectral bands, clean edge |
+| surface format | `bgra8unorm`, `alphaMode: "premultiplied"` |
+| **key** | **correct.** Outside the orb is RGBA **(0, 0, 0, 0)**; centre opaque; **242 distinct alpha values**, so a real soft matte rather than a binary cutout; 10.4% frame coverage |
+| **frame rate** | **22 fps steady state** into a 25 fps channel — see below |
+
+**It does not quite hold rate.** 22 against 25 means roughly one frame in eight is a repeat, and by
+§2 of `WEBGPU_IN_THE_HTML_PRODUCER.md` **nothing in the channel's timing will report that** —
+`late_frames` stays 0 and the period stays nominal. Its 63 uniforms include a `radius`, so a
+smaller orb is the obvious lever before anything cleverer. Measured at default `initialParams`,
+one style, on an RTX A4000, with nothing else on the box.
+
+Two practical notes for anyone repeating it: the exports are `orbShaderSource` (not
+`shaderSource`), `stylePresets[name]` **is** the params object rather than wrapping one, and the
+`../effect.wgsl?raw` import is Vite syntax that esbuild needs shimmed. And **the first run
+reported 3 frames** — that was shader compilation, not the effect; a warm-up before the
+measurement window is mandatory here.
+
+### 5.4 Four more, checked individually
+
+| source | shape | licence | verdict |
+| :--- | :--- | :--- | :--- |
+| [fluid](https://github.com/enonforetsam/fluid) / fluid.krackeddevs.com | **npm library** `fluid-bg` | **MIT**, 66★ | **Best of the four.** A runtime effect |
+| [holocloth](https://github.com/dmitrykurash/holocloth) | Three.js app | **MIT**, 188★ | Interesting, but an app |
+| sticky.ui8.dev | sticker/video exporter | **unstated** | Asset generator |
+| ascii.krackeddevs.com | ASCII converter | **unstated**, no repo | **Redundant — you already have it** |
+
+**`fluid-bg` is the one to take.** v0.4.0, **MIT**, **zero dependencies**, described as a
+"dependency-free WebGL studio for generative backgrounds and live embed" — a native canvas rather
+than an iframe, embeddable as an HTML tag, a React component or `npm i fluid-bg`. That is the same
+shape as §3.1's vgpu and §3.2's three.js: bundle it, one `<script>`, done. It is **WebGL, not
+WebGPU**, which on this server means it still needs `<enable-gpu>true` (§3.2's context table — a
+default config has no WebGL either).
+
+**holocloth** drapes an uploaded image or SVG over Verlet-simulated cloth with an iridescent foil
+shader, and exports transparent PNG. MIT, 188★, Three.js WebGL 2 + React, shaders and physics
+written from scratch. Two ways to read it: as an **asset generator**, it makes a transparent PNG of
+a station graphic on cloth, which is immediately usable; as a **runtime effect** it would mean
+lifting custom shaders and a physics loop out of a React app — the web-splat problem of §3.5 again.
+The asset route is the sane one unless the cloth needs to move on air.
+
+**sticky.ui8.dev** (UI8, built with Forge and three.js) exports images and 60 fps video with custom
+and video stickers. Free, no repository, no stated licence. Asset generator, §1's unstated-terms
+case.
+
+**ascii.krackeddevs.com converts images to ASCII and exports txt/ans/png/gif — and you already
+have this, better.** `ASCII Art` is in Vidvox's MIT collection and **renders** (§6.1), which means
+it runs on the mixer over live video, takes parameters through `CALL 1-1 ISF SET`, and can be
+keyframed. A website that exports a PNG cannot do any of that. The same applies to `CMYK Halftone`,
+`RGB Halftone` and `Dither-Bayer`, all of which render. **Check the 314 first** — it is the
+cheapest question in this document and it answers a surprising number of these.
 
 ## 6. MEASURED — what actually loads and renders, 2026-09-09
 
