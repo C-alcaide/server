@@ -1,6 +1,44 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: an OFX plugin's parameters reached the control API stripped of everything a client needs
+
+`/v1/tree/.../foreground/params` is what a client reads to **generate** a control surface rather
+than hard-code one. For OFX producers it was answering with read-only value leaves — `ACCESS 1`,
+no `RANGE`, no `DESCRIPTION`, no `casparcg` block — which is indistinguishable from a plugin that
+declares nothing.
+
+It was not empty by design. `ofx_producer::parameters()` **access-violated** on the first parameter
+of every plugin carrying a 2D parameter, and `api_tree`'s `catch (...)` swallowed it: this tree is
+built with `/EHa`, under which a bare `catch (...)` also catches structured exceptions. The node
+then fell back to the state snapshot's value-only leaves, so the failure surfaced as a plausible
+wrong answer instead of an error. That handler now catches `std::exception`, so memory corruption
+reaches a crash dump and only the benign layer-went-away race is swallowed.
+
+Three things the descriptor was missing are now published:
+
+* **layout.** OFX declares it twice, in opposite directions — a **page** lists its children
+  (`kOfxParamPropPageChild`), a **group** is named by them (`kOfxParamPropParent`) — and a page's
+  membership is unreachable from the parameter, because it lives on the page param, which carries
+  no value and which the host skips. Reading only the parent published a group for **0 of 506
+  parameters across 40 plugins**. Reading the page and falling back to the parent gives **505 of
+  506, across 38 of those 40**. Pages are the ones plugins use: `PageParamDescriptor` appears in
+  **104** openfx-misc files against `GroupParamDescriptor`'s 10.
+* **per-component defaults.** `default` carried component 0 only, so a vec2 control was handed one
+  number — `scale` defaulted to `[1.0]` rather than `[1.0, 1.0]`. **0 arity/default mismatches over
+  506 parameters** after the fix.
+* **colour parameters at all.** `RGB`/`RGBA` matched neither the double nor the integer branch and
+  fell through with no range and a default of 0 — a colour picker opening on black for a plugin
+  whose default is white. They now report their **declared** travel, with 0..1 only as the fallback:
+  `ColorCorrect`'s RGBA gain reads `0..4` and its offset `-1..1`, which the 0..1 a colour gets by
+  convention would have misstated.
+
+**Measured 2026-09-09**, Natron plugin set, OpenGL mixer: 505/506 grouped across 38/40 plugins;
+0 arity/default mismatches over 506 parameters; `Transform` publishing `TYPE "dd"`, per-component
+`RANGE`, the plugin's own hint as `DESCRIPTION` and `group: "Controls"`. **No battery covers any of
+this** — the six API batteries walk the tree and none of them loads an ISF shader or an OFX plugin,
+so a regression here fails no check. Recorded as gap 0 in `docs/features/control-api.md` §5.
+
 ### Added: `structure_revision`, so a client can tell the address space changed
 
 `/v1/events` carries **value** changes only, and the tree is dynamic: `PLAY` grows `layer/{m}/*`

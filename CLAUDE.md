@@ -366,6 +366,37 @@ cmake --build d:\Github\CasparVP\build --target casparcg
   translation unit. Missing *standard library* headers means the environment was never
   initialised — don't go looking at the includes.
 
+## `catch (...)` is not what it looks like here: this tree is built with `/EHa`
+
+`CMAKE_CXX_FLAGS` carries **`/EHa`** (`Bootstrap_Windows.cmake`), under which `catch (...)` also
+catches **structured** exceptions — an access violation included. So a defensive `catch (...)`
+around a call that might race does not merely swallow an exception; it swallows **memory
+corruption**, and turns a crash into a plausible wrong answer.
+
+Measured 2026-09-09 in `api_tree.cpp`. `describe_params` is wrapped in a `catch (...)` written for
+"a layer that went away between the snapshot and this query". `ofx_producer::parameters()` was
+access-violating on every OFX plugin with a 2D parameter; the handler ate it; the params node came
+back empty; and the tree fell back to the read-only value leaves the state snapshot had already
+put there. Nothing logged, nothing failed, and the API answered with something that looks exactly
+like a producer declaring no parameters. It was read as *"OFX plugins do not group their
+parameters"* and cost most of a session, most of it spent measuring a defect that was not there.
+
+**Catch `std::exception` unless you specifically mean to catch a fault**, and when a subsystem
+returns *nothing* rather than *wrong*, suspect a swallowed fault before believing the emptiness.
+An SEH translator makes the code visible in one build:
+
+```cpp
+_set_se_translator([](unsigned int c, EXCEPTION_POINTERS* ep) { /* throw with c and the address */ });
+```
+
+`0xC0000005` from a `catch (...)` that was never meant to see one is the signature.
+
+**And the AV underneath it was the missing-header-dependency trap below, not a code defect**:
+`producer_params.h` gained a field, ninja recorded no header dependency, and translation units
+disagreed about the struct's size. The A/B that "proved" the fault was pre-existing was run against
+the same inconsistent objects every time. **When a fault survives removing the code that could
+cause it, suspect the build before the code.**
+
 ## Shaders
 
 `src/accelerator/ogl/image/shader.frag` is embedded via `bin2c` into a generated

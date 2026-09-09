@@ -43,6 +43,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -884,13 +885,40 @@ std::vector<effect::param> effect::params() const
     if (!valid())
         return result;
 
+    // FIRST PASS: the page layout, which is where these plugins actually put their structure.
+    //
+    // OFX offers two groupings and they are stored in opposite directions. A GROUP is named by
+    // the child, through `kOfxParamPropParent`, and is read below. A PAGE names its children,
+    // through its own `kOfxParamPropPageChild` list -- so a page's membership is unreachable
+    // from the parameter and is lost entirely if page params are skipped, which is what this
+    // host did.
+    //
+    // Pages are the ones that matter: across openfx-misc, `PageParamDescriptor` appears in 104
+    // files and `GroupParamDescriptor` in 10. Reading only the parent -- the first version of
+    // this -- published a group for 0 of 506 parameters over 40 real plugins, which read as
+    // "plugins do not group their parameters" and was really "this host read the wrong half".
+    std::map<std::string, std::string> page_of;
+    for (auto* p : impl_->instance->getParamList()) {
+        if (p == nullptr || p->getType() != kOfxParamTypePage)
+            continue;
+        const auto& props = p->getProperties();
+        const int   n     = props.getDimension(kOfxParamPropPageChild);
+        for (int i = 0; i < n; ++i) {
+            const std::string child = props.getStringProperty(kOfxParamPropPageChild, i);
+            // The two pseudo-names are layout directives rather than parameters.
+            if (child.empty() || child == kOfxParamPageSkipRow || child == kOfxParamPageSkipColumn)
+                continue;
+            page_of.emplace(child, p->getName());
+        }
+    }
+
     for (auto* p : impl_->instance->getParamList()) {
         if (p == nullptr)
             continue;
         const std::string& type = p->getType();
         // Group and page params carry no VALUE, so they are still not published as parameters
-        // -- but their names are what the value params point at, so the relationship survives
-        // in `parent` below rather than being dropped along with them.
+        // -- but their structure survives in `parent` and `page` rather than being dropped
+        // along with them.
         if (type == kOfxParamTypeGroup || type == kOfxParamTypePage)
             continue;
 
@@ -901,6 +929,8 @@ std::vector<effect::param> effect::params() const
         // One call each on the descriptor the host already holds.
         pp.parent = p->getParentName();
         pp.hint   = p->getHint();
+        if (auto it = page_of.find(pp.name); it != page_of.end())
+            pp.page = it->second;
 
         // Read metadata (dimension, range, default, choice options) from the param properties.
         try {
@@ -928,6 +958,8 @@ std::vector<effect::param> effect::params() const
                 if (!(pp.max > -1e37 && pp.max < 1e37))
                     pp.max = props.getDoubleProperty(kOfxParamPropMax, 0);
                 pp.def       = props.getDoubleProperty(kOfxParamPropDefault, 0);
+                for (int i = 0; i < pp.dimension; ++i)
+                    pp.defs.push_back(props.getDoubleProperty(kOfxParamPropDefault, i));
                 pp.has_range = true;
             } else if (is_int) {
                 pp.min       = static_cast<double>(props.getIntProperty(kOfxParamPropDisplayMin, 0));
@@ -937,14 +969,44 @@ std::vector<effect::param> effect::params() const
                 if (!(pp.max > -1e37 && pp.max < 1e37))
                     pp.max = static_cast<double>(props.getIntProperty(kOfxParamPropMax, 0));
                 pp.def       = static_cast<double>(props.getIntProperty(kOfxParamPropDefault, 0));
+                for (int i = 0; i < pp.dimension; ++i)
+                    pp.defs.push_back(static_cast<double>(props.getIntProperty(kOfxParamPropDefault, i)));
                 pp.has_range = true;
             } else if (type == kOfxParamTypeBoolean) {
                 pp.min = 0.0;
                 pp.max = 1.0;
                 pp.def = static_cast<double>(props.getIntProperty(kOfxParamPropDefault, 0));
+                pp.defs.push_back(pp.def);
+                pp.has_range = true;
+            } else if (type == kOfxParamTypeRGB || type == kOfxParamTypeRGBA) {
+                // A colour is doubles, but it is neither `is_double` nor `is_int`, so it fell
+                // through every branch above and reached a control surface with no range and a
+                // default of zero -- a colour picker opening on black for a plugin whose
+                // default is white.
+                //
+                // The DECLARED range first, exactly as the double branch does, and 0..1 only
+                // when the plugin declared none. A colour is normalised 0..1 by convention and
+                // the convention is wrong often enough to matter: openfx-misc's ColorCorrect
+                // publishes RGBA gains, whose useful travel goes well above 1, and pinning
+                // those to 0..1 would put a ceiling on the slider that the plugin does not have.
+                pp.min = props.getDoubleProperty(kOfxParamPropDisplayMin, 0);
+                pp.max = props.getDoubleProperty(kOfxParamPropDisplayMax, 0);
+                if (!(pp.min > -1e37 && pp.min < 1e37))
+                    pp.min = props.getDoubleProperty(kOfxParamPropMin, 0);
+                if (!(pp.max > -1e37 && pp.max < 1e37))
+                    pp.max = props.getDoubleProperty(kOfxParamPropMax, 0);
+                if (!(pp.min > -1e37 && pp.min < 1e37) || !(pp.max > -1e37 && pp.max < 1e37) ||
+                    pp.min >= pp.max) {
+                    pp.min = 0.0;
+                    pp.max = 1.0;
+                }
+                for (int i = 0; i < pp.dimension; ++i)
+                    pp.defs.push_back(props.getDoubleProperty(kOfxParamPropDefault, i));
+                pp.def       = pp.defs.empty() ? 0.0 : pp.defs.front();
                 pp.has_range = true;
             } else if (type == kOfxParamTypeChoice) {
                 pp.def = static_cast<double>(props.getIntProperty(kOfxParamPropDefault, 0));
+                pp.defs.push_back(pp.def);
                 const int n = props.getDimension(kOfxParamPropChoiceOption);
                 for (int i = 0; i < n; ++i)
                     pp.choices.push_back(props.getStringProperty(kOfxParamPropChoiceOption, i));

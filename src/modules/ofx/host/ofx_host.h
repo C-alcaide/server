@@ -152,6 +152,14 @@ class effect
         double      min       = 0.0;
         double      max       = 0.0;
         double      def       = 0.0;   ///< default value (component 0; for choice = default index)
+
+        /// The default for EVERY component, which `def` alone cannot carry. A 2D parameter's
+        /// default is two numbers and a control surface initialises two spin boxes from it;
+        /// publishing only component 0 gave a vec2 control a one-element default, which reads
+        /// as "the second axis has no default" rather than as the truncation it is. Empty for
+        /// a type with no numeric default (a string, a push button), and one element for the
+        /// scalar types -- so a reader uses this and never has to know which case it is in.
+        std::vector<double> defs;
         std::vector<std::string> choices; ///< option labels for choice params
 
         /// The GROUP this parameter was declared inside, or empty. OFX plugins organise their
@@ -164,6 +172,11 @@ class effect
 
         /// The plugin's own hint text, for a tooltip. Also previously discarded.
         std::string hint;
+
+        /// The PAGE this parameter appears on, or empty. Stored on the page rather than on
+        /// the parameter, so it is unreachable without walking the page params -- and it is
+        /// the grouping these plugins actually use.
+        std::string page;
     };
 
     /// Enumerate the effect's parameters (in declaration order).

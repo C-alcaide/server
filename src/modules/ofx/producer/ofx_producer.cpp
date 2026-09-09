@@ -974,9 +974,13 @@ class ofx_producer : public core::frame_producer
             d.name   = p.name;
             d.label  = p.label.empty() ? p.name : p.label;
             d.access = access_t::read_write;
-            // OFX is the only format here that declares layout. Empty for a parameter the
-            // plugin left at the top level, which a control surface renders as ungrouped.
-            d.group  = p.parent;
+            // OFX declares layout TWICE, in opposite directions: a PAGE names its children,
+            // a GROUP is named by them. The page wins because it is the one these plugins
+            // actually use -- `PageParamDescriptor` appears in 104 openfx-misc files against
+            // `GroupParamDescriptor`'s 10 -- and the group is the fallback for the few that
+            // nest. Empty for a parameter in neither, which a control surface renders
+            // ungrouped rather than inventing a section for it.
+            d.group  = !p.page.empty() ? p.page : p.parent;
             if (!p.hint.empty())
                 d.description = p.hint;
             d.arity  = static_cast<uint8_t>(p.dimension < 1 ? 1 : p.dimension);
@@ -1010,7 +1014,13 @@ class ofx_producer : public core::frame_producer
                 d.min = p.min;
                 d.max = p.max;
             }
-            d.default_value.push_back(p.def);
+            // Every component, so a vec2 control gets two numbers to initialise from. Falls
+            // back to `def` for the types the host reads no per-component default for.
+            if (p.defs.empty())
+                d.default_value.push_back(p.def);
+            else
+                for (double x : p.defs)
+                    d.default_value.push_back(x);
 
             const std::string key = p.name;
             const auto        arity = d.arity;

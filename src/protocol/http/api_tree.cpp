@@ -491,10 +491,21 @@ json::object build_tree(const state_hub& hub, const http_config& cfg, const api_
                 if (auto stage = ctx.stage(ch)) {
                     try {
                         params = stage->describe_params(layer).get();
-                    } catch (...) {
+                    } catch (const std::exception&) {
                         // A layer that went away between the snapshot and this query. Not an
                         // error: the tree describes a moving system, and this is the one node
                         // built by asking rather than by reading.
+                        //
+                        // `std::exception` and NOT `...`, which is not a style preference here:
+                        // this tree is built with /EHa, so a bare `catch (...)` also swallows
+                        // STRUCTURED exceptions -- an access violation included. One did, for
+                        // every OFX plugin carrying a 2D parameter: `parameters()` faulted, this
+                        // handler ate it, and the tree quietly fell back to the read-only value
+                        // leaves the state snapshot had already put there. The result looked
+                        // exactly like a producer that declares no parameters, so the reading was
+                        // "OFX plugins do not group their parameters" rather than "the server is
+                        // crashing here". Memory corruption must reach a crash dump; only a
+                        // C++ exception is the benign race this comment is about.
                     }
                 }
 

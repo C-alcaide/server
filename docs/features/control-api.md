@@ -476,6 +476,55 @@ NOT raise it"* — and it is the check that makes the others mean anything.
 
 ---
 
+### `params/*` — enough to GENERATE a control surface, not merely to drive one
+
+A client that already knows a plugin can drive it from `/v1/value`. A client that has never seen
+it has to be **told what it has**, and `/v1/tree/channel/{n}/stage/layer/{m}/foreground/params`
+is that answer: every parameter of the running ISF shader or OFX plugin, each carrying the type,
+the arity, the declared range, the default, the plugin's own hint and whether it is writable.
+
+```json
+"translate": {
+  "FULL_PATH": "/channel/1/stage/layer/1/foreground/params/translate",
+  "TYPE": "dd", "ACCESS": 3,
+  "RANGE": [{"MIN": -10000.0, "MAX": 10000.0}, {"MIN": -10000.0, "MAX": 10000.0}],
+  "DESCRIPTION": "Translation along the x and y axes in pixels...",
+  "casparcg": { "type": "vec2", "arity": 2, "default": [0.0, 0.0],
+                "group": "Controls", "writable": true }
+}
+```
+
+`TYPE`, `RANGE` and `arity` pick the widget; `default` seeds it and says what a reset means;
+`DESCRIPTION` is the tooltip; **`group` is the section it belongs in**. A generated panel needs
+no per-plugin knowledge and no hard-coded parameter list.
+
+**`group` is present only when the FORMAT declares one**, absent otherwise — so a client can tell
+*ungrouped* from *grouped under the empty name*, and a flat list stays correct. ISF has no
+grouping concept and leaves it absent; **OFX declares it twice, in opposite directions**, and
+which one you read decides whether you see anything at all:
+
+| | who names whom | property | how common |
+| :--- | :--- | :--- | :--- |
+| **page** | the page lists its children | `kOfxParamPropPageChild`, on the page param | `PageParamDescriptor` in **104** openfx-misc files |
+| **group** | the child names its parent | `kOfxParamPropParent`, on the parameter | `GroupParamDescriptor` in **10** |
+
+A page's membership is therefore **unreachable from the parameter**: it exists only on the page
+param, which carries no value and which the host skips. Reading the parent alone published a
+group for **0 of 506 parameters across 40 real plugins** — which reads as *"OFX plugins do not
+group their parameters"* and was really *"the host read the wrong half"*. Reading the page and
+falling back to the parent gives **505 of 506, across 38 of those 40**.
+
+**Verified 2026-09-09** against the Natron plugin set, both halves of the descriptor: 505/506
+grouped; **0 arity/default mismatches over 506 parameters**; and openfx-misc's `ColorCorrect`
+RGBA parameters reporting their own declared travel — gain `0..4`, offset `-1..1`, defaults
+`[1,1,1,1]` and `[0,0,0,0]` — rather than the 0..1 a colour would get by convention.
+
+**What is NOT covered.** No battery drives this. It is measured by hand, on one plugin set, on
+the OpenGL mixer only, and nothing would fail if it regressed — which is exactly how it stayed
+broken -- §5 has the account.
+
+---
+
 ## 3. Design decisions, and what they cost
 
 **Application errors are HTTP 200 with a non-zero `status.code`.** Rejected: mapping each failure
@@ -704,6 +753,29 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
 ---
 
 ## 5. Known gaps
+
+0. **`params/*` is unmeasured, and it is the one part of the tree that a bare `catch (...)`
+   can empty without anyone noticing.** The node is built by ASKING the producer -- the only
+   part of the tree that is -- so the handler around `describe_params` decides what a failure
+   looks like. It caught `...`, and **this tree is built with `/EHa`**, under which `catch (...)`
+   also swallows STRUCTURED exceptions.
+
+   One was there. `ofx_producer::parameters()` access-violated on the first parameter of every
+   OFX plugin carrying a 2D parameter; the handler ate it; `params` came back empty; and the
+   node fell back to the read-only value leaves the state snapshot had already put there. The
+   symptom was not an error but a **plausible wrong answer**: ACCESS 1, no RANGE, no DESCRIPTION,
+   no `casparcg` block -- indistinguishable from a producer that simply declares nothing, and it
+   was read that way for a whole session ("OFX plugins do not group their parameters").
+
+   The handler now catches `std::exception`, so memory corruption reaches a crash dump and only
+   the benign race it was written for is swallowed. **The AV itself was not a shipped defect** --
+   it was the missing-header-dependency trap in the root `CLAUDE.md`: `producer_params.h` gained
+   a field, ninja recorded no header dependency, and the translation units disagreed about
+   `param_desc`'s size. A full sweep and rebuild ended it. Both halves are worth keeping: the
+   build trap makes the corruption, and the bare `catch (...)` decides whether you ever see it.
+
+   Still open: **nothing gates `params/*`.** The six batteries walk the tree and none of them
+   loads an ISF shader or an OFX plugin, so a regression here fails no check.
 
 1. ~~**No battery.**~~ **CLOSED.** Six batteries run on both mixers — `api-tree`,
    `api-roundtrip`, `api-events`, `api-write`, `api-atframe`, `api-readiness`. This item read
