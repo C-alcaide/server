@@ -153,6 +153,17 @@ class effect
         double      max       = 0.0;
         double      def       = 0.0;   ///< default value (component 0; for choice = default index)
         std::vector<std::string> choices; ///< option labels for choice params
+
+        /// The GROUP this parameter was declared inside, or empty. OFX plugins organise their
+        /// parameters into groups and pages; ISF has no equivalent, so OFX is the only format
+        /// here that can tell a control surface how to lay itself out. The host used to discard
+        /// this -- `params()` skipped group and page params as "structural" and never read
+        /// `kOfxParamPropParent` on the value params either, so a generated GUI could only be a
+        /// flat list in declaration order.
+        std::string parent;
+
+        /// The plugin's own hint text, for a tooltip. Also previously discarded.
+        std::string hint;
     };
 
     /// Enumerate the effect's parameters (in declaration order).

@@ -888,7 +888,9 @@ std::vector<effect::param> effect::params() const
         if (p == nullptr)
             continue;
         const std::string& type = p->getType();
-        // Skip structural/non-value params.
+        // Group and page params carry no VALUE, so they are still not published as parameters
+        // -- but their names are what the value params point at, so the relationship survives
+        // in `parent` below rather than being dropped along with them.
         if (type == kOfxParamTypeGroup || type == kOfxParamTypePage)
             continue;
 
@@ -896,6 +898,9 @@ std::vector<effect::param> effect::params() const
         pp.name  = p->getName();
         pp.type  = type;
         pp.label = p->getLabel();
+        // One call each on the descriptor the host already holds.
+        pp.parent = p->getParentName();
+        pp.hint   = p->getHint();
 
         // Read metadata (dimension, range, default, choice options) from the param properties.
         try {

@@ -1,6 +1,36 @@
 CasparVP — Unreleased
 ==========================================
 
+### Added: `structure_revision`, so a client can tell the address space changed
+
+`/v1/events` carries **value** changes only, and the tree is dynamic: `PLAY` grows `layer/{m}/*`
+and an ISF or OFX producer's whole `params/*` sub-tree, `SOURCE ADD` grows `source/*`, `BIND` grows
+`binding/{id}/*`. Nothing announced any of it, so a client either re-walked the tree speculatively
+or showed a stale one.
+
+`channel/{n}/stage/structure_revision` is a monotonic integer, first published as **1**, that rises
+whenever the channel's dynamic containers change — which layers exist, each layer's producer
+identity, the binding id set, the source name set. It is an ordinary published value, so a client
+subscribes to it like any other path and needs no new mechanism.
+
+**Not OSCQuery's `PATH_CHANGED`, and `EXTENSIONS.PATH_CHANGED` stays `false`.** That is a per-path
+WebSocket command whose correct emission needs a hook at every site that creates or destroys a
+subtree — the same shape as the mixers' `apply_transform_colour_values` allowlist, silently
+incomplete as soon as someone adds a new dynamic subtree. **The failure modes are not symmetric**:
+a missed bump leaves a client stale, a missed `PATH_CHANGED` makes the server *assert* nothing
+changed. Stale is recoverable.
+
+**Derived from a fingerprint in the publish pass, not bumped at the mutation sites** — same
+argument one level down. And deliberately **not** a hash of every published path, which would be
+self-maintaining and wrong: mixer fields publish **sparsely** (`if (v != defaults[i])`), so a field
+returning to default vanishes from the state and a client would be told the structure changed every
+time an operator set opacity back to 1.
+
+**Measured**: `api-events` **15/15 on both mixers**, with five checks added. The load-bearing one
+is *"a field value moving does NOT raise it"* — `contrast` 1.0 → 1.37 → 1.0 across a revision that
+must not move, which is what makes the other four mean anything. A counter that rose on any state
+change would pass "it goes up when a source is added" trivially and be one a client had to ignore.
+
 ### Added: a binding source publishes WHERE it listens, not just that it exists
 
 `SOURCE ADD 1 knobs OSC 7411` created a receiver whose **port was undiscoverable over the control

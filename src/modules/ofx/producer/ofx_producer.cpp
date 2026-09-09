@@ -974,6 +974,11 @@ class ofx_producer : public core::frame_producer
             d.name   = p.name;
             d.label  = p.label.empty() ? p.name : p.label;
             d.access = access_t::read_write;
+            // OFX is the only format here that declares layout. Empty for a parameter the
+            // plugin left at the top level, which a control surface renders as ungrouped.
+            d.group  = p.parent;
+            if (!p.hint.empty())
+                d.description = p.hint;
             d.arity  = static_cast<uint8_t>(p.dimension < 1 ? 1 : p.dimension);
 
             if (p.type == "OfxParamTypeDouble") {

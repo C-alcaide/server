@@ -82,6 +82,35 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     int                                                     next_binding_id_ = 1;
     mutable std::mutex                                      binding_lock_;
 
+    // -- Structural revision (stage executor only) --
+    //
+    // A MONOTONIC COUNTER A CLIENT COMPARES TO KNOW THE ADDRESS SPACE GREW OR SHRANK, published
+    // as `channel/N/stage/structure_revision`. It exists because nothing else says so: the tree
+    // is dynamic -- `PLAY` grows `layer/M/*` and a producer's `params/*`, `SOURCE ADD` grows
+    // `source/*`, `BIND` grows `binding/*` -- and `/v1/events` carries VALUE changes only. So a
+    // client either re-walks the tree speculatively or shows a stale one.
+    //
+    // WHY A COUNTER AND NOT OSCQuery's `PATH_CHANGED`, which is the standard answer: that is a
+    // per-path WebSocket command, and emitting it needs a hand-maintained hook at every site
+    // that creates or destroys a subtree -- the same shape as `apply_transform_colour_values`'s
+    // allowlist, silently incomplete the moment someone adds a new dynamic subtree. A missed
+    // bump here leaves a client stale; a missed hook there makes the server ASSERT that nothing
+    // changed. Stale is recoverable, a false assertion is not, so `EXTENSIONS.PATH_CHANGED`
+    // stays `false` and this is the fork's own signal.
+    //
+    // WHY IT IS DERIVED FROM A FINGERPRINT RATHER THAN BUMPED AT THE MUTATION SITES: the same
+    // argument, one level down. `structure_fingerprint()` is computed in the publish pass from
+    // what actually exists, so a new dynamic subtree is covered by editing one function that is
+    // obviously about this, rather than by remembering a call in a command handler.
+    //
+    // AND WHY IT IS NOT A HASH OF EVERY PUBLISHED PATH, which would be self-maintaining and
+    // wrong: mixer fields are published SPARSELY -- `if (v != defaults[i])` -- so a field
+    // returning to its default vanishes from the state, and a client would be told the structure
+    // changed every time an operator set opacity back to 1. The fingerprint therefore names the
+    // containers that are genuinely dynamic and nothing else.
+    std::size_t  structure_hash_     = 0;
+    std::int64_t structure_revision_ = 0;
+
     // -- Input routing (stage executor only, no mutex) --
     //
     // `input_capture_` latches the layer a drag belongs to. Once a button goes down on a layer,
@@ -592,6 +621,66 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 for (auto& p : layers_) {
                     state["layer"][p.first] = p.second.state();
                     publish_layer_transform(state, p.first);
+                }
+
+                // -- Structural revision -------------------------------------------------
+                //
+                // Four inputs, and each one is a container that appears or disappears rather
+                // than a value that moves:
+                //
+                //   * WHICH LAYERS EXIST      `PLAY`/`STOP` grow and prune `layer/M/*`
+                //   * EACH LAYER'S PRODUCER   a swap changes the producer's own sub-tree, and
+                //                             carries its `params/*` set with it. The producer
+                //                             NAME is a sound proxy for that set: an ISF or OFX
+                //                             parameter list is fixed per shader or plugin, so
+                //                             params cannot change under a stable producer
+                //   * BINDING IDS             `BIND`/`UNBIND` grow and prune `binding/{id}/*`
+                //   * SOURCE NAMES            `SOURCE ADD`/`REMOVE` grow and prune `source/*`
+                //
+                // Deliberately NOT included: any field VALUE, any timing figure, the frame
+                // number. A revision that moved every tick would be a revision a client had to
+                // ignore, which is the same as not having one.
+                {
+                    std::string fp;
+                    fp.reserve(256);
+                    for (const auto& p : layers_) {
+                        fp += std::to_string(p.first);
+                        fp += ':';
+                        // `foreground()` is never null -- an empty layer holds an empty
+                        // producer whose name is stable -- so this needs no guard, and a
+                        // producer swap changes the string.
+                        //
+                        // Hashed rather than appended because `name()` is a `std::wstring` and
+                        // this fingerprint never needs to be READ: it only needs to differ when
+                        // the producer differs. That avoids pulling `common/utf.h` in here and
+                        // avoids an encoding question in a function that has no business having
+                        // one.
+                        fp += std::to_string(std::hash<std::wstring>{}(p.second.foreground()->name()));
+                        fp += ';';
+                    }
+                    fp += '|';
+                    for (const auto& b : bindings_) {
+                        fp += std::to_string(b.id);
+                        fp += ';';
+                    }
+                    fp += '|';
+                    {
+                        std::lock_guard<std::mutex> lock(binding_lock_);
+                        for (const auto& kv : sources_) {
+                            fp += kv.first;
+                            fp += ';';
+                        }
+                    }
+
+                    const auto h = std::hash<std::string>{}(fp);
+                    if (h != structure_hash_) {
+                        structure_hash_ = h;
+                        // FIRST PASS BUMPS TO 1 rather than staying at 0, deliberately: a
+                        // client that reads 0 cannot tell "nothing has been published yet"
+                        // from "the structure is empty". Every published revision is >= 1.
+                        ++structure_revision_;
+                    }
+                    state["structure_revision"] = structure_revision_;
                 }
 
                 // -- Bindings and sources, published every tick ----------------------------

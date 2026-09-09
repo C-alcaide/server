@@ -433,6 +433,49 @@ key for:
 
 ---
 
+### `structure_revision` — how a client learns the address space changed
+
+**`/v1/events` carries value changes only, and the tree is dynamic.** `PLAY` grows
+`layer/{m}/*` and, for an ISF or OFX producer, a whole `params/*` sub-tree; `SOURCE ADD` grows
+`source/*`; `BIND` grows `binding/{id}/*`. Nothing announced any of it, so a client either
+re-walked the tree speculatively or showed a stale one.
+
+`channel/{n}/stage/structure_revision` is a **monotonic integer, first published as 1**, that
+increases whenever the channel's dynamic containers change. It is an ordinary published value, so
+a client **subscribes to it like any other path** — no new mechanism.
+
+```
+GET /v1/value/channel/1/stage/structure_revision   ->  7
+```
+
+**What moves it:** which layers exist, each layer's producer identity, the binding id set, the
+source name set. **What does not:** any field value, any timing figure, the frame number.
+
+**The producer's identity stands in for its parameter set**, because an ISF shader's or an OFX
+plugin's parameter list is fixed — params cannot change under a stable producer, so a swap is the
+only thing that can change them, and a swap changes the identity.
+
+**Why a counter and not OSCQuery's `PATH_CHANGED`.** That is a per-path WebSocket command, and
+emitting it correctly needs a hook at every site that creates or destroys a subtree — the same
+shape as the mixers' `apply_transform_colour_values` allowlist, and silently incomplete the moment
+someone adds a new dynamic subtree. **The failure modes are not symmetric**: a missed bump here
+leaves a client stale, while a missed `PATH_CHANGED` makes the server *assert* that nothing
+changed. Stale is recoverable; a false assertion is not. So `EXTENSIONS.PATH_CHANGED` stays
+`false` and this is the fork's own signal, honestly labelled.
+
+**Why it is derived from a fingerprint rather than bumped at the mutation sites** — the same
+argument one level down. It is computed in the stage's publish pass from what actually exists, so
+covering a new dynamic subtree means editing one function that is obviously about this, rather
+than remembering a call in a command handler.
+
+**And why it is not a hash of every published path**, which would be self-maintaining and wrong:
+mixer fields are published **sparsely** (`if (v != defaults[i])`), so a field returning to its
+default vanishes from the state entirely. A client would be told the structure changed every time
+an operator set opacity back to 1. `api-events` measures exactly that — *"a field value moving does
+NOT raise it"* — and it is the check that makes the others mean anything.
+
+---
+
 ## 3. Design decisions, and what they cost
 
 **Application errors are HTTP 200 with a non-zero `status.code`.** Rejected: mapping each failure

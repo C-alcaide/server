@@ -242,6 +242,14 @@ json::object param_leaf(const core::param_snapshot& p, const std::string& full_p
 
     auto leaf         = descriptor_leaf(meta, p.default_value);
     leaf["FULL_PATH"] = full_path;
+    // GROUP goes in the vendor block rather than at the top level, for the reason
+    // `vendor_block` states: inventing top-level keys makes the tree invalid against the
+    // OSCQuery spec. Absent -- not empty-string -- when the format declared none, so a client
+    // can tell "ungrouped" from "grouped under the empty name".
+    if (!p.group.empty()) {
+        auto& c = leaf["casparcg"].as_object();
+        c["group"] = p.group;
+    }
     // The DEFAULT is what `descriptor_leaf` put in VALUE; the live value overwrites it, exactly
     // as the mixer pass overwrites a published field's descriptor default below.
     if (!p.value.empty())

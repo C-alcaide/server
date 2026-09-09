@@ -66,6 +66,12 @@ struct param_desc
     std::string label;
     std::string unit;
 
+    /// The group this parameter belongs to, or empty. OFX declares groups and pages; ISF has
+    /// no equivalent in the format and leaves this empty, which is the honest answer rather
+    /// than a fabricated single group. A control surface uses it to lay out sections, and a
+    /// flat list stays correct when it is absent.
+    std::string group;
+
     /// For `enumeration`: the value names in order, comma-separated -- ISF's `LABELS` for a
     /// `long` input, OFX's choice options.
     std::string values;
@@ -105,6 +111,7 @@ struct param_snapshot
     std::string           unit;
     std::string           values;
     std::string           description;
+    std::string           group;
     double                step  = 0.0;
     uint8_t               arity = 1;
     monitor::vector_t     default_value;
