@@ -72,6 +72,20 @@ struct param_desc
     /// flat list stays correct when it is absent.
     std::string group;
 
+    /// Where this parameter sits in the format's own declared ORDER, from 0.
+    ///
+    /// EXPLICIT because the alternative is not ordering at all. The tree's `CONTENTS` is a JSON
+    /// object, and a JSON object is by definition an unordered collection -- key order survives
+    /// most parsers and is guaranteed by none of them. For ISF that is the whole problem: the
+    /// format has no grouping of any kind, so declaration order is the ONLY structure a shader's
+    /// author can express, and it was riding on an implementation detail of whichever JSON
+    /// library the client happened to use.
+    ///
+    /// For OFX it is also a correction rather than a convenience. A PAGE names its children in
+    /// order -- that list IS the plugin's declared layout -- and the tree was publishing the
+    /// order of `getParamList()`, which is creation order and need not agree with it.
+    int index = -1;
+
     /// For `enumeration`: the value names in order, comma-separated -- ISF's `LABELS` for a
     /// `long` input, OFX's choice options.
     std::string values;
@@ -107,6 +121,7 @@ struct param_snapshot
     std::optional<double> min;
     std::optional<double> max;
     fields::bounding_t    bounding = fields::bounding_t::refuse;
+    int                   index    = -1;
     std::string           label;
     std::string           unit;
     std::string           values;

@@ -981,6 +981,11 @@ class ofx_producer : public core::frame_producer
             // nest. Empty for a parameter in neither, which a control surface renders
             // ungrouped rather than inventing a section for it.
             d.group  = !p.page.empty() ? p.page : p.parent;
+            // A SORT KEY for now, renumbered densely below. The page's position where there is
+            // one, and creation order after every paged parameter otherwise -- which is the
+            // best a plugin that declared no layout has said about how to lay it out.
+            d.index  = p.page_index >= 0 ? p.page_index
+                                         : 1000000 + static_cast<int>(out.size());
             if (!p.hint.empty())
                 d.description = p.hint;
             d.arity  = static_cast<uint8_t>(p.dimension < 1 ? 1 : p.dimension);
@@ -1048,6 +1053,23 @@ class ofx_producer : public core::frame_producer
 
             out.push_back(std::move(d));
         }
+
+        // DENSE, and ordered. A page's child list contains things this producer does not
+        // publish -- a nested group, a parameter of a type with no mapping -- so its raw
+        // positions have gaps, and a client laying out by index would render blanks where a
+        // group header used to be. Renumbering over what is actually published keeps the
+        // plugin's declared ORDER, which is the part that carries meaning, and drops its
+        // spacing, which does not survive being turned into a flat list anyway.
+        //
+        // `out` itself is sorted too, so the tree's key order and `index` agree. Two orders
+        // that differ is worse than either alone: a client would have no way to know which one
+        // the server meant.
+        std::stable_sort(out.begin(), out.end(),
+                         [](const core::param_desc& a, const core::param_desc& b) {
+                             return a.index < b.index;
+                         });
+        for (std::size_t rank = 0; rank < out.size(); ++rank)
+            out[rank].index = static_cast<int>(rank);
 
         return out;
     }

@@ -55,6 +55,7 @@ param_snapshot snapshot_of(const param_desc& p)
     s.values        = p.values;
     s.description   = p.description;
     s.group         = p.group;
+    s.index         = p.index;
     s.step          = p.step;
     s.arity         = p.arity;
     s.default_value = p.default_value;

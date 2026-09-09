@@ -250,6 +250,13 @@ json::object param_leaf(const core::param_snapshot& p, const std::string& full_p
         auto& c = leaf["casparcg"].as_object();
         c["group"] = p.group;
     }
+    // ORDER, as a number. `CONTENTS` is a JSON object and a JSON object is an unordered
+    // collection by definition, so the declaration order a client sees today is whatever its
+    // parser happens to preserve. For ISF that is the only structure the format has.
+    if (p.index >= 0) {
+        auto& c = leaf["casparcg"].as_object();
+        c["index"] = p.index;
+    }
     // The DEFAULT is what `descriptor_leaf` put in VALUE; the live value overwrites it, exactly
     // as the mixer pass overwrites a published field's descriptor default below.
     if (!p.value.empty())

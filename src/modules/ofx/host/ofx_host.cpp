@@ -897,18 +897,23 @@ std::vector<effect::param> effect::params() const
     // files and `GroupParamDescriptor` in 10. Reading only the parent -- the first version of
     // this -- published a group for 0 of 506 parameters over 40 real plugins, which read as
     // "plugins do not group their parameters" and was really "this host read the wrong half".
-    std::map<std::string, std::string> page_of;
+    std::map<std::string, std::pair<std::string, int>> page_of;
     for (auto* p : impl_->instance->getParamList()) {
         if (p == nullptr || p->getType() != kOfxParamTypePage)
             continue;
         const auto& props = p->getProperties();
         const int   n     = props.getDimension(kOfxParamPropPageChild);
+        // POSITION is counted separately from the loop variable, because the skip directives
+        // below occupy a slot in the page's list and are not parameters. Counting `i` would
+        // leave gaps in the published order at exactly the plugins that lay themselves out
+        // most carefully.
+        int position = 0;
         for (int i = 0; i < n; ++i) {
             const std::string child = props.getStringProperty(kOfxParamPropPageChild, i);
             // The two pseudo-names are layout directives rather than parameters.
             if (child.empty() || child == kOfxParamPageSkipRow || child == kOfxParamPageSkipColumn)
                 continue;
-            page_of.emplace(child, p->getName());
+            page_of.emplace(child, std::make_pair(p->getName(), position++));
         }
     }
 
@@ -929,8 +934,10 @@ std::vector<effect::param> effect::params() const
         // One call each on the descriptor the host already holds.
         pp.parent = p->getParentName();
         pp.hint   = p->getHint();
-        if (auto it = page_of.find(pp.name); it != page_of.end())
-            pp.page = it->second;
+        if (auto it = page_of.find(pp.name); it != page_of.end()) {
+            pp.page       = it->second.first;
+            pp.page_index = it->second.second;
+        }
 
         // Read metadata (dimension, range, default, choice options) from the param properties.
         try {

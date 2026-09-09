@@ -541,8 +541,29 @@ the arity, the declared range, the default, the plugin's own hint and whether it
 ```
 
 `TYPE`, `RANGE` and `arity` pick the widget; `default` seeds it and says what a reset means;
-`DESCRIPTION` is the tooltip; **`group` is the section it belongs in**. A generated panel needs
-no per-plugin knowledge and no hard-coded parameter list.
+`DESCRIPTION` is the tooltip; **`group` is the section it belongs in**, and **`index` is where it
+goes within that section**. A generated panel needs no per-plugin knowledge and no hard-coded
+parameter list.
+
+**`index` is a number and not the key order, deliberately.** `CONTENTS` is a JSON object, and a
+JSON object is an unordered collection by definition — key order survives most parsers and is
+guaranteed by none of them. That matters most for **ISF, which has no grouping at all**: the
+spec's whole per-input vocabulary is `NAME`, `TYPE`, `LABEL`, `DEFAULT`, `MIN`, `MAX`, `VALUES`,
+`LABELS` and `IDENTITY`, so the order of `INPUTS` is the only layout a shader's author can
+express, and it was riding on an implementation detail of whichever JSON library the client used.
+An ISF panel is therefore a **flat list in declaration order**, and `group` is absent — not empty
+— on every ISF parameter, so a client can tell *this format has no sections* from *this parameter
+is in the section named empty-string*.
+
+For OFX, `index` is the position in the **page's** child list, which is the plugin's own declared
+layout and is not the same thing as `getParamList()` order — that is creation order. Measured
+across 22 openfx-misc plugins and 249 parameters the two agreed everywhere, so this is an
+explicit guarantee rather than a correction, and it is worth saying that plainly. It is
+**renumbered densely** over the parameters actually published: a page also lists nested groups,
+parameters of types this producer does not map, and `SkipRow`/`SkipColumn` directives, so its raw
+positions have gaps — `Transform` was missing index 9 — and a client laying out by index would
+render blanks where a group header used to be. The parameters are emitted in that order too, so
+key order and `index` agree; two orders that disagree would be worse than either alone.
 
 **`group` is present only when the FORMAT declares one**, absent otherwise — so a client can tell
 *ungrouped* from *grouped under the empty name*, and a flat list stays correct. ISF has no

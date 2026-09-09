@@ -823,6 +823,10 @@ class isf_producer : public core::frame_producer
             p.name  = in.name;
             p.label = in.label.empty() ? in.name : in.label;
             p.access = access_t::read_write;
+            // ISF declares no grouping of any kind, so the order of `INPUTS` is the ONLY
+            // structure the shader's author can express -- which is exactly why it is
+            // published as a number rather than left to JSON object key order.
+            p.index = static_cast<int>(out.size());
 
             if (in.type == "float") {
                 p.type  = value_type::real;

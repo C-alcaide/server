@@ -177,6 +177,13 @@ class effect
         /// the parameter, so it is unreachable without walking the page params -- and it is
         /// the grouping these plugins actually use.
         std::string page;
+
+        /// Its position in that page's child list, from 0, or -1 when it is on no page.
+        ///
+        /// The page's list is ORDERED and that order is the plugin's declared layout. It is not
+        /// the same thing as the order of `getParamList()`, which is creation order: a plugin is
+        /// free to create a parameter early and place it late.
+        int page_index = -1;
     };
 
     /// Enumerate the effect's parameters (in declaration order).

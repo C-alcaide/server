@@ -49,6 +49,34 @@ Covered by `producer-params`, **38/38 on both mixers**, including that a plug-in
 played is in the catalogue the same server serves — and that a colour, a boolean and a real all
 reach the kernel, measured from the picture. Enumeration remains described and not rendered.
 
+### Added: `index` — the declared ORDER of a producer's parameters, as a number
+
+A generated control surface lays parameters out in the order the format declares them, and that
+order was carried only by JSON object key order. `CONTENTS` is a JSON object and **a JSON object
+is an unordered collection by definition**: key order survives most parsers and is guaranteed by
+none of them.
+
+That matters most for **ISF, which has no grouping of any kind**. The spec's entire per-input
+vocabulary is `NAME`, `TYPE`, `LABEL`, `DEFAULT`, `MIN`, `MAX`, `VALUES`, `LABELS` and
+`IDENTITY` — no group, page, folder or section — so the order of `INPUTS` is the one layout
+decision a shader's author can make, and an ISF panel is a flat list in that order. `group` stays
+**absent** rather than empty on ISF parameters, so a client can tell *this format has no
+sections* from *this parameter is in the section named empty-string*.
+
+For OFX, `index` is the position in the **page's** child list — the plugin's own declared layout,
+which is not the same thing as `getParamList()` order, that being creation order. Across 22
+openfx-misc plugins and 249 parameters the two agreed everywhere, so this is an explicit
+guarantee rather than a correction.
+
+It is **renumbered densely** over the parameters actually published. A page also lists nested
+groups, parameters of types the producer does not map, and `SkipRow`/`SkipColumn` layout
+directives, so its raw positions have gaps: `Transform` came back missing index 9 the first time
+the contiguity check ran. Renumbering keeps the plugin's order, which carries meaning, and drops
+its spacing, which does not survive being flattened into a list. Parameters are emitted in that
+order too, so key order and `index` agree.
+
+Covered by `producer-params`, **43/43 on both mixers**.
+
 ### Fixed: an OFX plugin's parameters reached the control API stripped of everything a client needs
 
 `/v1/tree/.../foreground/params` is what a client reads to **generate** a control surface rather
