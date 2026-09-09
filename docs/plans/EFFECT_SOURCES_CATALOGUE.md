@@ -169,10 +169,10 @@ stages, so any shader supplying a custom vertex shader fails to compile it. This
 collection's entire blur/glow family is dark — those are the multi-pass shaders, and multi-pass
 shaders ship a `.vs` to set up per-pass coordinates. **Fixed the same day.** Both stages now share one declaration block; the collection went
 **276 → 314 of 327, +38, zero regressions**. Two cautions on that number: only the **22
-single-pass** ones are verified working, and the **16 multi-pass** ones now render but sit on a
-*second* defect this fix uncovered — `Bloom` (7 passes) returns its source byte-identically and
-`Multi Pass Gaussian Blur` (11) renders flat green, while `Soft Blur` (3) is correct. See
-`../features/isf-and-openfx.md` §5.0.
+single-pass** ones are verified working, and of the **16 multi-pass** ones exactly one —
+`Multi Pass Gaussian Blur` — is confirmed to render incorrectly, with the rest unverified rather
+than broken. The multi-pass engine itself was probed and is sound. See
+`../features/isf-and-openfx.md` §5.0, including the false positive that a first reading produced.
 
 The other **13** failures each need an input the test never supplied, and are not evidence of
 anything broken: `FFT Spectrogram` and `Radial Spectrogram` (audio), `Cursor`, `Random Shape`,

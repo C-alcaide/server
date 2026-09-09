@@ -174,20 +174,41 @@ the interesting behaviour belongs to third-party code. What is *ours* and testab
 
 ## 5. Known gaps
 
-0. **Multi-pass rendering is wrong above a low pass count.** Found 2026-09-09 while sweeping
-   Vidvox's 327-shader collection, and previously *masked* by the vertex-shader defect below —
-   these shaders could not compile at all, so nobody had seen their output. Measured against a
-   textured source, captured through the IMAGE consumer:
+0. **One multi-pass shader renders wrongly; the multi-pass ENGINE appears sound.** The first
+   version of this entry claimed multi-pass breaks above a low pass count, on the strength of
+   `Bloom` returning its source byte-identically. **That was a false positive** — `Bloom`'s
+   `intensity` input has `DEFAULT: 0`, so an unchanged image is the correct answer at defaults.
+   Recorded because the mistake is the instructive part: *a shader doing nothing may be obeying
+   its own defaults*, and the header must be read before its output is called a fault.
 
-   | shader | `PASSES` | output |
-   | :--- | ---: | :--- |
-   | Soft Blur | 3 | correct — differs from source, std 84.9 → 61.6 as a blur should |
-   | Bloom | 7 | **byte-identical to the source** — the effect never reaches the picture |
-   | Multi Pass Gaussian Blur | 11 | differs, but flat green — not a blur of the input |
+   What the engine was then probed for, with purpose-built shaders, all exact to 1 LSB:
 
-   Three passes work and seven do not, so this looks like the ping-pong or persistent-buffer
-   handling rather than `PASSES` parsing. **16 of the collection's shaders are multi-pass** and
-   their correctness is unestablished; the blur/glow family is the bulk of it.
+   | probe | result |
+   | :--- | :--- |
+   | pass 0 writes a buffer, pass 1 reads it | correct |
+   | three chained buffers, A→B→C→out | correct |
+   | final pass writing to a `TARGET` (as `Bloom` and `Multi Pass Gaussian Blur` do) | correct |
+   | downscaled intermediate (`$WIDTH/8`) then full-size out | correct |
+
+   So chaining, targeted final passes and per-pass sizing all work.
+
+   **What remains is `Multi Pass Gaussian Blur` (11 passes, and it has a `.vs`).** Against a
+   textured source, sweeping its `blurAmount`:
+
+   | `blurAmount` | mean RGB | note |
+   | ---: | :--- | :--- |
+   | 0 (min) | (136.4, 130.0, 121.5) | **exactly the source** — pass-through is right |
+   | 1 | (124.3, 139.8, 121.3) | |
+   | 4 | (88.4, 169.3, 120.6) | |
+   | 12 | (27.2, 225.7, 114.8) | |
+   | 24 (default) | (8.0, 244.5, 110.3) | |
+
+   A blur preserves the mean at any radius. Red falls monotonically and green rises with it, so
+   the fault is in the **sampling offsets** and scales with tap count — not in the pass mechanics,
+   which are exact at radius 0. Its `.vs` emits `out vec2 texOffsets[5]`, an **array varying**,
+   computed from `RENDERSIZE`, `PASSINDEX` and `blurAmount`; that is the obvious next place to
+   look and has not been looked at. **One shader is confirmed wrong. The other 15 multi-pass
+   shaders are unverified, not known-broken.**
 
 1. **No coverage.** §4.1 is a self-contained check needing only a fixture shader.
 2. **The `eUndefined` layout fix is unverified on both paths.**

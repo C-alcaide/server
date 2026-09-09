@@ -307,13 +307,18 @@ differs, `out` in the vertex stage and `in` in the fragment one.
 edge-enhance of a textured source, and `Sharpen RGB` raises image variance (std 84.9 → 119.3) as
 sharpening should.
 
-**This exposed a second defect that the first was hiding**, now recorded in
-`docs/features/isf-and-openfx.md` §5.0: **multi-pass rendering is wrong above a low pass count**.
-`Soft Blur` (3 passes) is a correct blur; `Bloom` (7 passes) comes back **byte-identical to its
-source**, so the effect never reaches the picture; `Multi Pass Gaussian Blur` (11 passes) renders
-flat green. Those shaders could not compile before this change, so nobody had seen their output.
-**So of the +38, the 22 single-pass ones are working and the 16 multi-pass ones now render but are
-not verified correct.**
+**It also made multi-pass output visible for the first time**, and a first reading of that called
+multi-pass broken above a low pass count. **That was wrong and is corrected in
+`docs/features/isf-and-openfx.md` §5.0:** `Bloom` returning its source unchanged is *correct*,
+because its `intensity` input defaults to 0. Purpose-built probes then found the engine sound —
+chained buffers, three-hop chains, a final pass writing to a `TARGET`, and downscaled
+intermediates are all exact.
+
+**One shader is confirmed wrong:** `Multi Pass Gaussian Blur` is exactly the source at
+`blurAmount` 0 and diverges monotonically as the radius grows (mean red 136→8, green 130→245),
+which a blur cannot do — so its sampling offsets are wrong while the pass mechanics are right.
+**Of the +38, the 22 single-pass shaders are verified working and the 16 multi-pass ones now
+render, one of them incorrectly and the rest unverified.**
 
 ### Added: ASIO is actually in the build now — the licence that blocked it expired
 
