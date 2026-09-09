@@ -565,20 +565,35 @@ class isf_producer : public core::frame_producer
     /// is `<samples or bins>` wide by `<channels>` high; `MAX` caps the count; and a shader reads
     /// it with `IMG_NORM_PIXEL`.
     ///
-    /// OURS, and stated as ours because there is no local copy of the specification to check the
-    /// pixel format against -- the reference implementation may well use a float texture:
+    /// CHECKED AGAINST THE SPECIFICATION 2026-09-09 -- VIDVOX's ISF Primer, *Audio Visualizers in
+    /// ISF* (`docs.isf.video`). This block used to say there was no local copy to check against
+    /// and that all four choices below were ours; three of them turn out to be the specification:
     ///
-    ///   * **RGBA8**, so the existing `upload_named` path carries it and no new GL code exists to
-    ///     get wrong. The cost is 8 bits of magnitude resolution, which is 48 dB of dynamic
-    ///     range -- ample for a spectrum bar and NOT enough to read a quiet partial out of a
-    ///     loud mix. Named in the guide rather than left to be discovered.
-    ///   * **all four channels carry the same value**, so a shader reading `.r`, `.g`, `.b` or
-    ///     `.a` gets the datum either way. Shaders in the wild read all of them.
-    ///   * **height 1**, a mono downmix. ISF's height is the channel count and per-channel rows
-    ///     are a legitimate thing to want; a shader sampling `vec2(x, 0.5)` lands in the single
-    ///     row and works, which is what almost every published spectrum shader does.
-    ///   * **waveform is offset-encoded**: a sample of -1 is 0, 0 is 128, +1 is 255. A shader
-    ///     wanting the signed value subtracts 0.5 and doubles, which is the conventional read.
+    ///   * **all four channels carry the same value** -- the spec, verbatim: *"the rgb channels
+    ///     for each pixel will all contain the same value... this will be a grayscale image"*.
+    ///     (It says rgb; we also write alpha, so `.r`, `.g`, `.b` and `.a` are interchangeable.)
+    ///   * **waveform is offset-encoded**: -1 is 0, 0 is 128, +1 is 255. The spec, verbatim:
+    ///     *"the amplitude of the signal at the sample time, **centered around 0.5**"*. And the
+    ///     asymmetry below is the spec's too -- only `audio` is centred; `audioFFT` is *"the
+    ///     amplitude of the frequency bin"*, uncentred, which is why only `waveform` is offset.
+    ///   * **`MAX` is a COUNT** of samples or bins, not a value ceiling -- the opposite of `MAX`
+    ///     on every other ISF input type, and the one an implementation gets wrong silently.
+    ///   * **RGBA8** is PERMITTED, not merely convenient: *"when possible, the host application
+    ///     **may** provide 32-bit floating point values instead of 8-bit data"*. So 8-bit is the
+    ///     baseline and float an optional upgrade we have not taken. It also means the existing
+    ///     `upload_named` path carries the texture with no new GL code to get wrong. The cost is
+    ///     8 bits of magnitude -- 48 dB, ample for a spectrum bar and NOT enough to read a quiet
+    ///     partial out of a loud mix -- and that is now a KNOWN limit of a conformant choice.
+    ///
+    /// ONE DEPARTURE, and it is a departure rather than a preference:
+    ///
+    ///   * **height 1**, a mono downmix. The spec's y axis is the channel count -- *"the y-axis
+    ///     representing individual channels"*, *"the first audio channel corresponds to the first
+    ///     vertical pixel row (y = 0)"* -- so **a stereo-aware shader sampling `y = 0.75` for
+    ///     channel 2 reads channel 1 here.** Kept because a shader sampling `vec2(x, 0.5)` works
+    ///     and that is what almost every published spectrum shader does, and because per-channel
+    ///     rows need `audio_analysis` to keep per-channel state it does not keep today. Named in
+    ///     `ISF_USER_AND_SHADER_GUIDE.md` §2.4 as a departure, not as a choice.
     ///
     /// AND ONE FRAME OF LAG, which is not a defect and is not avoidable here. The audio mixer
     /// runs AFTER the stage has pulled its producers, so the analysis this reads is the previous

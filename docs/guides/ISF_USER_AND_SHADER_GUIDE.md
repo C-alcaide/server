@@ -168,15 +168,32 @@ limit: 64 asks for the spectrum reduced to 64 bins, and omitting it gives the an
 | **all four channels** | carry the same value, so `.r`, `.g`, `.b` and `.a` are interchangeable |
 | **before any audio** | no texture is bound at all, rather than a zero-filled one — a zero texture is indistinguishable from silence, and a spectrum shader would draw a flat floor and look correct |
 
-**Four limits, each stated because a shader author will otherwise meet them by surprise:**
+**Checked against the specification 2026-09-09** — VIDVOX's ISF Primer, *Audio Visualizers in
+ISF* (`docs.isf.video`), which is the normative description of how a host packs audio into an
+image. **Three of the four choices above are the specification and not conventions of ours:**
 
-* **8-bit magnitude.** The texture is RGBA8, so a value has 256 levels and about 48 dB of
-  usable range. Ample for a bar or a pulse; **not** enough to pull a quiet partial out of a loud
-  mix. The ISF reference implementation may use a float texture — there is no copy of the Vidvox
-  specification in this tree to check the pixel format against, so this is our choice and is
-  named as ours.
-* **One row, a mono downmix.** ISF's height is the channel count; a shader wanting L and R
-  separately gets the mix of them.
+| | the specification says |
+| :--- | :--- |
+| all four channels the same | *"the rgb channels for each pixel will all contain the same value… this will be a grayscale image"* |
+| `audio` centred on 0.5 | *"the amplitude of the signal at the sample time, **centered around 0.5**"* — and only `audio`; `audioFFT` is a raw magnitude, which is why the two rows above differ |
+| `MAX` caps the count | *"`MAX` specifies the number of samples that the shader wants to receive"* — a **count**, not a value ceiling, which is the opposite of `MAX` on every other ISF type |
+
+**Two limits remain, and they are different in kind:**
+
+* **8-bit magnitude — conformant, and a ceiling.** The texture is RGBA8, so a value has 256
+  levels and about 48 dB of usable range: ample for a bar or a pulse, **not** enough to pull a
+  quiet partial out of a loud mix. The specification permits it — *"when possible, the host
+  application **may** provide 32-bit floating point values instead of 8-bit data"* — so 8-bit is
+  the baseline and float an optional upgrade this module has not taken. **A known limit of a
+  permitted choice**, where this used to be an unknown.
+* **One row, a mono downmix — a NAMED DEPARTURE from the specification.** ISF's height is the
+  channel count: *"the y-axis representing individual channels"*, and *"the first audio channel
+  corresponds to the first vertical pixel row (y = 0)"*. This module sends one row, so **a
+  stereo-aware shader sampling `y = 0.75` for channel 2 reads channel 1.** The reason is that
+  almost every published spectrum shader samples `vec2(x, 0.5)` and works, and per-channel rows
+  need `audio_analysis` to keep per-channel state it does not keep today — but it is a departure
+  and not a preference, and a shader written against the specification elsewhere will be wrong
+  here.
 * **One frame of lag.** The audio mixer runs after the stage has pulled its producers, so a
   shader reads the previous tick's analysis. 20 ms at 50p, under the ~21 ms analysis window.
 * **The channel's OWN audio**, post master volume and post clip — so a shader on a faded-out
@@ -294,7 +311,7 @@ void main() {
 
 ## 3. Current limitations
 
-- ~~`audio` / `audioFFT` inputs are not implemented.~~ **Implemented 2026-09-08** — §2.4, with four stated limits. Measured by `cli.py isf-audio` on both mixers.
+- ~~`audio` / `audioFFT` inputs are not implemented.~~ **Implemented 2026-09-08** — §2.4. Measured by `cli.py isf-audio` on both mixers, and **checked against VIDVOX's specification 2026-09-09**: three of the four packing choices are the spec rather than ours, RGBA8 is conformant (the spec makes float an optional upgrade), and **one departure remains — a single row where the spec's y axis is the channel count.**
 - On the Vulkan mixer, rendering uses a CPU read-back (not zero-copy), and GPU-texture-backed
   sources cannot be filtered (use a CPU source).
 - 8-bit output; float precision is available only for intermediate `FLOAT` pass buffers.
