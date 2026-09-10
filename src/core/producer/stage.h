@@ -52,6 +52,7 @@ namespace caspar { namespace core {
 namespace timeline {
 class timeline_store;
 struct transport_command;
+struct chase_config;
 }
 
 
@@ -323,6 +324,28 @@ class stage final : public stage_base
     using stage_field_writer =
         std::function<bool(const std::string& object, const std::string& field, const monitor::vector_t& value)>;
     void set_stage_field_writer(stage_field_writer w);
+
+    /// The HOUSE TIMECODE, as an absolute frame at the channel's rate, or nothing when there is
+    /// no valid signal. Injected by the shell.
+    ///
+    /// A BRIDGE for the reason the previz writer is one: `LTCInput` lives in `modules/ltc` and
+    /// `core` does not link the modules -- that inversion is exactly what forced the ten
+    /// `shared_ptr<void>` virtuals the `KEYFRAMES` module needed, and they are gone.
+    ///
+    /// Asked once per tick per chasing document. A document that is not chasing never calls it,
+    /// so a server with no LTC pays nothing.
+    using timecode_source = std::function<std::optional<std::uint32_t>(int fps)>;
+    void set_timecode_source(timecode_source src);
+
+    /// Configure timecode chase for a document. False if it is not one this channel owns.
+    std::future<bool> timeline_chase(const std::string& name, const timeline::chase_config& cfg);
+
+    /// The chase settings as they stand, so a caller can change ONE of them.
+    ///
+    /// Read-modify-write rather than a setter per field: the four settings are set independently
+    /// in practice -- an operator adds a hot region without restating the offset -- and four
+    /// setters would be four places for the executor hop.
+    std::future<timeline::chase_config> timeline_chase_config(const std::string& name);
 
     /// Queue one transport command for a document, to take effect on the next tick.
     ///

@@ -114,6 +114,10 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     /// How a previz screen or camera property is written. Injected by the shell; see stage.h.
     stage::stage_field_writer stage_field_writer_;
 
+    /// The house timecode. Injected by the shell; asked once per tick per CHASING document, so
+    /// a server with no LTC and no chase pays nothing.
+    stage::timecode_source timecode_source_;
+
     /// The last value written through each of the two LIVE registries, so a tick that changes
     /// nothing writes nothing.
     ///
@@ -1087,7 +1091,25 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 continue;
             }
 
-            const auto pos = tr.position_at(frame_number, per_frame);
+            // THE POSITION, and chase is a CORRECTION on top of the frame counter rather than a
+            // different clock. `chase_position` is the only per-tick call that may mutate the
+            // transport, which is why it is called here and exactly once.
+            timeline::flicks pos;
+            if (tr.chase().enabled) {
+                std::optional<timeline::flicks> house;
+                if (timecode_source_) {
+                    const auto fps = static_cast<int>(
+                        std::lround(boost::rational_cast<double>(format_desc_.framerate)));
+                    if (const auto f = timecode_source_(fps))
+                        house = timeline::from_frames(static_cast<std::int64_t>(*f),
+                                                      format_desc_.framerate);
+                }
+                pos = tr.chase_position(frame_number, per_frame, house);
+                ts["chasing"]     = tr.chasing();
+                ts["freewheeled"] = static_cast<std::int64_t>(tr.freewheeled());
+            } else {
+                pos = tr.position_at(frame_number, per_frame);
+            }
             ts["position"] = timeline::to_seconds(pos);
             ts["rate"]     = boost::rational_cast<double>(tr.rate());
 
@@ -1996,6 +2018,27 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     /// "The next instance" is the earliest start strictly after the playhead, over every layer
     /// AND the transparent anchors: an anchor is a cue point that writes nothing, which is
     /// exactly the thing an operator wants to jump to.
+    std::future<bool> timeline_chase(const std::string& name, const timeline::chase_config& cfg)
+    {
+        return executor_.begin_invoke([this, name, cfg] {
+            if (!timelines_)
+                return false;
+            const auto entry = timelines_->get(name);
+            if (!entry || entry->document.channel != channel_index_)
+                return false;
+            transports_[name].set_chase(cfg);
+            return true;
+        });
+    }
+
+    std::future<timeline::chase_config> timeline_chase_config(const std::string& name)
+    {
+        return executor_.begin_invoke([this, name] {
+            const auto it = transports_.find(name);
+            return it == transports_.end() ? timeline::chase_config{} : it->second.chase();
+        });
+    }
+
     std::future<bool> timeline_seek_relative(const std::string& name, bool forward)
     {
         return executor_.begin_invoke([this, name, forward] {
@@ -2682,6 +2725,21 @@ std::future<bool> stage::release_field(int layer, const std::string& path)
 void stage::set_stage_field_writer(stage::stage_field_writer w)
 {
     impl_->stage_field_writer_ = std::move(w);
+}
+
+void stage::set_timecode_source(stage::timecode_source src)
+{
+    impl_->timecode_source_ = std::move(src);
+}
+
+std::future<bool> stage::timeline_chase(const std::string& name, const timeline::chase_config& cfg)
+{
+    return impl_->timeline_chase(name, cfg);
+}
+
+std::future<timeline::chase_config> stage::timeline_chase_config(const std::string& name)
+{
+    return impl_->timeline_chase_config(name);
 }
 
 void stage::set_timeline_store(std::shared_ptr<timeline::timeline_store> store)

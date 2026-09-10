@@ -176,6 +176,60 @@ bool transport::apply_all(std::vector<transport_command>& pending, std::uint64_t
     return changed;
 }
 
+flicks transport::chase_position(std::uint64_t frame, flicks per_frame, std::optional<flicks> house)
+{
+    const auto free = position_at(frame, per_frame);
+
+    if (!chase_.enabled) {
+        chasing_   = false;
+        freewheel_ = 0;
+        return free;
+    }
+
+    // OUTSIDE EVERY HOT REGION THE TRANSPORT RUNS FREE, and the region is tested against the
+    // FREE position rather than against the timecode: the regions are declared in the
+    // document's own time, which is what an author can point at. Testing them against house
+    // time would make a document's regions depend on when the show is run.
+    if (!chase_.inside(free)) {
+        chasing_   = false;
+        freewheel_ = 0;
+        return free;
+    }
+
+    if (house) {
+        chasing_         = true;
+        freewheel_       = 0;
+        // RE-ANCHORED, so the free-running position agrees with the chased one from here. Without
+        // this, leaving a hot region would jump back to wherever the free clock had drifted to --
+        // which is the whole failure hot regions exist to avoid.
+        anchor_position_ = *house + chase_.offset;
+        anchor_frame_    = frame;
+        return anchor_position_;
+    }
+
+    // THE SIGNAL IS GONE. Freewheel: keep running on the frame counter from the last chased
+    // position, for a declared number of frames, and then PAUSE.
+    //
+    // Pause rather than stop, and rather than running on forever. A dropout of a few frames is
+    // ordinary -- a cable, a switcher cut -- and stopping the show for one would be worse than
+    // the dropout. Running on forever is worse still: the show drifts against house time with
+    // nothing saying so, which is the one thing chase exists to prevent. Pausing holds the last
+    // known-good position and keeps ownership, so the picture freezes rather than sliding.
+    ++freewheel_;
+    if (freewheel_ <= chase_.freewheel_frames) {
+        chasing_ = true;
+        return free;
+    }
+
+    chasing_ = false;
+    if (st_ == transport_state::playing) {
+        anchor_position_ = free;
+        anchor_frame_    = frame;
+        st_              = transport_state::paused;
+    }
+    return anchor_position_;
+}
+
 void transport_self_test()
 {
     const auto req = [](bool ok, const char* what) {
@@ -380,6 +434,104 @@ void transport_self_test()
         req(t.fired().front().second == from_seconds(10.0),
             "with the position it fired at, which is what the resolver needs to place the "
             "objects waiting on it");
+    }
+
+    // ---- TIMECODE CHASE ------------------------------------------------------------------
+    {
+        transport t;
+        t.apply(cmd(transport_command::verb::play), 0, per_frame);
+
+        // Disabled: the house timecode is ignored entirely.
+        req(t.chase_position(25, per_frame, from_seconds(500.0)) == from_seconds(1.0),
+            "with chase off the house timecode is ignored");
+        req(!t.chasing(), "and the transport says it is not chasing");
+
+        chase_config c;
+        c.enabled = true;
+        c.offset  = from_seconds(-10.0); //< a show that starts at house 10:00:00
+        t.set_chase(c);
+
+        req(t.chase_position(25, per_frame, from_seconds(12.0)) == from_seconds(2.0),
+            "with chase on the position is the house timecode PLUS the offset");
+        req(t.chasing(), "and it says it is chasing");
+
+        // AND IT RE-ANCHORS: the free-running position now agrees with the chased one, so
+        // leaving a hot region does not jump back to where the free clock had drifted to.
+        req(t.position_at(25, per_frame) == from_seconds(2.0),
+            "the free position is re-anchored to the chased one");
+        req(t.position_at(50, per_frame) == from_seconds(3.0),
+            "and runs on from there at the document's own rate");
+
+        // A JUMP IN HOUSE TIME is followed immediately -- house time is the authority.
+        req(t.chase_position(26, per_frame, from_seconds(70.0)) == from_seconds(60.0),
+            "a jump in house time is followed at once");
+
+        // FREEWHEEL: the signal goes, and the position keeps running for the declared number
+        // of frames from where it was.
+        c.freewheel_frames = 3;
+        t.set_chase(c);
+        t.chase_position(100, per_frame, from_seconds(90.0));
+        const auto held = t.position_at(100, per_frame);
+        req(t.chase_position(101, per_frame, std::nullopt) == held + per_frame,
+            "one frame of freewheel runs on from the last chased position");
+        req(t.freewheeled() == 1, "and counts");
+        t.chase_position(102, per_frame, std::nullopt);
+        t.chase_position(103, per_frame, std::nullopt);
+        req(t.freewheeled() == 3, "three frames of freewheel");
+        req(t.state() == transport_state::playing, "still playing at the limit");
+
+        // ...and then it PAUSES rather than running on for ever or stopping.
+        const auto at_limit = t.position_at(103, per_frame);
+        t.chase_position(104, per_frame, std::nullopt);
+        req(t.state() == transport_state::paused,
+            "past the freewheel limit it PAUSES -- a show drifting against house time with "
+            "nothing saying so is what chase exists to prevent, and stopping for a dropout of a "
+            "few frames would be worse than the dropout");
+        req(t.position_at(200, per_frame) == at_limit + per_frame,
+            "holding the last known-good position rather than sliding");
+
+        // AND IT RECOVERS: the signal comes back, and the position follows it again -- but the
+        // transport stays PAUSED until something plays it, because a pause is an ownership
+        // state and chase does not decide run states.
+        req(t.chase_position(210, per_frame, from_seconds(100.0)) == from_seconds(90.0),
+            "when the signal returns the position follows it again");
+        req(t.freewheeled() == 0, "and the freewheel counter resets");
+    }
+
+    // ---- HOT REGIONS ---------------------------------------------------------------------
+    {
+        transport    t;
+        chase_config c;
+        c.enabled = true;
+        c.offset  = 0;
+        c.hot_regions.push_back({from_seconds(10.0), from_seconds(20.0)});
+        t.set_chase(c);
+
+        auto sk = cmd(transport_command::verb::seek);
+        sk.at   = from_seconds(0.0);
+        t.apply(sk, 0, per_frame);
+        t.apply(cmd(transport_command::verb::play), 0, per_frame);
+
+        // OUTSIDE the region: free-running, and the timecode is ignored even though it is
+        // present and valid. That is the whole point -- an interactive stretch must not be
+        // dragged along by house time.
+        req(t.chase_position(25, per_frame, from_seconds(500.0)) == from_seconds(1.0),
+            "outside a hot region the transport runs FREE and ignores a valid timecode");
+        req(!t.chasing(), "and says so");
+
+        // INSIDE it: the timecode takes control.
+        sk.at = from_seconds(15.0);
+        t.apply(sk, 100, per_frame);
+        req(t.chase_position(100, per_frame, from_seconds(16.0)) == from_seconds(16.0),
+            "inside one, the timecode takes control");
+        req(t.chasing(), "and says so");
+
+        // The regions are tested against the DOCUMENT's position, not against house time: an
+        // author points at a region on their own timeline, and testing house time would make a
+        // document's regions depend on when the show is run.
+        req(t.chase_position(101, per_frame, from_seconds(999.0)) == from_seconds(999.0),
+            "and a wild house time inside the region is still followed -- the region gates "
+            "WHETHER to chase, not what to chase to");
     }
 
     CASPAR_LOG(info) << L"[timeline-transport] self-test: all checks passed";

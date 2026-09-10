@@ -1708,6 +1708,60 @@ std::future<std::wstring> timeline_command(command_context& ctx)
                 return make_ready_future<std::wstring>(
                     L"400 TIMELINE ERROR a loop region needs <to> after <from>\r\n");
         }
+    } else if (verb == L"CHASE") {
+        // `CHASE <name> ON|OFF`, `CHASE <name> OFFSET <seconds>`,
+        // `CHASE <name> FREEWHEEL <frames>`, `CHASE <name> REGION <from> <to>`,
+        // `CHASE <name> REGIONS OFF`.
+        //
+        // A sub-verb rather than a positional argument list, because the four settings are set
+        // independently in practice: an operator adds a hot region without restating the offset.
+        auto cfg = stage->timeline_chase_config(name).get();
+        auto sub = ctx.parameters.size() >= 3 ? ctx.parameters.at(2) : std::wstring(L"ON");
+        boost::to_upper(sub);
+
+        if (sub == L"ON")
+            cfg.enabled = true;
+        else if (sub == L"OFF")
+            cfg.enabled = false;
+        else if (sub == L"OFFSET") {
+            if (ctx.parameters.size() < 4)
+                return make_ready_future<std::wstring>(
+                    L"400 TIMELINE ERROR CHASE OFFSET needs a number of seconds\r\n");
+            cfg.offset = tl::from_seconds(std::stod(ctx.parameters.at(3)));
+        } else if (sub == L"FREEWHEEL") {
+            if (ctx.parameters.size() < 4)
+                return make_ready_future<std::wstring>(
+                    L"400 TIMELINE ERROR CHASE FREEWHEEL needs a number of frames\r\n");
+            const auto n = std::stoi(ctx.parameters.at(3));
+            if (n < 0)
+                return make_ready_future<std::wstring>(
+                    L"400 TIMELINE ERROR a freewheel length cannot be negative\r\n");
+            cfg.freewheel_frames = n;
+        } else if (sub == L"REGION") {
+            if (ctx.parameters.size() < 5)
+                return make_ready_future<std::wstring>(
+                    L"400 TIMELINE ERROR CHASE REGION needs <from> <to> in seconds\r\n");
+            const auto from = tl::from_seconds(std::stod(ctx.parameters.at(3)));
+            const auto to   = tl::from_seconds(std::stod(ctx.parameters.at(4)));
+            if (to <= from)
+                return make_ready_future<std::wstring>(
+                    L"400 TIMELINE ERROR a hot region needs <to> after <from>\r\n");
+            cfg.hot_regions.emplace_back(from, to);
+        } else if (sub == L"REGIONS") {
+            // `REGIONS OFF` clears them, which means "chase the whole document" rather than
+            // "chase nothing" -- an empty region list is the simple case and the default.
+            cfg.hot_regions.clear();
+        } else {
+            return make_ready_future<std::wstring>(
+                L"400 TIMELINE ERROR no such CHASE setting: " + ctx.parameters.at(2) +
+                L". ON OFF OFFSET FREEWHEEL REGION 'REGIONS OFF'\r\n");
+        }
+
+        if (!stage->timeline_chase(name, cfg).get())
+            return make_ready_future<std::wstring>(
+                L"404 TIMELINE ERROR no document '" + ctx.parameters.at(1) +
+                L"' on this channel\r\n");
+        return make_ready_future<std::wstring>(L"202 TIMELINE OK\r\n");
     } else if (verb == L"NEXT" || verb == L"PREV" || verb == L"PREVIOUS") {
         // NOT a `transport_command`, because the transport takes a position and knows nothing
         // about a document's contents. The stage reads the resolution, works out the position,
@@ -1724,7 +1778,7 @@ std::future<std::wstring> timeline_command(command_context& ctx)
     } else {
         return make_ready_future<std::wstring>(
             L"400 TIMELINE ERROR no such verb: " + ctx.parameters.at(0) +
-            L". PLAY PAUSE STOP SEEK RATE LOOP GO NEXT PREV INFO LIST\r\n");
+            L". PLAY PAUSE STOP SEEK RATE LOOP CHASE GO NEXT PREV INFO LIST\r\n");
     }
 
     if (!stage->timeline_command(name, cmd).get())

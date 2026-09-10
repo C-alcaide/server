@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–15 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–16 of 19 shipped. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -486,6 +486,7 @@ TIMELINE <ch> SEEK <name> <seconds>
 TIMELINE <ch> RATE <name> <n>
 TIMELINE <ch> LOOP <name> <from> <to>   ·   TIMELINE <ch> LOOP <name> OFF
 TIMELINE <ch> GO <name> [trigger]
+TIMELINE <ch> CHASE <name> ON|OFF|OFFSET <s>|FREEWHEEL <n>|REGION <a> <b>|REGIONS OFF
 TIMELINE <ch> NEXT <name>   ·   TIMELINE <ch> PREV <name>
 TIMELINE <ch> INFO <name>   ·   TIMELINE <ch> LIST
 ```
@@ -1093,4 +1094,98 @@ object-is-driving checks `PAUSE` first.
 
 ---
 
-*§16 Known gaps — arrives with commit 19.*
+## 16. Timecode chase
+
+A show that must not slip against house time follows LTC. **The frame counter is still the
+clock** — chase is a *correction* on top of it, not a different clock, which is what keeps every
+other transport property in §6 true while chasing.
+
+```
+TIMELINE <ch> CHASE <name> ON | OFF
+TIMELINE <ch> CHASE <name> OFFSET <seconds>
+TIMELINE <ch> CHASE <name> FREEWHEEL <frames>
+TIMELINE <ch> CHASE <name> REGION <from> <to>   ·   CHASE <name> REGIONS OFF
+```
+
+Sub-verbs rather than one positional argument list, because the four settings are set
+independently in practice: an operator adds a hot region without restating the offset.
+
+### 16.1 The three parts
+
+**The offset.** House time is a time of day; a document starts at zero. `OFFSET -36000` runs a
+document whose zero is house 10:00:00. Following the timecode also **re-anchors** the
+free-running playhead to the chased position, so leaving a hot region does not jump back to
+wherever the free clock had drifted to.
+
+**The freewheel.** When the signal goes, the position keeps running on the frame counter for a
+declared number of frames, and then the transport **pauses**. Pause rather than stop, and rather
+than running on for ever:
+
+* a dropout of a few frames is ordinary — a cable, a switcher cut — and stopping the show for one
+  would be worse than the dropout;
+* running on for ever is worse still, because the show drifts against house time with **nothing
+  saying so**, which is the one thing chase exists to prevent. Pausing holds the last known-good
+  position, so the picture freezes rather than sliding.
+
+`timeline/<name>/{chasing, freewheeled}` are published, so an operator whose show has stopped can
+see *why*.
+
+**Hot Regions** (PIXERA's). Outside every declared window the transport runs free and ignores the
+timecode; inside one, the timecode takes control. Empty means "the whole document", which is the
+simple case and the default — reading an empty list as "never chase" would make `CHASE ON` do
+nothing until a region was declared.
+
+This is the difference between a feature an operator can use and one they cannot. A show is
+usually a few timed sequences with interactive stretches between them; without hot regions, chase
+either drags the interactive parts along with house time or has to be switched on and off by hand
+at every boundary.
+
+The regions are tested against the **document's own position**, not against house time: an author
+points at a region on their own timeline, and testing house time would make a document's regions
+depend on when the show is run. The region gates *whether* to chase, not *what* to chase to.
+
+### 16.2 Where the house timecode comes from
+
+A bridge the shell injects, for the reason the previz writer is one: `LTCInput` lives in
+`modules/ltc` and `core` does not link the modules. That inversion is exactly what forced the ten
+`shared_ptr<void>` virtuals the removed `KEYFRAMES` module needed.
+
+**`is_valid()` is checked first and the frame is returned only when it is true.**
+`get_current_frame_number` answers whatever it last held otherwise, and a chase that followed a
+stale frame would look like a working chase on a dead cable — which is the failure chase exists to
+make visible. Absent is the honest answer, and the freewheel decides how long to tolerate it.
+
+The source is asked once per tick **per chasing document**, so a server with no LTC and no chase
+pays nothing.
+
+### 16.3 Where it is checked, and what cannot be
+
+**`transport_self_test` covers the arithmetic at boot**: the offset, the re-anchor, a jump in
+house time followed at once, the freewheel boundary, the pause after it, the recovery when the
+signal returns, and hot regions in both directions. It can do all of that because it injects a
+house position directly.
+
+**`timeline-chase`, 12/12 both mixers, covers the half that needs a running server** — and the
+half it covers is decided by a measured fact rather than a preference: **there is no LTC signal on
+this machine, and `is_valid()` is false without one.** Its system-clock fallback supplies a
+timecode *string* for display and does not make the input valid, so the bridge reports the house
+timecode as absent.
+
+That makes *following* a timecode unmeasurable here, and makes the more interesting half
+measurable: **what chase does when the signal is not there.** It pauses after the freewheel and
+holds; a long freewheel keeps the show running through the dropout and a short one does not; and
+**hot regions still gate it**, so with the LTC cable pulled the interactive stretches outside the
+regions keep working and only the timed sequences stop. That last one is a property an operator
+would want to know before a show, and it is checkable *because* there is no signal.
+
+**Shown failing first, three times.** Hot regions not gating, and a freewheel that never expires,
+both **abort the boot** — the self-test is again the stronger gate for the logic. So the mutation
+for the battery is in the tick: never calling `chase_position` fails five of its twelve.
+
+**Not measured, and recorded rather than implied:** accuracy against a real house clock, the
+offset end to end, and the recovery after a dropout. F9 of the plan records that the system-clock
+mode's rate predictability is unverified; this does not verify it and does not depend on it.
+
+---
+
+*§17 Known gaps — arrives with commit 19.*

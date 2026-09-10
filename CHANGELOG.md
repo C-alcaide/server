@@ -1,6 +1,48 @@
 CasparVP — Unreleased
 ==========================================
 
+### Timecode chase: the offset, the freewheel, and PIXERA-style Hot Regions
+
+`TIMELINE <ch> CHASE <name> ON|OFF|OFFSET <s>|FREEWHEEL <n>|REGION <a> <b>|REGIONS OFF`. The
+frame counter is still the clock -- chase is a CORRECTION on top of it, not a different clock.
+
+**Behaviour changes for an existing config.** None: chase is off unless a document asks for it,
+and the house timecode is read only for a document that is chasing, so a server with no LTC pays
+nothing. Two new published keys per chasing document,
+`channel/{n}/stage/timeline/<name>/{chasing, freewheeled}`.
+
+**WHEN THE SIGNAL GOES, the transport pauses after the declared freewheel and holds its last
+known-good position.** Pause rather than stop, because a dropout of a few frames is ordinary and
+rewinding the show for one would be worse than the dropout; and pause rather than running on for
+ever, because the show would then drift against house time with NOTHING SAYING SO, which is the
+one thing chase exists to prevent.
+
+**Hot Regions gate whether chase applies at all.** Outside a declared window the transport runs
+free and ignores the timecode. An empty region list means "the whole document" -- reading it as
+"never chase" would make `CHASE ON` do nothing until a region was declared. The regions are tested
+against the DOCUMENT's own position, so they do not depend on when the show is run.
+
+`is_valid()` is checked before the frame is read: `get_current_frame_number` answers whatever it
+last held otherwise, and a chase following a stale frame would look like a working chase on a dead
+cable.
+
+**MEASURED.** `transport_self_test` covers the arithmetic at boot -- the offset, the re-anchor, a
+jump in house time, the freewheel boundary, the pause after it, the recovery, and hot regions in
+both directions -- because it injects a house position directly. New battery `timeline-chase`
+**12/12 both mixers** covers what needs a running server, and WHAT it covers is decided by a
+measured fact: there is no LTC signal on this machine and `is_valid()` is false without one, so
+following a timecode is unmeasurable here. What is measurable is the more interesting half -- the
+pause after the freewheel, a long freewheel keeping the show running where a short one does not,
+and hot regions still gating with the cable pulled, so the interactive stretches keep working and
+only the timed sequences stop.
+
+**Shown failing first, three times.** Hot regions not gating, and a freewheel that never expires,
+both ABORT THE BOOT. So the battery's mutation is in the tick: never calling `chase_position`
+fails five of its twelve checks.
+
+**Not measured, and recorded rather than implied:** accuracy against a real house clock, the
+offset end to end, and the recovery after a dropout.
+
 ### `on_end: commit`, and a SEEK that compiles the state a played-through show would have
 
 An object's `on_end` is honoured now. `release` -- the default -- gives the parameter back to

@@ -1060,6 +1060,33 @@ A verb answers `202` and takes effect on the next frame. Several clients acting 
 are resolved as **stop beats pause beats play** — a stop can never lose to a play that arrived a
 moment later.
 
+### Chasing house timecode
+
+```
+TIMELINE 1 CHASE show ON              # follow LTC
+TIMELINE 1 CHASE show OFFSET -36000   # the document's zero is house 10:00:00
+TIMELINE 1 CHASE show FREEWHEEL 25    # tolerate a second of dropout before stopping
+TIMELINE 1 CHASE show REGION 120 300  # only chase between 2:00 and 5:00 of the document
+TIMELINE 1 CHASE show REGIONS OFF     # back to chasing the whole document
+TIMELINE 1 CHASE show OFF
+```
+
+**Three things to know before you rely on it.**
+
+*Losing the timecode stops the show, on purpose.* After the freewheel expires the document
+**pauses** where it was. It does not carry on guessing: a show drifting against house time with
+nothing telling you is worse than one that stops. Set `FREEWHEEL` to however much dropout you are
+willing to ride through — 25 is a second at 25p. `channel/1/stage/timeline/show/chasing` and
+`.../freewheeled` tell you which state you are in and for how long.
+
+*Hot Regions are what make this usable in a real show.* Most shows are a few timed sequences with
+interactive stretches between them. Declare a region per timed sequence and the rest of the
+document runs free — so if the LTC cable is pulled mid-show, only the timed parts stop and
+everything else keeps working. With no regions declared, the whole document chases.
+
+*Regions are positions in YOUR document*, not times of day. `REGION 120 300` means two to five
+minutes into the show, whenever the show happens to run.
+
 ### `HOLD` and `RELEASE` — taking a parameter back mid-show
 
 ```

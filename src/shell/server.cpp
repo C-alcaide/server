@@ -55,6 +55,8 @@
 #include <core/timeline/resolver.h>
 #include <core/timeline/timeline_store.h>
 #include <core/timeline/transport.h>
+
+#include <modules/ltc/ltc_input.h>
 #include <core/stage/stage_math_self_test.h>
 #include <core/timeline/time.h>
 
@@ -645,6 +647,25 @@ struct server::impl
 
             const std::wstring lifecycle_key = L"lock" + std::to_wstring(channel_id);
             channel->stage()->set_timeline_store(timelines_);
+
+            // THE HOUSE TIMECODE, for a document that chases it.
+            //
+            // A bridge for the reason the previz writer below is one: `LTCInput` lives in
+            // `modules/ltc` and `core` does not link the modules. That inversion is exactly what
+            // forced the ten `shared_ptr<void>` virtuals the removed `KEYFRAMES` module needed,
+            // and they are not coming back for this.
+            //
+            // `is_valid()` is checked FIRST and the frame is returned only when it is true.
+            // `get_current_frame_number` answers whatever it last held otherwise, and a chase
+            // that followed a stale frame would look like a working chase on a dead cable --
+            // which is the failure mode chase exists to make visible. Absent is the honest
+            // answer, and the transport's freewheel is what decides how long to tolerate it.
+            channel->stage()->set_timecode_source([](int fps) -> std::optional<std::uint32_t> {
+                auto& ltc = caspar::ltc::LTCInput::instance();
+                if (!ltc.is_valid())
+                    return std::nullopt;
+                return ltc.get_current_frame_number(fps);
+            });
 
             // HOW THE STAGE WRITES A PREVIZ PROPERTY, which is the same bridge the control API
             // uses and for the same reason: the previz renderer is in `accelerator`, which

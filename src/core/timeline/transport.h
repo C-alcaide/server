@@ -80,6 +80,38 @@ struct transport_command
     std::optional<std::uint64_t>            at_frame;              //< schedule it
 };
 
+/// TIMECODE CHASE, and the three things that make it usable rather than a demo.
+///
+/// A show that must not slip against house time follows LTC. The frame counter is still the
+/// clock -- chase is a CORRECTION on top of it, not a different clock -- which is what keeps
+/// everything else in this file true while chasing.
+struct chase_config
+{
+    bool   enabled          = false;
+    flicks offset           = 0; //< added to the house timecode; a show that starts at 10:00:00
+    int    freewheel_frames = 5;
+
+    /// PIXERA's HOT REGIONS. Outside every declared window the transport runs FREE and ignores
+    /// the timecode; inside one, the timecode takes control.
+    ///
+    /// This is the difference between a feature an operator can use and one they cannot. A show
+    /// is usually a few timed sequences with interactive stretches between them: without hot
+    /// regions, chase either drags the interactive parts along with house time or has to be
+    /// switched on and off by hand at every boundary. Empty means "the whole document", which is
+    /// the simple case and the default.
+    std::vector<std::pair<flicks, flicks>> hot_regions;
+
+    bool inside(flicks t) const
+    {
+        if (hot_regions.empty())
+            return true;
+        for (const auto& r : hot_regions)
+            if (t >= r.first && t < r.second)
+                return true;
+        return false;
+    }
+};
+
 class transport
 {
   public:
@@ -104,6 +136,27 @@ class transport
     /// Apply a whole tick's worth, in the safe order rather than arrival order.
     bool apply_all(std::vector<transport_command>& pending, std::uint64_t frame, flicks per_frame);
 
+    void               set_chase(chase_config c) { chase_ = std::move(c); }
+    const chase_config& chase() const { return chase_; }
+
+    /// THE POSITION FOR THIS TICK, given the house timecode if there is one.
+    ///
+    /// Not `position_at`, and the split is deliberate: `position_at` stays PURE and answerable
+    /// for any frame, which is what lets a client predict a position and a self-test check one.
+    /// This is the per-tick call, it MUTATES the freewheel counter, and it may pause the
+    /// transport -- so it is called exactly once per tick per document and nothing else may call
+    /// it.
+    ///
+    /// `house` is the house timecode as a position, or nothing when the signal is absent or
+    /// invalid.
+    flicks chase_position(std::uint64_t frame, flicks per_frame, std::optional<flicks> house);
+
+    /// How many consecutive ticks the house timecode has been missing. 0 while it is present.
+    int freewheeled() const { return freewheel_; }
+
+    /// Is the transport currently taking its position from the timecode?
+    bool chasing() const { return chasing_; }
+
     /// The triggers a GO has fired, in order, with the position at which each fired.
     const std::vector<std::pair<std::string, flicks>>& fired() const { return fired_; }
     void                                               clear_fired() { fired_.clear(); }
@@ -121,6 +174,10 @@ class transport
 
     std::optional<std::pair<flicks, flicks>>    loop_;
     std::vector<std::pair<std::string, flicks>> fired_;
+
+    chase_config chase_;
+    int          freewheel_ = 0;
+    bool         chasing_   = false;
 
     void reanchor(std::uint64_t frame, flicks per_frame);
 };
