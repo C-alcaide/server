@@ -1,6 +1,52 @@
 CasparVP — Unreleased
 ==========================================
 
+### `channel/N/stage/state_leaves`, and the binding cost re-measured against it
+
+**New published value:** how many keys a channel puts into `monitor::state` each tick. It was not
+observable from outside the process, and it is the DENOMINATOR for every per-tick cost question --
+`monitor::state` is a `flat_map` rebuilt every frame, so an insert is a binary search plus a
+memmove and the cost of publishing grows with the size of the WHOLE tree rather than with what any
+one subsystem adds. Identical on both mixers, as a publication should be.
+
+**With it, `timeline-cost` reads differently and better:**
+
+| arm | ch1 leaves | ogl late | vulkan late |
+| :--- | ---: | ---: | ---: |
+| nothing driven | 52 | 0 | 0 |
+| 8 keyed / channel | 91 | 0 | 0 |
+| 32 keyed / channel | **187** | 0 | 0 |
+| 8 bound / channel | **188** | 0 | 0 |
+| **32 bound / channel** | **596** | **259** | **279** |
+| 8 keyed + 8 bound | 227 | 0 | 0 |
+
+**32 keyed fields publish 187 leaves and cost nothing; 8 bindings publish 188 and cost nothing;
+32 bindings publish 596 and cost 13%.** So the expense tracks the TOTAL leaf count rather than
+which mechanism produced it -- at equal tree size the two are equally free. What the mechanism
+decides is leaves per unit: **17.0 for a binding against 4.2 for a keyed field, about 4x.**
+
+**That corrects the previous entry's "13 against 1"**, which measured a binding's `binding/{id}/`
+sub-tree against a keyed field's VALUE alone and ignored that a keyed field also publishes its
+`driver/`, `constant/` and `stack/` rows. The 4x is measured; the 13x was arithmetic on an
+undercount.
+
+**So the ceiling is a published tree of roughly 600 leaves per channel per tick**, and 128
+bindings is not quotable as a limit on its own. Whether a real show comes near it is now a
+measurement -- read `state_leaves` on a realistic channel -- and it **has not been taken.**
+
+**Also: `monitor::state` gains `size()` and `reserve()`**, and the stage pre-sizes each tick's
+state from the previous tick's count. **It produced no measurable change** (Vulkan `bind-32` read
+254, 279, 308 with it against 284, 288 without -- inside a +/-10% spread either way) and is kept
+on the mechanism rather than on a number: rebuilding a container of known size without reserving
+is a real reallocation series, and it cannot change behaviour. It is NOT a fix, exactly as
+predicted -- it removes the reallocations and leaves the memmoves.
+
+**And one honest correction to the earlier baselines.** Across six runs the `bind-32` arm spans
+90-259 on ogl and 254-308 on Vulkan, not the tight 284-288 previously written. Vulkan still
+supports a null result and ogl does not, but only within ~10%: the two nulls rule out a LARGE
+effect (20x the resolve work, 2560 extra locks per tick) rather than measuring a small one. Only
+the publication removal, a flat zero on both mixers, is unambiguous.
+
 ### What a running timeline costs -- and the cost prediction was right for the wrong reason
 
 No code change. `timeline-cost` measures what the plan predicted and carried as F7: one

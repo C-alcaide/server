@@ -1598,22 +1598,48 @@ fields, and 32 keyed all on **one** channel to separate a per-channel cost from 
 
 Four channels at 1080p50, ~2010 frames per arm, two passes A/B/A/B:
 
-| arm | ogl late | vulkan late |
-| :--- | ---: | ---: |
-| nothing driven | 0 | 0 |
-| 8 keyed / channel (32 total) | 0 | 0 |
-| **32 keyed / channel (128 total)** | **0** | **0** |
-| 8 bound / channel (32 total) | 0 | 0 |
-| **32 bound / channel (128 total)** | **90–251**, five runs | **284–288** |
-| 32 keyed all on one channel | 0 | 0 |
-| 8 keyed + 8 bound, disjoint fields | 0 | 0 |
+| arm | ch1 leaves | ogl late | vulkan late |
+| :--- | ---: | ---: | ---: |
+| nothing driven | 52 | 0 | 0 |
+| 8 keyed / channel (32 total) | 91 | 0 | 0 |
+| **32 keyed / channel (128 total)** | **187** | **0** | **0** |
+| 8 bound / channel (32 total) | **188** | 0 | 0 |
+| **32 bound / channel (128 total)** | **596** | **259** | **279** |
+| 32 keyed all on one channel | 187 | 0 | 0 |
+| 8 keyed + 8 bound, disjoint fields | 227 | 0 | 0 |
+
+**`ch1 leaves` is the denominator, and reading the table with it changes the finding.** It is
+what `channel/N/stage/state_leaves` publishes — how many keys that channel puts into
+`monitor::state` each tick — and it is **identical on both mixers**, as a publication should be.
+
+**32 keyed fields publish 187 leaves and cost nothing. 8 bindings publish 188 and cost nothing.
+32 bindings publish 596 and cost 13%.** So the expense tracks the **total leaf count**, not which
+mechanism produced it — at equal tree size the two are equally free. What the mechanism decides
+is how many leaves you buy per unit:
+
+| | leaves per unit |
+| :--- | ---: |
+| a keyed field | **4.2** — its mixer value, plus `driver/`, `constant/` and `stack/` |
+| a binding | **17.0** — the same layer rows plus a 13-key `binding/{id}/` sub-tree |
+
+**About 4×, and that is the whole of it.** An earlier version of this section said 13 against 1,
+which was the `binding/{id}/` sub-tree measured against a keyed field's *value* alone — it
+ignored that a keyed field also publishes its driver, constant and stack rows. The 4× is
+measured; the 13× was arithmetic on an undercount.
 
 The frame period sits at 40.00 ms in every arm and is **not** the discriminator: it is paced by
 the consumer's own clock and cannot rise until the thread overruns. The late count and
 `consume_max` are what move.
 
 **A timeline is decisively cheaper than the same number of bindings**, and the margin is not
-marginal: 128 driven fields cost nothing where 128 bindings cost 10 to 14 percent of frames.
+marginal: 128 driven fields cost nothing where 128 bindings cost 13 percent of frames. But the
+reason is the leaf count above rather than anything about bindings as such — **the ceiling is a
+published tree of roughly 600 leaves per channel per tick**, and a binding reaches it four times
+faster than a keyed field does.
+
+**Which is why 128 is not quotable as a limit on its own.** `channel/N/stage/state_leaves` makes
+the tree size readable on any machine, so the question "how close is a real show to this" is a
+measurement rather than an inference. Nobody has taken it yet.
 
 ### 21.2 The mechanism F7 named is wrong, and the real one is the state publication
 
@@ -1629,12 +1655,13 @@ nothing, and the third found all of it:
 | the per-binding **mutex + source map lookup, 20×** | — | 269 | ruled out |
 | **the per-binding state publication REMOVED** | **0** | **0** | **it is this** |
 
-**The null results were read on VULKAN, and had to be.** OpenGL's `bind-32` arm spans **90 to
-251 late frames across five runs of the same binary** while Vulkan's sits in a 284–288 band. A
-null result needs a stable baseline: 269 against 284–288 supports "no change", and nothing at all
-could be concluded from an ogl number inside a 2.8× spread. Only the last mutation — which drives
-the arm to a flat **zero on both** — is readable on either. Why ogl's binding cost is that
-variable is not explained here and is not the same question.
+**The null results were read on VULKAN, and neither baseline is as tight as first written.**
+Across six runs of unmutated binaries the `bind-32` arm spans **90–259 on ogl** and **254–308 on
+Vulkan** — a 2.9× spread against roughly ±10%. So Vulkan supports a null result and ogl does not,
+but only within that ±10%: what the two nulls establish is that **20× the resolve work and 2560
+extra locks and lookups per tick do not matter**, which is a large effect ruled out rather than a
+small one measured. Only the last mutation — a flat **zero on both mixers** — is unambiguous.
+Why ogl is that variable is unexplained and is a different question.
 
 So **F7's conclusion holds and its stated reason does not.** The write path is shared with the
 timeline and is free at 20× the work; the mutex and the string-keyed source lookup are free at
@@ -1643,10 +1670,11 @@ of frames late to **zero, on both mixers**.
 
 **Why publishing costs that much**, three things compounding in `monitor::state`:
 
-* **13 published values per binding per tick** (`layer`, `target`, `component`, `source`, `min`,
-  `max`, `in_min`, `in_max`, `gain`, `lag`, `curve`, `value`, `broken`) against **one** for a
-  keyed field. That is the asymmetry, and it is 416 writes per channel per tick at 32 bindings —
-  1664 across four.
+* **17 published leaves per binding against 4.2 for a keyed field**, measured (§21.1). Thirteen
+  of a binding's are its own `binding/{id}/` sub-tree — `layer`, `target`, `component`, `source`,
+  `min`, `max`, `in_min`, `in_max`, `gain`, `lag`, `curve`, `value`, `broken` — none of which a
+  keyed field has an equivalent of. At 32 bindings that is **596 leaves on the channel against
+  187** for the same number of keyed fields.
 * **`data_map_t` is a `boost::container::flat_map`**, a sorted vector, so each new key is a
   binary search plus a memmove of everything after it. Insert cost therefore grows with the size
   of the whole channel's tree, not with the number of bindings.
@@ -1661,21 +1689,37 @@ tree on every other tick — a client reading `binding/5/min` would find it once
 
 Three that do work, smallest first:
 
-1. **`reserve()` the tick's state from the previous tick's size.** Nearly free to try; helps the
-   reallocation and not the memmove, so expect a small win. **Not yet measured** — it is the next
-   thing to run.
-2. **Move the eleven static values off the per-tick surface**, published only when the binding
-   set changes. `structure_revision` already exists as the signal for a client to re-walk, and
-   `BIND`/`UNBIND` already feed it. This is the coherent fix, and it is an **API change**:
-   `binding/{id}/min` and its neighbours leave the per-tick tree, which touches `binding-lfo`,
-   `binding-owner`, `binding-input`, `binding-audio`, `binding-osc`, `api-tree` and `api-events`.
-3. **Change `data_map_t` to a hash map.** Fixes the class rather than the instance, but `flat_map`
-   is there for sorted iteration on the read side (the OSC fan-out and the tree walk), so this is
-   the large, risky one.
+1. **`reserve()` the tick's state from the previous tick's size.** **Done, and it produced no
+   measurable change**: Vulkan's `bind-32` read 254, 279 and 308 with it against 284 and 288
+   without, which is inside the ±10% spread either way. It is kept anyway, on the mechanism
+   rather than on a number — rebuilding a container of known size without reserving is a real
+   reallocation series, and four lines that cannot change behaviour are worth it. **It is not a
+   fix**, exactly as predicted: it removes the reallocations and leaves the memmoves, and the
+   memmoves are the cost.
+2. **Build the map by APPEND-AND-SORT instead of insert-with-memmove**, inside
+   `monitor::state`. This is the one to do if any of them is done. Every tick writes roughly the
+   same key set in whatever order the publication code runs, and each write memmoves to keep the
+   vector sorted; appending to a plain vector and flattening once — sort, dedupe last-wins, then
+   `flat_map(boost::container::ordered_unique_range, first, last)` — turns O(n²) in memmoves into
+   one O(n log n) sort. **No API change, no consumer change, sorted iteration preserved** (which
+   is why `flat_map` is there), and it helps *every* publication site rather than bindings: the
+   same quadratic sits under mixer fields, producer parameters and the previz tree. The risk is
+   duplicate keys within a tick, which `data_[key] = v` currently absorbs and append-then-sort
+   must handle explicitly, plus `merge()`, `operator=(const state&)` and `begin()`/`end()` all
+   needing the flatten to have happened.
+3. **Publish the eleven static binding values only when the binding set changes.** Recorded here
+   because it is the obvious next idea and it **does not work as stated**: `merge()` loops and
+   does `data_[key] = value` per key, so merging a cached sub-tree into each fresh tick costs the
+   same inserts and buys nothing. It only helps if the *consumers* read two states, which means
+   changing both the OSC fan-out and the API tree walk — a larger change than option 2 for a
+   benefit option 2 gets for free.
 
-**None is urgent.** The working figure is unchanged — 32 live bindings cost nothing however they
-are spread — and the thing a client generates hundreds of is keyed parameters, which measured 0
-at 128.
+**None is urgent, and option 2 is the only one worth building.** The working figure is unchanged
+— 32 live bindings cost nothing however they are spread, which covers a whole MIDI control
+surface — and the thing a client generates hundreds of is keyed parameters, which measured 0 at
+128. **The measurement that would decide it is now cheap and has not been taken:** read
+`channel/N/stage/state_leaves` on a realistic show and compare it with the 596 that breaks. If a
+real channel publishes 200, the ceiling is a long way off.
 
 **The battery is not vacuous**, and the `bind-32` arm is the reason: it reports a real cost on
 the same measurement path in every run. An instrument that never moves cannot be told from a
@@ -1712,7 +1756,8 @@ here so the numbers above are read as what they are.
 | **Whether a clip's picture is the right FRAME of the clip** (§20.4) | Needs a frame-pinned capture against a known frame of a marker clip. `api-readiness` does not do this either, so it is a harness capability gap rather than a timeline one. |
 | **A slow-source build** (§20.4) | `build_ms` is 40 ms for a local file. There is no fixture that builds slowly, so the "a clip that is not ready does not hold the cue" path is exercised only by `preroll_frames: 0`. |
 | **Where the resolve pass's cost goes** (§21.2) | It has none at 20× the work, so a regression making it ten times slower would pass `timeline-cost`. Nothing measures the pass itself. |
-| ~~Where the BINDING path's cost goes~~ (§21.2) | **ATTRIBUTED** — it is the per-binding state publication, 13 values per binding per tick into a `flat_map` that is rebuilt whole each tick. Removing it takes 128 bindings to 0 late frames on both mixers. What is **not** measured is whether `reserve()` alone recovers enough of it (§21.2 option 1). |
+| ~~Where the BINDING path's cost goes~~ (§21.2) | **ATTRIBUTED** — it is the state publication. 17 leaves per binding against 4.2 per keyed field, into a `flat_map` rebuilt whole each tick; removing it takes 128 bindings to 0 late frames on both mixers, and at equal leaf counts (187 vs 188) the two mechanisms are equally free. `reserve()` is done and made no measurable difference. |
+| **How many leaves a REALISTIC show publishes** (§21.1) | The ceiling is ~600 leaves per channel per tick, and the fixture reaches it with 32 bindings. Whether a real show comes near it is now readable from `channel/N/stage/state_leaves` and **has not been measured** — which is what decides whether §21.2 option 2 is ever worth building. |
 | **Following a real house timecode** (§16) | `LTCInput::is_valid()` is false without a signal and there is no LTC generator on this box, so chase is covered for what it does with **no** signal. F9 stands: the system-clock fallback's rate predictability is unverified, and nothing depends on it. |
 | **The `OFX KEY` refusal's reply** (§17) | Driving it against an ISF producer answered `202` because the `CALL` fell through to the wrapped producer. Instantiating the OFX producer needs a bundle, and there is none here. |
 | **Audio beyond the value stream** | `mixer/volume` is addressable, writable, publishable, bindable and keyable, and every check reads the published value. A recording plus `volumedetect` would prove it is audible. F5. |

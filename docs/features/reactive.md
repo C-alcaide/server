@@ -349,9 +349,9 @@ cannot rise until the thread overruns, so the late count is the discriminator.
 
 `timeline-cost` drives the same number of fields two ways on one binary, four channels at
 1080p50. At **32 driven fields** both mechanisms are free. At **128**, a timeline costs **0 late
-frames** and the same count of bindings costs **90–251 on ogl and 284–288 on vulkan** over five
-runs — 4 to 14 percent of frames. The ogl arm's 2.8× run-to-run spread is unexplained and is why
-the diagnostic mutations below were read on vulkan.
+frames** and the same count of bindings costs **90–259 on ogl and 254–308 on vulkan** over six
+runs — 4 to 15 percent of frames. The ogl arm's 2.9× run-to-run spread is unexplained and is why
+the diagnostic mutations below were read on vulkan, whose spread is about ±10%.
 
 **The cost is what a binding PUBLISHES, not what it computes or writes.** The timeline plan
 predicted copy count — one `frame_transform` copy per driven layer against three per binding —
@@ -360,11 +360,19 @@ times per path (2560 copies per tick) changed nothing, and 2560 extra mutex acqu
 source map lookups per tick changed nothing. **Removing the per-binding state publication takes
 128 bindings to 0 late frames on both mixers.**
 
-A binding publishes **13 values every tick** where a keyed field publishes one, into a
-`boost::container::flat_map` whose insert is a memmove and which is **rebuilt whole every tick** —
-so the eleven values that are pure configuration (`min`, `max`, `gain`, `lag`, `curve`, `target`,
-`source`, …) are re-inserted fifty times a second and cannot simply be skipped, because skipping
-them removes them from the tree. `timeline.md` §21.2 has the mechanism and three ranked fixes.
+A binding publishes **17 leaves** where a keyed field publishes **4.2**, into a
+`boost::container::flat_map` whose insert is a memmove and which is **rebuilt whole every tick**.
+Thirteen of a binding's are its own `binding/{id}/` sub-tree (`min`, `max`, `gain`, `lag`,
+`curve`, `target`, `source`, …), re-inserted fifty times a second, and they cannot simply be
+skipped because skipping them removes them from the tree.
+
+**But the cost tracks the TOTAL leaf count, not the mechanism**, which
+`channel/N/stage/state_leaves` now makes readable: 32 keyed fields publish 187 leaves and are
+free, 8 bindings publish 188 and are free, 32 bindings publish 596 and are late. **The ceiling is
+around 600 leaves per channel per tick**; a binding just reaches it four times faster.
+`timeline.md` §21 has the mechanism and the ranked fixes — and the measurement that decides
+whether any of them is worth building is reading `state_leaves` on a real show, which nobody has
+done.
 
 The working figure is comfortable and it is a **total** rather than a per-channel one, which the
 "32 all on one channel" arm establishes: **32 continuous bindings cost no late frames on four

@@ -495,6 +495,35 @@ key for:
 
 ---
 
+### `state_leaves` — how big the tree you are subscribed to actually is
+
+`channel/{n}/stage/state_leaves` is the number of keys that channel publishes into
+`monitor::state` each tick.
+
+```
+GET /v1/value/channel/1/stage/state_leaves   ->  187
+```
+
+**It is here because the publication is not free and nothing measured it.** `monitor::state` is a
+`boost::container::flat_map` — a sorted vector — and the stage builds a **fresh one every tick**,
+so each key costs a binary search plus a memmove of everything after it. The cost of publishing
+therefore grows with the size of the **whole** tree rather than with whatever any one subsystem
+adds to it, which makes this count the denominator for every per-tick cost question about the API.
+
+Measured on this box at 1080p50 across four channels, and identical on both mixers: **52** leaves
+on an idle channel, **187** driving 32 keyed timeline fields, **188** driving 8 bindings, **596**
+driving 32 bindings. The first three cost no late frames; **596 costs 13%**. So a client that
+subscribes widely is not the expensive thing — what a channel *publishes* is, and
+`docs/features/timeline.md` §21 has the mechanism and the ranked fixes.
+
+**Per unit:** a keyed timeline field adds about **4.2** leaves (its mixer value plus its
+`driver/`, `constant/` and `stack/` rows); a binding adds about **17** (the same layer rows plus a
+13-key `binding/{id}/` sub-tree). So a binding reaches the ceiling roughly four times faster.
+
+It is the **previous** tick's count, necessarily — it is read before the current tick's tree is
+finished — and therefore exact whenever the leaf set is stable, which is whenever
+`structure_revision` is.
+
 ### `structure_revision` — how a client learns the address space changed
 
 **`/v1/events` carries value changes only, and the tree is dynamic.** `PLAY` grows

@@ -240,6 +240,9 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         std::chrono::steady_clock::time_point started;
         double                                              build_ms = 0.0;
     };
+    /// The previous tick's published leaf count, so the next tick can pre-size. See the
+    /// `reserve` call in the publication block.
+    std::size_t                        last_state_leaves_ = 0;
     std::map<std::string, media_build> media_;
     stage::clip_factory                clip_factory_;
     std::map<std::string, timeline::trigger_log>                   trigger_logs_;
@@ -671,6 +674,13 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
                 monitor::state state;
 
+                // PRE-SIZED FROM THE PREVIOUS TICK. `monitor::state` is a `flat_map` and this
+                // one is built from scratch every frame, so without this a channel publishing a
+                // few hundred leaves walks the whole reallocation series once per frame. The
+                // count is stable between ticks by construction -- the leaf set only changes
+                // when the structure does, which is what `structure_revision_` tracks.
+                state.reserve(last_state_leaves_);
+
                 // Receive timing, on the refresh tick only. The whole-tick figure
                 // against the frame budget is the number that matters: if pulling
                 // every layer costs a few percent of a frame, sequential receive is
@@ -823,6 +833,21 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     state["structure_revision"] = structure_revision_;
                 }
 
+                // HOW MANY LEAVES THIS CHANNEL PUBLISHES, which decides what the publication
+                // costs and was not observable from outside the process.
+                //
+                // `monitor::state` is a `flat_map` rebuilt every tick, so an insert is a binary
+                // search plus a memmove and the cost of publishing grows with the size of the
+                // WHOLE tree rather than with the number of things any one subsystem adds. That
+                // makes this count the denominator for every per-tick cost question -- and
+                // without it, "128 bindings are expensive" cannot be told apart from "this
+                // fixture publishes ten times what a show does".
+                //
+                // The PREVIOUS tick's count, necessarily: it is read before this tick's tree is
+                // finished. Exact whenever the leaf set is stable, which is whenever the
+                // structure is -- and `structure_revision` above is what says so.
+                state["state_leaves"] = static_cast<std::int64_t>(last_state_leaves_);
+
                 // -- Bindings and sources, published every tick ----------------------------
                 //
                 // Published UNCONDITIONALLY when they exist, including `broken` and `value`,
@@ -883,7 +908,8 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     }
                 }
 
-                state_ = std::move(state);
+                last_state_leaves_ = state.size();
+                state_             = std::move(state);
             } catch (...) {
                 // Per-layer faults are handled inside the loop above; anything
                 // reaching here is a stage-wide fault (tween/timeline/route

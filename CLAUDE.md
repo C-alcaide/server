@@ -436,17 +436,28 @@ consequences that are not obvious from the call site:
   `"a"`, then `"a/b"`, then `"a/b/c"` — and `state_proxy::operator[]` returns by value, copying
   the key again. So one leaf write is several allocations.
 
-Measured 2026-09-10, and it was the whole of an unexplained cost. A binding publishes **13
-values per tick** (its layer, target, component, source, four range bounds, gain, lag, curve,
-value and broken flag) where a keyed timeline field publishes **one**. At 32 bindings per channel
-that is 416 writes per channel per tick, 1664 over four channels — and it put 128 bindings at
-**10–14% of frames late** while 128 keyed fields cost **zero**. Removing just that publication
-took it to zero on both mixers.
+Measured 2026-09-10, and it was the whole of an unexplained cost. **`channel/N/stage/state_leaves`
+publishes the count**, which is what made this measurable at all — it was not observable from
+outside the process, and it is the denominator for every per-tick cost question.
 
-**So before adding a published node per instance of something, count the keys and multiply by
-the frame rate.** And note the fix that looks obvious and is wrong: you cannot publish the static
-half only when it changes, because the tree is rebuilt whole each tick and the omitted keys
-disappear from it. `docs/features/timeline.md` §21.2 ranks the three that work.
+The numbers, from `timeline-cost` and identical on both mixers: a channel publishes **52** leaves
+idle, **187** driving 32 keyed timeline fields, **188** driving 8 bindings, and **596** driving 32
+bindings. **187 and 188 both cost zero late frames; 596 costs 13%.** So the expense tracks the
+TOTAL leaf count rather than which subsystem produced it — and what a subsystem decides is leaves
+per unit: **17.0 for a binding against 4.2 for a keyed field**, because a binding carries a
+13-key `binding/{id}/` sub-tree that a keyed field has no equivalent of.
+
+**So before adding a published node per instance of something, count the keys and multiply by the
+frame rate** — and read `state_leaves` to see what tree it is landing in, because the memmove
+makes the cost grow with the whole tree rather than with your addition. The ceiling on this box is
+around **600 leaves per channel per tick** at 1080p50 on four channels.
+
+Two fixes that look obvious and are not. **You cannot publish the static half only when it
+changes**: the tree is rebuilt whole each tick, so the omitted keys disappear from it, and
+`merge()`-ing a cached sub-tree back in costs the same inserts. **And `reserve()` is not enough** —
+it is in (`monitor::state::reserve`, called from the stage) and produced no measurable change,
+because it removes the reallocation series and leaves the memmoves. The one worth building is
+append-and-sort inside `monitor::state`, which `docs/features/timeline.md` §21.2 sets out.
 
 **The measurement lesson generalises past this case.** Three mutations were needed, one variable
 each, and the first two found nothing — the resolve pass at 20× the work, then 2560 extra mutex

@@ -127,6 +127,18 @@ class state
         return state_proxy(boost::lexical_cast<std::string>(key), data_);
     }
 
+    /// How many leaves this state holds.
+    std::size_t size() const { return data_.size(); }
+
+    /// Pre-size the underlying sorted vector.
+    ///
+    /// `data_map_t` is a `flat_map`, so an insert is a binary search plus a memmove of
+    /// everything after the insertion point, and a fresh `state` is built EVERY TICK. A channel
+    /// publishing a few hundred leaves therefore pays a reallocation series per frame on top of
+    /// the memmoves. Reserving from the previous tick's `size()` removes the reallocations; it
+    /// does NOT remove the memmoves, which is why it is a mitigation rather than a fix.
+    void reserve(std::size_t n) { data_.reserve(n); }
+
     data_map_t::const_iterator begin() const { return data_.begin(); }
 
     data_map_t::const_iterator end() const { return data_.end(); }
