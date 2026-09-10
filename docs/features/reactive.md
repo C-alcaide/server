@@ -349,16 +349,22 @@ cannot rise until the thread overruns, so the late count is the discriminator.
 
 `timeline-cost` drives the same number of fields two ways on one binary, four channels at
 1080p50. At **32 driven fields** both mechanisms are free. At **128**, a timeline costs **0 late
-frames** and the same count of bindings costs **198 on ogl and 284 on vulkan** — 10 to 14 percent
-of frames.
+frames** and the same count of bindings costs **90–251 on ogl and 284–288 on vulkan** over five
+runs — 4 to 14 percent of frames. The ogl arm's 2.8× run-to-run spread is unexplained and is why
+the diagnostic mutations below were read on vulkan.
 
-**Where that cost is has NOT been established, and the obvious answer was ruled out.** The
-timeline plan predicted the difference was copy count — one `frame_transform` copy per driven
-layer against three per binding. Two mutations refuted it: making the resolve pass copy and store
-per write changed nothing measurable, and doing it twenty times per path (2560 copies per tick)
-also changed nothing. So the expense is elsewhere in the binding path — source evaluation, the
-`tweened_transform::patch` onto the constant, the per-binding publication, or the state fan-out.
-That needs a profile, and `timeline.md` §21 records it as owed rather than guessing.
+**The cost is what a binding PUBLISHES, not what it computes or writes.** The timeline plan
+predicted copy count — one `frame_transform` copy per driven layer against three per binding —
+and that was refuted: making the resolve pass copy and store per write changed nothing, twenty
+times per path (2560 copies per tick) changed nothing, and 2560 extra mutex acquisitions plus
+source map lookups per tick changed nothing. **Removing the per-binding state publication takes
+128 bindings to 0 late frames on both mixers.**
+
+A binding publishes **13 values every tick** where a keyed field publishes one, into a
+`boost::container::flat_map` whose insert is a memmove and which is **rebuilt whole every tick** —
+so the eleven values that are pure configuration (`min`, `max`, `gain`, `lag`, `curve`, `target`,
+`source`, …) are re-inserted fifty times a second and cannot simply be skipped, because skipping
+them removes them from the tree. `timeline.md` §21.2 has the mechanism and three ranked fixes.
 
 The working figure is comfortable and it is a **total** rather than a per-channel one, which the
 "32 all on one channel" arm establishes: **32 continuous bindings cost no late frames on four

@@ -1604,7 +1604,7 @@ Four channels at 1080p50, ~2010 frames per arm, two passes A/B/A/B:
 | 8 keyed / channel (32 total) | 0 | 0 |
 | **32 keyed / channel (128 total)** | **0** | **0** |
 | 8 bound / channel (32 total) | 0 | 0 |
-| **32 bound / channel (128 total)** | **198** | **284** |
+| **32 bound / channel (128 total)** | **90–251**, five runs | **284–288** |
 | 32 keyed all on one channel | 0 | 0 |
 | 8 keyed + 8 bound, disjoint fields | 0 | 0 |
 
@@ -1615,24 +1615,71 @@ the consumer's own clock and cannot rise until the thread overruns. The late cou
 **A timeline is decisively cheaper than the same number of bindings**, and the margin is not
 marginal: 128 driven fields cost nothing where 128 bindings cost 10 to 14 percent of frames.
 
-### 21.2 The mechanism F7 named is wrong, and two mutations say so
+### 21.2 The mechanism F7 named is wrong, and the real one is the state publication
 
-**Neither mutation was caught**, which is the result rather than a gap:
+F7 predicted the difference was **copy count** — one `frame_transform` copy per driven layer
+against three per binding. Three mutations, each on one variable, settled it. The first two found
+nothing, and the third found all of it:
 
-* `resolve_drivers` fetching and storing the transform **per write** — the shape F7 named as
-  expensive — changed nothing measurable.
-* the same thing **twenty times per path**, which is 2560 copies and writes per tick at the
-  128-field arm, also changed nothing measurable.
+| mutation | bind-32 late, ogl | vulkan | verdict |
+| :--- | ---: | ---: | :--- |
+| *baseline, five runs* | 90–251 | 284–288 | — |
+| `resolve_drivers` copies and stores **per write** (F7's shape) | — | no change | ruled out |
+| the same, **20× per path** — 2560 copies/tick at the 128 arm | — | no change | ruled out |
+| the per-binding **mutex + source map lookup, 20×** | — | 269 | ruled out |
+| **the per-binding state publication REMOVED** | **0** | **0** | **it is this** |
 
-So the resolve pass is not the expense at any plausible multiple of it. **F7's conclusion holds
-and its stated reason does not.** The binding cost is elsewhere in the binding path — source
-evaluation, the `tweened_transform::patch` onto the constant, the per-binding publication, or
-the state fan-out — and that is **not measured**. It needs a profile, and it is recorded as owed
-rather than guessed at, which is the same limit `binding-cost` reached from the other side.
+**The null results were read on VULKAN, and had to be.** OpenGL's `bind-32` arm spans **90 to
+251 late frames across five runs of the same binary** while Vulkan's sits in a 284–288 band. A
+null result needs a stable baseline: 269 against 284–288 supports "no change", and nothing at all
+could be concluded from an ogl number inside a 2.8× spread. Only the last mutation — which drives
+the arm to a flat **zero on both** — is readable on either. Why ogl's binding cost is that
+variable is not explained here and is not the same question.
+
+So **F7's conclusion holds and its stated reason does not.** The write path is shared with the
+timeline and is free at 20× the work; the mutex and the string-keyed source lookup are free at
+2560 extra of each per tick. Removing what a binding *publishes* takes 128 bindings from 10–14%
+of frames late to **zero, on both mixers**.
+
+**Why publishing costs that much**, three things compounding in `monitor::state`:
+
+* **13 published values per binding per tick** (`layer`, `target`, `component`, `source`, `min`,
+  `max`, `in_min`, `in_max`, `gain`, `lag`, `curve`, `value`, `broken`) against **one** for a
+  keyed field. That is the asymmetry, and it is 416 writes per channel per tick at 32 bindings —
+  1664 across four.
+* **`data_map_t` is a `boost::container::flat_map`**, a sorted vector, so each new key is a
+  binary search plus a memmove of everything after it. Insert cost therefore grows with the size
+  of the whole channel's tree, not with the number of bindings.
+* **each write rebuilds its path by concatenation at every level.** `state["binding"][id]["min"]`
+  allocates `"binding"`, then `"binding/5"`, then `"binding/5/min"`, and `state_proxy::operator[]`
+  returns by value, copying the key again.
+
+**The obvious fix does not work, and the reason is worth knowing before anyone tries it.**
+`monitor::state state;` is constructed **fresh every tick** and swapped into `state_` at the end,
+so publishing the eleven static values only when they change would make them *vanish* from the
+tree on every other tick — a client reading `binding/5/min` would find it once and never again.
+
+Three that do work, smallest first:
+
+1. **`reserve()` the tick's state from the previous tick's size.** Nearly free to try; helps the
+   reallocation and not the memmove, so expect a small win. **Not yet measured** — it is the next
+   thing to run.
+2. **Move the eleven static values off the per-tick surface**, published only when the binding
+   set changes. `structure_revision` already exists as the signal for a client to re-walk, and
+   `BIND`/`UNBIND` already feed it. This is the coherent fix, and it is an **API change**:
+   `binding/{id}/min` and its neighbours leave the per-tick tree, which touches `binding-lfo`,
+   `binding-owner`, `binding-input`, `binding-audio`, `binding-osc`, `api-tree` and `api-events`.
+3. **Change `data_map_t` to a hash map.** Fixes the class rather than the instance, but `flat_map`
+   is there for sorted iteration on the read side (the OSC fan-out and the tree walk), so this is
+   the large, risky one.
+
+**None is urgent.** The working figure is unchanged — 32 live bindings cost nothing however they
+are spread — and the thing a client generates hundreds of is keyed parameters, which measured 0
+at 128.
 
 **The battery is not vacuous**, and the `bind-32` arm is the reason: it reports a real cost on
 the same measurement path in every run. An instrument that never moves cannot be told from a
-broken one; this one moves.
+broken one; this one moves — and it is what let three mutations rule three sites in or out.
 
 **What it therefore cannot see:** a regression that made the resolve pass ten times slower.
 That pass is free at 20×, so nothing here would notice. Stated rather than left implicit.
@@ -1665,7 +1712,7 @@ here so the numbers above are read as what they are.
 | **Whether a clip's picture is the right FRAME of the clip** (§20.4) | Needs a frame-pinned capture against a known frame of a marker clip. `api-readiness` does not do this either, so it is a harness capability gap rather than a timeline one. |
 | **A slow-source build** (§20.4) | `build_ms` is 40 ms for a local file. There is no fixture that builds slowly, so the "a clip that is not ready does not hold the cue" path is exercised only by `preroll_frames: 0`. |
 | **Where the resolve pass's cost goes** (§21.2) | It has none at 20× the work, so a regression making it ten times slower would pass `timeline-cost`. Nothing measures the pass itself. |
-| **Where the BINDING path's cost goes** (§21.2) | 128 bindings cost 10–14% of frames and two mutations ruled out the copy count. Needs a profile. This is the one open item of real size. |
+| ~~Where the BINDING path's cost goes~~ (§21.2) | **ATTRIBUTED** — it is the per-binding state publication, 13 values per binding per tick into a `flat_map` that is rebuilt whole each tick. Removing it takes 128 bindings to 0 late frames on both mixers. What is **not** measured is whether `reserve()` alone recovers enough of it (§21.2 option 1). |
 | **Following a real house timecode** (§16) | `LTCInput::is_valid()` is false without a signal and there is no LTC generator on this box, so chase is covered for what it does with **no** signal. F9 stands: the system-clock fallback's rate predictability is unverified, and nothing depends on it. |
 | **The `OFX KEY` refusal's reply** (§17) | Driving it against an ISF producer answered `202` because the `CALL` fell through to the wrapped producer. Instantiating the OFX producer needs a bundle, and there is none here. |
 | **Audio beyond the value stream** | `mixer/volume` is addressable, writable, publishable, bindable and keyable, and every check reads the published value. A recording plus `volumedetect` would prove it is audible. F5. |

@@ -423,6 +423,37 @@ disagreed about the struct's size. The A/B that "proved" the fault was pre-exist
 the same inconsistent objects every time. **When a fault survives removing the code that could
 cause it, suspect the build before the code.**
 
+## A per-tick published node costs more than the work behind it
+
+`monitor::state` is a **`boost::container::flat_map<std::string, vector_t>`** (`core/monitor/monitor.h`)
+and the stage builds a **fresh one every tick**, swapping it into `state_` at the end. Two
+consequences that are not obvious from the call site:
+
+* **each new key is a binary search plus a memmove of everything after it**, so the cost of a
+  write grows with the size of the whole channel's tree rather than with the number of things
+  you are publishing;
+* **`state["a"]["b"]["c"] = v` rebuilds the path by concatenation at every level** —
+  `"a"`, then `"a/b"`, then `"a/b/c"` — and `state_proxy::operator[]` returns by value, copying
+  the key again. So one leaf write is several allocations.
+
+Measured 2026-09-10, and it was the whole of an unexplained cost. A binding publishes **13
+values per tick** (its layer, target, component, source, four range bounds, gain, lag, curve,
+value and broken flag) where a keyed timeline field publishes **one**. At 32 bindings per channel
+that is 416 writes per channel per tick, 1664 over four channels — and it put 128 bindings at
+**10–14% of frames late** while 128 keyed fields cost **zero**. Removing just that publication
+took it to zero on both mixers.
+
+**So before adding a published node per instance of something, count the keys and multiply by
+the frame rate.** And note the fix that looks obvious and is wrong: you cannot publish the static
+half only when it changes, because the tree is rebuilt whole each tick and the omitted keys
+disappear from it. `docs/features/timeline.md` §21.2 ranks the three that work.
+
+**The measurement lesson generalises past this case.** Three mutations were needed, one variable
+each, and the first two found nothing — the resolve pass at 20× the work, then 2560 extra mutex
+acquisitions and map lookups per tick, both invisible. Those two null results read as "the cost is
+unprofiled" for half a day. **A mutation that does not move the number has ruled out that SITE,
+not the question.** Keep going.
+
 ## `/fp:fast` is on, so an exact-looking division is not one
 
 `CMAKE_CXX_FLAGS` carries **`/fp:fast`** alongside `/arch:AVX2`, which licenses MSVC to reassociate

@@ -16,7 +16,7 @@ machines.
 | 8 keyed / channel (32 total) | 0 | 0 |
 | **32 keyed / channel (128 total)** | **0** | **0** |
 | 8 bound / channel (32 total) | 0 | 0 |
-| **32 bound / channel (128 total)** | **198** | **284** |
+| **32 bound / channel (128 total)** | **90-251**, five runs | **284-288** |
 | 32 keyed all on one channel | 0 | 0 |
 | 8 keyed + 8 bound, disjoint fields | 0 | 0 |
 
@@ -25,14 +25,33 @@ consumer's clock and cannot rise until the thread overruns. **A timeline is deci
 than the same number of bindings** -- 128 driven fields cost nothing where 128 bindings cost 10
 to 14 percent of frames.
 
-**THE MECHANISM F7 NAMED IS WRONG, and two mutations say so -- neither was caught, which is the
-result rather than a gap.** `resolve_drivers` fetching and storing the transform PER WRITE (the
-shape F7 called expensive) changed nothing measurable; doing it TWENTY TIMES per path, 2560
-copies and writes per tick at the 128-field arm, also changed nothing. So the resolve pass is not
-the expense at any plausible multiple of it. F7's conclusion holds and its stated reason does
-not: the binding cost is elsewhere in the binding path -- source evaluation, the patch onto the
-constant, the per-binding publication, or the state fan-out -- and that is NOT MEASURED. It needs
-a profile and is recorded as owed.
+**THE MECHANISM F7 NAMED IS WRONG, AND THE REAL ONE IS THE STATE PUBLICATION.** Three mutations,
+one variable each. `resolve_drivers` copying and storing PER WRITE (the shape F7 called
+expensive): no change. The same TWENTY TIMES per path, 2560 copies and writes per tick at the 128
+arm: no change. The per-binding mutex and source map lookup 20x, 2560 extra of each per tick: no
+change, 269 against a 284-288 baseline. **The per-binding state publication REMOVED: 0 late
+frames, both mixers.**
+
+**The null results were read on VULKAN and had to be.** The ogl `bind-32` arm spans 90 to 251
+late frames across five runs of the same binary; vulkan's sits in a 284-288 band. A null result
+needs a stable baseline, so nothing could be concluded from an ogl number inside a 2.8x spread.
+Only the last mutation, which drives the arm to a flat zero on both, is readable either way. Why
+ogl is that variable is unexplained and is a different question.
+
+So F7's conclusion holds and its stated reason does not. **A binding publishes 13 values every
+tick** -- layer, target, component, source, min, max, in_min, in_max, gain, lag, curve, value,
+broken -- where a keyed field publishes ONE: 416 writes per channel per tick at 32 bindings, 1664
+across four. They go into a `boost::container::flat_map` whose insert is a binary search plus a
+memmove, so the cost grows with the whole tree's size; and each write rebuilds its path by
+concatenation at every level.
+
+**The obvious fix does not work**, which is worth knowing before anyone tries it: `monitor::state`
+is constructed FRESH every tick and swapped in, so publishing the eleven static values only on
+change would make them vanish from the tree. The three that do work are ranked in
+`docs/features/timeline.md` 21.2 -- `reserve()` (cheap, unmeasured, and the next thing to run),
+moving configuration off the per-tick surface behind `structure_revision` (right, and an API
+change), or replacing `flat_map` (large). **None is urgent:** the working figure is unchanged at
+32 live bindings free, and a client's animation goes through documents, which measured 0 at 128.
 
 The battery is not vacuous: the `bind-32` arm reports a real cost on the same measurement path in
 every run, and an instrument that never moves cannot be told from a broken one. What it therefore
