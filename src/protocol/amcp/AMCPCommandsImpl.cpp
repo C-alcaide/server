@@ -69,6 +69,7 @@
 #include <core/producer/transition/sting_producer.h>
 #include <core/producer/transition/transition_producer.h>
 #include <core/video_format.h>
+#include <core/address/target.h>
 #include <core/binding/binding.h>
 #include <core/mixer/audio/audio_analysis.h>
 #include "../midi/midi_source.h"
@@ -1549,7 +1550,7 @@ std::future<std::wstring> mixer_field_command(command_context& ctx)
         // No name: the inventory. A client with no other documentation can discover the
         // whole surface from the protocol it is already speaking.
         std::wstring out = L"201 MIXER OK\r\n";
-        for (const auto& f : fields::all()) {
+        const auto   row = [&out](const fields::field_meta& f) {
             const bool writable =
                 (static_cast<uint8_t>(f.access) & static_cast<uint8_t>(fields::access_t::write)) != 0;
             out += u16(f.path);
@@ -1559,22 +1560,39 @@ std::future<std::wstring> mixer_field_command(command_context& ctx)
             if (f.range)
                 out += L" [" + std::to_wstring(f.range->lo) + L".." + std::to_wstring(f.range->hi) + L"]";
             out += L"\r\n";
-        }
+        };
+        for (const auto& f : fields::all())
+            row(f);
+        // And the AUDIO half of the same transform, which is a mixer field to everyone except
+        // this codebase's struct layout. Listing only the image table made `volume` invisible to
+        // a client discovering the surface from the protocol -- while `MIXER VOLUME` set it.
+        for (const auto& f : fields::audio_fields())
+            row(f);
         out += L"\r\n";
         return make_ready_future<std::wstring>(std::move(out));
     }
 
     const auto  name = u8(ctx.parameters.at(0));
     const auto* f    = fields::find(name);
-    if (!f)
+    // The audio half, tried second so the image table stays the fast path and so a name can
+    // never resolve to both. Without this, `MIXER 1-10 FIELD volume` answered 403 while the
+    // control API's tree described `volume` as a writable mixer field -- the two facades
+    // disagreeing about what exists, which `api-roundtrip` caught on its first run.
+    const auto* a = f ? nullptr : fields::find_audio_field(name);
+    if (!f && !a)
         CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"no such mixer field: " + ctx.parameters.at(0)));
+
+    const fields::field_meta& meta = f ? static_cast<const fields::field_meta&>(*f)
+                                       : static_cast<const fields::field_meta&>(*a);
 
     // Read.
     if (ctx.parameters.size() < 2) {
-        auto transform = get_current_transform(ctx).share();
-        const auto* fp = f;
-        return std::async(std::launch::deferred, [transform, fp]() -> std::wstring {
-            const auto   v   = fp->get(transform.get().image_transform);
+        auto        transform = get_current_transform(ctx).share();
+        const auto* fp        = f;
+        const auto* ap        = a;
+        return std::async(std::launch::deferred, [transform, fp, ap]() -> std::wstring {
+            const auto&  tf  = transform.get();
+            const auto   v   = fp ? fp->get(tf.image_transform) : ap->get(tf.audio_transform);
             std::wstring out = L"201 MIXER OK\r\n";
             for (std::size_t i = 0; i < v.size(); ++i) {
                 if (i)
@@ -1586,22 +1604,22 @@ std::future<std::wstring> mixer_field_command(command_context& ctx)
         });
     }
 
-    if ((static_cast<uint8_t>(f->access) & static_cast<uint8_t>(fields::access_t::write)) == 0)
+    if ((static_cast<uint8_t>(meta.access) & static_cast<uint8_t>(fields::access_t::write)) == 0)
         CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"field is read-only: " + ctx.parameters.at(0)));
 
     transforms_applier transforms(ctx);
 
     // `arity` values, then the optional duration and tween -- the same trailing pair every
     // animatable MIXER command takes, in the same order, so the grammar is not a new one.
-    const std::size_t need = 1 + f->arity;
+    const std::size_t need = 1 + meta.arity;
     if (ctx.parameters.size() < need)
         CASPAR_THROW_EXCEPTION(user_error() << msg_info(ctx.parameters.at(0) + L" takes " +
-                                                        std::to_wstring(f->arity) + L" value(s)"));
+                                                        std::to_wstring(meta.arity) + L" value(s)"));
 
     core::monitor::vector_t value;
-    for (uint8_t i = 0; i < f->arity; ++i) {
+    for (uint8_t i = 0; i < meta.arity; ++i) {
         const auto& raw = ctx.parameters.at(1 + i);
-        switch (f->type) {
+        switch (meta.type) {
             case fields::value_type::boolean:
                 value.push_back(boost::iequals(raw, L"1") || boost::iequals(raw, L"true"));
                 break;
@@ -1623,8 +1641,8 @@ std::future<std::wstring> mixer_field_command(command_context& ctx)
                 value.push_back(static_cast<int32_t>(std::stoi(raw)));
                 break;
             default:
-                value.push_back(f->range ? grade_param(raw, *f->range, ctx.parameters.at(0).c_str())
-                                         : std::stod(raw));
+                value.push_back(meta.range ? grade_param(raw, *meta.range, ctx.parameters.at(0).c_str())
+                                           : std::stod(raw));
                 break;
         }
     }
@@ -1634,8 +1652,15 @@ std::future<std::wstring> mixer_field_command(command_context& ctx)
     // transform closure it runs on the stage executor, after the reply has gone out. A
     // failure there is a command that answers 202 and does nothing.
     {
-        core::image_transform probe;
-        if (!f->set(probe, value))
+        bool ok = false;
+        if (f) {
+            core::image_transform probe;
+            ok = f->set(probe, value);
+        } else {
+            core::audio_transform probe;
+            ok = a->set(probe, value);
+        }
+        if (!ok)
             CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"not a valid value for " + ctx.parameters.at(0)));
     }
 
@@ -1643,14 +1668,20 @@ std::future<std::wstring> mixer_field_command(command_context& ctx)
     const std::wstring tween    = ctx.parameters.size() > need + 1 ? ctx.parameters[need + 1] : L"linear";
 
     const auto* fp = f;
+    const auto* ap = a;
     transforms.add(stage::transform_tuple_t(
         ctx.layer_index(),
-        [fp, value](frame_transform transform) -> frame_transform {
-            if (!fp->set(transform.image_transform, value))
+        [fp, ap, value](frame_transform transform) -> frame_transform {
+            if (fp) {
+                if (!fp->set(transform.image_transform, value))
+                    CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"value is not valid for this field"));
+                // The same auto-enable a KEYFRAMES write performs, so a blur radius set through
+                // either route actually blurs.
+                core::fields::apply_enables(transform.image_transform, *fp);
+            } else if (!ap->set(transform.audio_transform, value)) {
                 CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"value is not valid for this field"));
-            // The same auto-enable a KEYFRAMES write performs, so a blur radius set through
-            // either route actually blurs.
-            core::fields::apply_enables(transform.image_transform, *fp);
+            }
+            // No `apply_enables` on the audio side: the audio rows declare no subsystem gate.
             return transform;
         },
         duration,
@@ -5741,7 +5772,7 @@ std::wstring bind_command(command_context& ctx)
     core::binding::binding_def def;
     def.layer = ctx.layer_index();
 
-    core::binding::split_target(u8(ctx.parameters.at(0)), def.target, def.component);
+    core::address::split(u8(ctx.parameters.at(0)), def.target, def.component);
 
     if (!core::binding::split_source_ref(u8(ctx.parameters.at(1)), def.source_name, def.source_channel))
         return L"400 BIND ERROR the source must be <name>/<channel>, e.g. lfo1/value\r\n";

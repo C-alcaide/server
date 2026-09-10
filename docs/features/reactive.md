@@ -152,9 +152,19 @@ out  = MIN + unit * (MAX - MIN)          then smoothed towards over LAG ms
 
 * **a mixer field** by its registry name — `opacity`, `brightness`, `hue_shift` — with an optional
   `.N` component suffix, so `fill_translation.0` is the X of the fill translation.
+* **the layer's audio gain**, `volume`. It is a mixer field to everyone except this codebase's
+  struct layout, which keeps it in `audio_transform`; `fields::audio_fields()` describes it in the
+  same row type as the image half. Until that table existed, `add_binding` validated a
+  non-producer target against the image registry alone and refused `BIND 1-10 volume` — a layer's
+  gain was the one mixer parameter no source could drive. `immediate_volume` is addressable and
+  deliberately **not** animatable: it is a ramping policy, not a quantity.
 * **a producer parameter** as `producer/<name>` — an ISF input or an OFX parameter of whatever is
   on that layer. A multi-component parameter is read-modified-written, so a binding to
   `producer/tint` with `.2` drives the blue and leaves the rest.
+
+All four resolve through `core::address::parse`, which is the single place the registries are
+consulted — see `docs/features/timeline.md` §2 for the grammar and for what it deliberately leaves
+to the caller.
 
 A binding also applies the same **auto-enable** a `PUT` or a keyframe applies, so a bound
 `blur_radius` switches blur on exactly as a written one does. Without that, a binding on

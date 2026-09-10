@@ -60,6 +60,7 @@ set(SOURCES
 		producer/frame_producer_registry.cpp
 		mixer/audio/audio_analysis.cpp
 
+		address/target.cpp
 		binding/binding.cpp
 		binding/binding_math.cpp
 
@@ -114,6 +115,7 @@ set(HEADERS
 		producer/frame_producer.h
 		mixer/audio/audio_analysis.h
 
+		address/target.h
 		binding/binding.h
 		binding/binding_math.h
 

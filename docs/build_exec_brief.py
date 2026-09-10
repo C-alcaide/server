@@ -61,6 +61,12 @@ FOLDED = {
     "vulkan-mixer":
         "the substrate the picture capabilities run on rather than a capability beside them. It "
         "appears on nearly every page already, as 'both renderers'.",
+    "timeline":
+        "NOT YET A CAPABILITY. Three of its nineteen commits are in the build -- the flicks time "
+        "base and the addressing -- and there is nothing an operator can do with it: no document "
+        "type, no transport, no commands. It earns a page when the resolver runs in the tick, "
+        "because a supervisor asked to fund something deserves a page about what it does rather "
+        "than about what it will do.",
 }
 
 

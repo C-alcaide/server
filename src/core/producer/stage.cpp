@@ -31,6 +31,7 @@
 #include <common/executor.h>
 #include <common/future.h>
 
+#include <core/address/target.h>
 #include <core/frame/frame_transform.h>
 #include <core/frame/transform_fields.h>
 #include <core/producer/route/route_producer.h>
@@ -164,6 +165,10 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     struct layer_publication
     {
         core::image_transform built_from;
+        //: The audio half, compared the same way. `frame_transform` has always carried both and
+        //: only the image one was ever published, so a layer's volume was reachable by
+        //: `MIXER VOLUME` and by nothing else -- not readable, not bindable, not animatable.
+        core::audio_transform built_from_audio;
         bool                  valid = false;
         bool                  projection_ever = false;
         //: relative key ("mixer/opacity", "projection/yaw") and its value
@@ -784,13 +789,21 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         if (tw == tweens_.end())
             return;
 
-        const auto& tf  = tw->second.fetch().image_transform;
+        const auto  ft  = tw->second.fetch();
+        const auto& tf  = ft.image_transform;
+        const auto& at  = ft.audio_transform;
         auto&       pub = layer_publications_[layer];
 
-        if (!pub.valid || !(pub.built_from == tf)) {
-            pub.built_from = tf;
-            pub.valid      = true;
-            rebuild_layer_publication(pub, tf);
+        // Both halves in the change test. `audio_transform` has no `operator==`, and adding one
+        // would be a public API change for two members -- so they are compared here, where the
+        // only question is "has anything this publication reads moved".
+        const bool audio_same =
+            pub.built_from_audio.volume == at.volume && pub.built_from_audio.immediate_volume == at.immediate_volume;
+        if (!pub.valid || !(pub.built_from == tf) || !audio_same) {
+            pub.built_from       = tf;
+            pub.built_from_audio = at;
+            pub.valid            = true;
+            rebuild_layer_publication(pub, tf, at);
         }
 
         if (pub.keys.empty())
@@ -802,9 +815,28 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     }
 
     /// The expensive half: which keys this transform contributes, and their values.
-    void rebuild_layer_publication(layer_publication& pub, const core::image_transform& tf)
+    void rebuild_layer_publication(layer_publication&           pub,
+                                   const core::image_transform& tf,
+                                   const core::audio_transform& at)
     {
         pub.keys.clear();
+
+        // The audio rows, sparse on the same rule as the image ones: a field at its declared
+        // default is absent, and `/v1/value` falls back to the descriptor for it.
+        {
+            static const std::vector<monitor::vector_t> adefaults = [] {
+                std::vector<monitor::vector_t> d;
+                for (const auto& f : core::fields::audio_fields())
+                    d.push_back(f.defaults());
+                return d;
+            }();
+            const auto& afs = core::fields::audio_fields();
+            for (std::size_t i = 0; i < afs.size(); ++i) {
+                auto v = afs[i].get(at);
+                if (v != adefaults[i])
+                    pub.keys.emplace_back(std::string("mixer/") + afs[i].path, std::move(v));
+            }
+        }
 
         // `defaults()` builds a fresh vector per call, so reading all ~180 of them per
         // rebuild would be most of the cost of the feature. They never change.
@@ -981,6 +1013,10 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     {
         // A producer parameter. The target names the parameter; the producer's own setter takes
         // it, so a bound ISF input goes through exactly the path `PUT` and `CALL ISF SET` use.
+        // NOT `address::parse` here, deliberately, and this is a per-tick path: `b.target` is
+        // ALREADY the bare field name -- the `.N` suffix was split off at BIND time -- so a
+        // parse would allocate two or three strings per binding per tick to recover a prefix
+        // test. `add_binding` does the full resolution once, where it is free.
         if (b.target.rfind("producer/", 0) == 0) {
             const auto name = b.target.substr(9);
 
@@ -1021,22 +1057,41 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         // 50-frame opacity fade snapped the moment an LFO on brightness ran. `tweened_transform`
         // kept `source_` private, so this function could not do better until `patch` existed.
         // Measured by `timeline-tween-survives`: the fade fits its ramp with the binding live.
-        const auto* f = fields::find(b.target);
-        if (!f || !f->set || !f->get)
+        //
+        // Both halves of the transform, through their own tables. The audio half is one row
+        // today -- `volume` -- and it goes through the same patch for the same reason: a bound
+        // volume must not cut a `MIXER 1-10 OPACITY 0.2 50` on the same layer.
+        if (const auto* f = fields::find(b.target)) {
+            if (!f->set || !f->get)
+                return;
+            tweens_[b.layer].patch([&](frame_transform& t) {
+                auto v = f->get(t.image_transform);
+                if (v.size() != f->arity)
+                    return;
+                v[std::min<std::size_t>(b.component, v.size() - 1)] = value;
+                if (!f->set(t.image_transform, v))
+                    return;
+                // The same auto-enable a `PUT` or a keyframe applies, so a bound blur radius
+                // switches blur on exactly as a written one does. Without it a binding on
+                // `blur_radius` would move a number that nothing reads.
+                fields::apply_enables(t.image_transform, *f);
+            });
             return;
+        }
 
-        tweens_[b.layer].patch([&](frame_transform& t) {
-            auto v = f->get(t.image_transform);
-            if (v.size() != f->arity)
+        if (const auto* a = fields::find_audio_field(b.target)) {
+            if (!a->set || !a->get)
                 return;
-            v[std::min<std::size_t>(b.component, v.size() - 1)] = value;
-            if (!f->set(t.image_transform, v))
-                return;
-            // The same auto-enable a `PUT` or a keyframe applies, so a bound blur radius switches
-            // blur on exactly as a written one does. Without it a binding on `blur_radius` would
-            // move a number that nothing reads.
-            fields::apply_enables(t.image_transform, *f);
-        });
+            tweens_[b.layer].patch([&](frame_transform& t) {
+                auto v = a->get(t.audio_transform);
+                if (v.size() != a->arity)
+                    return;
+                v[std::min<std::size_t>(b.component, v.size() - 1)] = value;
+                a->set(t.audio_transform, v);
+                // No `apply_enables`: the audio rows declare no subsystem gate, because there is
+                // no audio equivalent of "blur is off until blur_radius moves".
+            });
+        }
     }
 
     std::future<void> add_source(const std::string& name, std::shared_ptr<binding::source> src)
@@ -1072,25 +1127,41 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         return executor_.begin_invoke([this, def]() mutable {
             // The target must RESOLVE now. A binding to a misspelled field would otherwise be
             // accepted, evaluated on every tick, and do nothing -- with a 202 behind it.
-            if (def.target.rfind("producer/", 0) == 0) {
-                const auto name = def.target.substr(9);
-                auto       it   = layers_.find(def.layer);
-                if (it == layers_.end())
-                    return 0;
-                auto producer = it->second.foreground();
-                if (producer == frame_producer::empty())
-                    return 0;
-                bool found = false;
-                for (const auto& p : producer->parameters())
-                    if (p.name == name)
-                        found = true;
-                if (!found)
-                    return 0;
-            } else {
-                const auto* f = fields::find(def.target);
-                if (!f || !f->set)
-                    return 0;
-                if (def.component >= f->arity)
+            //
+            // Through `address::parse`, which is the one place the registries are consulted.
+            // This used to be an if/else that knew about two of them, which is why `volume` was
+            // unbindable: it is not in the image table and nothing here looked anywhere else.
+            const auto t = address::parse(def.target);
+            switch (t.kind) {
+                case address::target_kind::producer_param: {
+                    auto it = layers_.find(def.layer);
+                    if (it == layers_.end())
+                        return 0;
+                    auto producer = it->second.foreground();
+                    if (producer == frame_producer::empty())
+                        return 0;
+                    bool found = false;
+                    for (const auto& p : producer->parameters())
+                        if (p.name == t.field)
+                            found = true;
+                    if (!found)
+                        return 0;
+                    break;
+                }
+                case address::target_kind::image:
+                case address::target_kind::audio: {
+                    // `set` is the arm a binding needs: a derived or blob field is describable
+                    // and readable and cannot take a number every tick.
+                    const auto* img = fields::find(t.field);
+                    if (img ? !img->set : !fields::find_audio_field(t.field)->set)
+                        return 0;
+                    if (def.component >= t.meta->arity)
+                        return 0;
+                    break;
+                }
+                default:
+                    // The previz registries resolve as targets (commit 10 gives them a writer);
+                    // a binding to one is refused here rather than accepted and dropped.
                     return 0;
             }
 
@@ -1131,7 +1202,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                                                    return true;
                                                std::string field;
                                                uint8_t     comp = 0;
-                                               binding::split_target(target, field, comp);
+                                               address::split(target, field, comp);
                                                return b.target == field;
                                            }),
                             bindings_.end());
@@ -1151,7 +1222,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         // take -- which is why they take it at all.
         std::string field;
         uint8_t     comp = 0;
-        binding::split_target(target, field, comp);
+        address::split(target, field, comp);
 
         std::lock_guard<std::mutex> lock(binding_lock_);
         for (const auto& b : bindings_)

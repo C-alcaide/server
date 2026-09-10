@@ -677,6 +677,66 @@ const field_desc* find(std::string_view path)
     return it == idx.end() ? nullptr : &all()[it->second];
 }
 
+// ---------------------------------------------------------------------------------------------
+// The audio half. Written out rather than macro'd: two rows do not earn a macro, and the second
+// is a different shape from the first anyway.
+
+const std::vector<audio_field>& audio_fields()
+{
+    // clang-format off
+    static const std::vector<audio_field> table = {
+        audio_field{
+            "volume", value_type::real, access_t::read_write, std::nullopt, bounding_t::free,
+            // MULTIPLY, like `opacity` and `brightness`: two layers of gain are a product, and
+            // `audio_transform::operator*=` already multiplies -- this row describes what the
+            // mixer does rather than proposing something.
+            compose_t::multiply, guard_t::none, nullptr, "gain", nullptr,
+            "The layer's audio gain. 1.0 is unity; above 1.0 amplifies. Composed by multiplication.",
+            "volume", kf_kind::continuous, 0.01, 1, true,
+            [](const audio_transform& t) { return monitor::vector_t{t.volume}; },
+            [](audio_transform& t, const monitor::vector_t& v) {
+                double d;
+                if (v.size() != 1 || !as_num(v[0], d))
+                    return false;
+                t.volume = d;
+                return true;
+            },
+            []() { return monitor::vector_t{1.0}; },
+        },
+        audio_field{
+            "immediate_volume", value_type::boolean, access_t::read_write, std::nullopt, bounding_t::free,
+            compose_t::or_, guard_t::none, nullptr, "", nullptr,
+            "When false (the default) the audio mixer ramps intra-frame samples from the previous "
+            "volume, so a volume change does not click. True applies the new volume to the whole "
+            "frame at once.",
+            // NO `kf_names`, deliberately: this is a flag describing HOW a volume change is
+            // applied, not a quantity to change over time. Animating it would mean animating the
+            // ramping policy, which is not a thing an operator wants at 25 Hz.
+            nullptr, kf_kind::discrete, 1.0, 1, false,
+            [](const audio_transform& t) { return monitor::vector_t{t.immediate_volume}; },
+            [](audio_transform& t, const monitor::vector_t& v) {
+                double d;
+                if (v.size() != 1 || !as_num(v[0], d))
+                    return false;
+                t.immediate_volume = d >= 0.5;
+                return true;
+            },
+            []() { return monitor::vector_t{false}; },
+        },
+    };
+    // clang-format on
+    return table;
+}
+
+const audio_field* find_audio_field(std::string_view path)
+{
+    for (const auto& f : audio_fields()) {
+        if (path == f.path)
+            return &f;
+    }
+    return nullptr;
+}
+
 std::optional<kf_ref> find_kf(std::string_view kf_name)
 {
     const auto& idx = kf_index();

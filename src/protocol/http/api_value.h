@@ -29,6 +29,18 @@ struct write_target
     int                            channel = 0;
     int                            layer   = 0;
     const core::fields::field_desc* field   = nullptr;
+    /// Set INSTEAD of `field` when the path names an audio row (`mixer/volume`). Both row types
+    /// derive from `field_meta`, so validation, ranging and the descriptor are shared; only the
+    /// setter differs, because one writes `image_transform` and the other `audio_transform`.
+    /// `meta()` is what every shared step uses, so a caller that does not care which half it is
+    /// writing does not have to ask.
+    const core::fields::audio_field* audio = nullptr;
+
+    const core::fields::field_meta* meta() const
+    {
+        return field ? static_cast<const core::fields::field_meta*>(field)
+                     : static_cast<const core::fields::field_meta*>(audio);
+    }
 };
 
 /// Parse `/channel/1/stage/layer/10/mixer/opacity`. Anything else is refused with the code

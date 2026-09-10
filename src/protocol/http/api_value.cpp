@@ -191,12 +191,18 @@ api_reply resolve_write_target(const std::string& path, write_target& out)
     out.channel = std::atoi(seg[1].c_str());
     out.layer   = std::atoi(seg[4].c_str());
     out.field   = fields::find(seg[6]);
+    // The AUDIO half lives under the same prefix, because a layer's volume is a mixer property
+    // to everyone except this codebase's struct layout. Tried second so the image table stays
+    // the fast path and so a name can never resolve to both.
     if (!out.field)
+        out.audio = fields::find_audio_field(seg[6]);
+    if (!out.field && !out.audio)
         return api_reply::fail(api_code::unknown_path, "no such mixer field: " + seg[6]);
 
-    if ((static_cast<uint8_t>(out.field->access) & static_cast<uint8_t>(fields::access_t::write)) == 0)
+    const auto* m = out.meta();
+    if ((static_cast<uint8_t>(m->access) & static_cast<uint8_t>(fields::access_t::write)) == 0)
         return api_reply::fail(api_code::not_writable,
-                               std::string("field is read-only in this build: ") + out.field->path);
+                               std::string("field is read-only in this build: ") + m->path);
     return api_reply{};
 }
 
@@ -306,9 +312,9 @@ api_reply prepare_set(const std::string& path, const json::object& op, prepared_
     const auto* v = op.if_contains("value");
     if (!v)
         return api_reply::fail(api_code::field_missing, "no value for " + path);
-    if (auto r = json_to_value(*out.target.field, *v, out.value); r.code != api_code::ok)
+    if (auto r = json_to_value(*out.target.meta(), *v, out.value); r.code != api_code::ok)
         return r;
-    if (auto r = check_and_bound(*out.target.field, out.value); r.code != api_code::ok)
+    if (auto r = check_and_bound(*out.target.meta(), out.value); r.code != api_code::ok)
         return r;
 
     if (auto* d = op.if_contains("duration")) {
@@ -331,10 +337,19 @@ api_reply prepare_set(const std::string& path, const json::object& op, prepared_
 core::stage_base::transform_func_t set_closure(const prepared_set& p)
 {
     const auto* f = p.target.field;
+    const auto* a = p.target.audio;
     auto        v = p.value;
-    return [f, v](core::frame_transform t) {
-        f->set(t.image_transform, v);
-        core::fields::apply_enables(t.image_transform, *f);
+    return [f, a, v](core::frame_transform t) {
+        // One of the two, never both -- `resolve_write_target` tries the image table first and
+        // only reaches the audio one when that misses, so a name cannot resolve to both.
+        if (f) {
+            f->set(t.image_transform, v);
+            core::fields::apply_enables(t.image_transform, *f);
+        } else if (a) {
+            // No `apply_enables`: there is no audio subsystem gate to switch on, and the audio
+            // rows declare `enables == nullptr` accordingly.
+            a->set(t.audio_transform, v);
+        }
         return t;
     };
 }
@@ -632,7 +647,7 @@ api_reply write_value(const api_context& ctx,
     const std::string label =
         o.if_contains("label") && o.at("label").is_string() ? std::string(o.at("label").as_string().c_str()) : "";
 
-    const auto& f = *target.field;
+    const auto& f = *target.meta();
 
     // The operand, for the forms that take one. `toggle` takes none.
     core::monitor::vector_t operand;
@@ -672,14 +687,14 @@ api_reply write_value(const api_context& ctx,
     // sample. Nobody had chosen that precedence; it was simply not thought about. Here it is
     // chosen, and `field_bound` is a code of its own rather than `not_writable` so a control
     // surface can offer UNBIND instead of greying the slider out forever.
-    if (stage->is_bound(target.layer, target.field->path))
+    if (stage->is_bound(target.layer, f.path))
         return api_reply::fail(api_code::field_bound,
-                               std::string(target.field->path) +
+                               std::string(f.path) +
                                    " is driven by a binding on this layer. A write would be "
                                    "applied and then overwritten on the next tick, so it is "
                                    "refused instead -- `UNBIND " +
                                    std::to_string(target.channel) + "-" +
-                                   std::to_string(target.layer) + " " + target.field->path +
+                                   std::to_string(target.layer) + " " + f.path +
                                    "` hands the field back");
 
     // Everything the closure has to report back. It runs on the STAGE executor, so it
@@ -697,17 +712,38 @@ api_reply write_value(const api_context& ctx,
     auto out = std::make_shared<outcome>();
 
     const auto* fp = &f;
+    // WHICH HALF of the frame transform this field lives in, as an accessor pair, so every op
+    // below -- set, toggle, add, cas -- has one implementation over both. The alternative was a
+    // second copy of the closure for audio, and a second copy is where `toggle` would quietly
+    // work on one half and not the other.
+    const auto* img = target.field;
+    const auto* aud = target.audio;
+    auto        rd  = [img, aud](core::frame_transform& t) {
+        return img ? img->get(t.image_transform) : aud->get(t.audio_transform);
+    };
+    auto wr = [img, aud](core::frame_transform& t, const core::monitor::vector_t& v) {
+        if (img) {
+            if (!img->set(t.image_transform, v))
+                return false;
+            // Whatever subsystem this field belongs to, switched on the way a KEYFRAMES write
+            // switches it on -- so the two agree and a `blur_radius` set over either route
+            // actually blurs. The audio rows declare no `enables`, so there is nothing to do
+            // on that side.
+            core::fields::apply_enables(t.image_transform, *img);
+            return true;
+        }
+        return aud->set(t.audio_transform, v);
+    };
+
     stage
         ->apply_transform(
             target.layer,
-            [fp, op, operand, expect, out](core::frame_transform t) {
-                auto& it = t.image_transform;
-
+            [fp, rd, wr, op, operand, expect, out](core::frame_transform t) {
                 // Read INSIDE the closure, on the stage executor, against the same
                 // transform the write lands on. That is what makes toggle and cas atomic:
                 // no other client's write can interleave between the read and the write,
                 // because there is only one executor and this is one task on it.
-                out->previous = fp->get(it);
+                out->previous = rd(t);
 
                 core::monitor::vector_t next = out->previous;
 
@@ -754,18 +790,14 @@ api_reply write_value(const api_context& ctx,
                     next = std::move(v);
                 }
 
-                if (!fp->set(it, next)) {
+                if (!wr(t, next)) {
                     out->type_err = true;
                     return t;
                 }
                 // Read back what the field now HOLDS rather than echoing what arrived.
                 // They differ wherever the descriptor canonicalises: an enumeration set by
                 // ordinal reports its name, which is what a client should store and show.
-                next = fp->get(it);
-                // Whatever subsystem this field belongs to, switched on the way a
-                // KEYFRAMES write switches it on -- so the two agree and a `blur_radius`
-                // set over either route actually blurs.
-                core::fields::apply_enables(it, *fp);
+                next = rd(t);
 
                 out->written = std::move(next);
                 out->applied = true;

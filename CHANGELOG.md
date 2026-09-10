@@ -1,6 +1,49 @@
 CasparVP — Unreleased
 ==========================================
 
+### `mixer/volume` is a described field — addressable, writable, publishable, bindable
+
+`volume` and `immediate_volume` were the last two layer-transform parameters no registry
+described. `MIXER 1-10 VOLUME` set them and `audio_transform` held them, and because no table
+row existed, every table-driven surface was blind at once: the control-API tree did not list
+them, `PUT /v1/value/.../mixer/volume` answered `unknown_path`, `MIXER 1-10 FIELD volume`
+answered 403, the state publisher's change test compared only the image half of the transform,
+and `BIND 1-10 volume lfo1/value` was refused outright. Six mechanisms knew about `opacity` and
+one knew about `volume`.
+
+**Behaviour changes for an existing config.** The mixer sub-tree gains two rows per layer, so
+`MIXER 1-10 FIELD`'s inventory goes from 177 rows to 179 and a client enumerating writable
+fields now finds `volume`. A layer whose volume is not 1.0 now publishes
+`layer/{m}/mixer/volume`, where it previously published nothing — the change test compares both
+halves of the transform. `structure_revision` is unaffected: the rows are static, not dynamic
+containers.
+
+`immediate_volume` is addressable and deliberately **not** animatable — its `kf_names` is null,
+because it describes how a volume change is applied rather than what the volume is.
+
+Targets in the four registries now resolve through one function, `core::address::parse`
+(`src/core/address/target.h`), rather than through an if/else in `add_binding`, a frozen name
+table in `keyframe_fields.cpp` and a segment split in `api_value.cpp`. `binding::split_target`
+moved there as `address::split`; behaviour is unchanged, including the rule that a non-numeric dot
+stays in a producer parameter's name.
+
+**MEASURED, both mixers.** `api-roundtrip` 15/15 — the two rows asserted **by name**, since that
+battery discovers its fields from the tree and so cannot fail for a field nobody declared;
+`volume` written 0.37, read back through `/v1/value` and through `MIXER 1-10 VOLUME`, restored to
+unity. `binding-lfo` 15/15 with a new volume arm: an LFO bound to `volume` fits the same 0.5 Hz
+sine, max |error| **0.0000** over 100 frame-stamped samples. `api-tree`, `api-write`,
+`api-events`, `api-atframe`, `api-readiness`, `binding-owner`, `binding-audio`, `binding-osc` all
+green on both mixers.
+
+**Shown failing first.** Against the pre-change binary, `api-roundtrip`'s new block failed 7 of
+its 7 checks on both mixers — both rows `ABSENT` from the tree, and `unknown_path` on the write,
+the read and the restore. A second mutation, `add_binding` refusing an audio target, failed
+`binding-lfo`'s "volume can be bound at all" with AMCP 404 while the other ten checks passed.
+
+**Not audible.** These prove `volume` is a stored, published, round-tripping, bindable number.
+Whether the audio mixer applies that gain to samples needs a recording and `volumedetect`, and
+nothing in the tree measures that yet.
+
 ### Fixed: a binding no longer cuts an in-flight `MIXER <duration>` tween on its layer
 
 `MIXER 1-10 OPACITY 0.2 50 linear` and an LFO bound to brightness on the same layer: the fade
@@ -5912,7 +5955,6 @@ AMCP
     letting the server close the connection caused an exception to be logged.
 
 
-
 CasparCG 2.1.0 Beta 1 (w.r.t 2.0.7 Stable)
 ==========================================
 
@@ -6132,7 +6174,6 @@ AMCP
  * VERSION command can now provide CEF version.
 
 
-
 CasparCG Server 2.0.7 Stable (as compared to CasparCG Server 2.0.7 Beta 2)
 ==========================================================================
 
@@ -6232,7 +6273,6 @@ HTML producer
  * Now uses CEF3 event loop to avoid 100% CPU core usage.
 
 
-
 CasparCG Server 2.0.7 Beta 2 (as compared to CasparCG Server 2.0.7 Beta 1)
 ==========================================================================
 
@@ -6299,7 +6339,6 @@ AMCP
     correctly parsed (http://casparcg.com/forum/viewtopic.php?f=3&t=2480)
 
 
-
 CasparCG Server 2.0.7 Beta 1 (as compared to 2.0.6 Stable)
 ==========================================================
 
@@ -6315,7 +6354,6 @@ Producers
 
  * New HTML producer has been created (Robert Nagy sponsored by Flemish Radio
     and Television Broadcasting Organization, VRT)
-
 
 
 CasparCG Server 2.0.6 Stable (as compared to 2.0.4 Stable)
@@ -6354,7 +6392,6 @@ General
  * AMCP: CLS now reports duration and framerate for MOVIE files were
     information is possible to extract. (Robert Nagy)
  * Version bump to keep up with CasparCG Client version.
-
 
 
 CasparCG Server 2.0.4 Stable (as compared to 2.0.4 Beta 1)
@@ -6412,7 +6449,6 @@ OSC
     avoid fragmentation. (Robert Nagy sponsored by Boffins Technologies)
  * Removed usage of Microsoft Agents library (Server ran out of memory after a
     while) in favour of direct synchronous invocations.
-
 
 
 CasparCG Server 2.0.4 Beta 1 (as compared to 2.0.3 Stable)
@@ -6567,7 +6603,6 @@ OSC
    * image producer     /file/path        [file path]
 
 
-
 CasparCG Server 2.0.3 Stable (as compared to 2.0.3 Alpha)
 =========================================================
 
@@ -6582,7 +6617,6 @@ AMCP
  * DATA STORE now supports creating folders of path specified if they does not
     exist. (Jeff Lafforgue)
  * DATA REMOVE command was added. (Jeff Lafforgue)
-
 
 
 CasparCG Server 2.0.3 Alpha (as compared to 2.0 Stable)
@@ -6641,7 +6675,6 @@ Producers
    * Added PREMULTIPLY parameter to support images stored with straight alpha.
 
 
-
 CasparCG Server 2.0 Stable (as compared to Beta 3)
 ==================================================
 
@@ -6658,7 +6691,6 @@ Consumers
    * Added options, -r, -acodec, -s, -pix_fmt, -f and more.
  * Screen Consumer
    * Added vsync support.
-
 
 
 CasparCG Server 2.0 Beta 3 (as compared to Beta 1)
@@ -6762,7 +6794,6 @@ Diagnostics
  * Diagnostics window is now closable.
 
 
-
 CasparCG Server 2.0 Beta 1 (as compared to Alpha)
 =================================================
 
@@ -6830,7 +6861,6 @@ CasparCG Server 2.0 Beta 1 (as compared to Alpha)
     EMPTY, BLACK, RED etc...
  * Alpha value in color codes is now optional.
  * More than 2 DeckLink cards might be possible but have not yet been tested.
-
 
 
 CasparCG Server 2.0 Alpha (as compared to 1.8)

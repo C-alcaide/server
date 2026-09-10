@@ -50,6 +50,7 @@
 #include <accelerator/ogl/image/previz_renderer.h>
 #include <core/binding/binding_math.h>
 #include <core/mixer/audio/audio_analysis.h>
+#include <core/address/target.h>
 #include <core/stage/stage_math_self_test.h>
 #include <core/timeline/time.h>
 
@@ -198,6 +199,7 @@ struct server::impl
         // flicks, or the playhead drifts a fraction of a flick per frame forever. Checked here,
         // at boot, against the rate table -- not discovered in a picture weeks later.
         core::timeline::time_self_test();
+        core::address::target_self_test();
         accelerator::ogl::run_compose_self_test();
 #ifdef ENABLE_VULKAN
         // GUARDED, because the Vulkan accelerator's sources are only compiled when

@@ -145,28 +145,4 @@ bool split_source_ref(const std::string& ref, std::string& source, std::string& 
     return true;
 }
 
-void split_target(const std::string& spec, std::string& field, uint8_t& component)
-{
-    component = 0;
-    field     = spec;
-
-    // `producer/<name>` may legitimately contain a dot in the parameter's own name, so the
-    // suffix is only recognised when what follows it is entirely digits. `producer/foo.bar`
-    // is one name; `midtone.1` is a component.
-    const auto dot = spec.rfind('.');
-    if (dot == std::string::npos || dot + 1 >= spec.size())
-        return;
-
-    const auto tail = spec.substr(dot + 1);
-    if (tail.find_first_not_of("0123456789") != std::string::npos)
-        return;
-
-    const auto n = std::atoi(tail.c_str());
-    if (n < 0 || n > 3)
-        return;
-
-    field     = spec.substr(0, dot);
-    component = static_cast<uint8_t>(n);
-}
-
 }}} // namespace caspar::core::binding

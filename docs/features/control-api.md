@@ -46,9 +46,11 @@ word "API".
 * the **channels and layers that exist**, scanned out of the tick's own snapshots;
 * **every key the snapshot carries**, as a read-only leaf — this is exactly what OSC has always
   sent, now addressable rather than broadcast;
-* the **transform field registry**, per layer, under `mixer/`. This is the part a snapshot cannot
-  supply: a parameter sitting at its default is not published, so without this pass a client would
-  discover only the parameters somebody had already changed.
+* the **transform field registry**, per layer, under `mixer/` — **both halves** of the transform,
+  the image one from `fields::all()` and the audio one from `fields::audio_fields()`, so `volume`
+  and `immediate_volume` are described, writable and publishable like any other mixer field.
+  This is the part a snapshot cannot supply: a parameter sitting at its default is not published,
+  so without this pass a client would discover only the parameters somebody had already changed.
 
 **A mixer value at its default is not published at all**, and that is the one thing to know
 before reading anything here. The tick emits only the fields that DIFFER from their declared
@@ -345,14 +347,22 @@ every parameter this API describes -- and a field added to the registry is setta
 animatable with no handler written for it.
 
 ```
-MIXER 1-10 FIELD                            → the whole inventory, 177 rows
+MIXER 1-10 FIELD                            → the whole inventory, 179 rows
 MIXER 1-10 FIELD opacity                    → 0.37
 MIXER 1-10 FIELD opacity 0.37               → 202 MIXER OK
 MIXER 1-10 FIELD opacity 0.0 50 easeoutsine → the same duration/tween every MIXER command takes
 MIXER 1-10 FIELD fill_translation 0.1 0.2   → a vector field, one value per component
 MIXER 1-10 FIELD blend_mode screen          → an enumeration by name
 MIXER 1-10 FIELD blend_mode 5               → ...or by ordinal; reads back as `add`
+MIXER 1-10 FIELD volume 0.37 50 linear      → the AUDIO half, animatable like the rest
 ```
+
+179, not 177: the inventory and the read and write forms cover
+`fields::audio_fields()` as well. Before that they knew only the image half, so `MIXER 1-10 FIELD
+volume` answered **403** while this API's own tree described `volume` as a writable mixer field --
+the two facades disagreeing about what exists, which `api-roundtrip` reported on its first run
+after the tree gained the rows. The legacy `MIXER 1-10 VOLUME` verb still works and reads the same
+number.
 
 The inventory line is `name arity rw|r [min..max]`, so a client with no documentation at all can
 discover the surface from the protocol it is already speaking.

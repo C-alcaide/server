@@ -251,6 +251,27 @@ struct typed_field : field_meta
 /// The transform table's row type. Every existing caller names this and is unaffected.
 using field_desc = typed_field<image_transform>;
 
+/// The AUDIO half of a layer's transform, described with the same machinery.
+///
+/// `frame_transform` has always held both halves and only the image one was ever described, so
+/// `MIXER VOLUME` was the single way to reach a layer's volume: not in the tree, not readable,
+/// not bindable, not animatable. `field_meta` was split from `typed_field` precisely so a second
+/// struct could be described without editing a row of the first, and this is the second struct.
+///
+/// Two rows, and the second is deliberately not the same kind of thing as the first:
+/// `immediate_volume` is a RAMPING FLAG (when false the audio mixer ramps intra-frame samples
+/// from the previous volume), so it is described and writable but carries no `kf_names` -- a flag
+/// that changes how a ramp is performed is not itself a quantity to ramp.
+using audio_field = typed_field<audio_transform>;
+
+/// Every audio property, in table order. Published under the same
+/// `channel/N/stage/layer/M/mixer/` prefix as the image fields, because a layer's volume is a
+/// mixer property to everyone except this codebase's struct layout.
+const std::vector<audio_field>& audio_fields();
+
+/// One audio property by its path, or nullptr.
+const audio_field* find_audio_field(std::string_view path);
+
 /// Every field, in table order.
 const std::vector<field_desc>& all();
 

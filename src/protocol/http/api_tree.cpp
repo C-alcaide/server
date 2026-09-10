@@ -303,6 +303,14 @@ const json::object& mixer_template()
         for (const auto& f : fields::all())
             contents.emplace(f.path, descriptor_leaf(f, f.defaults()));
 
+        // The AUDIO rows, under the same `mixer/` prefix. A layer's volume is a mixer property
+        // to everyone except this codebase's struct layout, and it was reachable only by
+        // `MIXER VOLUME` -- absent from the tree, so no client could find it, describe it, bind
+        // it or animate it. `descriptor_leaf` takes a `field_meta`, which is the base of both
+        // row types, so this needs nothing new.
+        for (const auto& f : fields::audio_fields())
+            contents.emplace(f.path, descriptor_leaf(f, f.defaults()));
+
         node["CONTENTS"] = std::move(contents);
         return node;
     }();
@@ -652,8 +660,15 @@ api_reply read_value(const state_hub& hub, const std::string& path)
             const auto layer = key.substr(layer_prefix.size(), slash - layer_prefix.size());
             const auto rest  = key.substr(slash + 1);
             if (starts_with(rest, "mixer/")) {
-                const auto* f = fields::find(rest.substr(std::string("mixer/").size()));
-                if (f) {
+                const auto  name = rest.substr(std::string("mixer/").size());
+                const auto* f    = fields::find(name);
+                // The audio half of the transform is described by its own table and is just as
+                // sparsely published, so it needs the same answer -- otherwise `mixer/volume` on
+                // an untouched layer reads as a typo while `mixer/opacity` reads as 1.0.
+                const auto*                   a = f ? nullptr : fields::find_audio_field(name);
+                const fields::field_meta*     m = f ? static_cast<const fields::field_meta*>(f)
+                                                    : static_cast<const fields::field_meta*>(a);
+                if (m) {
                     const std::string this_layer = layer_prefix + layer + "/";
                     bool              exists     = false;
                     for (const auto& kv : *snap) {
@@ -667,8 +682,8 @@ api_reply read_value(const state_hub& hub, const std::string& path)
 
                     json::object r;
                     r["path"]       = full;
-                    r["value"]      = vector_to_json(f->defaults());
-                    r["type"]       = osc_tags_for(*f);
+                    r["value"]      = vector_to_json(f ? f->defaults() : a->defaults());
+                    r["type"]       = osc_tags_for(*m);
                     r["is_default"] = true;
                     return api_reply::ok_with(std::move(r));
                 }

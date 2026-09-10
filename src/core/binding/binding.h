@@ -217,12 +217,4 @@ class function_source final : public source
 /// than a default: `input` has four and picking one for the operator would be a guess.
 bool split_source_ref(const std::string& ref, std::string& source, std::string& channel);
 
-/// Split a target into a field path and a component index: `midtone.1`, `fill_x`, `opacity`.
-///
-/// The `.N` suffix is how a component is named, and it is chosen rather than inherited: the
-/// registry's own KEYFRAMES names already provide per-component names for the fields that have
-/// them (`mid_r`, `fill_x`), but only for animatable fields -- so a suffix that works for every
-/// field is needed anyway, and having one form is better than two.
-void split_target(const std::string& spec, std::string& field, uint8_t& component);
-
 }}} // namespace caspar::core::binding

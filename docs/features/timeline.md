@@ -1,16 +1,20 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commit 1 of 19 shipped (the time base). Nothing below §1 exists in
-> the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and each section here
-> lands with the commit that builds it.
-> **Modules:** **not a module** — `src/core/timeline/` (time base, model, resolver, transport),
-> `src/core/address/` (one target resolver over the four registries), with the commands in
-> `src/protocol/amcp/AMCPCommandsImpl.cpp` and the routes in `src/protocol/http/api_timeline.cpp`
+> **State:** **in progress** — commits 1–3 of 19 shipped (the time base, and addressing). Nothing
+> below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
+> each section here lands with the commit that builds it.
+> **Commands:** none yet. The `TIMELINE` family and `HOLD`/`RELEASE` arrive with commit 6; the
+> addressing in §2 is reached today through the commands that already exist — `MIXER FIELD`,
+> `BIND`, and `PUT /v1/value`
+> **Modules:** **not a module** — `src/core/timeline/` (the time base today; model, resolver and
+> transport to come) and `src/core/address/` (one target resolver over the four registries), with
+> the commands in `src/protocol/amcp/AMCPCommandsImpl.cpp`
 > **Replaces:** `src/modules/keyframes/` (the `KEYFRAMES` command family) and the OFX producer's
 > private `OFX KEY` engine — both removed when the resolver lands, with a `CHANGELOG` measurement
-> **Coverage:** `time_self_test()` at boot (§1). Batteries arrive with their commits: `timeline-ramp`,
-> `timeline-clock`, `timeline-hold`, `timeline-stack`, `timeline-step`, … — see §Verification
-> when it exists
+> **Coverage:** `time_self_test()` and `address::target_self_test()` at boot (§1, §2), and
+> `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds. The `timeline-*` batteries do
+> not exist yet and are named in the plan rather than here, because a battery named in a doc is a
+> command a reader will try to run
 
 ---
 
@@ -67,5 +71,73 @@ change `flicks_per_second` by one and the 59.94 exactness check fails at boot.
 
 ---
 
-*§2 Model, §3 Precedence, §4 Transport, §5 API and AMCP, §6 Verification, §7 Known gaps — arrive
+## 2. Addressing — which parameter a curve drives
+
+A timeline object, a binding and an operator write all have to name a parameter, and until this
+commit each of them named it differently. `BIND` took a bare registry name and validated it with
+an if/else that knew two of the five registries. `KEYFRAMES` took a frozen 193-name table with
+degrees baked into it. The HTTP write path split a channel-qualified URL into segments and
+consulted the tables itself. One question, three parsers, and a timeline about to be the fourth.
+
+`core::address::parse` is the one place the registries are consulted. The grammar is the binding
+one, because that is the short form an authored document wants — the channel and layer come from
+the object that owns the target, so they are not in the string:
+
+| address | registry |
+| :--- | :--- |
+| `opacity` | `fields::find` — the image half of the layer transform |
+| `fill_translation.0` | the same, component 0 of an arity-2 row |
+| `volume` | `fields::audio_fields()` — **the audio half**, new in this commit |
+| `producer/brightness` | `frame_producer::parameters()` on the layer's foreground |
+| `previz/camera/position.1` | `fields::find_camera_field`; `view_camera` for the viewport one |
+| `previz/screen/wall/position.0` | `fields::find_screen_field` on the named screen |
+
+A leading `mixer/` is accepted and ignored, so an address copied out of the published state tree
+or out of an HTTP path resolves unedited.
+
+**What `parse` decides and what it cannot.** Two of the five registries are static tables, so a
+path into them comes back resolved to a `field_meta*`. The other three need live state the header
+must not depend on: a producer parameter exists only while that producer is on that layer, and a
+screen exists only if the channel's previz renderer has one. So `parse` reports the **kind** and
+the key and leaves the live half to the stage, which holds both. Answering "valid" here and
+failing at the write would put two answers to one question in two places, which is the thing this
+file exists to undo.
+
+**Addresses are the TABLE's names, not the struct's.** A screen's X is `position.0`, because the
+screen table declares one vec3 row over `pos_x`/`pos_y`/`pos_z`. `previz/screen/wall/pos_x` does
+not resolve, and `target_self_test` asserts that it does not — the first version of that test
+asserted the struct member and aborted the boot, which is what the test is for.
+
+### 2.1 Audio is addressable now — `mixer/volume`
+
+`volume` and `immediate_volume` were the last mixer parameters no table described. `MIXER
+1-10 VOLUME` set them and `audio_transform` held them, and because no registry row existed, every
+table-driven surface was blind at once: the control-API tree did not list them, `PUT` answered
+`unknown_path`, `MIXER FIELD volume` answered 403, the state publisher's change test compared only
+the image half of the transform, and `BIND 1-10 volume` was refused. Six mechanisms knew about
+`opacity` and one knew about `volume`.
+
+`fields::audio_fields()` is that table, in the same row type as the image one. Two rows:
+
+| row | type | compose | animatable |
+| :--- | :--- | :--- | :--- |
+| `volume` | real, ≥ 0 | **multiply** — two layers of gain are a product, which is what `audio_transform::operator*=` already does | yes, continuous |
+| `immediate_volume` | boolean | or | **no** — `kf_names` is deliberately null |
+
+`immediate_volume` says *how* a volume change is applied (ramp the intra-frame samples, or jump),
+not what the volume is. Animating it would mean animating the ramping policy at 25 Hz, which is
+not a quantity an operator wants a curve on, so it carries no keyframe name.
+
+**Where it is checked.** `address::target_self_test()` at boot; `api-roundtrip` asserts both rows
+**by name** on both mixers, because everything else in that battery discovers its fields from the
+tree and so cannot fail for a field nobody declared; `binding-lfo` gains an arm that binds an LFO
+to `volume` and fits the published stream against the same sine as the brightness arm.
+
+**Not audible.** Every check above proves `volume` is a stored, published, round-tripping,
+bindable number. Whether the audio mixer applies that gain to samples needs a recording and
+`volumedetect`, which is F5 of this plan and is owed.
+
+---
+
+*§3 Model, §4 Precedence, §5 Transport, §6 API and AMCP, §7 Verification, §8 Known gaps — arrive
 with commits 5–19.*
