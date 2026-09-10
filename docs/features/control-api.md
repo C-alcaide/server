@@ -865,7 +865,7 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
 | the docs page is self-contained | 27 KB, **0 `<script>` tags, 0 external references** | 2026-09-05 |
 | authentication | no header, replayed answer, corrupted answer, wrong password, malformed header, unauthenticated WS upgrade: **all six 401**; a correct answer 200. A corrupted answer **consumed its challenge** | 2026-09-05 |
 | the frame path is unchanged by `MIXER FIELD` | `conformance` **100/100 within 1.0 LSB** and `grading` **48/48**, on **both mixers** | 2026-09-05 |
-| KEYFRAMES still round-trips | `KEYFRAMES 1-10 SET`/`GET` exact across `opacity`, `rgb_r_gamma`, `proj_yaw` and `blur_type`, including `proj_yaw` 90 on the wire against radians in the struct; frozen-name check passes at 193 | 2026-09-05 |
+| ~~KEYFRAMES still round-trips~~ | **the command family is REMOVED.** It was measured round-tripping (`SET`/`GET` exact across `opacity`, `rgb_r_gamma`, `proj_yaw` and `blur_type`, and a temporary battery at 8/8 on both mixers) and then deleted; `docs/features/timeline.md` replaces it. The frozen-name check went with the module: a path is validated against the LIVE registry at PUT, which is what the frozen list was standing in for | 2026-09-10 |
 
 ---
 

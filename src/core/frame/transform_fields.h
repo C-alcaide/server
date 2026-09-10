@@ -19,7 +19,7 @@
 // Why this exists. `image_transform` has been described in four separate hand-written
 // lists that nobody could keep aligned: the composition allowlist in BOTH mixers'
 // `apply_transform_colour_values` (`accelerator/{ogl,vulkan}/util/transforms.cpp`), the
-// KEYFRAMES table (`modules/keyframes/keyframe_fields.cpp`), `operator==` in
+// KEYFRAMES table (since removed with that module), `operator==` in
 // `frame_transform.cpp`, and the argument parsing of every MIXER command. A field added to
 // the struct but missed in the composition list is accepted, reported back correctly on
 // query, and never reaches the kernel -- `MIXER EXPOSURE` did exactly that for a whole
@@ -200,7 +200,7 @@ struct field_meta
     compose_t                  compose;
     guard_t                    guard;
     /// A subsystem enable that a write to this field switches on. Carries the auto-enable
-    /// rule from `apply_kf_to_transform`, so PUT and KEYFRAMES agree. nullptr = none.
+    /// rule the removed KEYFRAMES writer applied, so every route agrees. nullptr = none.
     const char* enables;
     const char* unit;
     /// For `enumeration`: the value names in enum order, comma-separated.
@@ -288,12 +288,21 @@ void compose_colour(image_transform& self, const image_transform& other);
 /// divergence to a single row rather than to the whole struct.
 void compose_field(const field_desc& f, image_transform& self, const image_transform& other);
 
-/// Switch on whatever subsystem `field` belongs to, the way `apply_kf_to_transform`
+/// Switch on whatever subsystem `field` belongs to, the way the removed KEYFRAMES writer
 /// does: a blur radius write enables blur (if the radius is non-zero), a geometry write
 /// enables the geometry modifiers, an RGB-levels write enables per-channel levels.
 void apply_enables(image_transform& tf, const field_desc& field);
 
-/// The name→index of a KEYFRAMES name: which field, which component. Lets the keyframes
+/// NO CALLER IN THIS BUILD, and that is stated rather than left to be discovered.
+///
+/// `KEYFRAMES` was the only consumer and it is gone. The names themselves stay -- they are
+/// published in each descriptor as `keyframe_names`, so a client that stored one can still
+/// find out which path it refers to -- and these two lookups are what the timeline's PUT will
+/// use when it starts ACCEPTING a legacy name as an alias for a path (D6 of the timeline
+/// plan). Kept rather than deleted because removing a five-line lookup and adding it back is
+/// churn; if that acceptance is dropped from the plan, these go with it.
+///
+/// The name-to-index of a legacy KEYFRAMES name: which field, which component. Let the
 /// module build its flat per-component table from this one.
 struct kf_ref
 {

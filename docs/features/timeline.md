@@ -1,8 +1,8 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–7 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–8 of 19 shipped. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
-> operator's value back. `KEYFRAMES` is still present and is removed next. Nothing
+> operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
 > each section here lands with the commit that builds it.
 > **Commands:** none yet. The `TIMELINE` family and `HOLD`/`RELEASE` arrive with commit 7; the
@@ -14,8 +14,7 @@
 > **Replaces:** `src/modules/keyframes/` (the `KEYFRAMES` command family) and the OFX producer's
 > private `OFX KEY` engine — both removed when the resolver lands, with a `CHANGELOG` measurement
 > **Coverage:** `time_self_test()` and `address::target_self_test()` at boot (§1, §2), and
-> `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, `keyframes-legacy` for the
-> engine in §3 through the command it still drives, `api-timeline` for §5, and
+> `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, `api-timeline` for §5, and
 > **`timeline-ramp`** and **`timeline-clock`** for §6 and §7. The remaining `timeline-*`
 > batteries do
 > not exist yet and are named in the plan rather than here, because a battery named in a doc is a
@@ -199,12 +198,15 @@ server finished starting.
 
 `KEYFRAMES` runs on this engine now, through a seconds-and-frozen-names adapter, so the swap
 shipped with the old command still working rather than in the same commit that removes it. The
-adapter has its own battery, **`keyframes-legacy`** — temporary, and deleted with the command
-family. It drives `SET`, `GET`, `STATUS`, `ARM` and `DISARM` and fits the published stream against
-a three-key piecewise ramp whose middle key is deliberately *not* the linear midpoint: **8/8 on
+adapter had its own battery — temporary, deleted with the command family, and its last green run
+is the evidence that what was removed worked. It drove `SET`, `GET`, `STATUS`, `ARM` and `DISARM` and fitted the published stream against
+a three-key piecewise ramp whose middle key was deliberately *not* the linear midpoint: **8/8 on
 both mixers, max |error| 0.0000 over 99 frame-stamped samples.** Shown failing first by halving
-the adapter's time base, which the boot self-test cannot see because it does not run the adapter:
-two named failures, the steps landing at exactly twice the authored rate.
+the adapter's time base, which the boot self-test could not see because it did not run the
+adapter: two named failures, the steps landing at exactly twice the authored rate.
+
+Both the adapter and that battery are **gone now** — the command family was removed one commit
+later, once the replacement had been measured. §8 has the deletion.
 
 That battery also measured two things about the old command worth writing down, because they are
 what D2 replaces:
@@ -335,7 +337,7 @@ of a group offset by ten seconds at local time −18 s.
 **No battery, and none is possible yet.** `resolve` is not reachable from outside the process
 until commit 7 adds the routes; the boot self-test is the whole gate for this commit, and it is
 run on every start rather than on demand. `api-tree`, `api-roundtrip`, `binding-lfo` and
-`keyframes-legacy` were run to show nothing moved.
+the legacy-keyframes battery were run to show nothing moved.
 
 **The JSON codec is not here.** The plan put `json.*` in `core/timeline`, which would drag
 Boost.JSON into a target that has a precompiled header — `protocol_http` deliberately has none
@@ -594,5 +596,38 @@ direction, and the rank.
 
 ---
 
-*§8 Ownership beyond two ranks, §9 Known gaps — arrive with commits 8–19. `KEYFRAMES` is still
-present and still works; it is removed next.*
+## 8. `KEYFRAMES` is gone
+
+The command family and `src/modules/keyframes` were deleted once the replacement had been
+measured, which is why it was two commits rather than one: a deletion whose replacement has not
+been proved is a deletion nobody can defend.
+
+**What went:** eleven files; the `add_subdirectory`; ten `shared_ptr<void>` virtuals on
+`stage_base` and their overrides on `stage` and `stage_delayed`; the tick's evaluation block; the
+five `kf_*` maps; the **change filter** `if (values == last) continue;`, which broke its own
+precedence by skipping the tick on which a value happened not to move; and the **`CALL SEEK`
+sniff**, which read the seek out of a producer call to guess a media time and was the only reason
+`SEEK` half-worked.
+
+**What survived:** the interpolation engine, as `core/timeline/curve.cpp` (§3), and the `kf` names
+in each field descriptor, published as `keyframe_names` — so a client that stored one can still
+find out which path it refers to. The frozen 193-name check went with the module, and nothing
+replaces it: a path is validated against the **live** registry at PUT, which is what a frozen list
+was standing in for.
+
+`docs/features/keyframes.md` is now a redirect with the command-by-command mapping, kept rather
+than deleted because a doc that vanishes leaves a reader with a dead link and no explanation.
+
+**Measured:** `KEYFRAMES 1-10 SET (...)` answers **AMCP 400 with the line echoed back**, which is
+this protocol's reply for a command it does not know. The measurement was taken with the
+temporary battery that had been driving it, on its last run before deletion — so the same tool
+reported both that the family worked and that it is gone.
+
+**F11 is closed.** The plan asked whether anything depended on `KEYFRAMES`, and the honest answer
+before this series was *nobody knows*: the harness had never sent the command. It now has a green
+run recorded against the old engine and a green run recorded against the new one through the same
+verbs, and then the family removed. That is the most that can be said without a user to ask.
+
+---
+
+*§9 Ownership beyond two ranks, §10 Known gaps — arrive with commits 9–19.*

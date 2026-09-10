@@ -70,7 +70,6 @@ add_subdirectory(tracking)
 message(STATUS "Tracking module enabled")
 
 # Keyframe animation module (always built)
-add_subdirectory(keyframes)
 message(STATUS "Keyframe module enabled")
 
 # Cluster sync module (always built)

@@ -1,6 +1,33 @@
 CasparVP — Unreleased
 ==========================================
 
+### Removed: the `KEYFRAMES` command family and `src/modules/keyframes`
+
+`KEYFRAMES SET|ARM|DISARM|CLEAR|GET|PATCH|SEEK|STATUS` no longer exist. **Measured: `KEYFRAMES
+1-10 SET (...)` answers AMCP 400 with the line echoed back**, which is this protocol's reply for
+a command it does not know. `docs/features/timeline.md` replaces the feature and
+`docs/features/keyframes.md` is now a redirect with the command-by-command mapping.
+
+**This is a breaking change for any client that sends `KEYFRAMES`.** Whether one exists is not
+knowable from here, and the honest position is written down rather than assumed: this repository's
+measurement harness had never sent the command even once until the commit that swapped the engine
+under it, so a green run against the old engine, a green run against the new one through the same
+verbs, and then the removal is the most that can be said. The replacement is not a like-for-like
+rename -- a document arrives over `PUT /v1/timeline/{name}` rather than over AMCP, and the keys
+are address-space paths in registry units rather than the 193 frozen names in degrees.
+
+**What went with it:** eleven files; ten `shared_ptr<void>` virtuals on `stage_base` and their
+overrides on `stage` and `stage_delayed`; the tick's keyframe evaluation block; five `kf_*` maps;
+the change filter `if (values == last) continue;`, which broke its own precedence by skipping the
+tick on which a value happened not to move; and the `CALL SEEK` sniff, which read the seek out of
+a producer call to guess a media time.
+
+**What survived:** the interpolation engine, as `core/timeline/curve.cpp`, and the `kf` names in
+each field descriptor, still published as `keyframe_names` -- so a client that stored one can
+still find out which path it refers to. The frozen 193-name startup check went with the module
+and nothing replaces it: a path is validated against the LIVE registry at PUT, which is what a
+frozen list was standing in for.
+
 ### The timeline runs in the tick, on the CHANNEL's clock, and releasing a field is lossless
 
 A loaded document now animates any layer on its channel. `TIMELINE <ch>

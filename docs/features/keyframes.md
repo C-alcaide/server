@@ -1,158 +1,50 @@
-# Keyframes — timeline animation of mixer state
+# Keyframes — REMOVED
 
-> **State:** **being replaced.** The interpolation engine is `core::timeline::curve` as of
-> commit 4 of the timeline plan (`~/.claude/plans/zesty-skipping-engelbart.md`); this module is
-> now an adapter over it, and the command family is removed at commit 6. See
-> [`timeline.md`](timeline.md).
-> **Modules:** `src/modules/keyframes` — the wire format and the commands. The ENGINE is
+> **State:** **removed.** The `KEYFRAMES` command family and `src/modules/keyframes` were
+> deleted, and the feature they provided is [`timeline.md`](timeline.md).
+> **Commands:** none. `KEYFRAMES SET|ARM|DISARM|CLEAR|GET|PATCH|SEEK|STATUS` answer
+> `400` with the line echoed back, which is AMCP's reply for a command it does not know.
+> **Modules:** **not a module** — nothing. The interpolation ENGINE survived and is
 > `src/core/timeline/curve.cpp`
-> **Commands:** 8 fork-specific AMCP commands, registered by the module
-> **Architecture:** none, deliberately — a tween table over the existing transform system; no structural decision to record
-> **Guide:** [`../guides/KEYFRAMES.md`](../guides/KEYFRAMES.md)
-> **Coverage:** `keyframes-legacy`, added with the engine swap and deleted with the command
-> family. 8/8 both mixers. It is the first check this project has ever pointed at `KEYFRAMES`
+> **Coverage:** none, deliberately: there is nothing left to cover. The temporary battery that
+> measured the engine swap was deleted with the command it drove; its last green run was 8/8 on
+> both mixers
 
-Animates mixer state over time from a keyframe list, rather than one tween per command. Arm a
-timeline, seek it, and the mixer follows — which is how a show cue with twenty simultaneous
-parameter moves is expressed as one object instead of twenty `MIXER` commands with matching
-durations.
+## What replaced it, and what to do instead
 
-Operator detail is in [`../guides/KEYFRAMES.md`](../guides/KEYFRAMES.md). This document is the
-state and the coverage.
+`KEYFRAMES` animated mixer state from a keyframe list. [`timeline.md`](timeline.md) does the
+same thing and more, and the mapping is direct:
 
----
-
-## 1. What is implemented today
-
-Eight commands (`keyframe_commands.cpp`):
-
-| command | purpose |
+| `KEYFRAMES` | the timeline |
 | :--- | :--- |
-| `KEYFRAMES SET` | define the keyframe list |
-| `KEYFRAMES PATCH` | modify it in place |
-| `KEYFRAMES GET` | read it back |
-| `KEYFRAMES CLEAR` | discard it |
-| `KEYFRAMES ARM` / `DISARM` | enable/disable playback |
-| `KEYFRAMES SEEK` | move the timeline position |
-| `KEYFRAMES STATUS` | query armed state and position |
+| `KEYFRAMES 1-10 SET ({...})` | `PUT /v1/timeline/{name}` — a document is JSON, and the JSON interface takes it |
+| `KEYFRAMES 1-10 ARM` | `TIMELINE 1 PLAY {name}` |
+| `KEYFRAMES 1-10 DISARM` | `TIMELINE 1 PAUSE {name}` — which holds the parameters, or `STOP` to give them back |
+| `KEYFRAMES 1-10 SEEK 12.5` | `TIMELINE 1 SEEK {name} 12.5`, and it is observable now |
+| `KEYFRAMES 1-10 GET` | `GET /v1/timeline/{name}` |
+| `KEYFRAMES 1-10 STATUS` | `TIMELINE 1 INFO {name}` |
+| `KEYFRAMES 1-10 PATCH 2.0 ({...})` | re-`PUT` the document; a `PUT` is cheap and a partial edit is the client's job |
+| the 193 frozen names, in degrees | **address-space paths in registry units** — `opacity`, `fill_translation.0`, `volume`, `producer/brightness`, `previz/screen/wall/position.0` |
 
-**The field vocabulary is the substance: 193 animatable names.** It covers the geometry
-(`anchor_x`, `fill_x`, `fill_sx`, `clip_x`…), the basic mixer state (`opacity`, `contrast`,
-`brightness`, `saturation`), and — critically — the fork's own grading and projection fields.
+Five things the replacement does that this could not, each of which is why it was replaced
+rather than extended:
 
-**The table is no longer written here.** It is DERIVED from `core::fields::all()`, the transform
-field registry, and the names are checked at startup against `FROZEN_KF_NAMES` — 193 of them — so a
-rename or a dropped entry in the registry fails immediately rather than silently changing what a
-saved timeline animates. That check earned its place on its first run: a `std::vector` holding the
-generated name strings reallocated as it grew, invalidating every `c_str()` already handed to the
-table, and the names came out wrong with no crash to say so.
+* **The clock is the channel's**, not the animated layer's producer. A colour fill, an empty
+  layer and a paused clip all animate; `SEEK` is observable.
+* **A layer is not a limit.** A document animates a producer parameter, a previz screen, a
+  camera and audio volume, not only `image_transform`.
+* **Releasing a parameter is lossless.** The operator's own `MIXER` value is remembered
+  during an animation and comes back when the document lets go.
+* **Time is exact.** `flicks` rather than `double` seconds, so a key on frame 12 of a 59.94
+  channel is on frame 12 forever.
+* **Objects relate to each other.** `#interview.end + 5` is written down, so moving the
+  interview moves what follows it.
 
-**It auto-enables the flags a field needs.** `apply_kf_to_transform` in `keyframe_fields.cpp` sets
-`enable_geometry_modifiers = true` when any geometry field is animated
-(`keyframe_fields.h` documents the rule). Without that, animating a geometry field would set a
-value the mixer's geometry gate never reads — the same class of silent no-op as the transform
-allowlist trap.
-
----
-
-## 2. How to drive it
-
-```
-KEYFRAMES 1-1 SET ...
-KEYFRAMES 1-1 ARM
-KEYFRAMES 1-1 SEEK 0
-KEYFRAMES 1-1 STATUS
-```
-
-The keyframe list syntax is in the operator guide and is not duplicated here.
+The `kf` names survive in the field registry's descriptors, published as `keyframe_names`, so
+a client that stored them can still look up which path a name refers to.
 
 ---
 
-## 3. Design decisions, and what they cost
-
-**A declared vocabulary, not a reflection over `image_transform` — but no longer a SECOND one.**
-C++20 has no reflection, so the animatable names have to be written down somewhere; the names are
-not derivable from the members in any case (`fill_x` is `fill_translation[0]`, `mid_r` is
-`midtone[0]`). What changed is *where*: this used to be ~200 hand-written entries, a third list to
-remember alongside both mixers' `apply_transform_colour_values`, and a new `image_transform` field
-was not animatable until someone added it here. It is now a projection of
-`core::fields::all()` — the same declaration the control API describes fields from and the mixers'
-composition is checked against.
-
-The cost is a layer of indirection between a keyframe name and the member it moves, and one real
-constraint: the registry stores angles in radians, so the projection into keyframe names converts
-to degrees on the way out and back on the way in, because that is what saved timelines contain.
-
-**Arm/disarm separate from set.** A list can be built and inspected before it drives anything,
-which matters when the alternative is discovering a bad cue live.
-
----
-
-## 4. Verification — what is measured, and what is not
-
-**`keyframes-legacy`, and it arrived only because the engine underneath was replaced.** For most
-of this module's life the answer here was *nothing* — no battery had ever sent `KEYFRAMES` — and
-that stayed true until `core::timeline::curve` took over the interpolation and the swap needed a
-before and an after. **8/8 on both mixers, max |error| 0.0000 over 99 frame-stamped samples**,
-fitting the published opacity stream against a three-key piecewise ramp whose middle key is
-deliberately not the linear midpoint, with a slope gate that a halved time base fails. It is
-temporary: it goes when the command family does.
-
-**Two things it measured about this command, and neither is a fixture problem:**
-
-* **The clock is the producer's, not the arm's.** A layer already playing is already that far
-  into its keyframes the instant it is armed. With a two-second document the first readable
-  sample was at t = 1.56 s — three quarters finished before anything could observe it. This is
-  the same fact as §3's "an empty layer pins t = 0", seen from the other end.
-* **`SEEK` is not observable.** `KEYFRAMES 1-10 SEEK 1.0` sets the position and the next tick
-  recomputes it from `producer->frame_number()`, overwriting it before any read lands: measured
-  at 0.23, the document's end, against the 0.55 the seek asked for.
-
-Both are why the timeline plan's D2 makes the CHANNEL FRAME COUNTER the transport clock.
-
-Two more things make the remaining gap worse than the raw command count suggests:
-
-1. **The field table now has one consistency check, and it is a name check rather than a
-   coverage check.** `FROZEN_KF_NAMES` fails startup if the registry stops generating a name that
-   saved timelines use. What it still cannot see is a field ADDED to `image_transform` and left out
-   of the registry — the missing case, which stays silent.
-
-   **A coverage check was run by hand on 2026-08-26** and the table is in good shape: of 71
-   `image_transform` fields, 8 are absent and **7 of those are legitimately not animatable** —
-   `blend_mask` (a texture), `grade_nodes` (a node graph), `geometry_override`, `is_key`, `is_mix`
-   and `layer_depth` (modes and ordering, not continuous values), and `ocio` (a config selection).
-
-   **The eighth is an asymmetry worth a look: `hue_curves` is absent while `curves` is present.**
-   Both are curve data of the same shape, so either tone curves should not be animatable or hue
-   curves should be. Not a defect — nothing breaks — but it is an inconsistency nobody chose, and
-   it is the kind that becomes a support question.
-2. **The auto-enable logic is the interesting part and is untested.** Animating a geometry field
-   without `enable_geometry_modifiers` produces no movement and no error.
-
----
-
-## 5. Known gaps
-
-1. ~~**No coverage.**~~ **CLOSED at commit 4 of the timeline plan** — `keyframes-legacy`, and
-   §4 has the numbers. Still uncovered: the auto-enable logic, and the picture (the battery
-   animates `opacity`, which lands in alpha, so an RGB patch mean cannot read it).
-2. **Still an allowlist, now shared.** A new `image_transform` field must be added to
-   `core::fields` or it is animatable nowhere and describable nowhere — which is an improvement on
-   three separate lists, but is not the same as being enforced. Both mixers still carry their own
-   hand-written composition tables; the registry asserts agreement with them rather than replacing
-   them.
-3. **No tween-shape verification.** The tween functions are shared with the `MIXER` commands'
-   `[tween]` argument, which is itself untested fork-wide.
-
----
-
-## 6. Related commits
-
-Not traced; the module predates this document.
-
----
-
-## 7. Diagrams
-
-Not warranted. The interesting content is a 193-name table and a state machine with two states
-(armed/disarmed) — neither benefits from a picture.
+*This file is a redirect. It is kept rather than deleted because a doc that vanishes leaves a
+reader with a dead link and no explanation, and `KEYFRAMES` was documented for long enough that
+links to it exist.*
