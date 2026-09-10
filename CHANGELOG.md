@@ -1,6 +1,42 @@
 CasparVP — Unreleased
 ==========================================
 
+### `on_end: commit`, and a SEEK that compiles the state a played-through show would have
+
+An object's `on_end` is honoured now. `release` -- the default -- gives the parameter back to
+whatever was underneath; `commit` bakes the object's final value into the operator's constant.
+And `SEEK` replays every committed object that ended at-or-before the target, in END order, so
+the same position reached by playing and by seeking looks the same. A `STOP` compiles to a seek
+to zero.
+
+**Behaviour changes for an existing config.** None: `on_end` is a property of a timeline
+document and defaults to `release`, which is what every document has done so far.
+
+**Why a compilation is needed at all.** Playing to 100 s runs every cue in order, so the
+committed ones have left their marks; jumping to 100 s runs none of them. Without this, an
+operator checking a cue by seeking to it sees the wrong picture. It is short because a `release`
+object leaves NO state behind -- only committed ones have anything to replay.
+
+The committed value is the curve's value AT THE OBJECT'S END rather than at the position the tick
+has reached, and it is written through `tweened_transform::patch` so an in-flight
+`MIXER <duration>` on another field of the same layer keeps interpolating. `commit` on a producer
+parameter or a previz field is a no-op, because neither has a constant to write into.
+
+**MEASURED, both mixers.** New battery `timeline-seek-compile` **10/10**. Three objects on one
+layer with distinct values, two committing and one releasing, and the operator's constant a fourth
+distinct number -- so each state says something specific. After the whole document the value is
+B's 0.70, because C released and its 0.50 must not persist. The constant is reset before each
+seek, so the compilation has to DO something rather than finding the state already correct.
+`timeline-ramp` 21/21, `timeline-stack` 16/16, `timeline-cue` 14/14 and `timeline-transport`
+12/12 still green.
+
+**Shown failing first, twice.** Removing the compilation fails both seek checks -- each reads the
+operator's 0.15 where playing gave 0.30 and 0.70. Committing every object regardless of `on_end`
+fails exactly one: the released object's value persists.
+
+**A behaviour the fixture found:** a seek while STOPPED positions the playhead and drives
+nothing, because a stopped document owns no parameter. It has its own check now.
+
 ### The transport measured through the tick: rate, pause/resume, and a loop region
 
 No code change to the transport itself -- `transport_self_test` already covered the arithmetic at

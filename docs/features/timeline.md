@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–14 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–15 of 19 shipped. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -1032,4 +1032,65 @@ client, and it is written here because it took two fixtures to notice.
 
 ---
 
-*§15 Known gaps — arrives with commit 19.*
+## 15. `on_end` and seek compilation
+
+An object ends in one of two ways, and the difference is intent rather than mechanism.
+
+| `on_end` | what happens | why |
+| :--- | :--- | :--- |
+| `release` *(default)* | the parameter goes back to whatever was underneath | the constant was never touched, so it costs nothing |
+| `commit` | the object's **final value is baked into the constant** | "this is the new normal" — a cue that moves a grade and leaves it there |
+
+The committed value is the curve's value **at the object's end**, not at the position the tick
+has reached: an object that ended two frames ago commits the value it finished on, not the value
+it would have had if it had kept running. It is written through
+`tweened_transform::patch`, so an in-flight `MIXER <duration>` on another field of the same layer
+keeps interpolating — which is the whole reason `patch` exists.
+
+**`commit` on a producer parameter or a previz field is a no-op**, because neither has a constant
+to write into (§12). Said here rather than left to be discovered.
+
+### 15.1 Why seeking then needs a compilation
+
+Playing a show to 100 s runs every cue in order, so the committed ones have left their marks.
+Jumping to 100 s runs none of them. Without a compilation **the same position reached by playing
+and by seeking looks different**, and an operator checking a cue by seeking to it is looking at
+the wrong picture.
+
+`SEEK t` replays every `on_end: commit` object whose end is at-or-before `t`, **in end order**.
+That is the whole compilation, and why it is short is the interesting part: **a `release` object
+leaves no state behind**, so only committed ones have anything to replay. End order matters
+because two objects committing the same path must land in the order they would have.
+
+A `STOP` compiles to a seek to zero, since that is what it does to the playhead.
+
+### 15.2 Where it is checked
+
+**`timeline-seek-compile`, 10/10 both mixers.** Three objects on one layer, every value distinct
+and none of them the operator's:
+
+```
+A   0..2 s    commit    brightness → 0.30
+B   4..6 s    commit    brightness → 0.70
+C   8..10 s   release   brightness → 0.50      (operator's constant: 0.15)
+```
+
+So each state says something specific. After A only, 0.30. After the whole document, **0.70** —
+because C releases and its 0.50 must not persist, which is the check a "commit everything"
+implementation fails. Seeking to 7 s must give 0.70 and not 0.30, which is what makes the replay
+*order* checkable. And **the constant is reset to the operator's value before each seek**, so the
+compilation has to do something rather than finding the state already correct.
+
+**Shown failing first, twice.** Removing the compilation fails the two seek checks — both read
+the operator's 0.15 where playing gave 0.30 and 0.70. Committing every object regardless of
+`on_end` fails exactly one: the released object's 0.50 persists.
+
+**And the fixture had to be corrected**, in a way worth keeping: a seek while **stopped**
+positions the playhead and drives *nothing*, because a stopped document owns no parameter. The
+first version expected the object under the playhead to be driving, which is to say it was
+asserting that a stopped document plays. There is now a check for the real behaviour, and the
+object-is-driving checks `PAUSE` first.
+
+---
+
+*§16 Known gaps — arrives with commit 19.*

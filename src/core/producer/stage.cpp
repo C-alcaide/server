@@ -185,6 +185,8 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     struct layer_entry
     {
         std::string                             active;
+        std::string                             document; //< which document's object it is
+        std::string                             object;   //< and which object, for `on_end`
         std::unordered_map<std::string, double> captured; //< for `rebase`
     };
     std::map<int, layer_entry> entries_;
@@ -913,6 +915,105 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         return nullptr;
     }
 
+    /// Does this object ask for its final value to be kept?
+    bool object_on_end_commit(const std::string& doc_name, const std::string& object_id)
+    {
+        if (!timelines_ || doc_name.empty())
+            return false;
+        const auto entry = timelines_->get(doc_name);
+        if (!entry)
+            return false;
+        const auto* obj = find_object(entry->document.objects, object_id);
+        return obj && obj->on_end == timeline::on_end_t::commit;
+    }
+
+    /// Write an object's curve value AT ITS END into the layer's constant.
+    ///
+    /// At its end rather than at the position the tick has reached: an object that ended two
+    /// frames ago should commit the value it finished on, not the value it would have had if it
+    /// had kept running. Through `tweened_transform::patch`, so an in-flight `MIXER <duration>`
+    /// on another field of the same layer keeps interpolating -- which is the whole reason
+    /// `patch` exists.
+    void commit_final_values(int layer, const std::string& doc_name, const std::string& object_id)
+    {
+        if (!timelines_)
+            return;
+        const auto entry = timelines_->get(doc_name);
+        if (!entry)
+            return;
+        const auto* obj = find_object(entry->document.objects, object_id);
+        if (!obj || obj->curves.empty())
+            return;
+
+        const auto at_end = obj->curves.interpolate(obj->curves.duration(), timeline::kind_of);
+        if (at_end.empty())
+            return;
+
+        tweens_[layer].patch([&](frame_transform& t) {
+            for (const auto& pv : at_end) {
+                const auto target = address::parse(pv.first);
+                if (target.kind == address::target_kind::image) {
+                    const auto* f = fields::find(target.field);
+                    if (!f || !f->set || !f->get)
+                        continue;
+                    auto v = f->get(t.image_transform);
+                    if (v.size() != f->arity)
+                        continue;
+                    v[std::min<std::size_t>(target.component, v.size() - 1)] = pv.second;
+                    if (f->set(t.image_transform, v))
+                        fields::apply_enables(t.image_transform, *f);
+                } else if (target.kind == address::target_kind::audio) {
+                    const auto* a = fields::find_audio_field(target.field);
+                    if (!a || !a->set || !a->get)
+                        continue;
+                    auto v = a->get(t.audio_transform);
+                    if (v.size() != a->arity)
+                        continue;
+                    v[std::min<std::size_t>(target.component, v.size() - 1)] = pv.second;
+                    a->set(t.audio_transform, v);
+                }
+            }
+        });
+    }
+
+    /// SEEK COMPILATION: make the constants say what they would say if the show had been played
+    /// up to `to` instead of jumped to it.
+    ///
+    /// This is the whole compilation, and it is short for a reason worth stating: a `release`
+    /// object leaves NO state behind, so only `commit` objects have anything to replay. Replayed
+    /// in END order, because two objects committing the same path must land in the order they
+    /// would have.
+    ///
+    /// Without it, a seek forwards past a committed cue leaves the parameter wherever it was --
+    /// so the same position reached by playing and by seeking would look different, and an
+    /// operator checking a cue by seeking to it would be looking at the wrong picture.
+    void compile_seek(const std::string& doc_name, timeline::flicks to)
+    {
+        if (!timelines_)
+            return;
+        const auto entry = timelines_->get(doc_name);
+        if (!entry || !entry->resolved.ok())
+            return;
+
+        std::vector<const timeline::instance*> done;
+        for (const auto& in : entry->resolved.instances)
+            if (in.end && *in.end <= to && !in.layer.empty())
+                done.push_back(&in);
+
+        std::stable_sort(done.begin(), done.end(),
+                         [](const timeline::instance* a, const timeline::instance* b) {
+                             return *a->end < *b->end;
+                         });
+
+        for (const auto* in : done) {
+            const auto layer = layer_index_for(in->layer);
+            if (!layer)
+                continue;
+            if (object_on_end_commit(doc_name, in->object_id))
+                commit_final_values(*layer, doc_name, in->object_id);
+        }
+    }
+
     /// Every document this channel owns, advanced one tick and evaluated into the overlays.
     void evaluate_timelines(std::uint64_t frame_number, monitor::state& state)
     {
@@ -940,9 +1041,23 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
             auto& tr = transports_[name];
 
+            // A SEEK IN THIS TICK'S COMMANDS needs its compilation run, and the target has to
+            // be read BEFORE `apply_all` consumes them. A stop counts too: it rewinds to zero,
+            // which is a seek to zero as far as the constants are concerned.
+            std::optional<timeline::flicks> seek_to;
+            for (const auto& c : pending_transport_[name]) {
+                if (c.v == timeline::transport_command::verb::seek)
+                    seek_to = c.at;
+                else if (c.v == timeline::transport_command::verb::stop)
+                    seek_to = 0;
+            }
+
             // The pending commands for this tick, in the SAFE order rather than arrival order:
             // stop outranks pause outranks play. See `transport::apply_all`.
             tr.apply_all(pending_transport_[name], frame_number, per_frame);
+
+            if (seek_to)
+                compile_seek(name, *seek_to);
 
             // A GO fired: the document has to be RE-RESOLVED, because an object whose end waits
             // on a trigger has no end until it fires, and everything downstream of it has no
@@ -1009,7 +1124,9 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 auto&      ent = entries_[*layer];
                 const bool entering = ent.active != identity;
                 if (entering) {
-                    ent.active = identity;
+                    ent.active   = identity;
+                    ent.document = name;
+                    ent.object   = inst->object_id;
                     ent.captured.clear();
 
                     // THE LIVE REGISTRIES ARE CAPTURED ON ENTRY WHATEVER `rebase` SAYS, and for
@@ -1110,6 +1227,20 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 ended.push_back(e.first);
 
         for (const auto layer : ended) {
+            const auto& ent = entries_[layer];
+
+            // `on_end: commit` -- BAKE the object's final value into the constant instead of
+            // releasing it. `release` (the default) is lossless because the constant was never
+            // touched; `commit` is the opposite intent: "this is the new normal", which is what
+            // an operator means by a cue that moves a grade and leaves it there.
+            //
+            // Committed BEFORE the live-target restore below, and the two do not overlap: a
+            // committed mixer field writes the constant, and a producer parameter or previz
+            // field has no constant to write -- so `commit` on one of those is a no-op and is
+            // documented as one rather than silently doing something else.
+            if (auto committed = object_on_end_commit(ent.document, ent.object))
+                commit_final_values(layer, ent.document, ent.object);
+
             const auto               prefix = std::to_string(layer) + "|";
             std::vector<std::string> paths;
             for (const auto& c : live_captures_)
