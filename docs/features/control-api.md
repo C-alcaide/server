@@ -488,12 +488,60 @@ key for:
   "RANGE": [{ "MIN": 0.0, "MAX": 1.0 }],
   "casparcg": {
     "type": "real", "bounding": "refuse", "compose": "max", "kind": "continuous",
-    "arity": 1, "default": [0.0], "writable": true, "kf": ["chroma_min_bright"]
+    "arity": 1, "default": [0.0], "writable": true, "animatable": true,
+    "keyframe_names": ["chroma_min_bright"]
   }
 }
 ```
 
 ---
+
+### `animatable` — what a timeline document may drive
+
+Every mixer field and every producer parameter carries it, and it has **three** states because
+the question has three answers:
+
+| value | meaning | what a client draws |
+| :--- | :--- | :--- |
+| `true` | a curve can **interpolate** it — a continuous or angular real | a ramp editor |
+| `"step"` | it can change **at** a key and hold — a bool, int, enum or string | a value lane |
+| `false` | nothing can drive it — the field is not writable | no track |
+
+Measured on the field registry: **140 `true`, 35 `"step"`, 5 `false`** of 180 mixer rows. The
+`false` five are `ocio_source_space`, `lut3d`, `hue_curves`, `blend_mask` and `grade_nodes`.
+
+**Do not read `keyframe_names` as animatability.** Those are the names of the removed `KEYFRAMES`
+command family, kept only so a client that stored one can look up which path it meant. Reading
+them that way was wrong in both directions: a mixer field advertised a list for a command that no
+longer exists, and a producer parameter advertised nothing — while a document **does** drive one,
+gated at 1 LSB by `timeline-targets`. `animatable` is the signal; `keyframe_names` is a migration
+aid.
+
+`api-tree` asserts every field carries it, that the value is one of the three, that a continuous
+real is `true` rather than `"step"`, and that a **discrete producer parameter is `"step"`** — the
+last because the first implementation answered `true` for an enumeration and a boolean, and a
+curve editor on a trigger is a control an operator cannot use.
+
+### `hold` on a value write — taking a parameter from whatever is driving it
+
+```
+PUT /v1/value/channel/1/stage/layer/10/mixer/brightness   {"hold": true}
+PUT /v1/value/channel/1/stage/layer/10/mixer/brightness   {"hold": false}
+```
+
+`{"hold": true}` pins the path to **what it is showing right now**, above a timeline and above a
+binding, until it is released. `{"hold": false}` hands it back, and whatever was underneath takes
+it again on the next tick. The AMCP equivalents are `HOLD` and `RELEASE`.
+
+**One route rather than two**, which is a deviation from the plan worth stating: the design called
+for a separate `POST …/release`, and a symmetric `hold` flag on the write that already exists is
+smaller and leaves nothing to keep in step. The `hold` block is read **before** the value
+requirement, so `{"hold": true}` on its own is legal — "stop it moving, at whatever it is now" is
+the operator gesture, and demanding a value would make them invent one.
+
+The reply carries `effective`, `shadowed_by` and `stack`, so a client that writes a value while
+something else owns the path is told so rather than left wondering. See `timeline.md` §10 for the
+full ownership stack.
 
 ### `state_leaves` — how big the tree you are subscribed to actually is
 
@@ -713,7 +761,8 @@ that really are transport — an endpoint that does not exist at all, and authen
 that `curl -f` does not fail on an application error, which surprises people once.
 
 **The vendor block, rather than new top-level keys.** Rejected: putting `bounding`, `compose`,
-`default` and `kf` next to `ACCESS` and `RANGE`. A strict OSCQuery client is entitled to reject a
+`default`, `animatable` and `keyframe_names` next to `ACCESS` and `RANGE`. A strict OSCQuery
+client is entitled to reject a
 node carrying unknown top-level keys, and ossia and Vezér both extend the format exactly this way.
 The cost is one level of nesting for the fork-specific half of every descriptor.
 

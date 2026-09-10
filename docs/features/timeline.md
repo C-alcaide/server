@@ -624,9 +624,12 @@ precedence by skipping the tick on which a value happened not to move; and the *
 sniff**, which read the seek out of a producer call to guess a media time and was the only reason
 `SEEK` half-worked.
 
-**What survived:** the interpolation engine, as `core/timeline/curve.cpp` (§3), and the `kf` names
-in each field descriptor, published as `keyframe_names` — so a client that stored one can still
-find out which path it refers to. The frozen 193-name check went with the module, and nothing
+**What survived:** the interpolation engine, as `core/timeline/curve.cpp` (§3), and the legacy
+names in each field descriptor, published as **`keyframe_names`** — so a client that stored one
+can still find out which path it refers to. They are a **migration aid and not an animatability
+signal**: the tree publishes `animatable` for that, because reading the name list that way told a
+client a mixer field could be driven by a deleted command and told it nothing at all about a
+producer parameter. The frozen 193-name check went with the module, and nothing
 replaces it: a path is validated against the **live** registry at PUT, which is what a frozen list
 was standing in for.
 

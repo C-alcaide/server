@@ -11,6 +11,8 @@
 
 #include "api_openapi.h"
 
+#include <cstring>
+
 #include <core/stage/stage_fields.h>
 #include "api_status.h"
 #include "json_state.h"
@@ -125,6 +127,19 @@ json::object field_schemas()
         x["default"]        = vector_to_json(f.defaults());
         if (f.unit && *f.unit)
             x["unit"] = f.unit;
+        // The same three-state the tree publishes, from the same function -- `true`, `"step"`
+        // or `false`. A spec that described animatability differently from the tree would be
+        // worse than one that omitted it.
+        {
+            const auto* a = fields::animatable_of(f);
+            if (std::strcmp(a, "true") == 0)
+                x["animatable"] = true;
+            else if (std::strcmp(a, "false") == 0)
+                x["animatable"] = false;
+            else
+                x["animatable"] = a;
+        }
+
         if (f.kf_names) {
             json::array kf;
             for (auto n : fields::split_list(f.kf_names))

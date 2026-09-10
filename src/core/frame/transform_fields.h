@@ -316,6 +316,18 @@ std::optional<kf_ref> find_kf(std::string_view kf_name);
 /// rather than silently changing what a saved timeline animates.
 std::vector<std::string> all_kf_names();
 
+/// WHAT A TIMELINE DOCUMENT CAN DO WITH THIS FIELD: `"true"`, `"step"` or `"false"`.
+///
+/// Returned as a string because the JSON value is a discriminated three-state, not a boolean --
+/// `true` means a curve can INTERPOLATE it, `"step"` means it can only change AT a key, and
+/// `false` means nothing can drive it. A client's timeline UI needs all three: a ramp editor for
+/// the first, a value lane for the second, and no track at all for the third.
+///
+/// This is the tree's only honest animatability signal. It replaces reading `kf_names`, which
+/// was a list of names for the deleted `KEYFRAMES` command family and which said nothing about
+/// producer parameters -- and a document drives those, gated at 1 LSB by `timeline-targets`.
+const char* animatable_of(const field_meta& f);
+
 /// Split a comma-separated `values` / `kf_names` list. Empty for nullptr.
 std::vector<std::string_view> split_list(const char* csv);
 

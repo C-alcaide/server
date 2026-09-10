@@ -10,6 +10,8 @@
  */
 
 #include "api_tree.h"
+
+#include <cstring>
 #include "json_state.h"
 
 #include <core/stage/stage_fields.h>
@@ -161,16 +163,43 @@ json::object vendor_block(const fields::field_meta& f, const core::monitor::vect
     if (f.enables)
         c["enables"] = f.enables;
 
+    // WHAT A TIMELINE DOCUMENT CAN DO WITH THIS FIELD -- `true`, `"step"` or `false`.
+    //
+    // This is the tree's animatability signal, and it exists because `keyframe_names` below is
+    // NOT one. Those are the names of the deleted `KEYFRAMES` command family, kept only so a
+    // client that stored one can look up which path it meant; reading them as "can this be
+    // animated" gave the wrong answer twice over -- a list for a command that no longer exists,
+    // and nothing at all for a producer parameter, which a document DOES drive.
+    //
+    // A string for `"step"` and a JSON boolean for the other two, because the three states are
+    // not a boolean: `true` means a curve interpolates it, `"step"` means it changes AT a key
+    // and holds, `false` means nothing can drive it. A client's timeline needs a ramp editor,
+    // a value lane and no track respectively.
+    {
+        const auto* a = fields::animatable_of(f);
+        if (std::strcmp(a, "true") == 0)
+            c["animatable"] = true;
+        else if (std::strcmp(a, "false") == 0)
+            c["animatable"] = false;
+        else
+            c["animatable"] = a;
+    }
+
     if (f.kf_names) {
         json::array kf;
         for (auto name : fields::split_list(f.kf_names))
             kf.push_back(json::value(std::string(name)));
-        c["kf"] = std::move(kf);
+        // `keyframe_names`, matching `/v1/openapi.json` and both feature docs. It was `kf` here
+        // and `keyframe_names` there -- the same data under two names on two surfaces of one
+        // API, so a client generated from the spec looked for a key the tree never sent. No
+        // battery asserted either name, which is how it survived; `api-tree` asserts they agree
+        // now.
+        c["keyframe_names"] = std::move(kf);
     } else {
-        // Explicitly null rather than absent: "this field cannot be animated" is a fact a
-        // control surface needs, and an absent key is indistinguishable from a tree built
-        // by a server that did not know about keyframes at all.
-        c["kf"] = nullptr;
+        // Explicitly null rather than absent: "this field has no legacy KEYFRAMES name" is a
+        // fact a migrating client needs, and an absent key is indistinguishable from a tree
+        // built by a server that never had them.
+        c["keyframe_names"] = nullptr;
     }
     return c;
 }
@@ -226,6 +255,29 @@ json::object param_leaf(const core::param_snapshot& p, const std::string& full_p
     meta.step     = p.step;
     meta.unit     = p.unit.empty() ? nullptr : p.unit.c_str();
     meta.values   = p.values.empty() ? nullptr : p.values.c_str();
+
+    // THE KIND, DERIVED FROM THE DECLARED TYPE, and it has to be set explicitly: `field_meta`
+    // default-initialises `kind` to `continuous`, so leaving it alone made `animatable_of`
+    // answer `true` for every producer parameter -- including an ENUMERATION and a BOOLEAN. A
+    // client would then offer a curve editor for a trigger, and interpolating an enum produces
+    // values it has no name for.
+    //
+    // Found by probing the tree rather than by the battery: the check asserted `animatable` was
+    // PRESENT and a real one was `true`, both of which passed. Asserting the discrete cases is
+    // what `api-tree` does now.
+    switch (p.type) {
+        case core::fields::value_type::real:
+        case core::fields::value_type::vec2:
+        case core::fields::value_type::vec3:
+        case core::fields::value_type::vec4:
+            meta.kind = core::fields::kf_kind::continuous;
+            break;
+        default:
+            // boolean, integer, string, enumeration, blob -- a value that changes AT a key and
+            // holds, which is D7's second mechanism.
+            meta.kind = core::fields::kf_kind::discrete;
+            break;
+    }
     // The parameter's own description if the format gave it one, else its label -- which every
     // ISF input and every OFX parameter has. Never empty, so a generated control always has
     // something to put next to the slider.
@@ -236,9 +288,14 @@ json::object param_leaf(const core::param_snapshot& p, const std::string& full_p
     // and `descriptor_leaf` omits the key entirely when there is no range, which says so.
     if (p.min && p.max)
         meta.range = core::grade_range{*p.min, *p.max};
-    // kf_names stays null: KEYFRAMES is bound to `image_transform` end to end, so `descriptor_leaf`
-    // emits an explicit `"kf": null` and a client is told the parameter cannot be animated rather
-    // than left to guess from an absent key.
+    // `kf_names` stays null -- a producer parameter never had a KEYFRAMES name, because that
+    // command family only ever reached `image_transform`. But `animatable` is DERIVED from the
+    // kind below and is the signal that matters: a document drives a producer parameter through
+    // a `producer/<name>` path, gated at 1 LSB by `timeline-targets`, so this must not say no.
+    //
+    // The comment here used to say the client "is told the parameter cannot be animated". That
+    // was true while KEYFRAMES was the only animator and became false the moment a document
+    // could drive one -- do not restore it.
 
     auto leaf         = descriptor_leaf(meta, p.default_value);
     leaf["FULL_PATH"] = full_path;

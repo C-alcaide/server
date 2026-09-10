@@ -746,6 +746,30 @@ std::optional<kf_ref> find_kf(std::string_view kf_name)
     return it->second;
 }
 
+const char* animatable_of(const field_meta& f)
+{
+    // NOT WRITABLE, SO NOTHING CAN DRIVE IT. Checked first because it outranks the kind: a
+    // read-only field with a continuous kind is still not animatable, and saying `true` would
+    // put a track in a client's timeline for something no write path can reach. Uses the same
+    // `access` test `api_tree` publishes as `writable`, so the two cannot disagree.
+    if ((static_cast<uint8_t>(f.access) & static_cast<uint8_t>(access_t::write)) == 0)
+        return "false";
+
+    // THE KIND DECIDES INTERPOLATE-OR-STEP, and it is the same question `curve::kind_of` asks
+    // when the tick evaluates a key -- so the tree's answer and the engine's behaviour come from
+    // one source rather than two that can drift.
+    switch (f.kind) {
+        case kf_kind::continuous:
+        case kf_kind::angular:
+        case kf_kind::angular_rad:
+            return "true";
+        default:
+            // Bool, int and enum: a value that changes AT a key and holds, which is D7's second
+            // mechanism. Interpolating an enum would produce values it has no name for.
+            return "step";
+    }
+}
+
 std::vector<std::string> all_kf_names()
 {
     std::vector<std::string> out;

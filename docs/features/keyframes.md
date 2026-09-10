@@ -40,8 +40,10 @@ rather than extended:
 * **Objects relate to each other.** `#interview.end + 5` is written down, so moving the
   interview moves what follows it.
 
-The `kf` names survive in the field registry's descriptors, published as `keyframe_names`, so
-a client that stored them can still look up which path a name refers to.
+The legacy names survive in the field registry's descriptors, published as **`keyframe_names`**,
+so a client that stored them can still look up which path a name refers to. They say nothing about
+whether a path can be animated — the tree publishes **`animatable`** for that, with three states
+(`true`, `"step"`, `false`). See [`control-api.md`](control-api.md).
 
 ---
 
