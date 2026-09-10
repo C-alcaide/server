@@ -27,7 +27,8 @@
 > `timeline-targets` (§12, a **1 LSB picture** check), `timeline-cue` (§13),
 > `timeline-transport` and `timeline-loop` (§14), `timeline-seek-compile` (§15),
 > `timeline-chase` (§16), `api-atframe` (§18), `timeline-crosschannel` (§19),
-> `timeline-media` (§20) and `timeline-cost` (§21). Plus `conformance` 100/100 within 1 LSB and
+> `timeline-media` (§20), `timeline-cost` and `publication-cost` (§21). Plus `conformance`
+> 100/100 within 1 LSB and
 > `grading` 48/48, because this edits the tick
 
 ---
@@ -1637,9 +1638,36 @@ reason is the leaf count above rather than anything about bindings as such — *
 published tree of roughly 600 leaves per channel per tick**, and a binding reaches it four times
 faster than a keyed field does.
 
-**Which is why 128 is not quotable as a limit on its own.** `channel/N/stage/state_leaves` makes
-the tree size readable on any machine, so the question "how close is a real show to this" is a
-measurement rather than an inference. Nobody has taken it yet.
+**Which is why 128 is not quotable as a limit on its own** — and the measurement has now been
+taken. `publication-cost` walks a channel from idle to fully dressed, reading
+`channel/N/stage/state_leaves` at each step:
+
+| a channel with… | stage leaves | % of the 596 that breaks |
+| :--- | ---: | ---: |
+| nothing on it | 7 | 1.2% |
+| one clip | 23–27 | ~4% |
+| three layers (a composite) | 50 | 8.4% |
+| + a grade, five fields on each layer | 68 | 11.4% |
+| + two previz screens and cameras | 68 | 11.4% |
+| **+ an ISF producer with parameters** | **78** | **13.1%** |
+| *+ 32 bindings — the pathological reference* | *653* | *110%* |
+
+**A fully dressed realistic channel publishes 78 leaves: an eighth of what costs frames.** So
+the container fix below is not worth building, and that is a measurement rather than a guess.
+What would change it is roughly **eight times** the publication of a dressed channel — which is
+what 32 continuously-live bindings is, and nothing else here comes close.
+
+Two things the arms established that are worth carrying:
+
+* **`state_leaves` counts the STAGE's map, not the channel's.** Adding previz moved it not at
+  all (68 → 68) because previz publishes under `mixer/previz` — `video_channel.cpp` assigns
+  `state["mixer"]["previz"] = image_mixer_->state()`. The battery's growth gate failed on that
+  first run, correctly, against a wrong expectation rather than a server defect.
+* **Every stage leaf is inserted twice per tick.** The channel builds its own `monitor::state`
+  and `state["stage"] = stage_->state()` goes through `state_proxy::operator=(const state&)`,
+  which loops inserting every leaf under a new prefix — into a larger map holding the mixer,
+  previz and output as well. So the stage's count is an undercount of what a channel pays, and
+  the channel-level total is not published.
 
 ### 21.2 The mechanism F7 named is wrong, and the real one is the state publication
 
@@ -1714,12 +1742,16 @@ Three that do work, smallest first:
    changing both the OSC fan-out and the API tree walk — a larger change than option 2 for a
    benefit option 2 gets for free.
 
-**None is urgent, and option 2 is the only one worth building.** The working figure is unchanged
-— 32 live bindings cost nothing however they are spread, which covers a whole MIDI control
-surface — and the thing a client generates hundreds of is keyed parameters, which measured 0 at
-128. **The measurement that would decide it is now cheap and has not been taken:** read
-`channel/N/stage/state_leaves` on a realistic show and compare it with the 596 that breaks. If a
-real channel publishes 200, the ceiling is a long way off.
+**None is worth building, on the measurement in §21.1.** A fully dressed realistic channel
+publishes **78** stage leaves against the **596** that costs frames — an eighth. The working
+figure is unchanged (32 live bindings cost nothing however they are spread, which covers a whole
+MIDI control surface), and the thing a client generates hundreds of is keyed parameters, which
+measured 0 at 128.
+
+**Option 2 is the one to build if that ever changes**, and the trigger is specific: a channel
+publishing past roughly 400 stage leaves, which `publication-cost` reports on every run. Nothing
+in a plausible show approaches it — you would need eight times a dressed channel's publication,
+and 32 continuously-live bindings is the only thing measured here that does.
 
 **The battery is not vacuous**, and the `bind-32` arm is the reason: it reports a real cost on
 the same measurement path in every run. An instrument that never moves cannot be told from a
@@ -1757,7 +1789,7 @@ here so the numbers above are read as what they are.
 | **A slow-source build** (§20.4) | `build_ms` is 40 ms for a local file. There is no fixture that builds slowly, so the "a clip that is not ready does not hold the cue" path is exercised only by `preroll_frames: 0`. |
 | **Where the resolve pass's cost goes** (§21.2) | It has none at 20× the work, so a regression making it ten times slower would pass `timeline-cost`. Nothing measures the pass itself. |
 | ~~Where the BINDING path's cost goes~~ (§21.2) | **ATTRIBUTED** — it is the state publication. 17 leaves per binding against 4.2 per keyed field, into a `flat_map` rebuilt whole each tick; removing it takes 128 bindings to 0 late frames on both mixers, and at equal leaf counts (187 vs 188) the two mechanisms are equally free. `reserve()` is done and made no measurable difference. |
-| **How many leaves a REALISTIC show publishes** (§21.1) | The ceiling is ~600 leaves per channel per tick, and the fixture reaches it with 32 bindings. Whether a real show comes near it is now readable from `channel/N/stage/state_leaves` and **has not been measured** — which is what decides whether §21.2 option 2 is ever worth building. |
+| ~~How many leaves a REALISTIC show publishes~~ (§21.1) | **MEASURED** by `publication-cost`: a fully dressed channel publishes **78** stage leaves against the **596** that costs frames, so §21.2's fixes are not worth building and the trigger to revisit is ~400. What is still not measured is the **channel-level** total — every stage leaf is re-inserted into the channel's own map each tick, and that count is not published. |
 | **Following a real house timecode** (§16) | `LTCInput::is_valid()` is false without a signal and there is no LTC generator on this box, so chase is covered for what it does with **no** signal. F9 stands: the system-clock fallback's rate predictability is unverified, and nothing depends on it. |
 | **The `OFX KEY` refusal's reply** (§17) | Driving it against an ISF producer answered `202` because the `CALL` fell through to the wrapped producer. Instantiating the OFX producer needs a bundle, and there is none here. |
 | **Audio beyond the value stream** | `mixer/volume` is addressable, writable, publishable, bindable and keyable, and every check reads the published value. A recording plus `volumedetect` would prove it is audible. F5. |

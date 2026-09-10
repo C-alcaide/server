@@ -1,6 +1,42 @@
 CasparVP — Unreleased
 ==========================================
 
+### A realistic channel publishes 78 leaves, so the publication fixes are not worth building
+
+The open question from the previous two entries -- the publication is the per-tick cost, the
+ceiling is ~596 stage leaves, but is a real show anywhere near it? -- is measured now, by a new
+`publication-cost` battery. Identical on both mixers:
+
+| a channel with... | stage leaves | % of the 596 that breaks |
+| :--- | ---: | ---: |
+| nothing on it | 7 | 1.2% |
+| one clip | 23-27 | ~4% |
+| three layers (a composite) | 50 | 8.4% |
+| + a grade, five fields on each layer | 68 | 11.4% |
+| + two previz screens and cameras | 68 | 11.4% |
+| **+ an ISF producer with parameters** | **78** | **13.1%** |
+| *+ 32 bindings -- the pathological reference* | *653* | *110%* |
+
+**A fully dressed realistic channel publishes an eighth of what costs frames.** So none of the
+three ranked fixes is worth building, and that is now a measurement rather than a judgement. The
+trigger to revisit is specific and reported on every run: a channel past roughly 400 stage
+leaves. Reaching it needs about EIGHT TIMES a dressed channel's publication, and 32
+continuously-live bindings is the only thing measured here that does.
+
+**Two things the battery established on its first run, one of them by failing.**
+
+`state_leaves` counts the STAGE's map, not the channel's. Adding previz moved it not at all (68
+-> 68) and the growth gate failed -- correctly, against a wrong expectation rather than a server
+defect: previz publishes under `mixer/previz`, since `video_channel.cpp` assigns
+`state["mixer"]["previz"] = image_mixer_->state()`. The arm is kept, marked as not expected to
+grow, because the distinction is what a reader needs before quoting the number.
+
+And EVERY STAGE LEAF IS INSERTED TWICE PER TICK. The channel builds its own `monitor::state` and
+`state["stage"] = stage_->state()` goes through `state_proxy::operator=(const state&)`, which
+loops inserting every leaf under a new prefix -- into a larger map holding the mixer, previz and
+output as well. So the stage's count understates what a channel pays, and the channel-level total
+is not published and therefore still not measured.
+
 ### `channel/N/stage/state_leaves`, and the binding cost re-measured against it
 
 **New published value:** how many keys a channel puts into `monitor::state` each tick. It was not

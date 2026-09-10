@@ -497,8 +497,11 @@ key for:
 
 ### `state_leaves` — how big the tree you are subscribed to actually is
 
-`channel/{n}/stage/state_leaves` is the number of keys that channel publishes into
-`monitor::state` each tick.
+`channel/{n}/stage/state_leaves` is the number of keys **the stage** publishes into
+`monitor::state` each tick — not the channel's total. The channel builds its own map and assigns
+`state["stage"]`, `state["mixer"]`, `state["mixer"]["previz"]` and `state["output"]` into it, so
+previz screens never move this number and every stage leaf is inserted **twice** per tick, the
+second time into a larger map. The channel-level total is not published.
 
 ```
 GET /v1/value/channel/1/stage/state_leaves   ->  187
@@ -510,11 +513,13 @@ so each key costs a binary search plus a memmove of everything after it. The cos
 therefore grows with the size of the **whole** tree rather than with whatever any one subsystem
 adds to it, which makes this count the denominator for every per-tick cost question about the API.
 
-Measured on this box at 1080p50 across four channels, and identical on both mixers: **52** leaves
-on an idle channel, **187** driving 32 keyed timeline fields, **188** driving 8 bindings, **596**
-driving 32 bindings. The first three cost no late frames; **596 costs 13%**. So a client that
-subscribes widely is not the expensive thing — what a channel *publishes* is, and
-`docs/features/timeline.md` §21 has the mechanism and the ranked fixes.
+Measured on this box at 1080p50, identical on both mixers: **7** leaves on a bare channel, **50**
+on a three-layer composite, **68** with a grade on each layer, **78** with an ISF producer's
+parameters as well — and **596** driving 32 continuously-live bindings, which is where it starts
+costing 13% of frames. **So a fully dressed realistic channel sits at an eighth of the count
+that hurts.** A client that subscribes widely is not the expensive thing; what a stage
+*publishes* is. `docs/features/timeline.md` §21 has the mechanism, the numbers and why none of
+the fixes is worth building.
 
 **Per unit:** a keyed timeline field adds about **4.2** leaves (its mixer value plus its
 `driver/`, `constant/` and `stack/` rows); a binding adds about **17** (the same layer rows plus a
