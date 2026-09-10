@@ -1014,6 +1014,42 @@ api_reply put_timeline(const api_context& ctx, const std::string& name, const st
     if (auto r = parse_timeline_document(body, name, doc); r.code != api_code::ok)
         return r;
 
+    // EVERY CLIP CHECKED BEFORE THE DOCUMENT IS STORED, so a path that cannot be built is a
+    // refusal the author sees now rather than a cue that misses on air. Refused rather than
+    // stored-with-a-fault, unlike an unresolvable expression: an expression fault leaves the rest
+    // of the document usable and an author can see it against what they wrote, whereas a
+    // document that will not put a picture up is not a document worth storing under a name a
+    // show will trigger.
+    if (ctx.check_clip) {
+        std::vector<std::pair<std::string, std::string>> bad; //< object id, reason
+        const std::function<void(const std::vector<tl::timeline_object>&)> walk =
+            [&](const std::vector<tl::timeline_object>& objs) {
+                for (const auto& o : objs) {
+                    if (o.clip) {
+                        if (auto why = ctx.check_clip(u8(*o.clip)); !why.empty())
+                            bad.emplace_back(o.id, why);
+                    }
+                    if (!o.children.empty())
+                        walk(o.children);
+                }
+            };
+        walk(doc.objects);
+
+        if (!bad.empty()) {
+            json::array details;
+            for (const auto& b : bad) {
+                json::object d;
+                d["object"] = b.first;
+                d["reason"] = b.second;
+                details.push_back(std::move(d));
+            }
+            return api_reply::fail(api_code::timeline_invalid,
+                                   "object '" + bad.front().first + "' names a clip that cannot "
+                                   "be built: " + bad.front().second,
+                                   std::move(details));
+        }
+    }
+
     const auto entry = ctx.timelines->put(std::move(doc));
 
     json::object out;

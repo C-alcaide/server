@@ -326,6 +326,19 @@ class stage final : public stage_base
     /// observable from outside the process at all.
     void set_timeline_store(std::shared_ptr<timeline::timeline_store> store);
 
+    /// HOW THE TICK BUILDS A CLIP, injected by the shell.
+    ///
+    /// A bridge for the same reason the previz writer and the timecode source are: building a
+    /// producer needs `frame_producer_registry` and a `frame_producer_dependencies` carrying the
+    /// channel's frame factory, format and channel_info -- which the shell assembles and the
+    /// stage has no business assembling for itself.
+    ///
+    /// CALLED OFF THE STAGE EXECUTOR, on a worker thread, because a build opens a file and
+    /// decodes: doing it in the tick would drop frames on every cue. It may throw, and the
+    /// caller turns that into a published fault rather than letting it reach the frame path.
+    using clip_factory = std::function<spl::shared_ptr<frame_producer>(const std::wstring& clip)>;
+    void set_producer_factory(clip_factory factory);
+
     /// How the stage writes a previz screen or camera property, injected by the shell.
     ///
     /// A BRIDGE for the reason `api_context::set_stage_field` is one: the previz renderer lives

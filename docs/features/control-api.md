@@ -163,7 +163,7 @@ GET    /v1/timeline/{name}/resolved?at=  instances, and the owner of each layer 
 POST   /v1/timeline/{name}/{verb}        drive it -- play pause stop seek rate loop go next previous
 ```
 
-Documented in [`timeline.md`](timeline.md) §5 and §18. Five things about it are properties of
+Documented in [`timeline.md`](timeline.md) §5 and §18. Six things about it are properties of
 this API rather than of the timeline:
 
 * **`DELETE` is the only one here**, because a timeline is the first thing this API *owns*.
@@ -176,6 +176,12 @@ this API rather than of the timeline:
 * **A PUT moves `structure_revision`.** The store's revision counter is mixed into every stage's
   structure fingerprint, so the same re-walk a client already does when a layer appears also picks
   up a document changing. Without it a PUT would be invisible to anything reading the tree.
+* **A PUT that names a clip BUILDS it, and refuses the document if that fails.** Unlike an
+  unresolvable expression, which is stored with a fault: an expression fault leaves the rest of
+  the document usable, and a document that will not put a picture up is not worth storing under a
+  name a show will trigger. The check is the build because a clip may be a colour, a page, a
+  device or a stream, and only the registry knows which factories would take it. One `details`
+  entry per bad object. See `timeline.md` §20.2.
 * **A document may address SEVERAL channels, and only its home channel publishes a playhead.**
   `channel/{home}/stage/timeline/{name}` carries `position` and `rate`;
   `channel/{guest}/stage/timeline/{name}` carries `follows`, `state` and `active` and neither of

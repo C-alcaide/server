@@ -648,6 +648,35 @@ struct server::impl
             const std::wstring lifecycle_key = L"lock" + std::to_wstring(channel_id);
             channel->stage()->set_timeline_store(timelines_);
 
+            // HOW A TIMELINE OBJECT'S CLIP BECOMES A PRODUCER.
+            //
+            // A bridge for the same reason the two below are: building one needs the registry
+            // and a `frame_producer_dependencies` carrying this channel's frame factory, format
+            // and `channel_info`, which the shell assembles and `core` cannot.
+            //
+            // `channels_` is read INSIDE the lambda, not copied here, and that is not a
+            // detail: it is still being filled as channels are constructed, so a copy taken now
+            // would give channel 1's producers an empty channel list and a `route://` clip would
+            // find nothing. `channels_` is a member and outlives the lambda.
+            {
+                auto weak_channel = channel;
+                channel->stage()->set_producer_factory(
+                    [this, weak_channel](const std::wstring& clip)
+                        -> spl::shared_ptr<core::frame_producer> {
+                        std::vector<spl::shared_ptr<core::video_channel>> all;
+                        for (auto& cc : *channels_)
+                            all.emplace_back(cc.raw_channel);
+                        core::frame_producer_dependencies deps(weak_channel->frame_factory(),
+                                                               all,
+                                                               video_format_repository_,
+                                                               weak_channel->stage()->video_format_desc(),
+                                                               producer_registry_,
+                                                               cg_registry_,
+                                                               weak_channel->get_channel_info());
+                        return producer_registry_->create_producer(deps, clip);
+                    });
+            }
+
             // THE HOUSE TIMECODE, for a document that chases it.
             //
             // A bridge for the reason the previz writer below is one: `LTCInput` lives in
@@ -977,6 +1006,45 @@ struct server::impl
                 };
                 api_ctx.channel_count = [channels] { return static_cast<int>(channels->size()); };
                 api_ctx.timelines     = timelines_;
+
+                // A CLIP IS CHECKED BY BUILDING IT, at PUT, and the producer is discarded.
+                //
+                // "Does the file exist" is not the question a timeline needs answered: a clip may
+                // be a colour, an HTML page, a device, a route or a stream, and only the registry
+                // knows which factories would take it. So the check is the build, and the answer
+                // is whatever it threw.
+                //
+                // ON CHANNEL 1's dependencies, whichever channel the document declares. The
+                // format and channel_info differ per channel, so a clip that builds here could in
+                // principle fail there -- accepted deliberately: the alternative is a PUT that
+                // builds one producer per channel the document touches, and the refusal exists to
+                // catch a wrong PATH, which no channel's format changes.
+                api_ctx.check_clip = [this](const std::string& clip) -> std::string {
+                    if (clip.empty())
+                        return "a clip cannot be empty";
+                    if (channels_->empty())
+                        return {}; //< nothing to build against yet; the preroll will report it
+                    try {
+                        std::vector<spl::shared_ptr<core::video_channel>> all;
+                        for (auto& cc : *channels_)
+                            all.emplace_back(cc.raw_channel);
+                        const auto& ch = all.front();
+                        core::frame_producer_dependencies deps(ch->frame_factory(),
+                                                               all,
+                                                               video_format_repository_,
+                                                               ch->stage()->video_format_desc(),
+                                                               producer_registry_,
+                                                               cg_registry_,
+                                                               ch->get_channel_info());
+                        auto p = producer_registry_->create_producer(deps, u16(clip));
+                        (void)p; //< discarded: see api_context.h for why it is not reused
+                        return {};
+                    } catch (const std::exception& e) {
+                        return e.what();
+                    } catch (...) {
+                        return "the producer registry threw";
+                    }
+                };
 
                 // THE CATALOGUE. Bridged here for the same reason `stage` above is: the OFX
                 // host is in `modules/ofx` and the ISF scanner in `modules/isf`, and

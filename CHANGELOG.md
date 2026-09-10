@@ -1,6 +1,69 @@
 CasparVP — Unreleased
 ==========================================
 
+### A timeline document starts a clip, built ahead of its cue
+
+`clip`, `action` and `preroll_frames` were parsed, echoed back by `GET`, and read by NOTHING: a
+document could grade a layer and put nothing on it. They work now.
+
+`action` is one of `play` `load` `pause` `resume` `stop` `clear`. With a `clip`, `play` loads and
+starts it and `load` leaves it in the background -- load and play are different cues, and a
+document that conflated them could not preload a next item.
+
+**PREROLL IS THE FEATURE, not an optimisation.** A producer build opens a file and decodes -- about
+40 ms for a local clip on this box, unbounded for a network source -- so building on the cue frame
+would put that latency between the GO and the picture. `preroll_frames` (default 25) is the operator
+saying how much warning the source needs. The build runs OFF the stage executor, the tick polls it
+with `wait_for(0)` rather than blocking, and a clip that is not ready does not hold the cue: the
+instance starts with nothing on the layer and the action fires on the tick the build lands. Late is
+a visible mistake an operator can fix; a stalled channel is not.
+
+One build per INSTANCE, and a repeat gets its own -- sharing a producer across repeats would share
+its playhead, so the second pass would start where the first finished.
+
+**A BAD CLIP IS REFUSED AT PUT**, unlike an unresolvable expression, which is stored with a fault.
+An expression fault leaves the rest of the document usable; a document that will not put a picture
+up is not worth storing under a name a show will trigger. The check IS the build -- a clip may be a
+colour, an HTML page, a device, a route or a stream, and only the registry knows which factories
+would take it -- so the PUT builds the producer, discards it, and answers with whatever it threw,
+one detail per bad object.
+
+**New published state:** `channel/N/stage/timeline/{name}/media/{object}/` carries `clip`, `ready`,
+`build_ms`, `on_air` and, when a build failed, `error`. **`build_ms` closes F10 of the timeline
+plan**, carried as "producer build latency unmeasured": 39.8 ms on ogl and 40.3 on vulkan for a
+local clip. REPORTED, not gated -- a gate would be gating this box's disk.
+
+**Measured, `timeline-media` 14/14 BOTH MIXERS:**
+
+| | ogl | vulkan |
+| :--- | :--- | :--- |
+| `ready` at position (object starts at 3.0) | 2.04 | 2.08 |
+| on air at position | 3.08 | 3.16 |
+| `build_ms` for a local clip | 39.8 | 40.3 |
+| `preroll_frames: 0`, on air at | 1.12 | 1.20 |
+
+The discriminating check is the ORDERING, not the picture: `ready` must be observable while the
+position is still short of the object's start, because building on entry also puts a picture up.
+
+**THE BATTERY FOUND TWO DEFECTS IN THIS CODE ON ITS FIRST RUN**, both in this commit.
+`preroll_frames: 0` never fired -- the window's upper bound was the instance's START, so the only
+tick that could begin a build was the one where the position equalled it exactly, and the build took
+a frame. The bound is the instance's END now, which also lets a document seeked into the middle of a
+cue build its clip. And the action fired only on ENTRY, with a comment claiming a late build would
+still fire later; nothing called it again. It runs every tick the instance is active and self-guards,
+so it fires once, on whichever tick the producer exists.
+
+**Mutations.** Building on entry rather than ahead: exactly ONE named failure, `ready` at 3.2
+against a start of 3.0, the other thirteen green -- which is the design's claim measured. Skipping
+the PUT-time check: three named failures, and it exposed a vacuous check of ours -- "the refusal
+names the object" matched the id anywhere in the reply, and a SUCCESSFUL put echoes the resolution,
+which names every object. It reads the structured `details` array now.
+
+**NOT measured:** whether the picture is the right FRAME of the clip, which needs a frame-pinned
+capture; and any slow-source build, for want of a fixture.
+
+`conformance` 100/100 within 1 LSB and `grading` 48/48 on both mixers.
+
 ### One timeline document can drive several channels
 
 A show spanning two channels was two documents, each with its own transport, and nothing kept

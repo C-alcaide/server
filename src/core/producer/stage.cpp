@@ -204,6 +204,44 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     /// a client addresses, and because a document may be re-PUT without losing its position.
     std::map<std::string, timeline::transport>                     transports_;
     std::map<std::string, std::vector<timeline::transport_command>> pending_transport_;
+
+    /// ONE CLIP BUILD PER INSTANCE, keyed `<document>/<object>#<repeat>` -- the same identity
+    /// string entry detection uses, and for the same reason: the resolution is rebuilt on every
+    /// re-resolve, so a pointer into it would dangle.
+    ///
+    /// A REPEAT GETS ITS OWN BUILD. Sharing one producer across repeats would share its
+    /// playhead, so the second pass would start wherever the first one finished -- which is
+    /// exactly the class of defect the timeline exists to remove.
+    struct media_build
+    {
+        /// A PLAIN `shared_ptr` INSIDE THE FUTURE TOO, and it has to be. MSVC's
+        /// `_Associated_state<T>` DEFAULT-CONSTRUCTS its result type, and `spl::shared_ptr`'s
+        /// default constructor calls `spl::make_shared<T>()` -- which cannot compile for an
+        /// abstract `frame_producer`. The error arrives as "cannot instantiate abstract class"
+        /// from inside `<future>` with nothing in this file named in it.
+        std::shared_future<std::shared_ptr<frame_producer>> pending;
+        /// A PLAIN `shared_ptr`, not `spl::shared_ptr`: the not-null wrapper cannot be
+        /// default-constructed for an abstract type, and "nothing built yet" is exactly the
+        /// state this struct spends most of its life in.
+        std::shared_ptr<frame_producer>                     producer;
+        bool                                                ready  = false;
+        bool                                                failed = false;
+        bool                                                fired  = false; //< the action has run
+        std::string                                         error;
+        std::string                                         clip;
+
+        /// HOW LONG THE BUILD TOOK, published rather than gated.
+        ///
+        /// This is F10 of the timeline plan -- "producer build latency on the API executor for
+        /// objects declared within a few frames of play" -- and it was carried as unmeasured
+        /// because nothing measured it. A number is only useful if it is on the machine the show
+        /// runs on, so the server reports it and the operator compares it with the preroll
+        /// window they chose. Gating it here would be gating this box's disk.
+        std::chrono::steady_clock::time_point started;
+        double                                              build_ms = 0.0;
+    };
+    std::map<std::string, media_build> media_;
+    stage::clip_factory                clip_factory_;
     std::map<std::string, timeline::trigger_log>                   trigger_logs_;
 
     /// The frame number of the last tick, so `timeline_state` can answer a position without
@@ -1069,6 +1107,22 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 name + "/" + inst->object_id + "#" + std::to_string(inst->repeat_index);
             auto&      ent = entries_[*layer];
             const bool entering = ent.active != identity;
+            // THE LAYER ACTION, EVERY TICK THE INSTANCE IS ACTIVE, not only on entry. It
+            // self-guards with `fired`, so it runs exactly once per instance -- but WHICH tick
+            // that is cannot be decided in advance: a build takes as long as it takes, and a
+            // clip that is not ready on the cue frame has to get its action on the tick it
+            // becomes ready.
+            //
+            // The first version called this inside the `entering` branch below, with a comment
+            // claiming a late build would still fire on a later tick. That comment was false and
+            // `timeline-media` proved it: with `preroll_frames: 0` the clip never reached the
+            // layer at all, because entry had already passed by the time the producer existed.
+            //
+            // BEFORE the capture below, and that ordering matters: a `play` that swaps the
+            // producer makes the previous producer's parameter values irrelevant, so capturing
+            // them after the swap is the only way to capture the right layer's state.
+            fire_layer_action(*layer, identity, *obj);
+
             if (entering) {
                 ent.active   = identity;
                 ent.document = name;
@@ -1157,6 +1211,169 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         }
     }
 
+    /// BUILD AHEAD OF THE CUE, and publish whether each build is ready.
+    ///
+    /// Walks the instances of every object carrying a `clip` and starts a build for any whose
+    /// start is within `preroll_frames` of now. Off the executor, so the decode that a build
+    /// performs never lands in the frame path -- which is the whole reason the factory is a
+    /// bridge rather than a call into the registry from here.
+    ///
+    /// WHY IT LOOKS AHEAD RATHER THAN BUILDING ON ENTRY. A build takes as long as it takes: a
+    /// local file is milliseconds and a network source is not. Building on entry would put that
+    /// latency between the cue and the picture, with nothing the operator could do about it. A
+    /// preroll window is the operator SAYING how much warning the source needs, and it defaults
+    /// to 25 frames because one second is the answer for a local file.
+    ///
+    /// A BUILD IS NEVER RETRIED inside one instance. A clip that cannot be built will not
+    /// build a second time either, and retrying once per tick would hammer a missing path fifty
+    /// times a second and fill the log. The fault is published and the instance stays failed;
+    /// a re-PUT is how an operator fixes it, which also re-resolves and gives new keys.
+    void preroll_media(const std::string&               name,
+                       const timeline::stored_timeline& entry,
+                       timeline::flicks                 pos,
+                       monitor::state&                  state,
+                       bool                             home)
+    {
+        if (!clip_factory_)
+            return;
+
+        const auto per_frame = timeline::flicks_per_frame(format_desc_.framerate);
+        auto       ts        = state["timeline"][name];
+
+        for (const auto& kv : entry.resolved.by_object) {
+            const auto* obj = find_object(entry.document.objects, kv.first);
+            if (!obj || !obj->clip || obj->layer.empty())
+                continue;
+            if (!layer_index_for(obj->layer, home))
+                continue;
+
+            const auto window = per_frame * std::max(0, obj->preroll_frames);
+
+            for (const auto idx : kv.second) {
+                if (idx >= entry.resolved.instances.size())
+                    continue;
+                const auto& in = entry.resolved.instances[idx];
+                const auto key = name + "/" + in.object_id + "#" + std::to_string(in.repeat_index);
+                auto&      mb  = media_[key];
+
+                if (mb.clip.empty())
+                    mb.clip = u8(*obj->clip);
+
+                // NOT YET IN THE WINDOW, and nothing is started. Checked against the instance's
+                // own start rather than the object's, so a repeating object prerolls each pass.
+                //
+                // THE UPPER BOUND IS THE INSTANCE'S END, not its start, and the first version
+                // used the start -- which made `preroll_frames: 0` a feature that never fired.
+                // With a zero window the only tick that could start a build was the one where
+                // `pos == start` exactly; the build then took a frame, and by the next tick
+                // `pos > start` closed the door on it forever. `timeline-media` caught it on its
+                // first run. Ending the window at the instance's end also means a document
+                // seeked into the middle of a cue still builds its clip, which is what an
+                // operator scrubbing a show expects.
+                if (!mb.ready && !mb.failed && !mb.pending.valid()) {
+                    if (in.start - pos > window || (in.end && pos >= *in.end))
+                        continue;
+                    const auto clip    = *obj->clip;
+                    auto       factory = clip_factory_;
+                    mb.started         = std::chrono::steady_clock::now();
+                    mb.pending         = std::async(std::launch::async,
+                                            [factory, clip]() -> std::shared_ptr<frame_producer> {
+                                                return factory(clip);
+                                            })
+                                     .share();
+                    CASPAR_LOG(debug) << L"[timeline] prerolling " << clip << L" for " << u16(key);
+                }
+
+                if (mb.pending.valid() && !mb.ready && !mb.failed &&
+                    mb.pending.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                    // COLLECTED IN THE TICK WITHOUT BLOCKING: `wait_for(0)` first, so a build
+                    // that is still running costs one atomic read and the tick moves on. A bare
+                    // `get()` here would make a slow source stall the channel, which is the
+                    // failure this whole pass exists to avoid.
+                    mb.build_ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - mb.started)
+                                      .count();
+                    try {
+                        mb.producer = mb.pending.get();
+                        mb.ready    = true;
+                    } catch (const std::exception& e) {
+                        mb.failed = true;
+                        mb.error  = e.what();
+                        CASPAR_LOG(error) << L"[timeline] " << u16(key) << L": could not build '"
+                                          << u16(mb.clip) << L"': " << u16(mb.error);
+                    } catch (...) {
+                        mb.failed = true;
+                        mb.error  = "the producer factory threw";
+                    }
+                }
+
+                auto ms     = ts["media"][in.object_id];
+                ms["clip"]  = mb.clip;
+                ms["ready"] = mb.ready;
+                if (mb.build_ms > 0.0)
+                    ms["build_ms"] = mb.build_ms;
+                if (mb.failed)
+                    ms["error"] = mb.error;
+                if (mb.fired)
+                    ms["on_air"] = true;
+            }
+        }
+    }
+
+    /// The object's `layer_action` at the moment its instance begins.
+    ///
+    /// Called from the entry branch of `drive_layers`, so it runs exactly once per instance --
+    /// the identity string is what makes that true, and it is the same one `preroll_media` keys
+    /// its builds by.
+    void fire_layer_action(int layer, const std::string& key, const timeline::timeline_object& obj)
+    {
+        auto& mb = media_[key];
+        if (mb.fired)
+            return;
+
+        // A CLIP THAT IS NOT READY DOES NOT BLOCK THE TICK. The instance starts with nothing on
+        // the layer and the fault is already published -- late is a visible mistake the operator
+        // can see and fix, and a stalled channel is not. `fired` is NOT set, so a build that
+        // lands a few frames later still gets its action on the next tick.
+        if (obj.clip) {
+            if (mb.failed) {
+                mb.fired = true; //< it will never be ready; stop looking
+                return;
+            }
+            if (!mb.ready)
+                return;
+            get_layer(layer).load(spl::make_shared_ptr(mb.producer), /* preview */ false,
+                                  obj.action == timeline::layer_action::play);
+        }
+
+        switch (obj.action) {
+            case timeline::layer_action::play:
+                // `load(auto_play)` above already started it when there was a clip. Without one
+                // this is a PLAY of whatever the operator had loaded, which is the form a
+                // document uses to start a clip somebody else cued.
+                if (!obj.clip)
+                    get_layer(layer).play();
+                break;
+            case timeline::layer_action::load:
+                break; //< `load(auto_play=false)` is the whole action
+            case timeline::layer_action::pause:
+                get_layer(layer).pause();
+                break;
+            case timeline::layer_action::resume:
+                get_layer(layer).resume();
+                break;
+            case timeline::layer_action::stop:
+                get_layer(layer).stop();
+                break;
+            case timeline::layer_action::clear:
+                layers_.erase(layer);
+                break;
+            case timeline::layer_action::none:
+                break;
+        }
+        mb.fired = true;
+    }
+
     /// Does this document address any layer on THIS channel?
     ///
     /// Asked before a guest does any work, so a four-channel server does not walk every
@@ -1223,6 +1440,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         if (ph->state == timeline::transport_state::stopped)
             return; //< the release sweep at the end of `evaluate_timelines` gives the layers back
 
+        preroll_media(name, entry, ph->position, state, /* home */ false);
         drive_layers(name, entry, ph->position, state, owned, /* home */ false);
     }
 
@@ -1359,6 +1577,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 continue;
             }
 
+            preroll_media(name, *entry, pos, state, /* home */ true);
             drive_layers(name, *entry, pos, state, owned, /* home */ true);
         }
 
@@ -1372,6 +1591,23 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         // A mixer field needs nothing: its release is the overlay being cleared, which happens
         // at the top of this function. The two LIVE registries do: a producer parameter's value
         // lives inside the producer, so it has to be written back.
+        // A BUILD FOR A DOCUMENT THAT IS GONE. Dropped here rather than left, because `media_`
+        // is keyed by `<document>/<object>#<repeat>` and a deleted-then-re-PUT document reuses
+        // those keys: a stale `fired` would make the new document's first cue a no-op, and a
+        // stale producer would put the OLD clip on air. Cheap -- one pass over a map with one
+        // entry per media instance, and only the names still loaded survive.
+        if (timelines_ && !media_.empty()) {
+            const auto live = timelines_->names();
+            for (auto it = media_.begin(); it != media_.end();) {
+                const auto slash = it->first.find('/');
+                const auto doc   = slash == std::string::npos ? it->first : it->first.substr(0, slash);
+                if (std::find(live.begin(), live.end(), doc) == live.end())
+                    it = media_.erase(it);
+                else
+                    ++it;
+            }
+        }
+
         std::vector<int> ended;
         for (const auto& e : entries_)
             if (!owned.count(e.first))
@@ -2869,6 +3105,11 @@ std::future<bool> stage::timeline_chase(const std::string& name, const timeline:
 std::future<timeline::chase_config> stage::timeline_chase_config(const std::string& name)
 {
     return impl_->timeline_chase_config(name);
+}
+
+void stage::set_producer_factory(stage::clip_factory factory)
+{
+    impl_->clip_factory_ = std::move(factory);
 }
 
 void stage::set_timeline_store(std::shared_ptr<timeline::timeline_store> store)

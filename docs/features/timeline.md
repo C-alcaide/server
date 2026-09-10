@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–19 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–20 shipped (the plan’s 16 and 18 were the last two outstanding; 18 remains). **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -1453,4 +1453,125 @@ a finding — a battery that cannot start has measured nothing.
 
 ---
 
-*§20 Known gaps — arrives with the docs commit.*
+## 20. A document starts a clip
+
+`clip`, `action` and `preroll_frames` were parsed, echoed back by `GET`, and read by nothing.
+A document could grade a layer and put nothing on it.
+
+```json
+{"id": "vt1", "layer": "1-10", "enable": {"start": 3, "end": 12},
+ "clip": "bars", "action": "play", "preroll_frames": 25,
+ "keys": [{"at": 0, "values": {"brightness": 0.4}},
+          {"at": 9, "values": {"brightness": 0.9}}]}
+```
+
+`action` is one of `play` `load` `pause` `resume` `stop` `clear` (default `none`). With a `clip`,
+`play` loads and starts it and `load` leaves it in the background — load and play are different
+cues, and a document that conflated them could not preload a next item. Without a `clip` the
+action drives whatever the operator already had on the layer, which is the form a document uses
+to start something somebody else cued.
+
+### 20.1 Preroll is the feature, not an optimisation
+
+A producer build opens a file and decodes: about 40 ms for a local clip on this box, unbounded
+for a network source. Building on the cue frame puts that latency between the GO and the picture
+with nothing the operator can do about it. `preroll_frames` is the operator **saying** how much
+warning the source needs, and it defaults to 25 — one second, which is the answer for a local
+file.
+
+Four properties, each a decision:
+
+* **the build runs OFF the stage executor.** A decode in the tick drops frames on every cue. The
+  factory is a shell-injected bridge for the same reason the previz writer and the timecode
+  source are: building needs the producer registry and a `frame_producer_dependencies`, which
+  `core` cannot assemble.
+* **the tick never blocks on a build.** It polls with `wait_for(0)` and moves on, so a slow
+  source costs one atomic read per frame rather than stalling the channel.
+* **a clip that is not ready does not hold the cue.** The instance starts with nothing on the
+  layer, the fault is already published, and the action fires on the tick the build lands. Late
+  is a visible mistake an operator can see and fix; a stalled channel is not.
+* **one build per instance, and a repeat gets its own.** Sharing a producer across repeats would
+  share its playhead, so the second pass would start where the first finished — exactly the class
+  of defect the timeline exists to remove.
+
+A build is never retried inside one instance: a clip that cannot be built will not build a second
+time either, and retrying per tick would hammer a missing path fifty times a second. A re-PUT is
+how an operator fixes it, and that re-resolves and gives new keys.
+
+### 20.2 A bad clip is refused at PUT
+
+Unlike an unresolvable expression, which is **stored** with a fault. The difference is what the
+author can do with the result: an expression fault leaves the rest of the document usable and can
+be seen against what they wrote, whereas a document that will not put a picture up is not worth
+storing under a name a show will trigger.
+
+**The check is the build.** "Does the file exist" is not the question — a clip may be a colour, an
+HTML page, a device, a route or a stream, and only the registry knows which factories would take
+it. So the PUT builds the producer and discards it, and the answer is whatever it threw. The
+refusal carries one detail per bad object naming the object and the reason.
+
+The producer is **not** reused at preroll. One a PUT built would be seconds or hours stale by the
+time its cue arrived, and a stale producer on air is worse than a second build.
+
+### 20.3 What the stage publishes
+
+```
+channel/1/stage/timeline/show/media/vt1/clip      "bars"
+channel/1/stage/timeline/show/media/vt1/ready     true
+channel/1/stage/timeline/show/media/vt1/build_ms  39.8
+channel/1/stage/timeline/show/media/vt1/on_air    true
+channel/1/stage/timeline/show/media/vt1/error     "..."   (only when the build failed)
+```
+
+`build_ms` closes **F10**, which the plan carried as "producer build latency unmeasured". It is
+**reported and not gated**: a gate here would be gating this box's disk.
+
+### 20.4 What is measured
+
+`timeline-media` **14/14 both mixers**.
+
+| | ogl | vulkan |
+| :--- | :--- | :--- |
+| `ready` at position (object starts at 3.0) | 2.04 | 2.08 |
+| on air at position | 3.08 | 3.16 |
+| `build_ms` for a local clip | 39.8 | 40.3 |
+| `preroll_frames: 0`, on air at | 1.12 | 1.20 |
+
+**The discriminating check is the ORDERING**, not the picture: `ready` has to be observable while
+the position is still short of the object's start. Building on entry also puts a picture up, so
+nothing else separates the two.
+
+**The battery found two defects in this code on its first run**, both mine and both in the same
+commit:
+
+* **`preroll_frames: 0` never fired.** The window's upper bound was the instance's *start*, so
+  with a zero window the only tick that could start a build was the one where the position
+  equalled the start exactly — the build then took a frame, and the next tick's `pos > start`
+  closed the door forever. The bound is the instance's **end** now, which also means a document
+  seeked into the middle of a cue builds its clip, as an operator scrubbing a show expects.
+* **the action fired only on ENTRY**, with a comment claiming a late build would still fire on a
+  later tick. The comment was false — nothing called it again. It now runs every tick the
+  instance is active and self-guards with `fired`, so it happens exactly once but on whichever
+  tick the producer exists.
+
+**Mutations:**
+
+* building on entry rather than ahead → **exactly one** named failure, `ready` at 3.2 against a
+  start of 3.0, with the other thirteen green. That is the docstring's point measured: both put a
+  picture up.
+* the PUT-time clip check skipped → **three** named failures, and it exposed a vacuous check of
+  my own. "The refusal names the object" was matching the id anywhere in the reply, and a
+  *successful* PUT echoes the resolution, which names every object — so it passed with the
+  refusal removed. It now reads the structured `details` array.
+
+**Not measured:** whether the picture is the right frame **of** the clip. That needs a
+frame-pinned capture against a known frame of a marker clip, which `api-readiness` does not do
+either. And there is no slow-source fixture, so a build that is slow for network reasons is
+unmeasured.
+
+Also green, both mixers: `conformance` **100/100 within 1 LSB**, `grading` **48/48** (with
+`--sequential`, see §19.4), `api-readiness` 7/7, and the eleven other timeline batteries.
+
+---
+
+*§21 Known gaps — arrives with the docs commit.*

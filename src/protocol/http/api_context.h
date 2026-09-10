@@ -63,6 +63,20 @@ struct api_context
     /// drive several channels and the transport that owns it lives on exactly one.
     std::shared_ptr<core::timeline::timeline_store> timelines;
 
+    /// CAN THIS CLIP BE BUILT AT ALL, asked at PUT so a bad path is refused instead of missing
+    /// its cue on air.
+    ///
+    /// It BUILDS the producer and throws it away, which is the only honest answer: "does this
+    /// file exist" is not the question -- a clip may be a colour, an HTML page, a device or a
+    /// stream, and only the registry knows which factories would take it. Returns the failure
+    /// message, or an empty string on success.
+    ///
+    /// Once per clip per PUT, on the API executor, and a PUT is an operator action rather than
+    /// a per-frame one. The stage builds again at preroll: the two builds are not shared,
+    /// because the producer a PUT built would be seconds or hours stale by the time its cue
+    /// arrived, and a stale producer on air is worse than a second build.
+    std::function<std::string(const std::string& clip)> check_clip;
+
     /// Everything installed, both formats, or empty when the shell wired nothing.
     ///
     /// A function for the reason the rest of this file is functions: the OFX host lives in
