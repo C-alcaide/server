@@ -1,11 +1,16 @@
 # Keyframes — timeline animation of mixer state
 
-> **State:** shipped, unmeasured
-> **Modules:** `src/modules/keyframes`
+> **State:** **being replaced.** The interpolation engine is `core::timeline::curve` as of
+> commit 4 of the timeline plan (`~/.claude/plans/zesty-skipping-engelbart.md`); this module is
+> now an adapter over it, and the command family is removed at commit 6. See
+> [`timeline.md`](timeline.md).
+> **Modules:** `src/modules/keyframes` — the wire format and the commands. The ENGINE is
+> `src/core/timeline/curve.cpp`
 > **Commands:** 8 fork-specific AMCP commands, registered by the module
 > **Architecture:** none, deliberately — a tween table over the existing transform system; no structural decision to record
 > **Guide:** [`../guides/KEYFRAMES.md`](../guides/KEYFRAMES.md)
-> **Coverage:** **none**
+> **Coverage:** `keyframes-legacy`, added with the engine swap and deleted with the command
+> family. 8/8 both mixers. It is the first check this project has ever pointed at `KEYFRAMES`
 
 Animates mixer state over time from a keyframe list, rather than one tween per command. Arm a
 timeline, seek it, and the mixer follows — which is how a show cue with twenty simultaneous
@@ -85,9 +90,27 @@ which matters when the alternative is discovering a bad cue live.
 
 ## 4. Verification — what is measured, and what is not
 
-**Nothing.** No battery arms a timeline or checks that a field animates.
+**`keyframes-legacy`, and it arrived only because the engine underneath was replaced.** For most
+of this module's life the answer here was *nothing* — no battery had ever sent `KEYFRAMES` — and
+that stayed true until `core::timeline::curve` took over the interpolation and the swap needed a
+before and an after. **8/8 on both mixers, max |error| 0.0000 over 99 frame-stamped samples**,
+fitting the published opacity stream against a three-key piecewise ramp whose middle key is
+deliberately not the linear midpoint, with a slope gate that a halved time base fails. It is
+temporary: it goes when the command family does.
 
-Two things make this a worse gap than the raw command count suggests:
+**Two things it measured about this command, and neither is a fixture problem:**
+
+* **The clock is the producer's, not the arm's.** A layer already playing is already that far
+  into its keyframes the instant it is armed. With a two-second document the first readable
+  sample was at t = 1.56 s — three quarters finished before anything could observe it. This is
+  the same fact as §3's "an empty layer pins t = 0", seen from the other end.
+* **`SEEK` is not observable.** `KEYFRAMES 1-10 SEEK 1.0` sets the position and the next tick
+  recomputes it from `producer->frame_number()`, overwriting it before any read lands: measured
+  at 0.23, the document's end, against the 0.55 the seek asked for.
+
+Both are why the timeline plan's D2 makes the CHANNEL FRAME COUNTER the transport clock.
+
+Two more things make the remaining gap worse than the raw command count suggests:
 
 1. **The field table now has one consistency check, and it is a name check rather than a
    coverage check.** `FROZEN_KF_NAMES` fails startup if the registry stops generating a name that
@@ -110,7 +133,9 @@ Two things make this a worse gap than the raw command count suggests:
 
 ## 5. Known gaps
 
-1. **No coverage.** §4.1 describes a cheap mechanical check worth having first.
+1. ~~**No coverage.**~~ **CLOSED at commit 4 of the timeline plan** — `keyframes-legacy`, and
+   §4 has the numbers. Still uncovered: the auto-enable logic, and the picture (the battery
+   animates `opacity`, which lands in alpha, so an RGB patch mean cannot read it).
 2. **Still an allowlist, now shared.** A new `image_transform` field must be added to
    `core::fields` or it is animatable nowhere and describable nowhere — which is an improvement on
    three separate lists, but is not the same as being enforced. Both mixers still carry their own

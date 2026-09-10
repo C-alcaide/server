@@ -1,6 +1,42 @@
 CasparVP — Unreleased
 ==========================================
 
+### The keyframe interpolation engine moved into core, and `KEYFRAMES` runs on it
+
+`core::timeline::curve` is `modules/keyframes`' `keyframe_timeline` with integer time, address-
+space paths and a registry-supplied kind, and the same algorithm otherwise — the per-path index,
+the binary search, the hold rules, the segment easing. `KEYFRAMES` now runs through it via a
+seconds-and-frozen-names adapter, so the engine ships with the old command still working rather
+than in the commit that removes it (commit 6 of the timeline plan).
+
+**Behaviour changes for an existing config.** None intended, and one measured difference in what
+is *possible* rather than what happens: a `KEYFRAMES` document with an unknown easing name still
+warns once and animates linearly, exactly as before, because the adapter catches the refusal. The
+new document format refuses instead. The easing vocabulary a `KEYFRAMES` document may use is
+unchanged: `common/tweener`'s 43 names are now the one table, and the four names the old
+35-entry map carried that tweener does not (`ease`, `easein`, `easeout`, and the long-standing
+`easeinelestic` misspelling) are aliases, so every name that worked still works.
+
+**MEASURED, both mixers.** New battery `keyframes-legacy` — temporary, and deleted with the
+command family — drives `SET`, `GET`, `STATUS`, `ARM`, `DISARM` and fits the published opacity
+stream against a three-key piecewise ramp whose middle key is deliberately not the linear
+midpoint: **8/8, max |error| 0.0000 over 99 frame-stamped samples**, every step at the authored
+slope to 6 decimal places. `curve_self_test()` runs at boot over the per-path hold rules, the
+per-kind angular modulus, the derived discrete hold, easing inheritance, the mutation semantics
+and exactness at 59.94.
+
+**Shown failing first, twice.** Flipping the sign of the angular wrap aborts the boot naming
+*"350 -> 10 degrees passes through 360, not 180"*. Halving the adapter's time base — which the
+boot self-test cannot see, because it does not run the adapter — fails two named
+`keyframes-legacy` checks with the steps at exactly twice the authored rate.
+
+**What `keyframes-legacy` measured about the old command**, since it is the first check this
+repository has ever pointed at `KEYFRAMES`: the keyframe clock is the *producer's*, so a layer
+already playing is already that far into its keyframes the instant it is armed (a two-second
+document was three quarters finished before its first sample could be read); and `SEEK` is not
+observable, because the next tick recomputes the position from `producer->frame_number()` and
+overwrites it. Both are what the plan's D2 replaces.
+
 ### `mixer/volume` is a described field — addressable, writable, publishable, bindable
 
 `volume` and `immediate_volume` were the last two layer-transform parameters no registry
@@ -12,7 +48,7 @@ and `BIND 1-10 volume lfo1/value` was refused outright. Six mechanisms knew abou
 one knew about `volume`.
 
 **Behaviour changes for an existing config.** The mixer sub-tree gains two rows per layer, so
-`MIXER 1-10 FIELD`'s inventory goes from 177 rows to 179 and a client enumerating writable
+`MIXER 1-10 FIELD`'s inventory goes from 178 rows to 180 and a client enumerating writable
 fields now finds `volume`. A layer whose volume is not 1.0 now publishes
 `layer/{m}/mixer/volume`, where it previously published nothing — the change test compares both
 halves of the transform. `structure_revision` is unaffected: the rows are static, not dynamic

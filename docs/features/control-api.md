@@ -347,7 +347,7 @@ every parameter this API describes -- and a field added to the registry is setta
 animatable with no handler written for it.
 
 ```
-MIXER 1-10 FIELD                            → the whole inventory, 179 rows
+MIXER 1-10 FIELD                            → the whole inventory, 180 rows
 MIXER 1-10 FIELD opacity                    → 0.37
 MIXER 1-10 FIELD opacity 0.37               → 202 MIXER OK
 MIXER 1-10 FIELD opacity 0.0 50 easeoutsine → the same duration/tween every MIXER command takes
@@ -357,7 +357,7 @@ MIXER 1-10 FIELD blend_mode 5               → ...or by ordinal; reads back as 
 MIXER 1-10 FIELD volume 0.37 50 linear      → the AUDIO half, animatable like the rest
 ```
 
-179, not 177: the inventory and the read and write forms cover
+180, not 178: the inventory and the read and write forms cover
 `fields::audio_fields()` as well. Before that they knew only the image half, so `MIXER 1-10 FIELD
 volume` answered **403** while this API's own tree described `volume` as a writable mixer field --
 the two facades disagreeing about what exists, which `api-roundtrip` reported on its first run

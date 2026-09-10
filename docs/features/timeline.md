@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–3 of 19 shipped (the time base, and addressing). Nothing
+> **State:** **in progress** — commits 1–4 of 19 shipped (the time base, addressing, the engine). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
 > each section here lands with the commit that builds it.
 > **Commands:** none yet. The `TIMELINE` family and `HOLD`/`RELEASE` arrive with commit 6; the
@@ -12,7 +12,8 @@
 > **Replaces:** `src/modules/keyframes/` (the `KEYFRAMES` command family) and the OFX producer's
 > private `OFX KEY` engine — both removed when the resolver lands, with a `CHANGELOG` measurement
 > **Coverage:** `time_self_test()` and `address::target_self_test()` at boot (§1, §2), and
-> `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds. The `timeline-*` batteries do
+> `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, and `keyframes-legacy` for the
+> engine in §3 through the command it still drives. The remaining `timeline-*` batteries do
 > not exist yet and are named in the plan rather than here, because a battery named in a doc is a
 > command a reader will try to run
 
@@ -139,5 +140,80 @@ bindable number. Whether the audio mixer applies that gain to samples needs a re
 
 ---
 
-*§3 Model, §4 Precedence, §5 Transport, §6 API and AMCP, §7 Verification, §8 Known gaps — arrive
+## 3. The curve — the interpolation engine
+
+`core::timeline::curve` is the old `KEYFRAMES` engine, moved into core and re-pointed at the
+address space. The design study says keep the engine (`L26`) and break the commands (`L171`), and
+this is where that line falls: the per-path index with its binary search, the hold-before and
+hold-after rules, the segment easing and the shortest-path angular wrap are the same algorithm,
+because they were right. Three things change.
+
+**Time is `flicks`.** A segment's fraction comes from two integers, so `local == key.time` is
+exact and a key placed at frame 12 of a 59.94 channel is at frame 12 forever. The old engine
+compared `double` seconds with a 1 ms tolerance, which called two keys 0.9 ms apart one key.
+
+**Keys are address-space paths.** `opacity`, `fill_translation.0`, `volume`,
+`producer/brightness`, `previz/screen/wall/position.0` — not the 193 frozen KEYFRAMES names. So a
+curve drives anything §2 resolves and nothing has to be added to a second table first. The
+degrees-to-radians conversion the frozen table performed dies with it: a path writes the
+registry's own units, exactly as `PUT` does.
+
+**Kind comes from the registry, through a lookup the caller supplies.** `curve` has to
+interpolate a producer parameter and a screen property as readily as a mixer field, and those
+live in registries `core/timeline` must not depend on — so "is this path angular" is asked of a
+function rather than answered by an `#include`. `kind_of` is the default, over `core::address`,
+and it **derives** `discrete` for a boolean, an integer or an enumeration rather than having the
+table declare it twice: those cannot be half-way between two values whatever a `kind` column
+says, and the column exists to tell angular from plain, which is a question only reals have.
+
+### 3.1 The per-kind modulus, which is the trap this rewrite introduced
+
+The old engine wrapped angles at 360 and only at 360, because the frozen table converted degrees
+to radians on the way *in*. With paths writing registry units there are two kinds and they need
+two moduli: a `kf_kind::angular` row holds degrees and wraps at 360, an `angular_rad` row holds
+radians and wraps at 2π. Using 360 for both is silent — a radian rotation never reaches the wrap
+threshold, so it takes the long way round instead of the short one and looks like a deliberate
+spin. `curve_self_test` asserts both, and asserts that `angle` really is `angular_rad` in the
+registry, so the two halves of the claim are connected rather than each checked against a lambda.
+
+### 3.2 One easing table
+
+`common/tweener`'s **43** names are authoritative. The `KEYFRAMES` map's 35 go: 31 of them are
+tweener names already, and the four that are not survive as aliases so no saved document stops
+working — `ease`, `easein` and `easeout` (that map's shorthands for the cubic family) and
+`easeinelestic`, a long-standing CasparCG spelling. An unknown name is **refused**, not defaulted
+to linear: the old behaviour warned once and animated linearly forever, so a document with a typo
+animated differently from the one its author wrote and the log said so once, at startup, months
+ago.
+
+### 3.3 Where it is checked
+
+`curve_self_test()` at boot, and it is the stronger of the two gates: every engine-level mutation
+tried against it aborts the boot with the failing rule named. **Shown failing first:** flipping
+the sign of the angular wrap failed *"350 -> 10 degrees passes through 360, not 180"* before the
+server finished starting.
+
+`KEYFRAMES` runs on this engine now, through a seconds-and-frozen-names adapter, so the swap
+shipped with the old command still working rather than in the same commit that removes it. The
+adapter has its own battery, **`keyframes-legacy`** — temporary, and deleted with the command
+family. It drives `SET`, `GET`, `STATUS`, `ARM` and `DISARM` and fits the published stream against
+a three-key piecewise ramp whose middle key is deliberately *not* the linear midpoint: **8/8 on
+both mixers, max |error| 0.0000 over 99 frame-stamped samples.** Shown failing first by halving
+the adapter's time base, which the boot self-test cannot see because it does not run the adapter:
+two named failures, the steps landing at exactly twice the authored rate.
+
+That battery also measured two things about the old command worth writing down, because they are
+what D2 replaces:
+
+* **the clock is the producer's, not the arm's.** A layer already playing is already that far
+  into its keyframes the instant it is armed. With a two-second document the first readable
+  sample was at t = 1.56 s — three quarters of the way through, before anything could observe it.
+  The battery's document is twelve seconds long for that reason.
+* **`SEEK` is not observable.** `KEYFRAMES 1-10 SEEK 1.0` sets the position and the next tick
+  recomputes it from `producer->frame_number()`, so it is overwritten before any read can see it:
+  measured at 0.23, the document's end, against the 0.55 the seek asked for.
+
+---
+
+*§4 Model, §5 Precedence, §6 Transport, §7 API and AMCP, §8 Verification, §9 Known gaps — arrive
 with commits 5–19.*

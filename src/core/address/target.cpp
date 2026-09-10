@@ -245,6 +245,11 @@ void target_self_test()
     // then fails to resolve, rather than silently becoming component 0 of a real field. `.4` on
     // a two-component field would otherwise write component 0.
     req(!parse("fill_translation.4"), "`.4` is out of range and does not resolve");
+
+    CASPAR_LOG(info) << L"[core] address self-test: all checks passed, over "
+                     << fields::all().size() << L" image, " << fields::audio_fields().size()
+                     << L" audio, " << fields::screen_fields().size() << L" screen and "
+                     << fields::camera_fields().size() << L" camera rows.";
 }
 
 }}} // namespace caspar::core::address

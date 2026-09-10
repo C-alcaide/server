@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <core/timeline/curve.h>
+
 #include <algorithm>
 #include <string>
 #include <unordered_map>
@@ -100,17 +102,19 @@ class keyframe_timeline
     kf_values interpolate(double time_secs) const;
 
   private:
-    std::vector<keyframe_t>  kfs_;             // sorted by time_secs
-    std::vector<std::string> all_field_names_; // unique, rebuilt on mutation
+    std::vector<keyframe_t> kfs_; // sorted by time_secs -- the AUTHORED form, in seconds
 
-    // Per-field time-sorted indices into kfs_ (only keyframes that define that
-    // field), rebuilt alongside all_field_names_ on every mutation. Lets
-    // interpolate() — called every frame, unlike add()/remove()/patch_at_time()
-    // — binary-search for kf_before/kf_after per field instead of scanning all
-    // keyframes for every field on every call.
-    std::unordered_map<std::string, std::vector<std::size_t>> field_keyframe_indices_;
+    // THE ENGINE IS `core::timeline::curve` NOW, and this is the adapter that keeps `KEYFRAMES`
+    // working until commit 6 of the timeline plan removes the command family. The per-field
+    // index, the binary search, the hold-before/hold-after rules and the angular wrap all moved
+    // to `core/timeline/curve.cpp`; what stays here is the seconds-and-frozen-names shape this
+    // command's wire format is stuck with.
+    //
+    // Rebuilt on every mutation, which is where the old index was rebuilt too: mutation is
+    // authoring and interpolation is every frame.
+    core::timeline::curve curve_;
 
-    void rebuild_field_index();
+    void rebuild_curve();
 };
 
 }} // namespace caspar::keyframes

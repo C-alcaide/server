@@ -158,6 +158,11 @@ static const std::unordered_map<std::string, easing_fn_t>& easing_map()
     return m;
 }
 
+// VESTIGIAL, and kept only because `keyframe_json.cpp` fills `keyframe_t::easing_fn` and the
+// wire format round-trips the NAME. Interpolation no longer calls it: `rebuild_curve` resolves
+// `easing_name` through `core::timeline::easing_from_name`, which is `common/tweener`'s table --
+// the one table D11 keeps. The 35 entries below are a subset of tweener's 43 plus four names it
+// does not carry, and those four are aliases in `curve.cpp`. Both go in commit 6.
 easing_fn_t resolve_easing(const std::string& name)
 {
     // Uppercase the name
@@ -189,14 +194,14 @@ easing_fn_t resolve_easing(const std::string& name)
 
 void keyframe_timeline::add(keyframe_t kf)
 {
-    // Remove any existing keyframe at the exact same time (±1ms)
+    // Remove any existing keyframe at the exact same time (+/-1ms)
     kfs_.erase(std::remove_if(kfs_.begin(), kfs_.end(),
         [&](const keyframe_t& k) { return std::abs(k.time_secs - kf.time_secs) < 0.001; }),
         kfs_.end());
     kfs_.push_back(std::move(kf));
     std::sort(kfs_.begin(), kfs_.end(),
         [](const keyframe_t& a, const keyframe_t& b) { return a.time_secs < b.time_secs; });
-    rebuild_field_index();
+    rebuild_curve();
 }
 
 bool keyframe_timeline::remove(double time_secs, double max_distance)
@@ -210,11 +215,11 @@ bool keyframe_timeline::remove(double time_secs, double max_distance)
     if (std::abs(it->time_secs - time_secs) > max_distance)
         return false;
     kfs_.erase(it);
-    rebuild_field_index();
+    rebuild_curve();
     return true;
 }
 
-void   keyframe_timeline::clear()         { kfs_.clear(); all_field_names_.clear(); }
+void   keyframe_timeline::clear()         { kfs_.clear(); curve_.clear(); }
 bool   keyframe_timeline::empty()  const  { return kfs_.empty(); }
 size_t keyframe_timeline::size()   const  { return kfs_.size(); }
 const std::vector<keyframe_t>& keyframe_timeline::keyframes() const { return kfs_; }
@@ -225,7 +230,7 @@ bool keyframe_timeline::patch_at_time(double time_secs, const kf_values& patch)
         if (std::abs(kf.time_secs - time_secs) < 0.001) {
             for (const auto& [k, v] : patch)
                 kf.values[k] = v;
-            rebuild_field_index();
+            rebuild_curve();
             return true;
         }
     }
@@ -234,91 +239,55 @@ bool keyframe_timeline::patch_at_time(double time_secs, const kf_values& patch)
 
 kf_values keyframe_timeline::interpolate(double time_secs) const
 {
-    if (kfs_.empty())
-        return {};
-
-    kf_values result;
-
-    for (const auto& field_name : all_field_names_) {
-        // Find the last keyframe at-or-before `time_secs` that contains this field
-        const keyframe_t* kf_before = nullptr;
-        // Find the first keyframe after `time_secs` that contains this field
-        const keyframe_t* kf_after = nullptr;
-
-        auto idx_it = field_keyframe_indices_.find(field_name);
-        if (idx_it != field_keyframe_indices_.end()) {
-            const auto& indices = idx_it->second;
-            // First index whose keyframe time is > time_secs (binary search,
-            // O(log n) instead of scanning every keyframe for every field).
-            auto after_it = std::upper_bound(
-                indices.begin(), indices.end(), time_secs,
-                [this](double t, std::size_t idx) { return t < kfs_[idx].time_secs; });
-            if (after_it != indices.end())
-                kf_after = &kfs_[*after_it];
-            if (after_it != indices.begin())
-                kf_before = &kfs_[*std::prev(after_it)];
+    // DELEGATED. The engine is `core::timeline::curve`; this converts at the boundary and back.
+    //
+    // The kind lookup is the KEYFRAMES one rather than `core::timeline::kind_of`, and that is
+    // the whole reason `interpolate` takes a lookup at all: these keys are frozen KEYFRAMES
+    // names in DEGREES, not address-space paths in registry units, so `proj_yaw` is
+    // `kf_kind::angular` here and `angular_rad` through a path. Asking the registry about a
+    // frozen name would wrap a degree value at 2pi.
+    const auto kind = [](const std::string& name) {
+        const auto* fd = kf_find_field(name);
+        if (!fd)
+            return core::fields::kf_kind::continuous;
+        switch (fd->kind) {
+            case field_kind::angular:
+                return core::fields::kf_kind::angular;
+            case field_kind::discrete:
+                return core::fields::kf_kind::discrete;
+            default:
+                return core::fields::kf_kind::continuous;
         }
+    };
 
-        if (kf_before && kf_after) {
-            double a_val = kf_before->values.at(field_name);
-            double b_val = kf_after->values.at(field_name);
-
-            // Look up field kind for specialized interpolation
-            const auto* fd = kf_find_field(field_name);
-            field_kind  fk = fd ? fd->kind : field_kind::continuous;
-
-            if (fk == field_kind::discrete) {
-                // Discrete fields hold the source value for the entire segment
-                result[field_name] = a_val;
-            } else {
-                double seg_dur = kf_after->time_secs - kf_before->time_secs;
-                double t_raw = (seg_dur > 0.0) ? (time_secs - kf_before->time_secs) / seg_dur : 0.0;
-                t_raw = std::max(0.0, std::min(1.0, t_raw));
-
-                // Apply easing from the "before" keyframe
-                easing_fn_t efn = kf_before->easing_fn ? kf_before->easing_fn : ease_linear;
-                double t_eased = efn(t_raw);
-
-                if (fk == field_kind::angular) {
-                    // Shortest-path wrapping at 360°
-                    double diff = std::fmod(b_val - a_val, 360.0);
-                    if (diff > 180.0)
-                        diff -= 360.0;
-                    else if (diff < -180.0)
-                        diff += 360.0;
-                    result[field_name] = a_val + diff * t_eased;
-                } else {
-                    // Standard linear interpolation
-                    result[field_name] = a_val + (b_val - a_val) * t_eased;
-                }
-            }
-        } else if (kf_before) {
-            // Hold at last known value
-            result[field_name] = kf_before->values.at(field_name);
-        } else if (kf_after) {
-            // Pre-roll: hold at first known value
-            result[field_name] = kf_after->values.at(field_name);
-        }
-    }
-
-    return result;
+    kf_values out;
+    for (const auto& [path, value] : curve_.interpolate(core::timeline::from_seconds(time_secs), kind))
+        out[path] = value;
+    return out;
 }
 
-void keyframe_timeline::rebuild_field_index()
+void keyframe_timeline::rebuild_curve()
 {
-    std::set<std::string> names;
-    for (const auto& kf : kfs_)
-        for (const auto& [k, v] : kf.values)
-            names.insert(k);
-    all_field_names_.assign(names.begin(), names.end());
-
-    // Per-field index: for each field, the indices into kfs_ (already
-    // time-sorted) of keyframes that define it, in the same order.
-    field_keyframe_indices_.clear();
-    field_keyframe_indices_.reserve(all_field_names_.size());
-    for (std::size_t i = 0; i < kfs_.size(); ++i) {
-        for (const auto& [k, v] : kfs_[i].values)
-            field_keyframe_indices_[k].push_back(i);
+    curve_.clear();
+    for (const auto& kf : kfs_) {
+        core::timeline::curve_key k;
+        k.time        = core::timeline::from_seconds(kf.time_secs);
+        k.easing_name = kf.easing_name;
+        // `easing_from_name` REFUSES an unknown name; `KEYFRAMES` has always warned once and used
+        // linear. That behaviour is preserved here deliberately -- changing it would turn a saved
+        // document with a typo from "animates linearly" into "the command errors", which is a
+        // behaviour change this commit is not making. The new document format refuses, which is
+        // the rule D11 states; this adapter dies with the command family in commit 6.
+        try {
+            k.ease = core::timeline::easing_from_name(kf.easing_name);
+        } catch (...) {
+            k.ease = core::timeline::easing_from_name("linear");
+        }
+        for (const auto& [name, value] : kf.values)
+            k.values[name] = value;
+        // The tolerance is this command's own 1 ms, not the curve default, so two keys the old
+        // engine treated as one are still treated as one.
+        curve_.add(std::move(k), core::timeline::from_seconds(0.001));
     }
 }
 
