@@ -10,6 +10,10 @@
  */
 
 #include "api_action.h"
+
+#include "api_timeline.h"
+
+#include <tuple>
 #include "api_value.h"
 
 #include <common/log.h>
@@ -236,6 +240,61 @@ std::wstring build_input_amcp(const action_target& t, const json::object& body, 
 /// waiting on one of those futures before the release is a guaranteed deadlock, and it is
 /// exactly what the first version did -- `run_action` called `.get()`, the batch hung, and
 /// the socket timed out with nothing in the log.
+/// `{"op": "timeline", "name": "show", "verb": "play"}` -- one transport verb in a batch.
+///
+/// WHY A BATCH NEEDS THIS AT ALL. Starting two channels' documents on one frame is the whole
+/// point of a batch, and before this a client could pin two field writes to a frame and not the
+/// two `PLAY`s that made them mean anything. The verb table itself is `parse_transport_verb`,
+/// shared with the route, so the two cannot drift.
+///
+/// The CHANNEL is taken from the document rather than the op, unlike every other op in a batch.
+/// A document declares which channel drives it, so asking the client to restate it would create
+/// a second source of truth whose only possible contribution is to disagree. An explicit
+/// `channel` IS accepted and is then checked against the document -- a client that thinks it is
+/// driving channel 2 and is not has made an error worth a message.
+///
+/// `at_frame` is NOT read from the op. The batch pins one frame for everything it carries, and
+/// an op naming a different one would break the single guarantee a batch makes.
+api_reply parse_timeline_batch_op(const api_context& ctx, const json::object& op, batch_op& out)
+{
+    if (!ctx.timelines)
+        return api_reply::fail(api_code::internal, "no timeline store is wired into this build");
+
+    const auto* n = op.if_contains("name");
+    if (!n || !n->is_string())
+        return api_reply::fail(api_code::field_missing, "a timeline op needs a document \"name\"");
+    out.timeline.name = n->as_string().c_str();
+
+    const auto entry = ctx.timelines->get(out.timeline.name);
+    if (!entry)
+        return api_reply::fail(api_code::timeline_not_found,
+                               "no document '" + out.timeline.name + "'");
+    out.channel = entry->document.channel;
+
+    if (const auto* c = op.if_contains("channel")) {
+        if (!c->is_number())
+            return api_reply::fail(api_code::field_wrong_type, "channel takes an index");
+        const auto claimed = static_cast<int>(c->to_number<double>());
+        if (claimed != out.channel)
+            return api_reply::fail(api_code::bad_request,
+                                   "document '" + out.timeline.name + "' declares channel " +
+                                       std::to_string(out.channel) + " and the op says " +
+                                       std::to_string(claimed));
+    }
+
+    const auto* v = op.if_contains("verb");
+    if (!v || !v->is_string())
+        return api_reply::fail(api_code::field_missing, "a timeline op needs a \"verb\"");
+    const std::string verb = v->as_string().c_str();
+
+    if (op.if_contains("at_frame") != nullptr)
+        return api_reply::fail(api_code::bad_request,
+                               "at_frame belongs on the batch, not on an op: a batch lands on one "
+                               "frame and an op that named its own would break that");
+
+    return parse_transport_verb(verb, op, out.timeline.cmd);
+}
+
 api_reply queue_verb(const std::shared_ptr<core::stage_base>& stage,
                      const action_target&                     target,
                      std::future<void>&                       out)
@@ -419,6 +478,23 @@ api_reply validate_batch(const api_context& ctx, const std::string& body, batch_
 
         const std::string kind =
             op.if_contains("op") && op.at("op").is_string() ? std::string(op.at("op").as_string().c_str()) : "set";
+        // A TIMELINE OP IS ADDRESSED BY DOCUMENT NAME, not by a state path, so the path
+        // requirement below does not apply to it and it is handled before that requirement is
+        // imposed. A document is server-wide -- it is not a property of a channel or a layer --
+        // which is why it is the one thing in this API with no path.
+        if (kind == "timeline") {
+            batch_op pl;
+            pl.index       = i;
+            pl.is_timeline = true;
+            if (auto r = parse_timeline_batch_op(ctx, op, pl); r.code != api_code::ok)
+                return fail(std::move(r));
+            if (!ctx.stage || !ctx.stage(pl.channel))
+                return fail(api_reply::fail(api_code::channel_not_found,
+                                            "no channel " + std::to_string(pl.channel)));
+            out.ops.push_back(std::move(pl));
+            continue;
+        }
+
         const auto* p = op.if_contains("path");
         if (!p || !p->is_string())
             return fail(api_reply::fail(api_code::field_missing, "an op needs a path"));
@@ -450,7 +526,8 @@ api_reply validate_batch(const api_context& ctx, const std::string& body, batch_
 
             pl.channel = pl.action.channel;
         } else {
-            return fail(api_reply::fail(api_code::bad_request, "unknown op in a batch: " + kind));
+            return fail(api_reply::fail(api_code::bad_request,
+                                        "unknown op in a batch: " + kind + " (set, action, timeline)"));
         }
 
         if (!ctx.stage || !ctx.stage(pl.channel))
@@ -495,6 +572,8 @@ api_reply apply_batch(const api_context& ctx, const batch_plan& plan)
     std::map<int, std::shared_ptr<core::stage_delayed>> delayed;
     std::vector<std::future<void>>                     results;
     std::vector<std::unique_lock<std::mutex>>          locks;
+    /// (op index, document name, "did the channel own it") for each `timeline` op.
+    std::vector<std::tuple<std::size_t, std::string, std::future<bool>>> verdicts;
 
     try {
         for (const auto& pl : plan.ops) {
@@ -510,6 +589,25 @@ api_reply apply_batch(const api_context& ctx, const batch_plan& plan)
 
         for (const auto& pl : plan.ops) {
             auto& st = delayed[pl.channel];
+            if (pl.is_timeline) {
+                // THROUGH THE DELAYED STAGE like every other op -- `stage_base` carries
+                // `timeline_command` for exactly this. Reaching past it to the real stage would
+                // not merely land on the wrong frame: the delayed stage is holding that
+                // channel's executor, so the call would block this thread against a lock it is
+                // itself responsible for releasing.
+                //
+                // The command then queues into the document's pending list and the tick applies
+                // a frame's worth at once under `stop > pause > run`, so a batch's `PLAY` and a
+                // batch's field writes land on the same tick.
+                //
+                // A SEPARATE VECTOR because this one answers `bool`, and the answer is checked
+                // after the release rather than discarded: false means the channel does not own
+                // the document, which validation could not rule out -- the store is mutable and
+                // a `DELETE` can land between the two.
+                verdicts.emplace_back(pl.index, pl.timeline.name,
+                                      st->timeline_command(pl.timeline.name, pl.timeline.cmd));
+                continue;
+            }
             if (pl.is_set) {
                 results.push_back(
                     st->apply_transform(pl.set.target.layer, set_closure(pl.set), pl.set.duration, pl.set.tween));
@@ -559,6 +657,24 @@ api_reply apply_batch(const api_context& ctx, const batch_plan& plan)
     } catch (const std::exception& e) {
         CASPAR_LOG_CURRENT_EXCEPTION();
         return api_reply::fail(api_code::internal, std::string("the batch threw while settling: ") + e.what());
+    }
+
+    // A TIMELINE OP THAT THE CHANNEL REFUSED. Reported AFTER the batch has landed rather than
+    // rolled back, and that is a limit stated rather than hidden: the field writes have already
+    // been applied by the time this is knowable, so the honest answer is "the batch landed and
+    // this op did not" instead of a rollback the design cannot perform.
+    for (auto& v : verdicts) {
+        if (std::get<2>(v).get())
+            continue;
+        json::object dd;
+        dd["index"]   = static_cast<std::int64_t>(std::get<0>(v));
+        dd["code"]    = to_string(api_code::timeline_not_found);
+        dd["message"] = "the channel no longer owns document '" + std::get<1>(v) +
+                        "' -- it was deleted or replaced between validation and apply";
+        return api_reply::fail(api_code::batch_op_failed,
+                               "op " + std::to_string(std::get<0>(v)) +
+                                   " was refused after the rest of the batch had landed",
+                               json::array{std::move(dd)});
     }
 
     CASPAR_LOG(info) << L"[api] " << u16(plan.peer) << L" batch ops=" << plan.ops.size() << L" channels="

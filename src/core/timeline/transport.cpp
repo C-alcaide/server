@@ -128,6 +128,37 @@ bool transport::apply_all(std::vector<transport_command>& pending, std::uint64_t
     if (pending.empty())
         return false;
 
+    // A COMMAND MAY NAME THE FRAME IT WANTS, and one naming a LATER frame is left in the
+    // pending list rather than applied. That is the whole of scheduling: the list is the queue,
+    // this tick takes what is due, and the rest waits for the tick that is.
+    //
+    // WHY HERE rather than in the stage. Two reasons, and the second decided it. A held command
+    // must not be visible to `stop > pause > run` yet -- a `STOP` due in fifty frames
+    // outranking a `PLAY` due now would be a show that will not start, and partitioning in the
+    // caller would put that rule one function away from the rank it has to agree with. And the
+    // arithmetic is then covered by `transport_self_test` at boot, which is consistently the
+    // stronger gate in this tree.
+    //
+    // A frame ALREADY PAST fires now (`>` rather than `>=` on the hold), because the
+    // alternative is a command waiting for a counter that has gone by -- which is forever. That
+    // is deliberately the opposite of what `/v1/batch` does with a past `at_frame`, where the
+    // reply is a refusal: a batch firing late applies stale FIELD VALUES over whatever has
+    // happened since, and a document starting late merely starts late.
+    if (std::any_of(pending.begin(), pending.end(), [&](const transport_command& c) {
+            return c.at_frame && *c.at_frame > frame;
+        })) {
+        std::vector<transport_command> held, due;
+        for (const auto& c : pending) {
+            if (c.at_frame && *c.at_frame > frame)
+                held.push_back(c);
+            else
+                due.push_back(c);
+        }
+        const auto changed = due.empty() ? false : apply_all(due, frame, per_frame);
+        pending            = std::move(held);
+        return changed;
+    }
+
     // STOP > PAUSE > RUN, and the implementation is "apply the strongest ONE" rather than
     // "apply them all in an order". Sorting and applying every one was the first attempt and it
     // is wrong in the obvious way: whichever rank goes last wins, so ordering stop-then-play
@@ -420,6 +451,59 @@ void transport_self_test()
         u.apply_all(p4, 0, per_frame);
         req(u.state() == transport_state::stopped && u.position_at(0, per_frame) == 0,
             "stop wins over a seek in the same tick, and rewinds");
+    }
+
+    // ---- at_frame: a command waits for the frame it named ---------------------------------
+    //
+    // This is what lets two channels start one show together without a batch. Each channel
+    // holds its own copy of the command until its own counter reaches the frame, so two clients
+    // that never talk to each other still land on the same instant.
+    {
+        transport                      t;
+        std::vector<transport_command> pending;
+        auto                           later = cmd(transport_command::verb::play);
+        later.at_frame                       = 100;
+        pending.push_back(later);
+
+        req(!t.apply_all(pending, 40, per_frame) && t.state() == transport_state::stopped,
+            "a play scheduled for frame 100 does nothing on frame 40");
+        req(pending.size() == 1,
+            "and it is still pending -- consuming it would make `at_frame` a no-op that looks "
+            "like a feature");
+
+        req(!t.apply_all(pending, 99, per_frame) && t.state() == transport_state::stopped,
+            "nor on the frame before, which is the off-by-one that would make every scheduled "
+            "start one frame early");
+        req(t.apply_all(pending, 100, per_frame) && t.state() == transport_state::playing,
+            "and it fires on exactly the frame it named");
+        req(pending.empty(), "and is consumed once it has");
+
+        // A HELD COMMAND IS NOT IN THE RANK YET. A stop scheduled for later must not suppress a
+        // play due now -- that would be a show that never starts because somebody scheduled its
+        // end, which is why the partition happens before `stop > pause > run` rather than after.
+        transport                      u;
+        std::vector<transport_command> mixed;
+        auto                           future_stop = cmd(transport_command::verb::stop);
+        future_stop.at_frame                       = 500;
+        mixed.push_back(future_stop);
+        mixed.push_back(cmd(transport_command::verb::play));
+        u.apply_all(mixed, 10, per_frame);
+        req(u.state() == transport_state::playing,
+            "a stop scheduled for frame 500 does not outrank a play due now");
+        req(mixed.size() == 1 && mixed.front().v == transport_command::verb::stop,
+            "and the stop is still waiting for its frame");
+        u.apply_all(mixed, 500, per_frame);
+        req(u.state() == transport_state::stopped, "...where it then wins");
+
+        // A FRAME ALREADY PAST FIRES NOW rather than never.
+        transport                      w;
+        std::vector<transport_command> past;
+        auto                           gone = cmd(transport_command::verb::play);
+        gone.at_frame                       = 5;
+        past.push_back(gone);
+        req(w.apply_all(past, 900, per_frame) && w.state() == transport_state::playing,
+            "a frame that has gone by fires immediately -- waiting for it would be waiting "
+            "forever");
     }
 
     // ---- go records its trigger with the position it fired at ------------------------------

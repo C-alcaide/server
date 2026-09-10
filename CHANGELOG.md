@@ -1,6 +1,52 @@
 CasparVP — Unreleased
 ==========================================
 
+### The transport over HTTP, and two channels starting on one frame
+
+`POST /v1/timeline/{name}/{verb}` drives a loaded document over the control API -- `play` `pause`
+`stop` `seek` `rate` `loop` `go` `next` `previous`, the same verb table AMCP's `TIMELINE` has.
+The channel is NOT in the path: a document declares which channel drives it, and restating that
+could only create a second source of truth to disagree with.
+
+**`{"at_frame": n}` on a verb holds it until that channel's frame counter reaches `n`**, so two
+clients that never talk to each other can start two channels on one instant with no batch between
+them. The hold lives in `transport::apply_all` rather than in the stage, because a command that is
+not due must not be visible to `stop > pause > run` -- a STOP scheduled for fifty frames' time
+outranking a PLAY due now would be a show that will not start.
+
+**A frame ALREADY PAST fires now**, which is deliberately the opposite of what `/v1/batch` does
+with a stale `at_frame` (refused). Not an inconsistency: a batch firing late applies stale FIELD
+VALUES over whatever has happened since, and a document starting late merely starts late.
+
+`{"op": "timeline", "name": ..., "verb": ...}` is a third kind of batch op, sharing the route's
+verb parser so the two cannot drift. It goes through the batch's `stage_delayed` like every other
+op -- which is why `timeline_command` is now on `stage_base`. Reaching past the delayed stage
+would not merely land on the wrong frame: that stage is holding the channel's executor, so the
+call would block the HTTP thread against a lock it is itself responsible for releasing. `at_frame`
+on an op is refused; a batch pins one frame for everything it carries.
+
+**Measured, `api-atframe` 20/20 BOTH MIXERS** with a new timeline arm:
+
+| | ogl | vulkan |
+| :--- | :--- | :--- |
+| one batch, two channels | frames 562 / 562 | 560 / 560 |
+| two independent POSTs at frame N | 628 / 628 | 626 / 626 |
+
+The gate is the SPREAD, at most one frame -- the two channels tick on their own threads, so an
+apply landing between them publishes on N for one and N+1 for the other. Both mechanisms measured
+0. The two-POST arm published on EXACTLY the frame it named; the batch arm two frames later,
+because a scheduled command is applied by the tick that is frame N and a batch's ops are applied
+from the HTTP thread onto the tick after.
+
+**NOT measured: the picture.** Both documents drive before either channel renders again, and
+proving that needs a capture per channel on a named frame, which the harness cannot take.
+
+**Mutations, both chosen to survive the boot** -- the self-test now gates the `at_frame`
+arithmetic, so a mutation there aborts the boot and says nothing about the battery. The route
+accepting `at_frame` and never passing it on: two named failures, documents starting 38 frames
+early (590 against a named 628). `stage_delayed::timeline_command` left at the base class's
+default: two named failures, the other two, nothing driven after the batch.
+
 ### Removed: the OFX producer's private keyframe engine (`OFX KEY`, `OFX CLEARKEYS`)
 
 `CALL <ch-layer> OFX KEY` and `CALL <ch-layer> OFX CLEARKEYS` no longer exist. The usage line

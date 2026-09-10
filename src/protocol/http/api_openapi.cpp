@@ -342,6 +342,27 @@ json::object openapi(const http_config& cfg)
     }
     {
         json::object p;
+        p["post"] = op("Drive a document",
+                       "One transport verb: `play` `pause` `stop` `seek` `rate` `loop` `go` `next` "
+                       "`previous`. Arguments go in the body -- `seek` takes `at` in seconds, `rate` a "
+                       "non-zero `rate`, `loop` either `from`+`to` or `{\"off\": true}`, `go` an "
+                       "optional `trigger`. The CHANNEL is not in the path: a document declares which "
+                       "channel drives it, so restating it here could only create something to "
+                       "disagree with.\n\n"
+                       "`at_frame` holds the command until that channel's frame counter reaches the "
+                       "frame, which is how two clients that never talk to each other start two "
+                       "channels on one instant. A frame ALREADY PAST fires now -- deliberately the "
+                       "opposite of what /v1/batch does with a stale at_frame, because a batch firing "
+                       "late applies stale FIELD VALUES and a document starting late merely starts "
+                       "late.\n\n"
+                       "The reply is `queued`, not `done`: the tick applies a whole frame's worth at "
+                       "once under stop > pause > run, so a stop can never lose to a play that "
+                       "arrived a microsecond later.",
+                       json::array{path_param("name", "show"), path_param("verb", "play")});
+        paths["/v1/timeline/{name}/{verb}"] = std::move(p);
+    }
+    {
+        json::object p;
         p["get"] = op("This document", "Generated from the server's own field table.", {});
         paths["/v1/openapi.json"] = std::move(p);
     }
@@ -476,6 +497,7 @@ std::string docs_page(const http_config& cfg)
         {"GET", "/v1/timeline/{name}", "The document as stored, with its resolution and its faults"},
         {"DELETE", "/v1/timeline/{name}", "Remove it -- the only DELETE in this API"},
         {"GET", "/v1/timeline/{name}/resolved", "Instances, and with ?at= the owner of each layer"},
+        {"POST", "/v1/timeline/{name}/{verb}", "play pause stop seek rate loop go next previous; at_frame schedules it"},
         {"GET", "/v1/auth", "A salt and a single-use challenge"},
         {"GET", "/v1/openapi.json", "This, machine-readable"},
         {"WS", "/v1/events", "Prefix subscription with a per-connection diff"},

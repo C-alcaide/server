@@ -30,6 +30,7 @@
 #include "api_status.h"
 
 #include <core/timeline/model.h>
+#include <core/timeline/transport.h>
 
 #include <string>
 
@@ -62,5 +63,31 @@ api_reply get_timeline_resolved(const api_context& ctx, const std::string& name,
 /// (the document was understood and does not resolve) -- a client acts on those differently.
 api_reply parse_timeline_document(const std::string& body, const std::string& name,
                                   core::timeline::timeline_document& out);
+
+/// `POST /v1/timeline/{name}/{verb}` -- one transport verb over HTTP.
+///
+/// The same verb table AMCP's `TIMELINE` drives. It exists because a client that already speaks
+/// this API should not have to open an AMCP socket to start a document, and because `at_frame`
+/// has no AMCP form: AMCP has no frame-scheduled anything, and inventing one for this verb alone
+/// would be a scheduling surface with a single user.
+///
+/// `at_frame` in the body holds the command until the CHANNEL's counter reaches that frame, so
+/// two clients that never talk to each other can start two channels on one instant with no
+/// batch between them. A frame already past fires now -- see `transport::apply_all` for why
+/// that is the opposite of what a batch does with a stale `at_frame`.
+api_reply timeline_verb(const api_context& ctx, const std::string& name, const std::string& verb,
+                        const std::string& body);
+
+/// Parse one transport verb and its JSON arguments into a command.
+///
+/// SHARED with `/v1/batch`'s `{"op": "timeline"}`, so the route and the batch cannot drift into
+/// disagreeing about what `rate` means. `at_frame` is NOT read here: a batch pins its own frame
+/// for every op it carries, and letting one op name a different one would break the batch's one
+/// guarantee.
+///
+/// Returns `bad_request` for a verb this form cannot carry -- `chase`, `next` and `previous` are
+/// not `transport_command`s at all and the route handles them separately.
+api_reply parse_transport_verb(const std::string& verb, const json::object& args,
+                               core::timeline::transport_command& out);
 
 }}} // namespace caspar::protocol::http

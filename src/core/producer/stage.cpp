@@ -2874,6 +2874,16 @@ std::future<void> stage_delayed::execute(std::function<void()> func)
     return executor_.begin_invoke([=, this]() { return stage_->execute(func).get(); });
 }
 
+std::future<bool> stage_delayed::timeline_command(const std::string&                       name,
+                                                  const timeline::transport_command& cmd)
+{
+    // Queued against the DELAYED executor like every other op, so a `{"op": "timeline"}` in a
+    // batch reaches the stage in the same released burst as the batch's field writes and both
+    // land on the same tick. Calling the real stage from here instead would deadlock: the
+    // delayed stage is holding that executor.
+    return executor_.begin_invoke([=, this]() { return stage_->timeline_command(name, cmd).get(); });
+}
+
 // ── Keyframe management (stage_delayed forwarding) ───────────────────────
 
 }} // namespace caspar::core

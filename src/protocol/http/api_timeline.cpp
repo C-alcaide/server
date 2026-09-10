@@ -1030,6 +1030,153 @@ api_reply put_timeline(const api_context& ctx, const std::string& name, const st
     return api_reply::ok_with(std::move(out));
 }
 
+api_reply parse_transport_verb(const std::string& verb, const json::object& args,
+                               tl::transport_command& out)
+{
+    const auto number = [&](const char* key, double& d) {
+        const auto* f = member(args, key);
+        return f && as_double(*f, d);
+    };
+
+    double d = 0;
+    if (verb == "play")
+        out.v = tl::transport_command::verb::play;
+    else if (verb == "pause")
+        out.v = tl::transport_command::verb::pause;
+    else if (verb == "stop")
+        out.v = tl::transport_command::verb::stop;
+    else if (verb == "seek") {
+        if (!number("at", d))
+            return api_reply::fail(api_code::field_missing, "seek needs \"at\" in seconds");
+        out.v  = tl::transport_command::verb::seek;
+        out.at = tl::from_seconds(d);
+    } else if (verb == "rate") {
+        if (!number("rate", d))
+            return api_reply::fail(api_code::field_missing, "rate needs a \"rate\"");
+        if (d == 0.0)
+            return api_reply::fail(api_code::bad_request,
+                                   "rate 0 is pause under another name; POST pause");
+        // A rational at 1/1000, matching AMCP's `TIMELINE RATE`, so a slowed group nested in a
+        // slowed document composes without drift.
+        out.v        = tl::transport_command::verb::rate;
+        out.new_rate = boost::rational<std::int64_t>(static_cast<std::int64_t>(std::llround(d * 1000)), 1000);
+    } else if (verb == "loop") {
+        // `{"off": true}` clears it; `{"from": a, "to": b}` sets it. Two shapes rather than a
+        // null `from`, because "loop over nothing" and "do not loop" are different intentions
+        // and a client that means the second should say so.
+        const auto* off = member(args, "off");
+        if (off && off->is_bool() && off->as_bool()) {
+            out.v = tl::transport_command::verb::clear_loop;
+        } else {
+            double from = 0, to = 0;
+            if (!number("from", from) || !number("to", to))
+                return api_reply::fail(api_code::field_missing,
+                                       "loop needs \"from\" and \"to\" in seconds, or "
+                                       "{\"off\": true}");
+            if (to <= from)
+                return api_reply::fail(api_code::bad_request,
+                                       "a loop region needs \"to\" after \"from\"");
+            out.v      = tl::transport_command::verb::loop;
+            out.region = {tl::from_seconds(from), tl::from_seconds(to)};
+        }
+    } else if (verb == "go") {
+        out.v = tl::transport_command::verb::go;
+        const auto* t = member(args, "trigger");
+        out.trigger   = t && t->is_string() ? std::string(t->as_string().c_str()) : "go";
+    } else {
+        return api_reply::fail(api_code::bad_request,
+                               "no such transport verb: '" + verb +
+                                   "'. play pause stop seek rate loop go");
+    }
+    return api_reply{};
+}
+
+api_reply timeline_verb(const api_context& ctx, const std::string& name, const std::string& verb,
+                        const std::string& body)
+{
+    if (!ctx.timelines)
+        return api_reply::fail(api_code::internal, "no timeline store is wired into this build");
+    if (!ctx.stage || !ctx.concrete_stage)
+        return api_reply::fail(api_code::internal, "the API was built without a stage");
+
+    // THE DOCUMENT NAMES ITS CHANNEL, so the route does not have to and a client cannot get it
+    // wrong. This is the one place in the API where the addressed thing is not at a path under a
+    // channel: a document is server-wide and says which channel drives it.
+    const auto entry = ctx.timelines->get(name);
+    if (!entry)
+        return api_reply::fail(api_code::timeline_not_found, "no document '" + name + "'");
+    const int channel = entry->document.channel;
+
+    auto stage = ctx.stage(channel);
+    if (!stage)
+        return api_reply::fail(api_code::channel_not_found,
+                               "document '" + name + "' declares channel " +
+                                   std::to_string(channel) + ", which this server does not have");
+
+    json::object args;
+    if (!body.empty()) {
+        json::error_code ec;
+        const auto       parsed = json::parse(body, ec);
+        if (ec)
+            return api_reply::fail(api_code::bad_request,
+                                   "the body is not JSON: " + ec.message());
+        if (parsed.is_object())
+            args = parsed.as_object();
+        else if (!parsed.is_null())
+            return api_reply::fail(api_code::bad_request, "a verb's arguments are a JSON object");
+    }
+
+    json::object out;
+    out["name"]    = name;
+    out["channel"] = channel;
+    out["verb"]    = verb;
+
+    // NEXT, PREVIOUS AND CHASE ARE NOT TRANSPORT COMMANDS, and are handled before the table for
+    // that reason. The first two need the document's RESOLUTION to work out where to seek to,
+    // which the transport deliberately knows nothing about; chase is configuration rather than
+    // an action, so it has no queue and no `at_frame`.
+    if (verb == "next" || verb == "previous" || verb == "prev") {
+        auto st = ctx.concrete_stage(channel);
+        if (!st || !st->timeline_seek_relative(name, verb == "next").get())
+            return api_reply::fail(api_code::bad_request,
+                                   std::string("no ") + (verb == "next" ? "later" : "earlier") +
+                                       " cue in '" + name + "', or the document does not resolve");
+        return api_reply::ok_with(std::move(out));
+    }
+    if (verb == "chase")
+        return api_reply::fail(api_code::bad_request,
+                               "chase is configuration rather than a transport verb; it is set "
+                               "with AMCP `TIMELINE <ch> CHASE " + name + " ...` in this release");
+
+    tl::transport_command cmd;
+    if (auto r = parse_transport_verb(verb, args, cmd); r.code != api_code::ok)
+        return r;
+
+    // `at_frame` -- HELD until the channel's counter reaches it. Reported back in the reply
+    // because a client that scheduled something needs to know the server understood which
+    // frame, and because a spread between two channels is only diagnosable against the frame
+    // they were both told.
+    if (const auto* at = member(args, "at_frame")) {
+        double d = 0;
+        if (!as_double(*at, d) || d < 0)
+            return api_reply::fail(api_code::field_wrong_type, "at_frame must be a frame number");
+        cmd.at_frame    = static_cast<std::uint64_t>(d);
+        out["at_frame"] = static_cast<std::int64_t>(*cmd.at_frame);
+    }
+
+    if (!stage->timeline_command(name, cmd).get())
+        return api_reply::fail(api_code::timeline_not_found,
+                               "document '" + name + "' declares channel " +
+                                   std::to_string(channel) +
+                                   ", and that channel does not own it");
+
+    // QUEUED, not applied: the tick takes a whole frame's worth at once under
+    // `stop > pause > run`, which is what makes several clients acting in one frame
+    // well-defined rather than a race.
+    out["queued"] = true;
+    return api_reply::ok_with(std::move(out));
+}
+
 api_reply get_timeline(const api_context& ctx, const std::string& name)
 {
     if (!ctx.timelines)

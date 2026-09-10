@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–17 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–18 of 19 shipped. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -1227,4 +1227,118 @@ both this and the older gap in one run.
 
 ---
 
-*§18 Known gaps — arrives with commit 19.*
+## 18. Starting two channels on one frame
+
+A show that spans two channels is two documents, and until now nothing could start them
+together. Both mechanisms below exist because a transport verb is not a field write, so neither
+of the API's two existing frame-accurate paths carried one.
+
+### 18.1 `POST /v1/timeline/{name}/{verb}`
+
+The transport over HTTP, with the same verb table AMCP's `TIMELINE` drives:
+
+```
+POST /v1/timeline/show/play
+POST /v1/timeline/show/seek      {"at": 12.5}
+POST /v1/timeline/show/rate      {"rate": 0.5}
+POST /v1/timeline/show/loop      {"from": 20, "to": 45}   or  {"off": true}
+POST /v1/timeline/show/go        {"trigger": "go"}
+POST /v1/timeline/show/next      POST /v1/timeline/show/previous
+```
+
+**The channel is not in the path.** A document declares which channel drives it, and it is the
+one thing in this API that is not a property of something under a channel — so restating the
+channel here could only create a second source of truth whose one possible contribution is to
+disagree. The batch op accepts an explicit `channel` and *checks* it against the document for
+exactly that reason.
+
+`chase` is not here: it is configuration rather than an action, so it has no queue and no frame
+to land on. It stays on AMCP in this release, and the route says so rather than 404ing.
+
+### 18.2 `at_frame` on a verb
+
+```
+POST /v1/timeline/show/play   {"at_frame": 6280}
+```
+
+The command is held in the document's pending list until **that channel's** frame counter
+reaches 6280, and is then applied by that tick. So two clients that never talk to each other can
+start two channels on one instant with no batch between them, which is what a show controller
+actually has.
+
+Three properties, each of which is a decision rather than a consequence:
+
+* **The hold lives in `transport::apply_all`**, not in the stage. A command that is not due yet
+  must not be visible to `stop > pause > run` — a `STOP` scheduled for fifty frames' time
+  outranking a `PLAY` due now would be a show that will not start. Putting the partition in the
+  caller would put that rule one function away from the rank it has to agree with. It is also
+  then covered by `transport_self_test` at boot, which in this tree is consistently the stronger
+  gate.
+* **A frame already past fires NOW**, because the alternative is waiting for a counter that has
+  gone by, which is forever. This is deliberately the *opposite* of what `/v1/batch` does with a
+  stale `at_frame`, where the reply is a refusal — and the difference is not an inconsistency: a
+  batch firing late applies stale **field values** over whatever has happened since, and a
+  document starting late merely starts late.
+* **The frame is echoed in the reply.** A client that scheduled something needs to know which
+  frame the server understood, and a spread between two channels is only diagnosable against the
+  frame they were both told.
+
+### 18.3 `{"op": "timeline"}` in a batch
+
+```json
+{"at_frame": 6280, "ops": [
+  {"op": "timeline", "name": "show-left",  "verb": "play"},
+  {"op": "timeline", "name": "show-right", "verb": "play"},
+  {"op": "set", "path": "/channel/1/stage/layer/10/mixer/opacity", "value": 1.0}
+]}
+```
+
+The verb parser is **shared** with the route (`parse_transport_verb`), so the two cannot drift
+into disagreeing about what `rate` means. `at_frame` on an *op* is refused: a batch pins one
+frame for everything it carries, and an op naming its own would break the single guarantee a
+batch makes.
+
+**The op goes through the batch's `stage_delayed` like every other op**, which is why
+`timeline_command` is on `stage_base` rather than only on `stage`. Reaching past the delayed
+stage to the real one would not merely land on the wrong frame — the delayed stage is holding
+that channel's executor, so the call would block the HTTP thread against a lock it is itself
+responsible for releasing.
+
+One limit stated rather than hidden: a timeline op that the channel refuses **after** the batch
+has landed is reported and not rolled back. The store is mutable, so a `DELETE` can arrive
+between validation and apply; by the time that is knowable the field writes are already on the
+stage, and the honest answer is "the batch landed and this op did not".
+
+### 18.4 What is measured
+
+`api-atframe` **20/20 both mixers**, extended with a timeline arm that drives both mechanisms:
+
+| | ogl | vulkan |
+| :--- | :--- | :--- |
+| one batch, two channels | frames 562 / 562 | 560 / 560 |
+| two independent POSTs at frame N | 628 / 628 | 626 / 626 |
+
+The gate is the **spread**, at most one frame, for the same reason the battery's field-write arm
+gates at one: the two channels tick on their own threads, so an apply landing between them
+publishes on N for one and N+1 for the other. Both mechanisms measured 0 here.
+
+Worth noting what the numbers show beyond the gate: the two-POST arm published on **exactly** the
+frame it named, while the batch arm publishes two frames later. The scheduled command is applied
+by the tick that *is* frame N; a batch's ops are applied from the HTTP thread and land on the
+tick after.
+
+**Not measured: the picture.** Both documents are driving before either channel renders again,
+and proving that needs a capture per channel on a named frame, which nothing in this harness can
+take.
+
+**Mutations, both of them chosen to survive the boot** — the self-test now gates the `at_frame`
+arithmetic, so a mutation there aborts the boot and says nothing about the battery:
+
+* the route accepting `at_frame` and never passing it on → **2 named failures**, and the
+  documents started 38 frames early (590 against a named 628);
+* `stage_delayed::timeline_command` left at the base class's "no such document" → **2 named
+  failures**, the other two, with nothing driven after the batch.
+
+---
+
+*§19 Known gaps — arrives with the docs commit.*

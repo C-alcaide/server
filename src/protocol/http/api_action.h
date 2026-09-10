@@ -14,6 +14,8 @@
 #include "api_context.h"
 #include "api_status.h"
 
+#include <core/timeline/transport.h>
+
 #include "api_value.h"
 
 #include <string>
@@ -30,13 +32,26 @@ struct action_target
 };
 
 /// One validated op of a batch.
+/// One transport verb for one document, inside a batch.
+struct batch_timeline
+{
+    std::string                       name;
+    core::timeline::transport_command cmd;
+};
+
 struct batch_op
 {
-    std::size_t   index  = 0;
-    bool          is_set = false;
-    prepared_set  set;
-    action_target action;
-    int           channel = 0;
+    std::size_t index  = 0;
+    bool        is_set = false;
+    /// A TIMELINE verb rather than a field write or a layer action.
+    ///
+    /// A third flag rather than an enum, because `is_set` was already a bool and turning it into
+    /// an enum would touch every reader for no information they do not already have.
+    bool           is_timeline = false;
+    prepared_set   set;
+    action_target  action;
+    batch_timeline timeline;
+    int            channel = 0;
 };
 
 /// A batch that has passed validation and is ready to apply -- now or on a named frame.

@@ -410,6 +410,16 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
                     return park_batch(std::move(deferred));
                 return reply;
             }
+            // `POST /v1/timeline/{name}/{verb}` -- the transport over HTTP. Split from the
+            // right so a document name containing a slash still resolves; a verb never does.
+            if (starts_with(path, "/v1/timeline/")) {
+                const auto rest = path.substr(std::string("/v1/timeline/").size());
+                const auto cut  = rest.rfind('/');
+                if (cut != std::string::npos && cut + 1 < rest.size())
+                    return timeline_verb(context_, rest.substr(0, cut), rest.substr(cut + 1), body);
+                return api_reply::fail(api_code::unknown_path,
+                                       "a timeline POST is /v1/timeline/{name}/{verb}");
+            }
             return api_reply::fail(api_code::unknown_path, "nothing accepts POST at " + path);
         }
 

@@ -160,10 +160,11 @@ PUT    /v1/timeline/{name}               store one -- seconds on the wire, expre
 GET    /v1/timeline/{name}               the document as stored, with its resolution and faults
 DELETE /v1/timeline/{name}               remove it
 GET    /v1/timeline/{name}/resolved?at=  instances, and the owner of each layer at `at`
+POST   /v1/timeline/{name}/{verb}        drive it -- play pause stop seek rate loop go next previous
 ```
 
-Documented in [`timeline.md`](timeline.md) §5. Three things about it are properties of this API
-rather than of the timeline:
+Documented in [`timeline.md`](timeline.md) §5 and §18. Four things about it are properties of
+this API rather than of the timeline:
 
 * **`DELETE` is the only one here**, because a timeline is the first thing this API *owns*.
   Everything else it writes is a property of something the server already had, and there is no
@@ -175,6 +176,11 @@ rather than of the timeline:
 * **A PUT moves `structure_revision`.** The store's revision counter is mixed into every stage's
   structure fingerprint, so the same re-walk a client already does when a layer appears also picks
   up a document changing. Without it a PUT would be invisible to anything reading the tree.
+* **A verb takes no channel, and `at_frame` schedules it.** The document declares its channel, so
+  the path does not; `{"at_frame": n}` holds the command until that channel's counter reaches `n`,
+  which is how two clients start two channels on one instant with no batch between them. A frame
+  already past fires now here and is *refused* by a batch — see `timeline.md` §18.2 for why those
+  two answers are both right.
 
 `PUT /v1/value/channel/{n}/stage/layer/{m}/mixer/{field}` -- mixer fields only in this build.
 
@@ -283,9 +289,14 @@ missing file is `unknown_path`, a bad argument is `bad_request`, and neither say
 {"label":"go cue 12","ops":[
   {"op":"set","path":"/channel/1/stage/layer/10/mixer/opacity","value":0.25},
   {"op":"set","path":"/channel/2/stage/layer/10/mixer/opacity","value":0.75},
-  {"op":"action","path":"/channel/1/stage/layer/10/pause"}
+  {"op":"action","path":"/channel/1/stage/layer/10/pause"},
+  {"op":"timeline","name":"show-right","verb":"play"}
 ]}
 ```
+
+**Three kinds of op:** `set` writes a field, `action` drives a layer, `timeline` drives a
+document. A timeline op is the only one addressed by NAME rather than by a path, because a
+document is server-wide -- see `timeline.md` §18.3.
 
 **Every op is validated before any op is applied.** A failure answers `batch_op_failed` with the
 failing index and that op's own status, and **nothing is written**:
@@ -308,11 +319,16 @@ Two limits, both deliberate:
   breaking the guarantee. `POST` it to `/v1/action` first, then batch the rest.
 * **`queue` is accepted and echoed, and there is one queue.** The field is reserved now so a client
   written today does not have to change when independent queues arrive.
+* **`at_frame` on an OP is refused.** A batch pins one frame for everything it carries; an op
+  naming its own would break the guarantee. Put it on the batch.
+* **A `timeline` op refused AFTER the batch landed is reported, not rolled back.** The store is
+  mutable, so a `DELETE` can arrive between validation and apply. By then the field writes are on
+  the stage, and the honest answer is that the batch landed and one op did not.
 
 ### The API describes itself
 
-`GET /v1/openapi.json` is an OpenAPI 3.1 document, **generated**. The eight endpoints are written
-out in the source because there are eight of them and they do not change on their own; the field
+`GET /v1/openapi.json` is an OpenAPI 3.1 document, **generated**. The endpoints are written
+out in the source because there are a handful of them and they do not change on their own; the field
 list is not -- every mixer parameter, its JSON type, its arity, its range, its enumeration values,
 its composition rule and its keyframe names come from `core::fields::all()`. The document cannot
 describe a field the server does not have, or miss one it does, and there is no `.yaml` in the

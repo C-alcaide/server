@@ -215,6 +215,22 @@ class stage_base
         return make_ready_future(false);
     }
 
+    /// Queue one transport command for a document this stage's channel owns.
+    ///
+    /// ON THE BASE, and it has to be: a `/v1/batch` holding this channel's executor blocked
+    /// must still be able to start a document. A batch reaching past its `stage_delayed` to the
+    /// real stage would not merely land on the wrong frame -- the delayed stage holds that
+    /// executor, so the call would block the HTTP thread against a lock it is itself holding.
+    /// Going through the base means one implementation of the verb table serves the route, the
+    /// batch and AMCP.
+    ///
+    /// Defaulted to "no such document" rather than pure, for the same reason as `hold_field`.
+    virtual std::future<bool> timeline_command(const std::string&                 name,
+                                               const timeline::transport_command& cmd)
+    {
+        return make_ready_future(false);
+    }
+
     /// Hand an input event to every source that wants one. Called from `video_channel::input`.
     virtual void feed_sources(const input_event&) {}
 
@@ -353,7 +369,12 @@ class stage final : public stage_base
     /// frame well-defined: the tick applies a whole frame's worth at once under `stop > pause >
     /// run`, so a stop can never lose to a play that happened to arrive a microsecond later.
     /// Returns false only if the document is not one this channel owns.
-    std::future<bool> timeline_command(const std::string& name, const timeline::transport_command& cmd);
+    ///
+    /// A command carrying `at_frame` is held in the pending list until this channel's counter
+    /// reaches that frame -- see `transport::apply_all`, which is where the hold lives so the
+    /// rank cannot see a command that is not due.
+    std::future<bool> timeline_command(const std::string&                 name,
+                                       const timeline::transport_command& cmd) override;
 
     /// Seek to the start of the next (`forward`) or previous instance in the document.
     ///
@@ -451,6 +472,8 @@ class stage_delayed final : public stage_base
     std::future<std::shared_ptr<frame_producer>> background(int index) override;
 
     std::future<void>            execute(std::function<void()> k) override;
+    std::future<bool>            timeline_command(const std::string&                 name,
+                                                  const timeline::transport_command& cmd) override;
 
 
     std::unique_lock<std::mutex> get_lock() const { return stage_->get_lock(); }
