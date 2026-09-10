@@ -457,6 +457,220 @@ api_reply write_stage_value(const api_context& ctx,
 /// the values there costs no new machinery and puts the read and the write at the SAME path. A
 /// separate `producer/` node would have needed its own publication and would have left reads
 /// and writes at two different addresses for one value.
+/// `channel/N/stage/layer/M/mixer/node/<id>/<param>` -- nine segments.
+///
+/// Tested BEFORE the seven-segment `resolve_write_target`, which would otherwise try to read
+/// `node` as a field name and answer `unknown_path` for a parameter that exists.
+bool is_node_path(const std::string& path)
+{
+    const auto seg = split_path(path);
+    return seg.size() == 9 && seg[0] == "channel" && seg[2] == "stage" && seg[3] == "layer" &&
+           seg[5] == "mixer" && seg[6] == "node";
+}
+
+/// A NODE-PARAMETER write, validated against the ATTACHED DOCUMENT's descriptor.
+///
+/// `write_param_value`'s shape, and the resemblance is the point: a node parameter and a producer
+/// parameter are both LIVE registries, so both fetch the descriptor from the stage first and then
+/// validate the body against it. Two executor round trips per write -- describe, then set -- which
+/// is the right trade for a PUT: trusting the body and letting the setter refuse loses the reason,
+/// and a control surface needs to know whether the name, the arity or the range was wrong.
+///
+/// WHAT IS DIFFERENT FROM A PRODUCER PARAMETER, and it is the whole reason the node graph was
+/// designed this way: a node parameter has a CONSTANT. The attached document holds it, so a write
+/// during a ramp is REMEMBERED rather than refused -- `effective: false` with `shadowed_by`, and
+/// the value lands when the driver ends. `faults.yaml` calls the producer-parameter refusal "a gap
+/// in the ownership stack rather than a policy"; this is that gap closed for node parameters.
+api_reply write_node_value(const api_context& ctx,
+                           const std::string& path,
+                           const std::string& body,
+                           const std::string& peer)
+{
+    const auto seg = split_path(path);
+    if (!is_number(seg[1]) || !is_number(seg[4]))
+        return api_reply::fail(api_code::bad_request, "channel and layer must be numbers: " + path);
+    const auto channel = std::atoi(seg[1].c_str());
+    const auto layer   = std::atoi(seg[4].c_str());
+    const auto node_path = "node/" + seg[7] + "/" + seg[8];
+
+    if (!ctx.stage)
+        return api_reply::fail(api_code::internal, "no stage bridge is wired into this build");
+    auto stage = ctx.stage(channel);
+    if (!stage)
+        return api_reply::fail(api_code::channel_not_found,
+                               "no channel " + std::to_string(channel));
+
+    const auto gname = stage->graph_of(layer);
+    if (gname.empty())
+        return api_reply::fail(api_code::unknown_path,
+                               "layer " + std::to_string(layer) +
+                                   " has no node graph attached. `GRAPH " +
+                                   std::to_string(channel) + "-" + std::to_string(layer) +
+                                   " ATTACH <name>` puts one on it");
+
+    json::value doc;
+    try {
+        doc = body.empty() ? json::value(json::object()) : json::parse(body);
+    } catch (...) {
+        return api_reply::fail(api_code::bad_request, "body is not valid JSON");
+    }
+    if (!doc.is_object())
+        return api_reply::fail(api_code::bad_request, "body must be a JSON object");
+    const auto& op = doc.as_object();
+
+    // `duration`/`tween` REFUSED, with the producer-parameter message and for a related reason:
+    // `MIXER <duration>` tweens a `frame_transform` and a node parameter is not in one. The
+    // answer is a timeline, which is a better one -- it can ease, it can be scheduled, and it
+    // publishes what it is doing.
+    if (op.if_contains("duration") || op.if_contains("tween"))
+        return api_reply::fail(api_code::bad_request,
+                               "a node parameter cannot be tweened by a write. `MIXER <duration>` "
+                               "interpolates the frame transform and a node parameter is not on "
+                               "it -- animate it with a timeline, which can also ease it, "
+                               "schedule it and publish what it is doing");
+
+    std::vector<core::param_snapshot> params;
+    try {
+        params = stage->describe_graph(layer).get();
+    } catch (...) {
+        return api_reply::fail(api_code::internal, "describing the graph threw");
+    }
+    const auto p = std::find_if(params.begin(), params.end(),
+                                [&](const core::param_snapshot& x) { return x.name == node_path; });
+    if (p == params.end())
+        return api_reply::fail(api_code::unknown_path,
+                               "graph '" + gname + "' has no parameter '" + node_path +
+                                   "'. Its ports are in the tree under "
+                                   "channel/N/stage/layer/M/mixer/node/");
+
+    // The descriptor stands in for a `field_meta`, exactly as a producer parameter's does: the
+    // same four things the validation needs, so the JSON conversion and the range check are the
+    // same two steps a mixer field goes through.
+    core::fields::field_meta meta{};
+    meta.path     = p->name.c_str();
+    meta.type     = p->type;
+    meta.access   = p->access;
+    meta.bounding = p->bounding;
+    meta.arity    = p->arity;
+    meta.values   = p->values.empty() ? nullptr : p->values.c_str();
+    if (p->min && p->max)
+        meta.range = core::grade_range{*p->min, *p->max};
+
+    // A HOLD OR RELEASE WITH NO VALUE, handled BEFORE the value is required -- exactly as the
+    // mixer-field path does, and for the same reason: `PUT {"hold": true}` on a ramping
+    // parameter means "stop there", and requiring a value would make the client read the
+    // position first and race the next tick. `{"hold": false}` is the release and has no value
+    // to send at all.
+    //
+    // FOUND BY `graph-stack` ON ITS FIRST RUN, and it is worth recording how: the release check
+    // came back `field_missing: no value`, and the four checks after it failed as CASCADES --
+    // the hold never let go, so the binding, the document and a later write all read the held
+    // number. One defect, five red checks, and reading them in order was the only way to see
+    // that. A battery that had stopped at the first failure would have reported four defects.
+    const auto* v = op.if_contains("value");
+    if (const auto* h = op.if_contains("hold"); h && !v) {
+        if (!h->is_bool())
+            return api_reply::fail(api_code::bad_request, "\"hold\" takes a boolean");
+        const bool want   = h->as_bool();
+        const auto before = stage->describe_graph(layer).get();
+        const auto bp     = std::find_if(before.begin(), before.end(),
+                                     [&](const core::param_snapshot& x) { return x.name == node_path; });
+
+        bool ok = false;
+        try {
+            ok = want ? stage->hold_field(layer, node_path).get()
+                      : stage->release_field(layer, node_path).get();
+        } catch (...) {
+            ok = false;
+        }
+        if (want && !ok)
+            return api_reply::fail(api_code::not_writable,
+                                   node_path + " cannot be held");
+
+        CASPAR_LOG(info) << L"[api] " << u16(peer) << (want ? L" HOLD " : L" RELEASE ")
+                         << u16(path);
+
+        json::object r;
+        r["path"]  = path;
+        r["graph"] = gname;
+        r["param"] = node_path;
+        r["hold"]  = want;
+        if (bp != before.end())
+            r["value"] = vector_to_json(bp->value);
+        // A RELEASE THAT REMOVED NOTHING IS `ok` with `hold: false`, not an error: "make sure
+        // this is not held" is idempotent, and a client tidying up should not have to know
+        // whether it had held anything.
+        r["changed"] = ok;
+        if (!want) {
+            // WHO HAS IT NOW, which is the half a client needs to know whether releasing gave
+            // the parameter to the operator or to a document underneath.
+            const auto after = stage->driver_of(layer, node_path);
+            if (!after.first.empty())
+                r["shadowed_by"] = after.first;
+        }
+        return api_reply::ok_with(std::move(r));
+    }
+
+    if (!v)
+        return api_reply::fail(api_code::field_missing, "no value for " + path);
+
+    core::monitor::vector_t operand;
+    if (auto r = json_to_value(meta, *v, operand); r.code != api_code::ok)
+        return r;
+    if (auto r = check_and_bound(meta, operand); r.code != api_code::ok)
+        return r;
+
+    // HOLD-AND-WRITE, in that order, so `{"value":..,"hold":true}` is one round trip and the
+    // operator owns the parameter from the moment the value lands rather than one frame later.
+    bool held = false;
+    if (const auto* h = op.if_contains("hold"); h && h->is_bool() && h->as_bool()) {
+        try {
+            held = stage->hold_field(layer, node_path).get();
+        } catch (...) {
+            held = false;
+        }
+    }
+
+    std::string label;
+    if (const auto* l = op.if_contains("label"); l && l->is_string())
+        label = l->as_string().c_str();
+
+    bool applied = false;
+    try {
+        applied = stage->set_node_param(layer, node_path, operand, label).get();
+    } catch (...) {
+        return api_reply::fail(api_code::internal, "the node parameter write threw");
+    }
+    if (!applied)
+        return api_reply::fail(api_code::unknown_path,
+                               "the write to " + node_path + " did not land. The descriptor came "
+                               "from the attached document, so this is the store refusing a value "
+                               "it described as legal rather than a path or type error");
+
+    CASPAR_LOG(info) << L"[api] " << u16(peer) << L" PUT " << u16(path);
+
+    // WHO HAS IT NOW, in the same shape every mixer field's reply carries. `effective: false`
+    // with `shadowed_by` is what makes a write during a ramp REMEMBERED instead of refused: the
+    // value is in the document, and it is what the parameter returns to when the driver ends.
+    const auto who = stage->driver_of(layer, node_path);
+    json::object r;
+    r["path"]  = path;
+    r["graph"] = gname;
+    r["param"] = node_path;
+    if (held)
+        r["held"] = true;
+    if (!who.first.empty()) {
+        // `hold` puts THIS write on top, so it is effective even though a driver exists.
+        r["effective"] = held || who.first == "hold";
+        if (!r["effective"].as_bool())
+            r["shadowed_by"] = who.first;
+        r["stack"] = who.second;
+    } else {
+        r["effective"] = true;
+    }
+    return api_reply::ok_with(std::move(r));
+}
+
 bool is_param_path(const std::string& path)
 {
     const auto seg = split_path(path);
@@ -615,6 +829,10 @@ api_reply write_value(const api_context& ctx,
         return write_stage_value(ctx, path, body, peer);
     if (is_param_path(path))
         return write_param_value(ctx, path, body, peer);
+    // BEFORE `resolve_write_target`, which splits a seven-segment path and would read `node` as
+    // a field name -- answering `unknown_path` for a parameter that exists.
+    if (is_node_path(path))
+        return write_node_value(ctx, path, body, peer);
 
     write_target target;
     if (auto r = resolve_write_target(path, target); r.code != api_code::ok)

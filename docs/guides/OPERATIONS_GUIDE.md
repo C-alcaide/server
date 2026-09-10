@@ -1005,6 +1005,60 @@ The existing commands are unchanged and remain the ones to use where they exist:
 takes a radius, a type, an angle and a centre together and switches blur on for you, which
 `FIELD` will not do.
 
+### `GRAPH` — putting a node graph on a layer
+
+A node graph is a look built as boxes and wires — an exposure, a CDL, a mask, a mix — rather than
+as a list of `MIXER` commands. **The graph itself arrives over the control API**, like a timeline
+document and for the same reason: it is JSON, and AMCP does not speak JSON.
+
+```
+PUT /v1/graph/warm-key      # the graph, as JSON. See docs/features/node-graph.md
+```
+
+AMCP then puts it on a layer, takes it off, or says what is on one:
+
+```
+GRAPH 1-10 ATTACH warm-key    # this layer runs that look
+GRAPH 1-10                    # which graph is on this layer? (NONE if none)
+GRAPH 1-10 DETACH             # take it off
+```
+
+Four things to know at the keyboard:
+
+*One graph, one layer, both ways.* A graph cannot be attached twice, and a layer cannot hold two.
+Attaching a graph that is already somewhere answers **403** and says where it is. To use the same
+look on two layers, `PUT` it under a second name — which is usually what you wanted anyway, since
+the two then grade independently. Re-attaching the same graph to the same layer is harmless.
+
+*Its parameters are ordinary parameters.* Once a graph is attached, every value port is an address
+like any other, so everything you already know works on it:
+
+```
+MIXER 1-10 FIELD node/n1/gain 2.0        # set it
+MIXER 1-10 FIELD node/n1/gain            # read it
+MIXER 1-10 FIELD                         # ...and the inventory lists them, after the mixer rows
+HOLD 1-10 node/n1/gain                   # take it for yourself, above a show or a fader
+BIND 1-10 node/n1/gain audio1/rms        # drive it from a live source
+```
+
+A timeline keys them too — a document's key is just `"node/n1/gain"` — and the ownership rules are
+the ones in the `TIMELINE` section below, unchanged. `channel/1/stage/layer/10/mixer/node/n1/gain`
+is where the value is published, and `.../driver/node/n1/gain` says what is writing it.
+
+*There is no duration or tween on a node parameter.* `MIXER 1-10 FIELD node/n1/gain 2.0 50 linear`
+is refused rather than ignored. A `MIXER` duration interpolates the frame transform and a node
+parameter is not on it — animate it with a timeline, which can also ease it, schedule it and show
+you what it is doing.
+
+*DETACH does not stop a show.* If a document is driving a node parameter and you detach the graph,
+the document keeps running; re-attach it and the parameter goes straight back under the ramp where
+it would have been. `MIXER 1-10 CLEAR` detaches too, because clearing a layer clears its look.
+
+> **At this build a graph changes no picture.** It stores, validates, attaches, publishes its
+> parameters and answers every ownership question — and the renderer does not consult it yet. The
+> looks you can actually put on screen today are still the `MIXER` grading chain and
+> `MIXER GRADE_NODE`. `docs/features/node-graph.md` §8 is the order the rest arrives in.
+
 ### `TIMELINE` — driving an authored show
 
 A timeline document animates any parameter on the channel over time, from one object instead of

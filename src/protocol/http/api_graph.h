@@ -65,6 +65,18 @@ api_reply delete_graph(const api_context& ctx, const std::string& name);
 /// `GET /v1/graph/{name}/history` -- the undo stack, newest last, plus `can_undo`/`can_redo`.
 api_reply get_graph_history(const api_context& ctx, const std::string& name);
 
+/// `POST /v1/graph/{name}/{attach|detach}` -- put the document on a layer, or take it off.
+///
+/// `{"channel": n, "layer": m}` for `attach`; `detach` needs neither, because a document is
+/// attached to at most one layer and the store knows which.
+///
+/// A ROUTE RATHER THAN AMCP-ONLY, which the plan's endpoint table did not list: without it a
+/// client that speaks only HTTP could store a graph, read it, undo it and delete it, and never
+/// put it on a layer. The AMCP `GRAPH <ch>-<layer> ATTACH` façade exists as well, for an operator
+/// at a console.
+api_reply graph_attach_verb(const api_context& ctx, const std::string& name,
+                            const std::string& verb, const std::string& body);
+
 /// `POST /v1/graph/{name}/{undo|redo}` -- one step, answering the resulting document.
 api_reply graph_history_verb(const api_context& ctx, const std::string& name,
                              const std::string& verb);

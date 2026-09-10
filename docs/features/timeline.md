@@ -106,17 +106,31 @@ the object that owns the target, so they are not in the string:
 | `producer/brightness` | `frame_producer::parameters()` on the layer's foreground |
 | `previz/camera/position.1` | `fields::find_camera_field`; `view_camera` for the viewport one |
 | `previz/screen/wall/position.0` | `fields::find_screen_field` on the named screen |
+| `node/n1/exposure` | a parameter of a node in the layer's **attached graph** — added 2026-09-11 |
+| `node/n1/slope.2` | the same, component 2 of a vec3 port |
 
 A leading `mixer/` is accepted and ignored, so an address copied out of the published state tree
 or out of an HTTP path resolves unedited.
 
-**What `parse` decides and what it cannot.** Two of the five registries are static tables, so a
-path into them comes back resolved to a `field_meta*`. The other three need live state the header
-must not depend on: a producer parameter exists only while that producer is on that layer, and a
-screen exists only if the channel's previz renderer has one. So `parse` reports the **kind** and
-the key and leaves the live half to the stage, which holds both. Answering "valid" here and
-failing at the write would put two answers to one question in two places, which is the thing this
-file exists to undo.
+**What `parse` decides and what it cannot.** Two of the **six** registries are static tables, so a
+path into them comes back resolved to a `field_meta*`. The other four need live state the header
+must not depend on: a producer parameter exists only while that producer is on that layer, a
+screen exists only if the channel's previz renderer has one, and a **node** exists only in the
+document attached to that layer. So `parse` reports the **kind** and the key and leaves the live
+half to the stage, which holds both. Answering "valid" here and failing at the write would put two
+answers to one question in two places, which is the thing this file exists to undo.
+
+**And a document can key a NODE parameter with no change to the timeline at all** — which is the
+point of there being one grammar. A curve naming `node/n1/exposure` resolves, drives, publishes
+its owner and releases losslessly through exactly the machinery §10 describes for a mixer field;
+`graph-stack` measures it at **29/29 on both mixers**, and `node-graph.md` §3.1 is where the
+per-workflow table lives. Two constraints follow from the grammar rather than from the graph:
+
+* **a node id may not contain `/` or `.`**, because those are what the address splits on —
+  `graph::validate` refuses such an id at PUT, and `target_self_test` asserts the other half;
+* **`edge/` is reserved** and parses to nothing. Per-edge `mute` as a step target is a v2 hook,
+  and reserving the prefix now makes adding it a table entry rather than a grammar change a
+  client has to be told about.
 
 **Addresses are the TABLE's names, not the struct's.** A screen's X is `position.0`, because the
 screen table declares one vec3 row over `pos_x`/`pos_y`/`pos_z`. `previz/screen/wall/pos_x` does

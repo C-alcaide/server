@@ -30,6 +30,8 @@
 //   producer/brightness            a parameter of whatever is playing on the layer
 //   previz/camera/position.1       the production camera; view_camera for the viewport one
 //   previz/screen/wall/pos_x       a named screen on the channel's previz stage
+//   node/n1/exposure               a parameter of a node in the layer's attached graph
+//   node/n1/slope.2                ...and one component of one
 //
 // A leading `mixer/` is accepted and ignored, so an address copied out of the published state
 // tree or out of an HTTP path resolves without editing.
@@ -59,7 +61,8 @@ enum class target_kind
     producer_param,  ///< `frame_producer::parameters()` on the layer's foreground
     screen,          ///< `fields::find_screen_field` on the named screen
     camera,          ///< `fields::find_camera_field`, production camera
-    view_camera      ///< the same table, viewport camera
+    view_camera,     ///< the same table, viewport camera
+    node             ///< a parameter of a node in the layer's attached graph
 };
 
 const char* kind_name(target_kind k);
@@ -75,7 +78,11 @@ struct target
     /// The registry key alone: `opacity`, `volume`, `brightness`, `pos_x`, `position`.
     std::string field;
 
-    /// The screen name, for `kind::screen`. Empty for every other kind.
+    /// The screen name for `kind::screen`, or the NODE ID for `kind::node`. Empty otherwise.
+    ///
+    /// Two kinds share this field because they ask the same question -- "which of several objects
+    /// of this kind" -- and giving each its own member would mean every switch over `kind` had to
+    /// remember which one to read.
     std::string object;
 
     /// Which component of an arity>1 field, 0 for the whole thing. Only 0..3 parse.

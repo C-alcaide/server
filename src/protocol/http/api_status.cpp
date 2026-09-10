@@ -33,6 +33,7 @@ const char* to_string(api_code c)
         case api_code::timeline_invalid: return "timeline_invalid";
         case api_code::graph_not_found: return "graph_not_found";
         case api_code::graph_invalid: return "graph_invalid";
+        case api_code::graph_attached: return "graph_attached";
         case api_code::unauthorized: return "unauthorized";
         case api_code::bad_request: return "bad_request";
         case api_code::internal: return "internal";

@@ -529,6 +529,122 @@ api_reply get_graph_history(const api_context& ctx, const std::string& name)
     return api_reply::ok_with(std::move(out));
 }
 
+api_reply graph_attach_verb(const api_context& ctx, const std::string& name,
+                            const std::string& verb, const std::string& body)
+{
+    if (!ctx.graphs)
+        return no_store();
+    const auto entry = ctx.graphs->get(name);
+    if (!entry)
+        return api_reply::fail(api_code::graph_not_found, "no graph named '" + name + "'");
+    if (!ctx.stage)
+        return api_reply::fail(api_code::internal, "no stage bridge is wired into this build");
+
+    if (verb == "detach") {
+        // WHERE it is attached comes from the STORE, not from the body. A client asking to take
+        // a look off air knows the look's name; making it also send the channel and layer would
+        // mean it had to remember them, and it would then be able to get them wrong.
+        const auto where = ctx.graphs->attached(name);
+        if (!where)
+            return api_reply::fail(api_code::bad_request,
+                                   "'" + name + "' is not attached to anything");
+        auto stage = ctx.stage(where->channel);
+        if (!stage)
+            return api_reply::fail(api_code::channel_not_found,
+                                   "no channel " + std::to_string(where->channel));
+        bool ok = false;
+        try {
+            ok = stage->detach_graph(where->layer).get();
+        } catch (...) {
+            return api_reply::fail(api_code::internal, "the detach threw");
+        }
+        json::object r;
+        r["name"]     = name;
+        r["detached"] = ok;
+        return api_reply::ok_with(std::move(r));
+    }
+
+    if (verb != "attach")
+        return api_reply::fail(api_code::bad_request,
+                               "'" + verb +
+                                   "' is not a graph verb. Take `attach`, `detach`, `undo` or "
+                                   "`redo`");
+
+    json::error_code ec;
+    const auto       parsed = json::parse(body.empty() ? "{}" : body, ec);
+    if (ec || !parsed.is_object())
+        return api_reply::fail(api_code::bad_request,
+                               "attach takes {\"channel\": n, \"layer\": m}");
+    const auto& o  = parsed.as_object();
+    const auto* ch = member(o, "channel");
+    const auto* ly = member(o, "layer");
+    double      chd = 0, lyd = 0;
+    if (!ch || !as_double(*ch, chd) || !ly || !as_double(*ly, lyd))
+        return api_reply::fail(api_code::bad_request,
+                               "attach takes {\"channel\": n, \"layer\": m}");
+    const auto channel = static_cast<int>(chd);
+    const auto layer   = static_cast<int>(lyd);
+
+    auto stage = ctx.stage(channel);
+    if (!stage)
+        return api_reply::fail(api_code::channel_not_found,
+                               "no channel " + std::to_string(channel));
+
+    core::stage_base::attach_result res{};
+    try {
+        res = stage->attach_graph(layer, name).get();
+    } catch (...) {
+        return api_reply::fail(api_code::internal, "the attach threw");
+    }
+
+    switch (res) {
+        case core::stage_base::attach_result::ok:
+            break;
+        case core::stage_base::attach_result::no_such_graph:
+            return api_reply::fail(api_code::graph_not_found, "no graph named '" + name + "'");
+        case core::stage_base::attach_result::already_attached: {
+            // ONE DOCUMENT, AT MOST ONE LAYER, and the message says why rather than only
+            // refusing: the attached document's parameter values ARE the operator's constant, so
+            // a second attachment would be two answers to what a parameter is set to.
+            const auto where = ctx.graphs->attached(name);
+            json::object d;
+            if (where) {
+                d["channel"] = where->channel;
+                d["layer"]   = where->layer;
+            }
+            return api_reply::fail(
+                api_code::graph_attached,
+                "'" + name + "' is already attached" +
+                    (where ? " to channel " + std::to_string(where->channel) + " layer " +
+                                 std::to_string(where->layer)
+                           : std::string()) +
+                    ". One document attaches once -- its parameter values are the operator's "
+                    "constant, so two attachments would be two answers to what a parameter is "
+                    "set to. PUT it under another name to reuse the look",
+                json::array{d});
+        }
+        case core::stage_base::attach_result::layer_busy: {
+            const auto other = stage->graph_of(layer);
+            return api_reply::fail(api_code::graph_attached,
+                                   "channel " + std::to_string(channel) + " layer " +
+                                       std::to_string(layer) + " already has graph '" + other +
+                                       "'. Detach it first");
+        }
+    }
+
+    json::object r;
+    r["name"]     = name;
+    r["channel"]  = channel;
+    r["layer"]    = layer;
+    // A GRAPH THAT DOES NOT COMPILE CAN STILL BE ATTACHED, and the reply says so rather than
+    // refusing. An operator mid-edit whose document has a fault has not stopped wanting it on
+    // that layer, and the stage publishes `graph_stale` for exactly this state.
+    r["ok"]       = entry->ok();
+    if (!entry->ok())
+        r["stale"] = true;
+    return api_reply::ok_with(std::move(r));
+}
+
 api_reply graph_history_verb(const api_context& ctx, const std::string& name,
                              const std::string& verb)
 {

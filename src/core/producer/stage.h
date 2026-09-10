@@ -219,6 +219,62 @@ class stage_base
         return make_ready_future(false);
     }
 
+    // -- The node graph: attach a document to a layer, and read or write its parameters -----
+    //
+    // On the BASE for the same reason `timeline_command` is: a `/v1/batch` op has to reach
+    // these through its `stage_delayed`, and reaching past it to the real stage would block the
+    // HTTP thread against a lock it is itself holding. Defaulted rather than pure, so a stage
+    // with no graph support needs no override.
+
+    /// What happened to an `ATTACH`. Three outcomes rather than a bool, because a client acts
+    /// on them differently: `graph_not_found` is a name to fix, `already_attached` is a document
+    /// in use somewhere else, and `layer_busy` is this layer already holding another.
+    enum class attach_result
+    {
+        ok,
+        no_such_graph,
+        already_attached,
+        layer_busy,
+    };
+
+    /// Attach `name` to `layer`. Re-attaching the same document to the same layer is `ok` --
+    /// idempotent, which a client retrying after a timeout depends on.
+    virtual std::future<attach_result> attach_graph(int layer, const std::string& name)
+    {
+        return make_ready_future(attach_result::no_such_graph);
+    }
+
+    /// Detach whatever is on `layer`. False if there was nothing.
+    virtual std::future<bool> detach_graph(int layer) { return make_ready_future(false); }
+
+    /// Which document `layer` has, or empty. Synchronous, for a write path that has to answer
+    /// before it can validate anything.
+    virtual std::string graph_of(int layer) const { return {}; }
+
+    /// ONE node parameter, described. The registry's port descriptor with the DOCUMENT's value
+    /// in it -- which is the only place those two meet, and the reason this is a stage call
+    /// rather than a registry lookup: the registry has the type and the document has the value.
+    ///
+    /// The `name` field is the ADDRESS (`node/<id>/<param>`) rather than the bare port name, so
+    /// what a caller publishes, writes and reads back is one string.
+    virtual std::future<std::vector<param_snapshot>> describe_graph(int layer)
+    {
+        return make_ready_future(std::vector<param_snapshot>());
+    }
+
+    /// Write one node parameter, by address. False for a layer with no graph, an unknown node
+    /// or port, or a value the validator refuses.
+    ///
+    /// `label` names the GESTURE for the store's undo history, so a slider drag under one label
+    /// is one undo rather than fifty.
+    virtual std::future<bool> set_node_param(int                      layer,
+                                             const std::string&       path,
+                                             const monitor::vector_t& value,
+                                             const std::string&       label)
+    {
+        return make_ready_future(false);
+    }
+
     /// Queue one transport command for a document this stage's channel owns.
     ///
     /// ON THE BASE, and it has to be: a `/v1/batch` holding this channel's executor blocked
@@ -434,6 +490,16 @@ class stage final : public stage_base
     /// not resolve.
     std::future<bool> hold_field(int layer, const std::string& path) override;
     std::future<bool> release_field(int layer, const std::string& path) override;
+
+    /// The node graph, attached per layer. See `stage_base` for what each of these answers.
+    std::future<attach_result>              attach_graph(int layer, const std::string& name) override;
+    std::future<bool>                       detach_graph(int layer) override;
+    std::string                             graph_of(int layer) const override;
+    std::future<std::vector<param_snapshot>> describe_graph(int layer) override;
+    std::future<bool>                       set_node_param(int                      layer,
+                                                           const std::string&       path,
+                                                           const monitor::vector_t& value,
+                                                           const std::string&       label) override;
 
     /// The documents this channel owns, with their playheads. For `TIMELINE <ch> LIST`.
     std::future<std::vector<std::pair<std::string, timeline_status>>> timeline_list();

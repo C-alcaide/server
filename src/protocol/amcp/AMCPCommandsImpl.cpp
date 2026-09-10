@@ -1577,6 +1577,60 @@ std::future<std::wstring> hold_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 HOLD OK\r\n");
 }
 
+std::future<std::wstring> graph_command(command_context& ctx)
+{
+    auto stage = ctx.channel.raw_channel->stage();
+    if (!stage)
+        return make_ready_future<std::wstring>(L"501 GRAPH FAILED no stage on this channel\r\n");
+
+    // No argument: WHAT IS ON THIS LAYER. A client that has just connected, or an operator
+    // wondering why a look is not moving, needs this before anything else.
+    if (ctx.parameters.empty()) {
+        const auto name = stage->graph_of(ctx.layer_index());
+        if (name.empty())
+            return make_ready_future<std::wstring>(L"201 GRAPH OK\r\nNONE\r\n\r\n");
+        return make_ready_future<std::wstring>(L"201 GRAPH OK\r\n" + u16(name) + L"\r\n\r\n");
+    }
+
+    if (boost::iequals(ctx.parameters.at(0), L"DETACH")) {
+        // 202 whether or not anything was attached. "Make sure this layer has no graph" is
+        // idempotent, and a client tidying up should not have to know what it had.
+        stage->detach_graph(ctx.layer_index()).get();
+        return make_ready_future<std::wstring>(L"202 GRAPH OK\r\n");
+    }
+
+    if (!boost::iequals(ctx.parameters.at(0), L"ATTACH") || ctx.parameters.size() < 2)
+        return make_ready_future<std::wstring>(
+            L"400 GRAPH ERROR usage: GRAPH <ch>-<layer> ATTACH <name> | DETACH | (no argument to "
+            L"query). A document is JSON and arrives over the control API -- PUT /v1/graph/<name> "
+            L"-- so there is no GRAPH LOAD\r\n");
+
+    const auto name = u8(ctx.parameters.at(1));
+    switch (stage->attach_graph(ctx.layer_index(), name).get()) {
+        case core::stage_base::attach_result::ok:
+            return make_ready_future<std::wstring>(L"202 GRAPH OK\r\n");
+        case core::stage_base::attach_result::no_such_graph:
+            return make_ready_future<std::wstring>(
+                L"404 GRAPH ERROR no graph named " + ctx.parameters.at(1) +
+                L". GET /v1/graph lists them\r\n");
+        case core::stage_base::attach_result::already_attached:
+            // ONE DOCUMENT, AT MOST ONE LAYER: the attached document's parameter values ARE the
+            // operator's constant, so a second attachment would be two answers to what a
+            // parameter's value is. Reusing a look is a PUT under another name, which is also
+            // what makes the two independently gradeable.
+            return make_ready_future<std::wstring>(
+                L"403 GRAPH ERROR " + ctx.parameters.at(1) +
+                L" is already attached to a layer. One document attaches once -- its parameter "
+                L"values are the operator's constant, so two attachments would be two answers to "
+                L"what a parameter is set to. PUT it under another name to reuse the look\r\n");
+        case core::stage_base::attach_result::layer_busy:
+            return make_ready_future<std::wstring>(
+                L"403 GRAPH ERROR layer " + std::to_wstring(ctx.layer_index()) +
+                L" already has a graph. DETACH it first\r\n");
+    }
+    return make_ready_future<std::wstring>(L"501 GRAPH FAILED\r\n");
+}
+
 std::future<std::wstring> release_command(command_context& ctx)
 {
     auto stage = ctx.channel.raw_channel->stage();
@@ -1819,12 +1873,115 @@ std::future<std::wstring> mixer_field_command(command_context& ctx)
         // a client discovering the surface from the protocol -- while `MIXER VOLUME` set it.
         for (const auto& f : fields::audio_fields())
             row(f);
+        // AND THE ATTACHED GRAPH'S PARAMETERS, last, because they are the only rows that are
+        // not the same on every layer. A client discovering the surface from the protocol has to
+        // be able to see them: leaving them out is what made `volume` invisible for a release
+        // while `MIXER VOLUME` set it, and a node parameter is one address further from
+        // guessable than that was.
+        if (auto stage = ctx.channel.raw_channel->stage()) {
+            for (const auto& p : stage->describe_graph(ctx.layer_index()).get()) {
+                out += u16(p.name);
+                out += L" ";
+                out += std::to_wstring(p.arity);
+                out += L" rw";
+                if (p.min && p.max)
+                    out += L" [" + std::to_wstring(*p.min) + L".." + std::to_wstring(*p.max) + L"]";
+                out += L"\r\n";
+            }
+        }
         out += L"\r\n";
         return make_ready_future<std::wstring>(std::move(out));
     }
 
-    const auto  name = u8(ctx.parameters.at(0));
-    const auto* f    = fields::find(name);
+    const auto name = u8(ctx.parameters.at(0));
+
+    // A NODE PARAMETER of the layer's attached graph.
+    //
+    // Handled here rather than as its own command because it IS a mixer field to an operator:
+    // one address space, one verb, and a path copied out of the state tree works unedited. What
+    // it cannot share is the descriptor lookup -- a node's ports are a property of the attached
+    // DOCUMENT, so the table is fetched from the stage rather than from `fields::find`.
+    if (name.rfind("node/", 0) == 0) {
+        auto stage = ctx.channel.raw_channel->stage();
+        if (!stage)
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"no stage on this channel"));
+
+        const auto gname = stage->graph_of(ctx.layer_index());
+        if (gname.empty())
+            CASPAR_THROW_EXCEPTION(user_error()
+                                   << msg_info(L"layer " + std::to_wstring(ctx.layer_index()) +
+                                               L" has no node graph attached -- GRAPH <ch>-<layer> "
+                                               L"ATTACH <name>"));
+
+        auto        params = stage->describe_graph(ctx.layer_index()).get();
+        const auto  it     = std::find_if(params.begin(), params.end(),
+                                     [&](const core::param_snapshot& x) { return x.name == name; });
+        if (it == params.end())
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"graph '" + u16(gname) +
+                                                            L"' has no parameter " +
+                                                            ctx.parameters.at(0)));
+
+        // READ.
+        if (ctx.parameters.size() < 2) {
+            std::wstring out = L"201 MIXER OK\r\n";
+            for (std::size_t i = 0; i < it->value.size(); ++i) {
+                if (i)
+                    out += L" ";
+                out += u16(boost::apply_visitor(monitor_to_string(), it->value[i]));
+            }
+            out += L"\r\n";
+            return make_ready_future<std::wstring>(std::move(out));
+        }
+
+        // NO DURATION OR TWEEN, and the message says why rather than only refusing: a
+        // `MIXER <duration>` interpolates the frame transform, and a node parameter is not on
+        // one. The answer is a timeline, which is a better one -- it eases, it schedules, and it
+        // publishes what it is doing.
+        if (ctx.parameters.size() > static_cast<std::size_t>(1 + it->arity))
+            CASPAR_THROW_EXCEPTION(
+                user_error() << msg_info(L"a node parameter takes no duration or tween. `MIXER "
+                                         L"<duration>` interpolates the frame transform and a "
+                                         L"node parameter is not on it -- animate it with a "
+                                         L"timeline"));
+        if (ctx.parameters.size() < static_cast<std::size_t>(1 + it->arity))
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(ctx.parameters.at(0) + L" takes " +
+                                                            std::to_wstring(it->arity) +
+                                                            L" value(s)"));
+
+        core::monitor::vector_t value;
+        for (uint8_t i = 0; i < it->arity; ++i) {
+            const auto& raw = ctx.parameters.at(1 + i);
+            switch (it->type) {
+                case fields::value_type::boolean:
+                    value.push_back(boost::iequals(raw, L"1") || boost::iequals(raw, L"true"));
+                    break;
+                case fields::value_type::enumeration:
+                    // A name or its ORDINAL, and the ordinal pushed as a NUMBER -- the same trap
+                    // the mixer-field path below records: pushed as the string "5" the setter
+                    // looks it up in the name list, fails to find it, and the write is lost with
+                    // a 202 behind it.
+                    if (!raw.empty() && raw.find_first_not_of(L"0123456789") == std::wstring::npos)
+                        value.push_back(static_cast<int32_t>(std::stoi(raw)));
+                    else
+                        value.push_back(u8(raw));
+                    break;
+                case fields::value_type::integer:
+                    value.push_back(static_cast<int32_t>(std::stoi(raw)));
+                    break;
+                default:
+                    value.push_back(std::stod(raw));
+                    break;
+            }
+        }
+
+        if (!stage->set_node_param(ctx.layer_index(), name, value, "MIXER FIELD").get())
+            CASPAR_THROW_EXCEPTION(user_error()
+                                   << msg_info(L"the graph refused that value for " +
+                                               ctx.parameters.at(0)));
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    const auto* f = fields::find(name);
     // The audio half, tried second so the image table stays the fast path and so a name can
     // never resolve to both. Without this, `MIXER 1-10 FIELD volume` answered 403 while the
     // control API's tree described `volume` as a writable mixer field -- the two facades
@@ -6786,6 +6943,9 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER BLUR", mixer_blur_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER SHAPE", mixer_shape_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER FIELD", mixer_field_command, 0);
+    // Its own group, because a graph is not a mixer field: `MIXER FIELD node/...` writes a
+    // parameter, and this attaches the DOCUMENT those parameters belong to.
+    repo->register_channel_command(L"Graph Commands", L"GRAPH", graph_command, 0);
     repo->register_channel_command(L"Timeline Commands", L"TIMELINE", timeline_command, 0);
     repo->register_channel_command(L"Timeline Commands", L"HOLD", hold_command, 1);
     repo->register_channel_command(L"Timeline Commands", L"RELEASE", release_command, 1);

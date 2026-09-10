@@ -6,11 +6,14 @@
 > gap; §8 lists what arrives when and §9 says exactly what is measured today. It replaces the
 > `MIXER GRADE_NODE` prototype, whose largest defect is measured here: a node grades the
 > **display-encoded** pixel, **42 LSB** away from `MIXER CDL` (§2).
-> **Commands:** **none yet.** `GRAPH <ch>-<layer> ATTACH|DETACH <name>` and
-> `MIXER FIELD node/<id>/<param>` arrive with the address grammar (§8). There is deliberately **no
-> `GRAPH LOAD`** — a document is JSON and arrives over the control API, the timeline's precedent.
+> **Commands:** `GRAPH <ch>-<layer> ATTACH <name> | DETACH` and `GRAPH <ch>-<layer>` to query,
+> plus `MIXER FIELD node/<id>/<param>` — and `HOLD`/`RELEASE`/`BIND`/`UNBIND` need no new command,
+> because a node parameter is an address. There is deliberately **no `GRAPH LOAD`**: a document is
+> JSON and arrives over the control API, the timeline's precedent.
 > **API:** `PUT`/`GET`/`DELETE /v1/graph/{name}`, `GET /v1/graph`, `GET /v1/graph/{name}/history`,
-> `POST /v1/graph/{name}/{undo|redo}` (§7)
+> `POST /v1/graph/{name}/{attach|detach|undo|redo}` (§7), and
+> `GET`/`PUT /v1/value/channel/N/stage/layer/M/mixer/node/{id}/{param}` — the same body every
+> mixer field takes, `hold` included (§3.1)
 > **Modules:** **not a module** — `src/core/graph/` (`registry`, `model`, `validate`,
 > `graph_store`), with the JSON codec in `src/protocol/http/api_graph.cpp`, the routes in
 > `src/protocol/http/http_server.cpp` and the store injected into every stage by
@@ -18,12 +21,18 @@
 > **Replaces:** the `MIXER GRADE_NODE` prototype — `grade_window`/`grade_node`/`grade_graph` in
 > `src/core/frame/frame_transform.h`, `mixer_grade_command`, and the `grade_nodes` blob row. Not
 > yet removed: the prototype still ships and is still the only thing that renders.
-> **Coverage:** `api-graph` — **34/34 both mixers** (the document, its faults, its evaluation order,
-> its history); `grade-graph` — **8/8 both mixers** (which colour space a node pass runs in, the gap
-> measured at 42.00 LSB); three boot self-tests — `node_registry_self_test`,
-> `graph_validate_self_test`, `graph_store_self_test`. **No picture check exists**, because nothing
-> evaluates a graph yet; `grade-window` covers the prototype's picture and §2 records why its own
-> oracle has to change when the placement moves.
+> **Coverage:** `api-graph` — **34/34 both mixers** (the document, its faults, its evaluation
+> order, its history); **`graph-stack` — 29/29 both mixers** (a node parameter through the whole
+> ownership stack: a timeline keys it, a binding outranks the timeline, `HOLD` outranks both,
+> every rank releases losslessly, a write during a ramp is remembered and lands, and
+> `MIXER FIELD` agrees with `PUT`); `grade-graph` — **8/8 both mixers** (which colour space a node
+> pass runs in, the gap measured at 42.00 LSB); three boot self-tests —
+> `node_registry_self_test`, `graph_validate_self_test`, `graph_store_self_test`, plus
+> `target_self_test`'s node rows. **No picture check exists**, because nothing evaluates a graph
+> yet — so the `MIXER EXPOSURE` class (a parameter that stores, publishes and reports its owner
+> correctly and renders nothing) is the one failure none of these can catch. `grade-window` covers
+> the prototype's picture and §2 records why its own oracle has to change when the placement
+> moves.
 
 ---
 
@@ -105,6 +114,70 @@ every other binding — and what an operator asks of it is **membership** ("what
 `stack/<path>` already answers per address. `reactive.md` §1.2's "a node graph in the server —
 bindings are edges and the client draws them" stands for *bindings*; a compositing graph is a
 different object for this reason.
+
+## 3.1 A node parameter is an address — and that is now measured, not asserted
+
+`node/<id>/<param>[.N]`, resolved by `core::address::parse` like every other target, and
+published under `channel/N/stage/layer/M/mixer/node/<id>/<param>` so **read and write are one
+path**: an address copied out of the tree resolves unedited, because `parse` strips a leading
+`mixer/` and the rest is the address. That is the same property `previz/` has, and it is why both
+live under `mixer` rather than beside it.
+
+**A node parameter is a LIVE registry**, like a producer parameter: `parse` classifies the path
+and leaves `meta` null, because the descriptor is the attached document's class crossed with the
+registry's port and only the stage holds both. Reporting a node path as valid in `parse` and
+having the write fail later would put two answers to one question in two places, which is the
+mistake `target.h` exists to undo.
+
+| workflow | what it took | measured by |
+| :--- | :--- | :--- |
+| a timeline keys it | nothing — the path resolved | `graph-stack`: the published value follows the ramp |
+| a binding drives it | a `case node:` in `add_binding` validating against the **attached document**, and a `node/` prefix test in `apply_binding` **before** the `fields::find` fallthrough | a binding parked at 2.35 outranks a document ramping 0.5–4.0 |
+| `HOLD` takes it | a node arm in `hold_field`, reading the **effective** value | held while the *binding* has it, so a hold that snapped to the constant reads the wrong number |
+| a write is remembered | `set_node_param` → `graph_store::patch_params` | `effective: false`, `shadowed_by`, and it lands at `STOP` |
+| `animatable` describes it | nothing — `param_leaf` and `animatable_of` already read a `param_snapshot` | the tree carries a node port with a mixer field's whole key set |
+
+**Why `apply_binding`'s prefix test has to come first**, stated because it is a one-line guard
+between this path and the failure the whole design is built to avoid: `fields::find("node/n1/gain")`
+returns null and the function simply `return`s, so the binding would be **accepted at `BIND` time
+and then do nothing on every tick**, with a 202 behind it. That is the shape `stage_fields.h`,
+`producer_params.h` and the timeline's path validation each exist to prevent.
+
+**And the document's parameter values ARE the operator's constant.** There is deliberately no
+per-layer constant table seeded from the document: two tables would be two answers to "what is
+this parameter set to". So a write goes into the document, `constant/node/<id>/<param>` publishes
+it beside the effective value, and release is **lossless by construction** rather than by care —
+nothing above the document ever writes it, so there is nothing to restore.
+
+That is what makes a node parameter **class (a)**, like a mixer field, rather than class (b) like
+a producer parameter — which is captured and restored, and *refused* while bound because there is
+nowhere on the stage to remember a write. `faults.yaml` calls that "a gap in the ownership stack
+rather than a policy"; for node parameters the gap is closed.
+
+## 3.2 Attaching a document to a layer
+
+```
+POST /v1/graph/{name}/attach   {"channel": 1, "layer": 10}
+POST /v1/graph/{name}/detach
+GRAPH <ch>-<layer> ATTACH <name> | DETACH | (no argument to query)
+```
+
+**One document, at most one layer**, and a layer holds at most one document — `graph_attached`
+either way. The reason is the constant: two attachments would be two answers to what a parameter
+is set to. Reusing a look is a `PUT` under another name, which is also what makes the two copies
+independently gradeable. Re-attaching the **same** document to the **same** layer is idempotent,
+which a client retrying after a timeout depends on.
+
+**`DETACH` leaves the DRIVERS alone**, and this is a decision rather than an omission. A timeline
+keying `node/n1/gain` on a layer whose graph has just been detached keeps writing an overlay
+nothing reads — and re-attaching puts the parameter straight back **under the ramp it was under**.
+Dropping the overlays would make a detach silently end a show's animation. `MIXER CLEAR` detaches
+too, because "this layer's look is gone" includes the graph, and leaving it would keep the
+document claimed by a layer that no longer has anything on it.
+
+**There is no `GRAPH LOAD`.** A document is JSON and arrives over the control API — the timeline's
+precedent, and the same reasoning: `protocol_http` is a sibling of the AMCP implementation, not a
+layer below it, so putting a JSON parser in the AMCP tokeniser would be a second codec.
 
 ## 4. The document
 
@@ -319,7 +392,7 @@ Each of these is sequenced rather than open, and the order is riskiest-first:
 
 | next | what it adds |
 | :--- | :--- |
-| the address grammar | `target_kind::node`, `/v1/value/.../mixer/node/{id}/{p}`, the tree, `GRAPH ATTACH/DETACH`, `MIXER FIELD node/…`, and every ownership arm — so a timeline keys a node parameter and a binding drives it |
+| ~~the address grammar~~ | **DONE** — see §3.1 and §3.2 |
 | **the seam** | `image_transform::{node_plan, node_values}` replacing `grade_nodes`, the evaluator at `stage: display`, `mixer_grade_command` deleted, `grade-window` migrated |
 | Vulkan fan-out | `renderpass::commit()` barriering any earlier attachment, not only the previous one |
 | fp16 intermediates | working-space values exceed 1.0, so unorm intermediates clip |
@@ -341,6 +414,7 @@ rather than by the `MIXER` tween.
 | what | battery | result |
 | :--- | :--- | :--- |
 | the document, its faults, its order, its history | `api-graph` | **34/34 both mixers** |
+| a node parameter through the whole OWNERSHIP STACK | `graph-stack` | **29/29 both mixers** |
 | which colour space a node pass runs in | `grade-graph` | **8/8 both mixers**, the gap measured at 42.00 LSB |
 | what a node computes (the prototype) | `grade-window` | 1 LSB both mixers — **and its oracle asserts the current placement**, so its figures move when §8's working-space commit lands |
 | the class table against its own rules | `node_registry_self_test` | at boot |
@@ -357,12 +431,45 @@ the rule it broke:
 | the `image → mask` coercion reported as exact | `node_registry_self_test` — *"must be legal and REPORTED as lossy"*, boot aborted |
 | the graph store dropped from the stage fingerprint | `api-graph` — exactly *"a graph PUT moves structure_revision"* at `2 -> 2`, the rest green |
 
+**Three mutations on the ownership arms**, and what they show about the battery is worth as much
+as what they show about the code:
+
+| mutation | what `graph-stack` reported |
+| :--- | :--- |
+| a binding writes `patch_params` (the document) instead of its overlay | 3 of 29: the binding does not outrank the document, the stack names only the timeline, and the release is wrong |
+| `apply_binding` loses its `node/` arm entirely | **the same three** |
+| the rank inverted in the effective-value walk | 3 of 29, but a **different** three: the *hold* stops holding, drifting 1.998 → 2.53 while the ramp runs under it |
+
+The first two being indistinguishable is recorded rather than smoothed over: this battery
+discriminates *"the binding arm is broken"* and not *which way*. And in both cases `BIND` still
+answered **202** — the accepted-and-does-nothing shape, caught by the value stream rather than by
+the command's reply, which is exactly why the value stream is measured.
+
 **And one check came from reading a PASSING check's output**, which is the cheaper half of this
 discipline and the easier one to skip. The unknown-class case reported **three** faults: the real
 one, plus *"no node 'b' to take an edge to"* for each edge touching it. That is false — the node
 exists, its *class* does not — and an editor told it would highlight three things for one typo. The
 validator now records such a node as known-but-unclassified and leaves its edges alone, and
 `api-graph` gained the assertion that one cause produces one fault, which nothing had been making.
+
+**Two defects the battery found in this commit's own code, both on its first run:**
+
+* **A graphed layer published nothing at all.** `publish_layer_transform` returns early when no
+  mixer field differs from its default — correct, because creating `state["layer"][layer]` for an
+  untouched layer costs a leaf per layer per tick for no information. But *"no mixer field
+  differs"* is not *"nothing to say"*: a plain colour layer with an attached graph is exactly that
+  case, and the graph block sat after the return. `graph=None` on a layer whose attach had
+  provably succeeded. The guard now also asks whether the layer is graphed or driven.
+* **`{"hold": false}` could not be expressed.** `write_node_value` required a `value`, so a
+  release came back `field_missing`. The mixer-field path handles `hold` *before* the value is
+  required, and for a reason: `PUT {"hold": true}` on a ramping parameter means "stop there", and
+  requiring a value would make the client read the position first and race the next tick.
+
+  **The second one is also a lesson about reading a battery.** It produced *five* red checks: the
+  release, and then four cascades — the hold never let go, so the binding, the document and a
+  later write all read the held number. One defect, five failures, and only reading them in order
+  showed that. A battery that stopped at the first failure would have reported four defects that
+  did not exist.
 
 **Not measured, and each is honest rather than pending:** anything about a picture, because nothing
 evaluates a graph yet; and the *second* half of the revision rule — that a parameter write must

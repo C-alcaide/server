@@ -608,6 +608,85 @@ json::object build_tree(const state_hub& hub, const http_config& cfg, const api_
                         fg_contents = json::object();
                     fg_contents.as_object()["params"] = std::move(params_node);
                 }
+
+                // ---- SOURCE 5: THE ATTACHED NODE GRAPH ---------------------------------
+                //
+                // The same shape and the same reason as the producer parameters above: a node's
+                // ports are a property of the ATTACHED DOCUMENT, not of anything static, so two
+                // layers with two graphs have two different parameter sets and the state
+                // snapshot alone shows only the ones somebody has changed away from their
+                // default.
+                //
+                // BORROWS `param_leaf`, which is the whole point of a port being a
+                // `param_snapshot` plus three enums: a node parameter carries EXACTLY a mixer
+                // field's key set -- type, arity, range, bounding, unit, default, and
+                // `animatable` -- with no new descriptor code anywhere in this file. A bespoke
+                // node type system would have needed a second leaf builder, and the two would
+                // have drifted.
+                //
+                // Placed under `mixer/node/<id>/<param>` rather than a sibling of `mixer`, so
+                // the FULL_PATH a client copies out of here resolves through `address::parse`
+                // unedited -- the `mixer/` prefix is stripped and the rest is the address. That
+                // is the same property `previz/` has and the reason both live under `mixer`.
+                std::vector<core::param_snapshot> node_params;
+                if (auto stage = ctx.stage(ch)) {
+                    try {
+                        node_params = stage->describe_graph(layer).get();
+                    } catch (const std::exception&) {
+                        // A layer cleared between the snapshot and this query. `std::exception`
+                        // and not `...`, for the reason spelled out above: /EHa makes a bare
+                        // catch swallow an access violation too.
+                    }
+                }
+                if (!node_params.empty()) {
+                    const std::string node_base = layer_base + "/mixer/node";
+
+                    // Grouped BY NODE, because that is how a client draws it -- a palette shows
+                    // one box per node with its parameters inside, not a flat list of forty. The
+                    // grouping is derived from the address rather than carried separately, so
+                    // there is one source of truth for which node a parameter belongs to.
+                    json::object nodes_contents;
+                    for (const auto& p : node_params) {
+                        // `node/<id>/<param>` -- the address form `describe_graph` returns.
+                        const auto first = p.name.find('/');
+                        const auto last  = p.name.rfind('/');
+                        if (first == std::string::npos || last == first)
+                            continue;
+                        const auto id    = p.name.substr(first + 1, last - first - 1);
+                        const auto param = p.name.substr(last + 1);
+
+                        auto& node_val = nodes_contents[id];
+                        if (!node_val.is_object()) {
+                            json::object n;
+                            n["FULL_PATH"] = node_base + "/" + id;
+                            n["ACCESS"]    = 0;
+                            n["CONTENTS"]  = json::object();
+                            node_val       = std::move(n);
+                        }
+                        node_val.as_object()["CONTENTS"].as_object().emplace(
+                            param, param_leaf(p, node_base + "/" + id + "/" + param));
+                    }
+
+                    json::object node_node;
+                    node_node["FULL_PATH"] = node_base;
+                    node_node["ACCESS"]    = 0;
+                    node_node["CONTENTS"]  = std::move(nodes_contents);
+
+                    // Merged under the EXISTING `mixer` node, which source 1 built from the
+                    // snapshot. Replacing it would drop every mixer field on the layer.
+                    auto& mx = contents_val.as_object()["mixer"];
+                    if (!mx.is_object())
+                        mx = json::object();
+                    auto& mx_obj = mx.as_object();
+                    if (!mx_obj.if_contains("FULL_PATH"))
+                        mx_obj["FULL_PATH"] = layer_base + "/mixer";
+                    if (!mx_obj.if_contains("ACCESS"))
+                        mx_obj["ACCESS"] = 0;
+                    auto& mx_contents = mx_obj["CONTENTS"];
+                    if (!mx_contents.is_object())
+                        mx_contents = json::object();
+                    mx_contents.as_object()["node"] = std::move(node_node);
+                }
             }
         }
     }

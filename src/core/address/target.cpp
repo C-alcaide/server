@@ -34,6 +34,8 @@ const char* kind_name(target_kind k)
             return "camera";
         case target_kind::view_camera:
             return "view_camera";
+        case target_kind::node:
+            return "node";
         default:
             return "none";
     }
@@ -104,6 +106,34 @@ target parse(std::string_view path)
         split(rest, out.field, out.component);
         if (out.field.empty())
             return target{};
+        return out;
+    }
+
+    // `node/<id>/<param>[.N]` -- a parameter of a node in the layer's ATTACHED graph.
+    //
+    // A LIVE registry, like a producer parameter and for the same reason: the descriptor is the
+    // attached document's class crossed with the registry's port, and only the stage holds both.
+    // So this reports the kind, the node id and the field, and leaves `meta` null; the caller
+    // does the live half. Reporting a node path as valid here and having the write fail later
+    // would put two answers to one question in two places, which is what this file exists to
+    // undo.
+    //
+    // `edge/` IS RESERVED and parses to `none`. Per-edge `mute` as an addressable step target is
+    // a v2 hook, and reserving the prefix now means adding it later is a table entry rather than
+    // a grammar change a client has to be told about.
+    if (eat(rest, "node/")) {
+        const auto slash = rest.find('/');
+        if (slash == std::string_view::npos || slash == 0 || slash + 1 >= rest.size())
+            return target{};
+        out.object = std::string(rest.substr(0, slash));
+        // A node id may not contain '/' or '.', which `graph::validate` refuses at PUT -- that
+        // refusal exists precisely so this split is unambiguous.
+        if (out.object.find('.') != std::string::npos)
+            return target{};
+        split(rest.substr(slash + 1), out.field, out.component);
+        if (out.field.empty())
+            return target{};
+        out.kind = target_kind::node;
         return out;
     }
 
@@ -189,6 +219,42 @@ void target_self_test()
         const auto t = parse("mixer/volume");
         req(t.kind == target_kind::audio, "`mixer/volume` resolves the same way");
     }
+
+    // NODE PARAMETERS -- the sixth kind, and a LIVE registry like a producer parameter: the
+    // descriptor is the attached document's class crossed with the registry's port, and only the
+    // stage holds both. So `parse` classifies and leaves `meta` null.
+    {
+        const auto t = parse("node/n1/exposure");
+        req(t.kind == target_kind::node, "`node/n1/exposure` is a node parameter");
+        req(t.object == "n1", "the node id lands in `object`");
+        req(t.field == "exposure" && t.component == 0, "and the port in `field`");
+        req(t.meta == nullptr, "with no meta -- the stage resolves it against the attached graph");
+        req(t.path == "node/n1/exposure", "the whole path is kept, which is what overlays key on");
+    }
+    {
+        const auto t = parse("node/n1/slope.2");
+        req(t.kind == target_kind::node, "a component suffix still classifies");
+        req(t.object == "n1" && t.field == "slope" && t.component == 2, "id, port and component");
+    }
+    {
+        // The `mixer/` strip has to work here too, or a path copied out of the published tree --
+        // which is where a client gets it -- would not resolve. That is the whole reason the
+        // publication uses `mixer/node/...` rather than a second prefix.
+        const auto t = parse("mixer/node/n1/gain");
+        req(t.kind == target_kind::node, "`mixer/node/...` resolves the same way");
+        req(t.object == "n1" && t.field == "gain", "and splits the same way");
+    }
+    req(!parse("node/"), "`node/` alone names nothing");
+    req(!parse("node/n1"), "a node id with no port names nothing");
+    // A NODE ID WITH A DOT IS REFUSED, because the address would be ambiguous: `node/a.b/x`
+    // could be port `b/x` of node `a`. `graph::validate` refuses such an id at PUT for exactly
+    // this reason, and this is the other half of that contract.
+    req(!parse("node/a.b/x"), "a node id containing '.' makes its own address ambiguous");
+    // `edge/` IS RESERVED. Per-edge `mute` as an addressable step target is a v2 hook, and
+    // reserving the prefix now means adding it is a table entry rather than a grammar change a
+    // client has to be told about. Asserted so nobody makes it resolve to an image field by
+    // accident -- `edge` is not in the image table today, and this says it must not become one.
+    req(!parse("edge/e1/muted"), "`edge/` is reserved and parses to nothing");
 
     // Producer parameters keep their dots. This is the case that made `split` conditional.
     {

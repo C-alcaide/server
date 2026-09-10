@@ -117,6 +117,19 @@ whole rank.
 | **stage / previz fields as targets** | the previz renderer lives in `accelerator`, which `core` does not link. A binding would have to reach it through the shell's bridge, which is a synchronous round trip per tick. Real gap, named — and note it is a gap in BINDINGS only: `core::address::parse` resolves a `previz/screen/...` path, so a timeline document can address one once its writer lands |
 | **cross-channel sources** | a source is created on a channel and belongs to it. BPM sync across a rack is the case that wants sharing, and it wants a *clock* rather than a shared oscillator |
 
+> **AMENDED 2026-09-11, and the distinction is why this paragraph still stands.** The fork now has
+> a node graph in the server — `node-graph.md` — and it is **not** this. It is the COMPOSITING
+> graph, and the two are different objects for a reason that is not presentational: a compositing
+> edge carries frame data whose **order changes the result**, so topology is intrinsic and the
+> server has to own evaluation order, validity and cycles. A binding has no topology at all: one
+> scalar to one address, unordered against every other binding, and what an operator actually asks
+> of it is **membership** — *"what drives this?"*, *"what does OSC touch?"* — which
+> `stack/<path>` already answers per address and a list answers better than a canvas.
+>
+> So the sentence above holds for bindings, and a node PARAMETER is simply one more address in
+> that membership question. Direction and multiplicity for a binding graph remain open (`L367`).
+
+
 ---
 
 ## 2. How to drive it

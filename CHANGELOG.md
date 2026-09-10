@@ -1,6 +1,51 @@
 CasparVP — Unreleased
 ==========================================
 
+### A node graph is a document you can attach to a layer — and its parameters are ordinary addresses
+
+**New, and it changes no picture yet.** `PUT /v1/graph/{name}` stores a typed DAG of image, mask
+and value nodes; `GRAPH <ch>-<layer> ATTACH <name>` (or `POST /v1/graph/{name}/attach`) puts it on
+a layer. The renderer does not consult it: `image_transform` has no node field, so an attached
+graph changes the published parameter values and not the frame. The looks that reach a screen today
+are still the `MIXER` grading chain and the `MIXER GRADE_NODE` prototype.
+
+**What ships is the model, and the reason to ship it first is that a client is built against it.**
+The prototype it replaces is a 16-slot array of one fixed record inside `image_transform` — no
+edges, no ports, no types, addressed by index. Index addressing has no identity: delete node 3 and
+every reference to node 4 means something else, so a parameter address, a timeline key, a binding
+and an undo entry all name the wrong thing after one edit.
+
+**A node parameter is an ADDRESS**, which is what makes the answer "and" rather than "or" for every
+other workflow:
+
+```
+MIXER 1-10 FIELD node/n1/gain 2.0        # set it, or read it back with no value
+HOLD 1-10 node/n1/gain                   # take it for yourself, above a show or a fader
+BIND 1-10 node/n1/gain audio1/rms        # drive it from a live source
+PUT /v1/value/channel/1/stage/layer/10/mixer/node/n1/gain  {"value": 2.0, "hold": true}
+```
+
+...and a timeline document's key is simply `"node/n1/gain"`. No new mechanism: `core::address::parse`
+gained a sixth kind and the existing ownership stack does the rest. Measured by `graph-stack` at
+**29/29 on both mixers** — a binding parked at 2.35 outranks a document ramping 0.5–4.0, `HOLD`
+outranks both and takes what is on air, every rank releases losslessly, and a write during a ramp
+is *remembered* with `effective: false` and lands when the driver ends.
+
+**Three new fault codes:** `graph_not_found`, `graph_invalid` (the document is **stored** — a graph
+is edited while it is on air, so a mistyped port name must not lose the grade that is rendering),
+and `graph_attached` (one document, at most one layer, because its parameter values *are* the
+operator's constant).
+
+**And the prototype's placement is now measured, which is why it is being replaced rather than
+extended.** A `MIXER GRADE_NODE` pass runs at the END of `main()`, after the whole chain and after
+the output conversion, so it grades the **display-encoded** pixel. The same CDL applied as a node
+and as `MIXER CDL` lands **42.00 LSB apart** under any config with an encoding step — identically on
+both mixers — and the node's answer is invariant under `MIXER COLORSPACE`, which is what "it runs
+after everything" looks like from outside. `stage: working` (the default for a graph) is where the
+design puts node passes; `stage: display` keeps the prototype's placement as a deliberate choice.
+
+Full detail, including what is measured by nothing, in `docs/features/node-graph.md`.
+
 ### A timeline key that names no parameter is refused at PUT, not stored and dropped on air
 
 **Behaviour change, and it will reject documents the previous build accepted.** A PUT whose curve

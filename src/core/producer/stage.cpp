@@ -34,6 +34,7 @@
 #include <core/address/target.h>
 #include <core/timeline/resolver.h>
 #include <core/graph/graph_store.h>
+#include <core/graph/registry.h>
 #include <core/timeline/timeline_store.h>
 #include <core/timeline/transport.h>
 #include <core/frame/frame_transform.h>
@@ -116,6 +117,14 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     /// client walking the tree. Nothing else in the tick consults it yet -- the frame path
     /// arrives with the evaluator.
     std::shared_ptr<graph::graph_store>       graphs_;
+    /// Which document each layer has, mirrored from the store.
+    ///
+    /// A MIRROR rather than the truth, and the store is the truth: the store answers "is this
+    /// document attached anywhere" for the refusal, because it is the only thing that can see
+    /// every channel. This answers "what does layer M have" without taking the store's mutex
+    /// per layer per tick. Kept in step because every attach and detach touches both, under
+    /// `binding_lock_`.
+    std::map<int, std::string>                graph_attach_;
 
     /// How a previz screen or camera property is written. Injected by the shell; see stage.h.
     stage::stage_field_writer stage_field_writer_;
@@ -1932,12 +1941,84 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             rebuild_layer_publication(pub, tf, at);
         }
 
-        if (pub.keys.empty())
+        // NOTHING TO SAY -> SAY NOTHING, and creating `state["layer"][layer]` for an
+        // untouched layer would be a leaf per layer per tick for no information.
+        //
+        // BUT "nothing to say" IS NOT "no mixer field differs from its default". A layer with an
+        // attached graph, or one something is driving, has plenty to say and no mixer key at all
+        // -- which is the ordinary case for a graph on a plain colour layer, and is exactly how
+        // this was found: `graph-stack`'s first run reported `graph=None` on a layer the attach
+        // had provably succeeded on, because this return fired before the graph block below.
+        const auto  dit_early = drivers_.find(layer);
+        const bool  driven    = dit_early != drivers_.end() &&
+                            !(dit_early->second.timeline.empty() &&
+                              dit_early->second.binding.empty() &&
+                              dit_early->second.dominant.empty());
+        const bool  graphed   = graph_attach_.find(layer) != graph_attach_.end();
+        if (pub.keys.empty() && !driven && !graphed)
             return;
 
         auto ls = state["layer"][layer];
         for (const auto& kv : pub.keys)
             ls[kv.first] = kv.second;
+
+        // ── THE ATTACHED GRAPH, and its node parameters ────────────────────────────────
+        //
+        // `mixer/node/<id>/<param>`, so read and write are ONE address and a path copied out of
+        // the tree resolves through `address::parse` unedited -- which is the whole reason the
+        // prefix is `mixer/` rather than a second namespace.
+        //
+        // NOT part of `rebuild_layer_publication`'s cached key list, deliberately: that cache is
+        // keyed on the `image_transform` and a node parameter is not in one. So there is no
+        // change test here and these are rebuilt per tick -- affordable only because they are
+        // SPARSE. A parameter at its default is omitted and the reader has the descriptor to
+        // fill it in. Ten nodes with six off-default parameters each is ~70 leaves against the
+        // ~600-per-channel ceiling measured on this box; publishing densely would be several
+        // hundred for one layer, so sparse is a requirement rather than a saving.
+        //
+        // No lock: this runs on the stage executor, which is the only writer of `graph_attach_`
+        // and `drivers_`. `graphs_->get` takes the STORE's lock, which is a different mutex and
+        // once per tick per attached layer.
+        if (graphs_) {
+            const auto git = graph_attach_.find(layer);
+            if (git != graph_attach_.end()) {
+                const auto entry = graphs_->get(git->second);
+                if (entry) {
+                    // The NAME and the REVISION, so a client walking the tree learns which
+                    // document a layer has and whether it has moved. `graph_stale` is published
+                    // only when TRUE -- there is no descriptor default for it, so absent means
+                    // "the attached document compiles", which is the fact a client needs.
+                    ls["graph"]          = git->second;
+                    ls["graph_revision"] = entry->document.revision;
+                    if (!entry->ok())
+                        ls["graph_stale"] = true;
+
+                    for (const auto& n : entry->document.nodes) {
+                        const auto* c = graph::find_node_class(n.cls);
+                        if (!c)
+                            continue;
+                        for (const auto& port : c->ports) {
+                            if (port.domain != graph::port_domain::value ||
+                                port.direction != graph::port_direction::input)
+                                continue;
+                            const auto path = "node/" + n.id + "/" + port.param.name;
+                            const auto eff  = graph_effective_unlocked(layer, path);
+                            if (eff.empty())
+                                continue;
+                            // SPARSE, with ONE exception: a parameter something is DRIVING is
+                            // published even at its default. A ramp passing through the default
+                            // must not make the leaf vanish for a frame -- a client watching the
+                            // value would read that as the parameter going away rather than as
+                            // one sample that happens to equal the default.
+                            const bool is_driven = !driver_of_unlocked(layer, path).first.empty();
+                            if (!is_driven && eff == port.param.default_value)
+                                continue;
+                            ls[std::string("mixer/") + path] = eff;
+                        }
+                    }
+                }
+            }
+        }
 
         // ── WHO OWNS WHAT, published rather than inferable ─────────────────────────────
         //
@@ -1992,6 +2073,24 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             ls["stack"][path]  = who.second;
 
             const auto target = address::parse(path);
+
+            // A NODE PARAMETER, and this arm is BEFORE the `!target.meta` early-out on purpose.
+            // A node target has no `field_meta` by design -- it is a live registry, resolved
+            // against the attached document -- so falling through would publish `driver/` and
+            // `stack/` for it and never its constant, which is the half a client needs to show
+            // "you set 0.5, the timeline is at 0.2".
+            //
+            // The KEY IS THE WHOLE PATH here, not `target.field`: `node/n1/gain` and
+            // `node/n2/gain` are different parameters and both are called `gain`. The image and
+            // audio arms below key on the bare field because a layer has exactly one of each.
+            if (target.kind == address::target_kind::node) {
+                const auto was = graph_constant_unlocked(layer, path);
+                const auto now = graph_effective_unlocked(layer, path);
+                if (!was.empty() && was != now)
+                    ls["constant"][path] = was;
+                return;
+            }
+
             if (!target.meta)
                 return;
             monitor::vector_t was, now;
@@ -2159,12 +2258,43 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<void> clear_transforms(int index)
     {
-        return executor_.begin_invoke([=, this] { tweens_.erase(index); });
+        return executor_.begin_invoke([=, this] {
+            tweens_.erase(index);
+            // AND THE GRAPH GOES WITH IT. `MIXER CLEAR` means "this layer's look is gone", and
+            // the prototype this replaces already dropped its node chain here -- leaving the
+            // attachment would keep the document claimed by a layer that has been cleared, so
+            // nothing else could attach it and no client could see why.
+            detach_graph_here(index);
+        });
     }
 
     std::future<void> clear_transforms()
     {
-        return executor_.begin_invoke([=, this] { tweens_.clear(); });
+        return executor_.begin_invoke([=, this] {
+            tweens_.clear();
+            std::lock_guard<std::mutex> lock(binding_lock_);
+            if (graphs_)
+                for (const auto& kv : graph_attach_)
+                    graphs_->release(kv.second);
+            graph_attach_.clear();
+        });
+    }
+
+    /// Detach `layer`'s graph. On the executor already; takes `binding_lock_` itself.
+    ///
+    /// Split out of `detach_graph` so `clear_transforms` can reach it without a second executor
+    /// hop -- it is already on that executor, and `begin_invoke` from inside it would queue a
+    /// task behind the frame rather than running now.
+    bool detach_graph_here(int layer)
+    {
+        std::lock_guard<std::mutex> lock(binding_lock_);
+        const auto                  it = graph_attach_.find(layer);
+        if (it == graph_attach_.end())
+            return false;
+        if (graphs_)
+            graphs_->release(it->second);
+        graph_attach_.erase(it);
+        return true;
     }
 
     // ---------------------------------------------------------------------------------
@@ -2268,6 +2398,26 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             return;
         }
 
+        // A NODE PARAMETER, and it goes into the same binding overlay a mixer field does.
+        //
+        // BEFORE the `fields::find` fallthrough, because `fields::find("node/n1/exposure")`
+        // returns null and the function would simply `return` -- so the binding would be
+        // accepted at BIND time and then do nothing on every tick, with a 202 behind it. That is
+        // the failure `stage_fields.h`, `producer_params.h` and the timeline's path validation
+        // each exist to prevent, and a single-site guard is all that stands between this path
+        // and it.
+        //
+        // No arity re-attachment here, unlike the mixer arm below: a node target keeps its `.N`
+        // suffix in `b.target` because only the attached document knows a port's arity, and
+        // `add_binding` cannot consult it without holding the graph store on the control path.
+        // So the suffix is never split off in the first place and there is nothing to restore.
+        if (b.target.rfind("node/", 0) == 0) {
+            auto& ov = drivers_[b.layer].binding;
+            ov.owner = "binding:" + std::to_string(b.id);
+            ov.values[b.target] = value;
+            return;
+        }
+
         // A MIXER FIELD, and it goes into the binding OVERLAY rather than into the layer's tween.
         //
         // That is what makes `UNBIND` lossless: the operator's constant is untouched for the
@@ -2362,6 +2512,47 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     if (img ? !img->set : !fields::find_audio_field(t.field)->set)
                         return 0;
                     if (def.component >= t.meta->arity)
+                        return 0;
+                    break;
+                }
+                case address::target_kind::node: {
+                    // VALIDATED AGAINST THE ATTACHED DOCUMENT, not merely against the registry.
+                    // A node id is a property of one document, so "does this port exist" cannot
+                    // be answered by the class table alone -- and a binding to a node that is
+                    // not on this layer is exactly the accepted-and-does-nothing case this
+                    // switch exists to refuse.
+                    if (!graphs_)
+                        return 0;
+                    std::string name;
+                    {
+                        std::lock_guard<std::mutex> lock(binding_lock_);
+                        const auto                  it = graph_attach_.find(def.layer);
+                        if (it == graph_attach_.end())
+                            return 0;
+                        name = it->second;
+                    }
+                    const auto entry = graphs_->get(name);
+                    if (!entry)
+                        return 0;
+                    const auto n =
+                        std::find_if(entry->document.nodes.begin(), entry->document.nodes.end(),
+                                     [&](const graph::graph_node& x) { return x.id == t.object; });
+                    if (n == entry->document.nodes.end())
+                        return 0;
+                    const auto* c = graph::find_node_class(n->cls);
+                    if (!c)
+                        return 0;
+                    const auto* port = graph::find_port(*c, t.field);
+                    if (!port)
+                        return 0;
+                    // A BINDING DRIVES A NUMBER, so the port has to be a writable value input
+                    // whose component the binding names. An image or mask port takes an EDGE,
+                    // and refusing it here is the difference between a client being told and a
+                    // binding that runs forever writing into nothing.
+                    if (port->domain != graph::port_domain::value ||
+                        port->direction != graph::port_direction::input)
+                        return 0;
+                    if (def.component >= port->param.arity)
                         return 0;
                     break;
                 }
@@ -2536,6 +2727,18 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         // binding mutators take -- the identical arrangement `is_bound` uses and for the
         // identical reason.
         std::lock_guard<std::mutex> lock(binding_lock_);
+        return driver_of_unlocked(layer, path);
+    }
+
+    /// The body of `driver_of`, WITHOUT taking `binding_lock_`.
+    ///
+    /// Two kinds of caller, and neither may take that lock: the tick, which runs on the executor
+    /// that owns `drivers_` and therefore needs no lock at all, and code that already holds it.
+    /// `binding_lock_` is a plain `std::mutex`, so a second acquisition on one thread is a
+    /// deadlock rather than a slow path -- which is why this split exists rather than being a
+    /// convenience.
+    std::pair<std::string, std::string> driver_of_unlocked(int layer, const std::string& path) const
+    {
         const auto                  it = drivers_.find(layer);
         if (it == drivers_.end())
             return {};
@@ -2574,6 +2777,33 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     {
         return executor_.begin_invoke([this, layer, path] {
             const auto t = address::parse(path);
+
+            // A NODE PARAMETER, held the same way and for the same reason.
+            //
+            // Its "effective value" is the document's constant with the ranked overlays applied,
+            // which is what `graph_effective_unlocked` computes -- and holding it means writing
+            // that same number into the dominant overlay, so whatever was driving it stops
+            // mattering and the operator moves it from where it was. Identical in intent to the
+            // mixer arm below; different only in where the current value is read from, because a
+            // node parameter is not on the frame transform.
+            if (t.kind == address::target_kind::node) {
+                std::lock_guard<std::mutex> lock(binding_lock_);
+                const auto                  v = graph_effective_unlocked(layer, t.path);
+                if (v.empty())
+                    return false;
+                auto& ov = drivers_[layer].dominant;
+                ov.owner = "hold";
+                if (v.size() == 1) {
+                    double d = 0;
+                    if (as_number(v[0], d)) {
+                        ov.values[t.path] = d;
+                        return true;
+                    }
+                }
+                ov.steps[t.path] = v;
+                return true;
+            }
+
             if (t.kind != address::target_kind::image && t.kind != address::target_kind::audio)
                 return false;
 
@@ -2616,6 +2846,207 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 ov.steps[t.path] = v;
             }
             return true;
+        });
+    }
+
+    // ---- THE NODE GRAPH ---------------------------------------------------------------
+    //
+    // WHAT IS AND IS NOT HERE at this commit. The overlays carry node parameter values and the
+    // publication reports the EFFECTIVE one, so the whole ownership stack works on a node
+    // parameter -- a timeline keys it, a binding drives it, `HOLD` takes it, a write is
+    // remembered. What does NOT happen is anything reaching a PIXEL: `image_transform` has no
+    // node field yet, so an attached graph changes the published values and not the picture.
+    // That split is why `graph-stack` measures the value stream and says so in its docstring.
+    //
+    // The document's parameter values ARE the operator's constant. There is deliberately no
+    // per-layer constant table seeded from the document: two tables would be two answers to
+    // "what is this parameter's value", which is the mistake `target.h`'s own header names.
+
+    /// The attached document's value for one node path, or an empty vector.
+    ///
+    /// NEVER takes `binding_lock_`: every caller is either on the stage executor (which owns
+    /// `graph_attach_` and `drivers_`) or already holding it, and that mutex is not recursive.
+    /// It does read the STORE, which takes its own -- a different mutex, once per call, and
+    /// every caller is a control-path operation or the once-per-tick publication.
+    monitor::vector_t graph_constant_unlocked(int layer, const std::string& path) const
+    {
+        if (!graphs_)
+            return {};
+        const auto it = graph_attach_.find(layer);
+        if (it == graph_attach_.end())
+            return {};
+        const auto entry = graphs_->get(it->second);
+        if (!entry)
+            return {};
+
+        if (path.compare(0, 5, "node/") != 0)
+            return {};
+        const auto slash = path.find('/', 5);
+        if (slash == std::string::npos)
+            return {};
+        const auto id = path.substr(5, slash - 5);
+        // A `.N` suffix is stripped here because a CONSTANT is the whole parameter; a caller
+        // wanting one component reads the vector and indexes it, which is the same division
+        // `resolve_drivers` already makes for a mixer field.
+        auto       param = path.substr(slash + 1);
+        const auto dot   = param.rfind('.');
+        if (dot != std::string::npos && dot + 1 < param.size() &&
+            std::all_of(param.begin() + dot + 1, param.end(),
+                        [](char c) { return c >= '0' && c <= '9'; }))
+            param = param.substr(0, dot);
+
+        const auto n = std::find_if(entry->document.nodes.begin(), entry->document.nodes.end(),
+                                    [&](const graph::graph_node& x) { return x.id == id; });
+        if (n == entry->document.nodes.end())
+            return {};
+        const auto* c = graph::find_node_class(n->cls);
+        if (!c)
+            return {};
+        const auto* port = graph::find_port(*c, param);
+        if (!port)
+            return {};
+        // ABSENT MEANS AT ITS DEFAULT, which is what makes a sparse `params` affordable: the
+        // reader has the descriptor, so it can fill the default in.
+        const auto pv = n->params.find(param);
+        return pv == n->params.end() ? port->param.default_value : pv->second;
+    }
+
+    /// The EFFECTIVE value of one node path: the document's constant with the ownership stack
+    /// applied. Does not take `binding_lock_` -- see `graph_constant_unlocked`.
+    ///
+    /// THE RANK IS THE SAME THREE LINES `resolve_drivers` uses, in the same order and for the
+    /// same reason -- weakest first, so the strongest owner's write is the one that survives:
+    /// timeline (3), then binding (2), then dominant (1). Duplicated here rather than shared
+    /// because `resolve_drivers` composes into a `frame_transform` and a node parameter is not
+    /// on one; when the frame path lands, THIS is the function that stops being separate.
+    monitor::vector_t graph_effective_unlocked(int layer, const std::string& path) const
+    {
+        auto       v  = graph_constant_unlocked(layer, path);
+        const auto it = drivers_.find(layer);
+        if (it == drivers_.end())
+            return v;
+
+        const auto apply = [&](const layer_overlay& ov) {
+            const auto sv = ov.steps.find(path);
+            if (sv != ov.steps.end())
+                v = sv->second;
+            const auto pv = ov.values.find(path);
+            if (pv != ov.values.end())
+                v = monitor::vector_t{pv->second};
+        };
+        apply(it->second.timeline);
+        apply(it->second.binding);
+        apply(it->second.dominant);
+        return v;
+    }
+
+    std::future<stage_base::attach_result> attach_graph(int layer, const std::string& name)
+    {
+        return executor_.begin_invoke([this, layer, name] {
+            if (!graphs_ || !graphs_->get(name))
+                return stage_base::attach_result::no_such_graph;
+
+            std::lock_guard<std::mutex> lock(binding_lock_);
+            const auto                  mine = graph_attach_.find(layer);
+            if (mine != graph_attach_.end() && mine->second != name)
+                return stage_base::attach_result::layer_busy;
+
+            if (!graphs_->claim(name, graph::attachment{channel_index_, layer}))
+                return stage_base::attach_result::already_attached;
+            graph_attach_[layer] = name;
+            return stage_base::attach_result::ok;
+        });
+    }
+
+    std::future<bool> detach_graph(int layer)
+    {
+        return executor_.begin_invoke([this, layer] {
+            const auto had = detach_graph_here(layer);
+            // THE DRIVERS ARE LEFT ALONE, deliberately. A timeline keying `node/n1/exposure` on
+            // a layer whose graph has just been detached keeps writing an overlay nothing reads,
+            // and that is the right answer: the document did not stop, and re-attaching the
+            // graph puts it straight back under the ramp it was under. Dropping the overlays
+            // would make a detach silently end a show's animation.
+            return had;
+        });
+    }
+
+    std::string graph_of(int layer) const
+    {
+        std::lock_guard<std::mutex> lock(binding_lock_);
+        const auto                  it = graph_attach_.find(layer);
+        return it == graph_attach_.end() ? std::string() : it->second;
+    }
+
+    std::future<std::vector<param_snapshot>> describe_graph(int layer)
+    {
+        return executor_.begin_invoke([this, layer] {
+            std::vector<param_snapshot> out;
+            if (!graphs_)
+                return out;
+            std::string name;
+            {
+                std::lock_guard<std::mutex> lock(binding_lock_);
+                const auto                  it = graph_attach_.find(layer);
+                if (it == graph_attach_.end())
+                    return out;
+                name = it->second;
+            }
+            const auto entry = graphs_->get(name);
+            if (!entry)
+                return out;
+
+            for (const auto& n : entry->document.nodes) {
+                const auto* c = graph::find_node_class(n.cls);
+                if (!c)
+                    continue;
+                for (const auto& port : c->ports) {
+                    if (port.domain != graph::port_domain::value ||
+                        port.direction != graph::port_direction::input)
+                        continue;
+                    // THE REGISTRY'S DESCRIPTOR WITH THE DOCUMENT'S VALUE IN IT. That is the
+                    // only place those two meet, and the reason this is a stage call rather
+                    // than a registry lookup a client could do for itself.
+                    auto p = port.param;
+                    // THE NAME IS THE ADDRESS, not the bare port name, so what a caller
+                    // publishes, writes and reads back is one string. `describe_params` does
+                    // the same for a producer parameter.
+                    p.name        = "node/" + n.id + "/" + port.param.name;
+                    const auto pv = n.params.find(port.param.name);
+                    p.value       = pv == n.params.end() ? port.param.default_value : pv->second;
+                    // The node's own name, so a client can group a palette by node rather than
+                    // by class -- `label` when the operator gave it one, the class otherwise.
+                    p.group = n.label.empty() ? n.cls : n.label;
+                    out.push_back(std::move(p));
+                }
+            }
+            return out;
+        });
+    }
+
+    std::future<bool> set_node_param(int layer, const std::string& path,
+                                     const monitor::vector_t& value, const std::string& label)
+    {
+        return executor_.begin_invoke([this, layer, path, value, label] {
+            if (!graphs_)
+                return false;
+            std::string name;
+            {
+                std::lock_guard<std::mutex> lock(binding_lock_);
+                const auto                  it = graph_attach_.find(layer);
+                if (it == graph_attach_.end())
+                    return false;
+                name = it->second;
+            }
+            // THE DOCUMENT IS THE CONSTANT, so an operator's write goes into it. `patch_params`
+            // moves the store's VALUES revision and not its structure revision, so a slider
+            // drag does not make every client re-walk the tree.
+            const auto before = graphs_->get(name);
+            const auto after  = graphs_->patch_params(name, {{path, value}}, label);
+            // `patch_params` IGNORES a key it cannot resolve rather than refusing -- it is also
+            // called against a document that may have been re-PUT since a driver resolved -- so
+            // "did this write land" is answered by comparing entries, not by its return value.
+            return after != nullptr && after != before;
         });
     }
 
@@ -3128,6 +3559,28 @@ std::future<bool> stage::hold_field(int layer, const std::string& path)
 std::future<bool> stage::release_field(int layer, const std::string& path)
 {
     return impl_->release_field(layer, path);
+}
+
+std::future<stage_base::attach_result> stage::attach_graph(int layer, const std::string& name)
+{
+    return impl_->attach_graph(layer, name);
+}
+
+std::future<bool> stage::detach_graph(int layer) { return impl_->detach_graph(layer); }
+
+std::string stage::graph_of(int layer) const { return impl_->graph_of(layer); }
+
+std::future<std::vector<param_snapshot>> stage::describe_graph(int layer)
+{
+    return impl_->describe_graph(layer);
+}
+
+std::future<bool> stage::set_node_param(int                      layer,
+                                        const std::string&       path,
+                                        const monitor::vector_t& value,
+                                        const std::string&       label)
+{
+    return impl_->set_node_param(layer, path, value, label);
 }
 
 void stage::set_stage_field_writer(stage::stage_field_writer w)

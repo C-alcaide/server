@@ -431,10 +431,16 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
             if (starts_with(path, "/v1/graph/")) {
                 const auto rest = path.substr(std::string("/v1/graph/").size());
                 const auto cut  = rest.rfind('/');
-                if (cut != std::string::npos && cut + 1 < rest.size())
-                    return graph_history_verb(context_, rest.substr(0, cut), rest.substr(cut + 1));
-                return api_reply::fail(api_code::unknown_path,
-                                       "a graph POST is /v1/graph/{name}/{undo|redo}");
+                if (cut != std::string::npos && cut + 1 < rest.size()) {
+                    const auto name = rest.substr(0, cut);
+                    const auto verb = rest.substr(cut + 1);
+                    if (verb == "attach" || verb == "detach")
+                        return graph_attach_verb(context_, name, verb, body);
+                    return graph_history_verb(context_, name, verb);
+                }
+                return api_reply::fail(
+                    api_code::unknown_path,
+                    "a graph POST is /v1/graph/{name}/{attach|detach|undo|redo}");
             }
             return api_reply::fail(api_code::unknown_path, "nothing accepts POST at " + path);
         }

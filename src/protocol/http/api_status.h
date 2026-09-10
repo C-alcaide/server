@@ -83,6 +83,17 @@ enum class api_code
                               ///< rounded to a whole number) compiles and renders, and the entry
                               ///< exists so an editor can draw a warning on the edge instead of
                               ///< the server either refusing it or doing it silently.
+    graph_attached,           ///< that document is already attached to a layer
+                              ///<
+                              ///< One document, at most one layer. The attached document's
+                              ///< parameter values ARE the operator's constant, so a second
+                              ///< attachment would be two answers to "what is this parameter's
+                              ///< value". Reusing a look on another layer is a PUT under another
+                              ///< name, which is also what makes the two independently gradeable.
+                              ///<
+                              ///< Re-attaching the SAME document to the SAME layer is not this
+                              ///< error -- it is idempotent, which a client retrying after a
+                              ///< timeout depends on.
     unauthorized,
     bad_request,
     internal,

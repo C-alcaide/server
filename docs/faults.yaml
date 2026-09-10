@@ -195,6 +195,25 @@ status_codes:
       authored. A malformed body, a misspelled `stage` or a `ui` blob that is not JSON come back as
       `bad_request` instead and store nothing.
 
+  - code: graph_attached
+    meaning: >
+      That node graph is already attached to a layer, or that layer already has one. ONE DOCUMENT,
+      AT MOST ONE LAYER, and the reason is the constant: the attached document's parameter values
+      ARE the operator's constant, so a second attachment would be two answers to "what is this
+      parameter set to". A layer holding two documents would likewise be two answers to what it
+      renders. Re-attaching the SAME document to the SAME layer is NOT this error -- it is
+      idempotent, which a client retrying after a timeout depends on. `details` carries the
+      channel and layer it is attached to, when the refusal is about the document rather than the
+      layer.
+    do: >
+      To reuse a look on a second layer, `PUT` it under another name: two documents grade
+      independently, which is usually what was wanted anyway. To move it, `POST
+      /v1/graph/{name}/detach` (or `GRAPH <ch>-<layer> DETACH`) and attach it where you want it --
+      and note that detaching leaves any timeline or binding DRIVING its parameters in place, so
+      re-attaching puts them straight back under whatever was driving them. `GET /v1/graph` shows
+      every document's attachment, and `channel/N/stage/layer/M/graph` shows a layer's from the
+      other direction.
+
   - code: internal
     meaning: >
       The server threw. This is a defect, not a usage error, and the message carries what
