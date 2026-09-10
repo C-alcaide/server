@@ -68,6 +68,7 @@ set(SOURCES
 		timeline/expression.cpp
 		timeline/resolver.cpp
 		timeline/time.cpp
+		timeline/timeline_store.cpp
 
 		producer/layer.cpp
 		producer/producer_params.cpp
@@ -127,6 +128,7 @@ set(HEADERS
 		timeline/model.h
 		timeline/resolver.h
 		timeline/time.h
+		timeline/timeline_store.h
 
 		producer/producer_params.h
 		producer/frame_producer_registry.h

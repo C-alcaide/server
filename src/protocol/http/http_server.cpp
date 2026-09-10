@@ -18,6 +18,7 @@
 #include "api_openapi.h"
 #include "api_status.h"
 #include "api_tree.h"
+#include "api_timeline.h"
 #include "api_value.h"
 #include "json_state.h"
 #include "boost_prelude.h"
@@ -415,11 +416,24 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         if (method == bhttp::verb::put) {
             if (starts_with(path, "/v1/value/"))
                 return write_value(context_, *hub_, path.substr(std::string("/v1/value").size()), body, peer);
+            if (starts_with(path, "/v1/timeline/"))
+                return put_timeline(context_, path.substr(std::string("/v1/timeline/").size()), body);
             return api_reply::fail(api_code::unknown_path, "nothing is writable at " + path);
         }
 
+        // DELETE, and this is the first verb in the API that has one. It is here rather than
+        // as a POST because a timeline is the first thing the API OWNS: everything else it
+        // writes is a property of something the server already had, and there is no meaning to
+        // deleting an opacity.
+        if (method == bhttp::verb::delete_) {
+            if (starts_with(path, "/v1/timeline/"))
+                return delete_timeline(context_, path.substr(std::string("/v1/timeline/").size()));
+            return api_reply::fail(api_code::unknown_path, "nothing is deletable at " + path);
+        }
+
         if (method != bhttp::verb::get && method != bhttp::verb::head)
-            return api_reply::fail(api_code::bad_request, "this build accepts GET, PUT and POST");
+            return api_reply::fail(api_code::bad_request,
+                                   "this build accepts GET, PUT, POST and DELETE");
 
         if (path == "/" || path == "/v1")
             return api_reply::ok_with(host_info(config_, count_subscriptions()));
@@ -445,6 +459,20 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
 
         if (starts_with(path, "/v1/value/"))
             return read_value(*hub_, path.substr(std::string("/v1/value").size()));
+
+        if (path == "/v1/timeline")
+            return get_timeline(context_, "");
+        if (starts_with(path, "/v1/timeline/")) {
+            auto rest = path.substr(std::string("/v1/timeline/").size());
+            // `/resolved` is a sub-resource of the document rather than a query on it, so a
+            // client can cache the document and re-fetch only the resolution.
+            static const std::string suffix = "/resolved";
+            if (rest.size() > suffix.size() &&
+                rest.compare(rest.size() - suffix.size(), suffix.size(), suffix) == 0)
+                return get_timeline_resolved(context_, rest.substr(0, rest.size() - suffix.size()),
+                                             query);
+            return get_timeline(context_, rest);
+        }
 
         return api_reply::fail(api_code::unknown_path, "no such endpoint: " + path);
     }

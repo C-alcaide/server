@@ -409,6 +409,33 @@ disagreed about the struct's size. The A/B that "proved" the fault was pre-exist
 the same inconsistent objects every time. **When a fault survives removing the code that could
 cause it, suspect the build before the code.**
 
+## `/fp:fast` is on, so an exact-looking division is not one
+
+`CMAKE_CXX_FLAGS` carries **`/fp:fast`** alongside `/arch:AVX2`, which licenses MSVC to reassociate
+floating point and — the case that has already cost something — to replace a **division by a
+constant with a multiplication by its reciprocal**.
+
+Measured 2026-09-10 in `core/timeline/time.cpp`. `to_seconds` was
+`static_cast<double>(t) / flicks_per_second`, which is exact in IEEE arithmetic: 21,168,000,000
+flicks divided by 705,600,000 is exactly 30. Under `/fp:fast` it became a multiply by
+1/705,600,000, which is not representable, and **thirty seconds arrived at the control API as
+`29.999999999999996`**. It shipped because the self-test's round-trip check allowed one flick of
+error — 1.4 ns — and the defect is 3.6 femtoseconds, four hundred thousand times smaller than the
+gate. A tolerance can hide an exactness bug completely.
+
+Two rules follow:
+
+* **When exactness is the property, assert equality, not a tolerance.** A whole number of seconds
+  round-tripping to a whole number is a wire contract a client compares against; `abs(a-b) <= eps`
+  cannot check it.
+* **Structure the arithmetic so the optimiser cannot change the answer**, rather than reaching for
+  `#pragma float_control`. `to_seconds` now takes the integer quotient and remainder and adds a
+  fractional term that is exactly zero for a whole second — so whatever the reciprocal does, it is
+  multiplied by nothing. That survives a flag change; a pragma is one edit away from being lost.
+
+The same suspicion applies anywhere a constant divisor appears on a path whose output is compared:
+the colour matrices, the transfer functions, and anything that reports a time.
+
 ## Shaders
 
 `src/accelerator/ogl/image/shader.frag` is embedded via `bin2c` into a generated

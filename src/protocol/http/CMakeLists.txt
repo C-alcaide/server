@@ -17,6 +17,7 @@ set(SOURCES
 		api_events.cpp
 		api_openapi.cpp
 		api_status.cpp
+		api_timeline.cpp
 		api_tree.cpp
 		api_value.cpp
 		boost_json_src.cpp
@@ -32,6 +33,7 @@ set(HEADERS
 		api_events.h
 		api_openapi.h
 		api_status.h
+		api_timeline.h
 		api_context.h
 		api_tree.h
 		api_value.h

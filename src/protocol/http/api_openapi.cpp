@@ -300,6 +300,48 @@ json::object openapi(const http_config& cfg)
     }
     {
         json::object p;
+        p["get"] = op("The timelines that are loaded",
+                      "Names, revisions, object and instance counts. A document is SERVER-WIDE rather "
+                      "than per-channel: one may drive several channels, so its name is not qualified "
+                      "by a channel index.",
+                      {});
+        paths["/v1/timeline"] = std::move(p);
+    }
+    {
+        json::object p;
+        p["put"] = op("Store a timeline document",
+                      "Times on the wire are SECONDS as a JSON number; {\"frames\": n}, {\"tc\": "
+                      "\"hh:mm:ss:ff\"} and {\"bars\": b} are accepted as literals and converted "
+                      "against the document's own rate and tempo. A STRING is an expression -- "
+                      "`#interview.end + 5`, `.lowerthird.start`. A document that does not resolve is "
+                      "STORED and answered `timeline_invalid` with one fault per object, because a "
+                      "half-authored show is the normal state of a document being edited and a client "
+                      "cannot show the author their mistake if the server threw it away.",
+                      json::array{path_param("name", "show")});
+        p["get"] = op("The document as stored",
+                      "With its resolution and, if it has any, its faults.",
+                      json::array{path_param("name", "show")});
+        p["delete"] = op("Remove it",
+                         "The only DELETE in this API. A timeline is the first thing the API OWNS -- "
+                         "everything else it writes is a property of something the server already had, "
+                         "and there is no meaning to deleting an opacity.",
+                         json::array{path_param("name", "show")});
+        paths["/v1/timeline/{name}"] = std::move(p);
+    }
+    {
+        json::object p;
+        p["get"] = op("What the resolver computed",
+                      "Instances in absolute time, and with `?at=<seconds>` the OWNER of each layer at "
+                      "that position -- decided here, once, by priority and then last-started-wins. This "
+                      "is the endpoint a client draws from: reimplementing the collision rules in a "
+                      "client is how it comes to disagree with the server about which cue is on air. An "
+                      "OPEN end is `null` rather than a large number, because \"runs until told\" and "
+                      "\"runs until 10:00\" are different facts.",
+                      json::array{path_param("name", "show")});
+        paths["/v1/timeline/{name}/resolved"] = std::move(p);
+    }
+    {
+        json::object p;
         p["get"] = op("This document", "Generated from the server's own field table.", {});
         paths["/v1/openapi.json"] = std::move(p);
     }
@@ -429,6 +471,11 @@ std::string docs_page(const http_config& cfg)
         {"PUT", "/v1/value/{path}", "Write one value; op set|toggle|add|cas, with duration and tween"},
         {"POST", "/v1/action/{path}", "play, stop, pause, resume, preview, clear, clear_transforms"},
         {"POST", "/v1/batch", "Several ops, one frame, all or nothing; at_frame or in_frames"},
+        {"GET", "/v1/timeline", "The timeline documents that are loaded"},
+        {"PUT", "/v1/timeline/{name}", "Store a document; seconds on the wire, expressions as strings"},
+        {"GET", "/v1/timeline/{name}", "The document as stored, with its resolution and its faults"},
+        {"DELETE", "/v1/timeline/{name}", "Remove it -- the only DELETE in this API"},
+        {"GET", "/v1/timeline/{name}/resolved", "Instances, and with ?at= the owner of each layer"},
         {"GET", "/v1/auth", "A salt and a single-use challenge"},
         {"GET", "/v1/openapi.json", "This, machine-readable"},
         {"WS", "/v1/events", "Prefix subscription with a per-connection diff"},

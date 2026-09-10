@@ -1,10 +1,10 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–5 of 19 shipped: the time base, addressing, the engine,
-> and the model, grammar and resolver. Nothing runs in the tick yet. Nothing
+> **State:** **in progress** — commits 1–6 of 19 shipped: the time base, addressing, the engine,
+> the model, grammar and resolver, and the document over HTTP. Nothing runs in the tick yet. Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
 > each section here lands with the commit that builds it.
-> **Commands:** none yet. The `TIMELINE` family and `HOLD`/`RELEASE` arrive with commit 6; the
+> **Commands:** none yet. The `TIMELINE` family and `HOLD`/`RELEASE` arrive with commit 7; the
 > addressing in §2 is reached today through the commands that already exist — `MIXER FIELD`,
 > `BIND`, and `PUT /v1/value`
 > **Modules:** **not a module** — `src/core/timeline/` (the time base today; model, resolver and
@@ -13,8 +13,9 @@
 > **Replaces:** `src/modules/keyframes/` (the `KEYFRAMES` command family) and the OFX producer's
 > private `OFX KEY` engine — both removed when the resolver lands, with a `CHANGELOG` measurement
 > **Coverage:** `time_self_test()` and `address::target_self_test()` at boot (§1, §2), and
-> `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, and `keyframes-legacy` for the
-> engine in §3 through the command it still drives. The remaining `timeline-*` batteries do
+> `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, `keyframes-legacy` for the
+> engine in §3 through the command it still drives, and `api-timeline` for §5. The remaining
+> `timeline-*` batteries do
 > not exist yet and are named in the plan rather than here, because a battery named in a doc is a
 > command a reader will try to run
 
@@ -343,5 +344,89 @@ need.
 
 ---
 
-*§5 Precedence, §6 Transport, §7 API and AMCP, §8 Verification, §9 Known gaps — arrive with
-commits 6–19.*
+## 5. The document on the wire
+
+```
+GET    /v1/timeline                     the documents that are loaded
+PUT    /v1/timeline/{name}              store one
+GET    /v1/timeline/{name}              the document as stored, with its resolution and faults
+DELETE /v1/timeline/{name}              remove it
+GET    /v1/timeline/{name}/resolved?at= instances, and the owner of each layer at `at`
+```
+
+A document is **server-wide**, not per-channel: one may drive several channels, so its name is
+not qualified by a channel index. `DELETE` is the only one in this API, and it is here because a
+timeline is the first thing the API *owns* — everything else it writes is a property of something
+the server already had, and there is no meaning to deleting an opacity.
+
+### 5.1 Units on the wire
+
+**Seconds, as a JSON number.** `{"frames": 300}`, `{"tc": "00:00:12:00"}` (or `00:01:00;02` for
+drop-frame) and `{"bars": 4}` are accepted as literals and converted at PUT against the
+document's own `rate` and `tempo`, so nothing downstream has to know which form the author used.
+A **string** is an expression and goes to the grammar in §4.2. A read comes back in seconds,
+which is the canonical form — a client that sends `{"frames": 300}` gets `12` back.
+
+`{"trigger": "go"}` is the one expression form that is an object rather than a string, because a
+trigger name is not a time and giving it string syntax would add a third sigil to a grammar that
+has two.
+
+`while` takes `true` or `"1"` or `"#id"`. A bare **number** is refused with a message saying
+what to send: a number in every other position in the document is a time, and `while: 1` meaning
+"always" is exactly the ambiguity §4.2's separate parser exists to remove.
+
+### 5.2 An invalid document is stored
+
+`timeline_invalid` rather than `bad_request`, and the document is kept. A half-authored show is
+the normal state of a document being edited, and a client cannot show the author their mistake if
+the server threw the document away — so `GET` returns what was sent with the faults attached, one
+per object, carrying `object`, `expression` and `reason`. Nothing evaluates a document whose
+resolution failed, so an invalid one is inert rather than dangerous. `docs/faults.yaml` lists the
+usual causes.
+
+A **name in the path that disagrees with the `name` in the body** is `bad_request`. Guessing
+which one is right would store the document under a name the client does not expect.
+
+### 5.3 What makes a PUT observable
+
+The store's revision counter is mixed into each stage's **structure fingerprint**, so a document
+appearing, changing or being deleted bumps `channel/{n}/stage/structure_revision`. That matters
+more than it looks: without it a PUT is invisible to anything walking the tree, and a client
+displaying a show would have to poll `/v1/timeline` on a timer to find out that it had been
+edited. The counter rather than the documents themselves — the question is "has anything changed
+since I looked", and hashing a large document every tick on every channel to answer it would be
+the wrong trade.
+
+### 5.4 Where the codec lives, and why not where the plan said
+
+`api_timeline.cpp` is in `protocol_http`, not `core/timeline`. Boost.JSON is compiled from source
+into exactly one translation unit and `protocol_http` deliberately has **no precompiled header**
+because of it — `boost_prelude.h` records the four seconds per translation unit that Beast and
+Boost.JSON cost, and `CLAUDE.md` records that a header inside a PCH needs the full
+touch-everything-and-delete-the-PCH sweep on every edit. `core` has a PCH. So the document
+**type** is in core, which is what the stage and AMCP both need, and the JSON is here.
+
+### 5.5 Where it is checked
+
+**`api-timeline`, 25/25 on both mixers.** Its reference document is built so that a wrong answer
+cannot look right: a transparent anchor with three dependents; two objects sharing a class that
+do *not* nest, so `.lt.start` and `.lt.end` come from **different** members and a resolver that
+took one member's span fails one of the two checks; two objects overlapping on one layer, so the
+owner at t=20 tests last-started-wins rather than document order; and a duration given in frames,
+so the derived end tests the rate conversion.
+
+**Shown failing first:** removing the store's revision from the structure fingerprint fails *"a
+PUT moves structure_revision"* — `2 -> 2` — and leaves the other 24 passing.
+
+**And it found a real defect on its first run, in commit 1's code.** Thirty seconds came back as
+`29.999999999999996`. `to_seconds` divides, which is exact in IEEE arithmetic, and **this tree is
+built with `/fp:fast`**, under which MSVC may replace a division by a constant with a
+multiplication by its reciprocal — and 1/705,600,000 is not representable. It reached the wire
+because `time_self_test`'s round-trip check allowed one flick of error, which is far more than
+this. `to_seconds` now splits into integer seconds plus a remainder, so the fractional term is
+multiplied by zero for any whole number of seconds, and the self-test asserts exact equality for
+seven whole-second values.
+
+---
+
+*§6 Transport, §7 The tick, §8 Verification, §9 Known gaps — arrive with commits 7–19.*

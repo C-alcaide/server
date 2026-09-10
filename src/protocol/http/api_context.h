@@ -14,6 +14,7 @@
 #include <core/frame/transform_fields.h>
 #include <core/monitor/monitor.h>
 #include <core/producer/stage.h>
+#include <core/timeline/timeline_store.h>
 
 #include <functional>
 #include <memory>
@@ -56,6 +57,12 @@ struct catalog_entry
 
 struct api_context
 {
+    /// The timeline documents. A POINTER rather than a function bridge, unlike everything else
+    /// in this struct: the store is in `core`, which `protocol_http` already links, so there is
+    /// no dependency to avoid. Server-wide rather than per-channel, because one document may
+    /// drive several channels and the transport that owns it lives on exactly one.
+    std::shared_ptr<core::timeline::timeline_store> timelines;
+
     /// Everything installed, both formats, or empty when the shell wired nothing.
     ///
     /// A function for the reason the rest of this file is functions: the OFX host lives in

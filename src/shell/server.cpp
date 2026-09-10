@@ -53,6 +53,7 @@
 #include <core/address/target.h>
 #include <core/timeline/curve.h>
 #include <core/timeline/resolver.h>
+#include <core/timeline/timeline_store.h>
 #include <core/stage/stage_math_self_test.h>
 #include <core/timeline/time.h>
 
@@ -154,6 +155,15 @@ struct server::impl
     std::shared_ptr<http::http_server>                     http_server_;
     std::vector<std::shared_ptr<void>>                     predefined_osc_subscriptions_;
     spl::shared_ptr<std::vector<protocol::amcp::channel_context>> channels_;
+
+    /// THE TIMELINE DOCUMENTS, one store for the server.
+    ///
+    /// Owned here rather than by a channel because a document may drive several channels and
+    /// the transport that owns it lives on exactly one -- a per-channel store would make
+    /// "which channel owns this show" a property of where the client happened to PUT it. Given
+    /// to every channel's stage (for the structure fingerprint) and to the HTTP context.
+    std::shared_ptr<core::timeline::timeline_store> timelines_ =
+        std::make_shared<core::timeline::timeline_store>();
     spl::shared_ptr<core::cg_producer_registry>                   cg_registry_;
     spl::shared_ptr<core::frame_producer_registry>                producer_registry_;
     spl::shared_ptr<core::frame_consumer_registry>                consumer_registry_;
@@ -632,6 +642,7 @@ struct server::impl
                                                 working_space_composite);
 
             const std::wstring lifecycle_key = L"lock" + std::to_wstring(channel_id);
+            channel->stage()->set_timeline_store(timelines_);
             channels_->emplace_back(channel, channel->stage(), lifecycle_key);
         }
 
@@ -885,6 +896,7 @@ struct server::impl
                     return channels->at(static_cast<std::size_t>(index - 1)).raw_channel->stage();
                 };
                 api_ctx.channel_count = [channels] { return static_cast<int>(channels->size()); };
+                api_ctx.timelines     = timelines_;
 
                 // THE CATALOGUE. Bridged here for the same reason `stage` above is: the OFX
                 // host is in `modules/ofx` and the ISF scanner in `modules/isf`, and

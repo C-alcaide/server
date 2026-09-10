@@ -152,6 +152,30 @@ it.
 
 ### Writing a value
 
+### The timeline document
+
+```
+GET    /v1/timeline                      the documents that are loaded
+PUT    /v1/timeline/{name}               store one -- seconds on the wire, expressions as strings
+GET    /v1/timeline/{name}               the document as stored, with its resolution and faults
+DELETE /v1/timeline/{name}               remove it
+GET    /v1/timeline/{name}/resolved?at=  instances, and the owner of each layer at `at`
+```
+
+Documented in [`timeline.md`](timeline.md) §5. Three things about it are properties of this API
+rather than of the timeline:
+
+* **`DELETE` is the only one here**, because a timeline is the first thing this API *owns*.
+  Everything else it writes is a property of something the server already had, and there is no
+  meaning to deleting an opacity.
+* **An invalid document is `timeline_invalid` and is STORED**, with one fault per object naming
+  the object and quoting the reason. `bad_request` would mean "your request was malformed"; this
+  means "the server understood you and the document does not resolve", and a client acts on those
+  differently.
+* **A PUT moves `structure_revision`.** The store's revision counter is mixed into every stage's
+  structure fingerprint, so the same re-walk a client already does when a layer appears also picks
+  up a document changing. Without it a PUT would be invisible to anything reading the tree.
+
 `PUT /v1/value/channel/{n}/stage/layer/{m}/mixer/{field}` -- mixer fields only in this build.
 
 ```bash

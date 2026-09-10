@@ -1,6 +1,41 @@
 CasparVP — Unreleased
 ==========================================
 
+### Timeline documents over HTTP, and a `/fp:fast` rounding defect they exposed
+
+`PUT`/`GET`/`DELETE /v1/timeline/{name}`, `GET /v1/timeline` and
+`GET /v1/timeline/{name}/resolved?at=`. A document is server-wide rather than per-channel, times
+on the wire are seconds with `{"frames"|"tc"|"bars"}` accepted as literals, and a string is an
+expression. Nothing evaluates a document yet -- the tick arrives with the next commit.
+
+**Behaviour changes for an existing config.** The API accepts `DELETE`, which it did not before;
+the refusal message for an unsupported verb now says so. Two new status codes,
+`timeline_not_found` and `timeline_invalid`, both documented in `docs/faults.yaml`. A
+`PUT /v1/timeline/{name}` bumps `channel/{n}/stage/structure_revision` on every channel, because
+the store's revision is mixed into the structure fingerprint -- a client that re-walks the tree on
+that will now do so when a document changes, which is the intent.
+
+**A DEFECT IN COMMIT 1'S CODE, found by the new battery on its first run.** Thirty seconds came
+back from the API as `29.999999999999996`. `to_seconds` divides, which is exact in IEEE
+arithmetic -- and this tree is built with **`/fp:fast`**, under which MSVC may replace a division
+by a constant with a multiplication by its reciprocal, and 1/705,600,000 is not representable. It
+reached the wire because `time_self_test`'s round-trip check allowed one flick of error, which is
+far larger than this. `to_seconds` now splits into integer seconds plus a remainder, so the
+fractional term is multiplied by zero for any whole number of seconds, and the self-test asserts
+exact equality for seven whole-second values. **Any value the API reports in seconds was
+affected**, and a whole number of seconds now reports as one.
+
+**MEASURED, both mixers.** New battery `api-timeline`, **25/25**. Its reference document is
+built so a wrong answer cannot look right: a transparent anchor with three dependents; two
+objects sharing a class that do not nest, so the class reference's two extremes come from
+different members; two objects overlapping on one layer, so the owner at t=20 tests
+last-started-wins rather than document order; and a duration in frames, so the derived end tests
+the rate conversion. `api-tree`, `api-write`, `api-events`, `api-roundtrip` and `api-readiness`
+green on both.
+
+**Shown failing first.** Removing the store's revision from the structure fingerprint fails "a
+PUT moves structure_revision" -- `2 -> 2` -- and leaves the other 24 checks passing.
+
 ### The keyframe interpolation engine moved into core, and `KEYFRAMES` runs on it
 
 `core::timeline::curve` is `modules/keyframes`' `keyframe_timeline` with integer time, address-

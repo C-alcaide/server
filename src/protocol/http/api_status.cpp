@@ -29,6 +29,8 @@ const char* to_string(api_code c)
         case api_code::producer_not_ready: return "producer_not_ready";
         case api_code::batch_op_failed: return "batch_op_failed";
         case api_code::not_supported_on_backend: return "not_supported_on_backend";
+        case api_code::timeline_not_found: return "timeline_not_found";
+        case api_code::timeline_invalid: return "timeline_invalid";
         case api_code::unauthorized: return "unauthorized";
         case api_code::bad_request: return "bad_request";
         case api_code::internal: return "internal";

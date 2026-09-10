@@ -45,6 +45,16 @@ enum class api_code
     producer_not_ready,       ///< a valid write that cannot be honoured yet
     batch_op_failed,          ///< with the failing index and that op's own status
     not_supported_on_backend, ///< the fork's own: one mixer implements a field, the other does not
+    timeline_not_found,       ///< no document by that name
+    timeline_invalid,         ///< the document was stored and does not resolve
+                              ///<
+                              ///< STORED, and that is the difference from `bad_request`: the
+                              ///< client can GET back what it sent and see the errors against
+                              ///< it, because a half-authored show is the normal state of a
+                              ///< document being edited. `details` carries one entry per fault
+                              ///< with `object`, `expression` and `reason`, so a client can
+                              ///< highlight the expression the author typed rather than
+                              ///< reporting that the document is invalid.
     unauthorized,
     bad_request,
     internal,

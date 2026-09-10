@@ -32,6 +32,7 @@
 #include <common/future.h>
 
 #include <core/address/target.h>
+#include <core/timeline/timeline_store.h>
 #include <core/frame/frame_transform.h>
 #include <core/frame/transform_fields.h>
 #include <core/producer/route/route_producer.h>
@@ -111,6 +112,9 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     // containers that are genuinely dynamic and nothing else.
     std::size_t  structure_hash_     = 0;
     std::int64_t structure_revision_ = 0;
+
+    /// Server-wide, injected by the shell, and read once per tick for its revision only.
+    std::shared_ptr<timeline::timeline_store> timelines_;
 
     // -- Input routing (stage executor only, no mutex) --
     //
@@ -676,6 +680,19 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                             fp += ';';
                         }
                     }
+                    fp += '|';
+                    // THE TIMELINE STORE'S REVISION, and it is what makes a `PUT
+                    // /v1/timeline/{name}` observable from outside this process. A document
+                    // appearing, changing or being deleted moves this counter, which moves the
+                    // fingerprint, which bumps `structure_revision` -- and re-walking the tree
+                    // on that is exactly what a client already does.
+                    //
+                    // The counter rather than the documents themselves: the question is "has
+                    // anything changed since I looked", and hashing a large document every tick
+                    // on every channel to answer it would be the wrong trade. One mutex
+                    // acquisition per tick per channel is the whole cost.
+                    if (timelines_)
+                        fp += std::to_string(timelines_->revision());
 
                     const auto h = std::hash<std::string>{}(fp);
                     if (h != structure_hash_) {
@@ -1750,6 +1767,14 @@ std::future<void> stage::add_source(const std::string& name, std::shared_ptr<bin
 }
 std::future<bool> stage::remove_source(const std::string& name) { return impl_->remove_source(name); }
 std::future<std::vector<stage_base::source_info>> stage::list_sources() { return impl_->list_sources(); }
+void stage::set_timeline_store(std::shared_ptr<timeline::timeline_store> store)
+{
+    // NOT on the executor, and it does not need to be: this is called once, from the shell,
+    // before the channel ticks. Posting it would make the first frame's fingerprint depend on
+    // whether the task had run yet.
+    impl_->timelines_ = std::move(store);
+}
+
 std::future<int>  stage::add_binding(const binding::binding_def& def) { return impl_->add_binding(def); }
 std::future<int>  stage::remove_bindings(int layer, const std::string& target)
 {

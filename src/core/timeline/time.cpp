@@ -36,7 +36,25 @@ flicks flicks_per_frame(const boost::rational<int>& fps)
 
 flicks from_seconds(double seconds) { return static_cast<flicks>(std::llround(seconds * flicks_per_second)); }
 
-double to_seconds(flicks t) { return static_cast<double>(t) / flicks_per_second; }
+double to_seconds(flicks t)
+{
+    // SPLIT INTO WHOLE SECONDS AND A REMAINDER, and this is not premature care -- it is a
+    // correction. `static_cast<double>(t) / flicks_per_second` is exact in IEEE arithmetic,
+    // and THIS TREE IS BUILT WITH `/fp:fast`, under which MSVC is allowed to replace a
+    // division by a constant with a multiplication by its reciprocal. 1/705'600'000 is not
+    // representable, so 21'168'000'000 flicks -- exactly thirty seconds -- came back as
+    // 29.999999999999996 and appeared on the wire that way. Found by `api-timeline` on its
+    // first run, reading back a document whose author had typed 30.
+    //
+    // Here the integer division is exact, and the remainder is 0 for any whole number of
+    // seconds, so whatever the optimiser does to the fractional term it is multiplied by
+    // zero. A time that is not a whole number of seconds is not exactly representable
+    // anyway, and no wire contract rests on it.
+    const auto whole = t / flicks_per_second;
+    const auto rem   = t - whole * flicks_per_second;
+    return static_cast<double>(whole) +
+           static_cast<double>(rem) / static_cast<double>(flicks_per_second);
+}
 
 namespace {
 
@@ -168,6 +186,18 @@ int time_self_test()
     // The wire example: 0.48 s on a 25p channel is frame 12 exactly, not 11.9999.
     check(to_frames(from_seconds(0.48), {25000, 1000}) == 12, "wire/0.48s-at-25p-is-frame-12",
           std::to_string(to_frames(from_seconds(0.48), {25000, 1000})));
+    // A WHOLE NUMBER OF SECONDS MUST ROUND-TRIP EXACTLY, which is a wire contract rather than a
+    // nicety: a document's `"end": 30` is read back by the client and compared. This one failed
+    // under `/fp:fast`'s reciprocal substitution -- thirty seconds came back as
+    // 29.999999999999996 -- and the failure reached the API before anything here noticed. The
+    // loop below, which allows one flick of error, could not see it.
+    for (const int secs : {1, 3, 15, 30, 60, 3600, 86400}) {
+        const auto t = from_seconds(static_cast<double>(secs));
+        check(t % flicks_per_second == 0, "exact/whole-second-is-whole-flicks", std::to_string(secs));
+        check(to_seconds(t) == static_cast<double>(secs), "exact/whole-second-roundtrip",
+              std::to_string(secs) + " -> " + std::to_string(to_seconds(t)));
+    }
+
     // Seconds round-trip to within one flick.
     for (const double s : {0.0, 0.04, 1.0, 59.999, 3600.5, 86399.0}) {
         const double back = to_seconds(from_seconds(s));

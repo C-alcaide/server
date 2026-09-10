@@ -49,6 +49,11 @@ class graph;
 
 namespace caspar { namespace core {
 
+namespace timeline {
+class timeline_store;
+}
+
+
 struct layer_frame
 {
     bool       is_interlaced;
@@ -290,6 +295,15 @@ class stage final : public stage_base
     std::future<bool>                  patch_keyframe(int layer, double time_secs, std::shared_ptr<void> patch_data) override;
     std::future<void>                  set_media_time_override(int layer, double time_secs) override;
     std::future<std::shared_ptr<void>> get_keyframe_status(int layer) override;
+
+    /// The server-wide timeline documents, injected by the shell.
+    ///
+    /// The stage does not OWN it -- one document may drive several channels -- and this build
+    /// only reads its revision, which is mixed into the structure fingerprint so a client
+    /// re-walks the tree when a document appears or changes. The tick evaluation arrives with
+    /// the next commit; the pointer is here now because the fingerprint is what makes a PUT
+    /// observable from outside the process at all.
+    void set_timeline_store(std::shared_ptr<timeline::timeline_store> store);
 
     std::unique_lock<std::mutex> get_lock() const;
 

@@ -124,6 +124,29 @@ status_codes:
       past, or `at_frame` and `in_frames` together.
     do: The message says which.
 
+  - code: timeline_not_found
+    meaning: No timeline document by that name is loaded on this server.
+    do: >
+      `GET /v1/timeline` lists the names, and `PUT /v1/timeline/{name}` creates one. A document
+      is server-wide rather than per-channel, so the name is not qualified by a channel index --
+      one document may drive several channels.
+
+  - code: timeline_invalid
+    meaning: >
+      The document was STORED and does not resolve. `details` carries one entry per fault with
+      `object`, `expression` and `reason`. Nothing evaluates a document whose resolution failed,
+      so an invalid one is inert rather than dangerous -- and it is kept rather than rejected
+      because a half-authored show is the normal state of a document being edited, and a client
+      cannot show the author their mistake if the server threw the document away.
+    do: >
+      `GET /v1/timeline/{name}` returns the document with the same faults attached, so an editor
+      can highlight the expression the author typed. The usual causes: a reference to an object
+      id that does not exist (check the spelling against the document's own ids); a circular
+      reference, which names the object it came back to; two objects sharing an id, which makes
+      every reference to it ambiguous; an end before its start; and all three of start, end and
+      duration given with the third disagreeing, which is refused rather than resolved by a
+      precedence rule nobody would remember.
+
   - code: internal
     meaning: >
       The server threw. This is a defect, not a usage error, and the message carries what
