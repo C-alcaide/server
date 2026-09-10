@@ -18,7 +18,7 @@
 > **Replaces:** the `MIXER GRADE_NODE` prototype — `grade_window`/`grade_node`/`grade_graph` in
 > `src/core/frame/frame_transform.h`, `mixer_grade_command`, and the `grade_nodes` blob row. Not
 > yet removed: the prototype still ships and is still the only thing that renders.
-> **Coverage:** `api-graph` — **33/33 both mixers** (the document, its faults, its evaluation order,
+> **Coverage:** `api-graph` — **34/34 both mixers** (the document, its faults, its evaluation order,
 > its history); `grade-graph` — **8/8 both mixers** (which colour space a node pass runs in, the gap
 > measured at 42.00 LSB); three boot self-tests — `node_registry_self_test`,
 > `graph_validate_self_test`, `graph_store_self_test`. **No picture check exists**, because nothing
@@ -340,7 +340,7 @@ rather than by the `MIXER` tween.
 
 | what | battery | result |
 | :--- | :--- | :--- |
-| the document, its faults, its order, its history | `api-graph` | **33/33 both mixers** |
+| the document, its faults, its order, its history | `api-graph` | **34/34 both mixers** |
 | which colour space a node pass runs in | `grade-graph` | **8/8 both mixers**, the gap measured at 42.00 LSB |
 | what a node computes (the prototype) | `grade-window` | 1 LSB both mixers — **and its oracle asserts the current placement**, so its figures move when §8's working-space commit lands |
 | the class table against its own rules | `node_registry_self_test` | at boot |
@@ -355,7 +355,14 @@ the rule it broke:
 | cycle detection removed | `graph_validate_self_test` — *"a cycle was accepted"*, boot aborted |
 | a parameter write bumps the structure revision | `graph_store_self_test` — *"patch_params moved the STRUCTURE revision"*, boot aborted |
 | the `image → mask` coercion reported as exact | `node_registry_self_test` — *"must be legal and REPORTED as lossy"*, boot aborted |
-| the graph store dropped from the stage fingerprint | `api-graph` — exactly *"a graph PUT moves structure_revision"* at `2 -> 2`, the other 32 green |
+| the graph store dropped from the stage fingerprint | `api-graph` — exactly *"a graph PUT moves structure_revision"* at `2 -> 2`, the rest green |
+
+**And one check came from reading a PASSING check's output**, which is the cheaper half of this
+discipline and the easier one to skip. The unknown-class case reported **three** faults: the real
+one, plus *"no node 'b' to take an edge to"* for each edge touching it. That is false — the node
+exists, its *class* does not — and an editor told it would highlight three things for one typo. The
+validator now records such a node as known-but-unclassified and leaves its edges alone, and
+`api-graph` gained the assertion that one cause produces one fault, which nothing had been making.
 
 **Not measured, and each is honest rather than pending:** anything about a picture, because nothing
 evaluates a graph yet; and the *second* half of the revision rule — that a parameter write must
