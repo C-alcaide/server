@@ -63,6 +63,8 @@ set(SOURCES
 		binding/binding.cpp
 		binding/binding_math.cpp
 
+		timeline/time.cpp
+
 		producer/layer.cpp
 		producer/producer_params.cpp
 		producer/stage.cpp
@@ -114,6 +116,8 @@ set(HEADERS
 
 		binding/binding.h
 		binding/binding_math.h
+
+		timeline/time.h
 
 		producer/producer_params.h
 		producer/frame_producer_registry.h

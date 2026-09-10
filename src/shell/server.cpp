@@ -51,6 +51,7 @@
 #include <core/binding/binding_math.h>
 #include <core/mixer/audio/audio_analysis.h>
 #include <core/stage/stage_math_self_test.h>
+#include <core/timeline/time.h>
 
 #include <protocol/http/http_server.h>
 #include <protocol/http/state_hub.h>
@@ -193,6 +194,10 @@ struct server::impl
         core::fields::run_stage_math_self_test();
         core::binding::binding_math_self_test();
         core::audio_analysis_self_test();
+        // The timeline's time base: one frame at every configurable rate is a whole number of
+        // flicks, or the playhead drifts a fraction of a flick per frame forever. Checked here,
+        // at boot, against the rate table -- not discovered in a picture weeks later.
+        core::timeline::time_self_test();
         accelerator::ogl::run_compose_self_test();
 #ifdef ENABLE_VULKAN
         // GUARDED, because the Vulkan accelerator's sources are only compiled when
