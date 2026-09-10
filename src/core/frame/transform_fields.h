@@ -297,24 +297,27 @@ void apply_enables(image_transform& tf, const field_desc& field);
 ///
 /// `KEYFRAMES` was the only consumer and it is gone. The names themselves stay -- they are
 /// published in each descriptor as `keyframe_names`, so a client that stored one can still
-/// find out which path it refers to -- and these two lookups are what the timeline's PUT will
-/// use when it starts ACCEPTING a legacy name as an alias for a path (D6 of the timeline
-/// plan). Kept rather than deleted because removing a five-line lookup and adding it back is
-/// churn; if that acceptance is dropped from the plan, these go with it.
+/// find out which path it refers to.
 ///
-/// The name-to-index of a legacy KEYFRAMES name: which field, which component. Let the
-/// module build its flat per-component table from this one.
-struct kf_ref
-{
-    const field_desc* field;
-    uint8_t           component;
-};
-std::optional<kf_ref> find_kf(std::string_view kf_name);
-
-/// Every KEYFRAMES name this table generates, in table order. The keyframes module
+/// **THE SERVER-SIDE ALIAS LOOKUP WAS DROPPED, 2026-09-10, and this is where it was.** D6 of the
+/// timeline plan called for a PUT to accept a legacy `KEYFRAMES` name in place of a path, with a
+/// deprecation log line, and `find_kf` / `all_kf_names` / `kf_index` existed with no caller
+/// waiting for it. Two reasons it is not coming:
+///
+///  * **nobody is known to have stored one.** `KEYFRAMES` was AMCP-only and had zero harness
+///    coverage for its whole life -- F11 of the plan was flagged precisely because no evidence
+///    either way existed -- so the client population needing the alias is plausibly empty.
+///  * **the mapping is already published.** `keyframe_names` is on every descriptor, so a client
+///    that did store a name can resolve it to a path itself. A server-side alias is a
+///    convenience on top of a lookup the client can already do, and it would put a deprecated
+///    spelling into the one grammar the timeline has.
+///
+/// So a path is the only thing a document may name, validated against the LIVE registry at PUT.
+/// If that decision is revisited, the lookup is five lines and `keyframe_names` is still there
+/// to build it from. The keyframes module
 /// compares it against its frozen list so a rename or a dropped entry fails at startup
 /// rather than silently changing what a saved timeline animates.
-std::vector<std::string> all_kf_names();
+
 
 /// WHAT A TIMELINE DOCUMENT CAN DO WITH THIS FIELD: `"true"`, `"step"` or `"false"`.
 ///

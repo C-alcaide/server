@@ -654,20 +654,6 @@ const std::unordered_map<std::string_view, std::size_t>& path_index()
     return idx;
 }
 
-const std::unordered_map<std::string_view, kf_ref>& kf_index()
-{
-    static const auto idx = [] {
-        std::unordered_map<std::string_view, kf_ref> m;
-        for (const auto& f : all()) {
-            const auto names = split_list(f.kf_names);
-            for (std::size_t c = 0; c < names.size(); ++c)
-                m.emplace(names[c], kf_ref{&f, static_cast<uint8_t>(c)});
-        }
-        return m;
-    }();
-    return idx;
-}
-
 } // namespace
 
 const field_desc* find(std::string_view path)
@@ -737,15 +723,6 @@ const audio_field* find_audio_field(std::string_view path)
     return nullptr;
 }
 
-std::optional<kf_ref> find_kf(std::string_view kf_name)
-{
-    const auto& idx = kf_index();
-    const auto  it  = idx.find(kf_name);
-    if (it == idx.end())
-        return std::nullopt;
-    return it->second;
-}
-
 const char* animatable_of(const field_meta& f)
 {
     // NOT WRITABLE, SO NOTHING CAN DRIVE IT. Checked first because it outranks the kind: a
@@ -768,15 +745,6 @@ const char* animatable_of(const field_meta& f)
             // mechanism. Interpolating an enum would produce values it has no name for.
             return "step";
     }
-}
-
-std::vector<std::string> all_kf_names()
-{
-    std::vector<std::string> out;
-    for (const auto& f : all())
-        for (const auto n : split_list(f.kf_names))
-            out.emplace_back(n);
-    return out;
 }
 
 // ---------------------------------------------------------------------------------------

@@ -41,7 +41,12 @@ rather than extended:
   interview moves what follows it.
 
 The legacy names survive in the field registry's descriptors, published as **`keyframe_names`**,
-so a client that stored them can still look up which path a name refers to. They say nothing about
+so a client that stored them can still look up which path a name refers to. **The SERVER does
+not accept one in place of a path** — that acceptance was in the plan and was dropped 2026-09-10,
+because `KEYFRAMES` was AMCP-only with no coverage for its whole life (so the client population
+needing it is plausibly empty) and because publishing the mapping is enough for a client to
+resolve a stored name itself. A document may name only a path, validated against the live
+registry at PUT. They say nothing about
 whether a path can be animated — the tree publishes **`animatable`** for that, with three states
 (`true`, `"step"`, `false`). See [`control-api.md`](control-api.md).
 
