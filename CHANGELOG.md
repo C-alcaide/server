@@ -1,6 +1,50 @@
 CasparVP — Unreleased
 ==========================================
 
+### Ownership: a write to a driven field is REMEMBERED, `HOLD`/`RELEASE`, and `field_bound` retired
+
+Bindings write their own overlay instead of the layer's tween, so the ownership stack has four
+ranks now -- HOLD, binding, timeline, the operator's constant -- and only the operator writes the
+constant. `HOLD <ch>-<layer> <field>` / `RELEASE`, and `PUT .../mixer/<field> {"hold": true}`.
+
+**BREAKING FOR A CLIENT THAT DEPENDS ON `field_bound`.** A `PUT` to a mixer field a binding or a
+timeline is driving is now **accepted** rather than refused. The write lands in the operator's
+constant, is kept, and takes effect the moment the driver ends; the reply carries
+`effective: false` and `shadowed_by`, and `stack` when more than one rank wants the path. A
+client that treated `field_bound` as "your write did nothing" will now believe a write succeeded
+-- which it did, but not on air. `effective` is ABSENT rather than true when nothing shadows the
+write, so a client that ignores the new fields behaves as before for every undriven field.
+
+`field_bound` keeps one site, for a different reason than the code originally gave: a driven
+PRODUCER PARAMETER. Its value lives inside the producer, not on the stage, so there is nowhere to
+remember an operator's write. `docs/faults.yaml` marks the code deprecated and says why.
+
+**Other behaviour changes.** `MIXER 1-10 VOLUME` and `MIXER FIELD <name>` read the EFFECTIVE
+value now, not the operator's constant -- they returned the constant before, which stopped being
+what is on air the moment bindings became an overlay. And two new published keys per driven
+layer: `layer/{m}/driver/<path>` (the effective owner) and `layer/{m}/stack/<path>` (every rank
+that wanted it, strongest first).
+
+**A binding outranks a timeline**, because a binding is a live input and a document is authored
+ahead of time; every product surveyed does the same. `HOLD` outranks both, because a show needs
+an escape hatch and PIXERA's Dominant is the precedent. A hold takes what is ON AIR rather than
+the operator's last typed value.
+
+**MEASURED, both mixers.** New battery `timeline-stack` **16/16**: a document and a binding
+contending for one parameter, a HOLD above both, and each rank removed in turn -- including the
+check that separates an overlay from a write, which is that after `UNBIND` the document takes the
+parameter AT ITS OWN POSITION rather than where it was when the binding took over. `binding-owner`
+**8/8, inverted**: the write is accepted, reports itself shadowed, does not reach the picture, and
+LANDS on `UNBIND` with no further write. `tools/linux_smoke.py` inverted the same way. Also green
+on both: `binding-lfo`, `binding-input`, `binding-audio`, `binding-osc`, `timeline-ramp`,
+`timeline-clock`, `timeline-resolved`, `api-write`, `api-roundtrip`, `api-tree`, `api-events`.
+
+**Shown failing first, twice, and both mutations are the old design.** Inverting the rank
+(binding applied before the timeline) fails three `timeline-stack` checks. Having the binding
+write the constant as well -- the old writer -- fails exactly the two checks that describe
+losslessness: `binding-owner`'s "UNBIND lands the write made during the binding" (0.6 instead of
+0.11) and `timeline-stack`'s final release (0.65 instead of 0.42).
+
 ### `GET /v1/timeline/{name}/resolved?at=` carries the per-path VALUES
 
 The endpoint already reported the instances and, with `at`, the object owning each layer and its

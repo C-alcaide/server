@@ -394,8 +394,10 @@ api_reply write_stage_value(const api_context& ctx,
 
     if (o.if_contains("duration") || o.if_contains("tween"))
         return api_reply::fail(api_code::bad_request,
-                               "stage fields are not tweenable: KEYFRAMES is bound to "
-                               "image_transform, so a screen cannot be animated in this build");
+                               "stage fields are not tweenable through this endpoint: the previz "
+                               "renderer's mutators are called from the http executor and cannot be "
+                               "driven per tick from here. A timeline document animates them -- "
+                               "PUT /v1/timeline/{name} with a `previz/screen/...` path");
 
     const auto& f = *target.field;
 
@@ -496,10 +498,10 @@ api_reply write_param_value(const api_context& ctx,
 
     if (o.if_contains("duration") || o.if_contains("tween"))
         return api_reply::fail(api_code::bad_request,
-                               "producer parameters are not tweenable: KEYFRAMES is bound to "
-                               "image_transform end to end, so a producer parameter cannot be "
-                               "animated by it. The OFX module has its own keyframe engine, "
-                               "reachable through CALL ... OFX KEY");
+                               "producer parameters are not tweenable through this endpoint: a "
+                               "producer's setter is not a transform and has no tween. A timeline "
+                               "document animates them -- PUT /v1/timeline/{name} with a "
+                               "`producer/<name>` path");
 
     const std::string op =
         o.if_contains("op") && o.at("op").is_string() ? std::string(o.at("op").as_string().c_str()) : "set";
@@ -548,11 +550,17 @@ api_reply write_param_value(const api_context& ctx,
     if ((static_cast<uint8_t>(p->access) & static_cast<uint8_t>(core::fields::access_t::write)) == 0)
         return api_reply::fail(api_code::not_writable, "parameter is read-only: " + name);
 
+    // A DRIVEN PRODUCER PARAMETER IS THE ONE CASE STILL REFUSED, and the reason is different
+    // from the one `field_bound` used to give. A producer parameter has no constant on the
+    // stage -- the value lives inside the producer, and a binding writes it through the
+    // producer's own setter. There is nowhere to remember an operator's write, so it really
+    // would be applied and overwritten. That is a gap in the ownership stack rather than a
+    // policy: it closes when producer parameters get their own overlay.
     if (stage->is_bound(layer, "producer/" + name))
         return api_reply::fail(api_code::field_bound,
-                               "producer/" + name + " is driven by a binding on this layer. A "
-                               "write would be applied and then overwritten on the next tick, "
-                               "so it is refused instead -- `UNBIND " +
+                               "producer/" + name + " is driven by a binding on this layer, and "
+                               "a producer parameter has no constant on the stage to remember a "
+                               "write in -- so unlike a mixer field this one is refused. `UNBIND " +
                                    std::to_string(channel) + "-" + std::to_string(layer) +
                                    " producer/" + name + "` hands the parameter back");
 
@@ -649,6 +657,57 @@ api_reply write_value(const api_context& ctx,
 
     const auto& f = *target.meta();
 
+    const auto stage = ctx.stage(target.channel);
+    if (!stage)
+        return api_reply::fail(api_code::channel_not_found, "no channel " + std::to_string(target.channel));
+
+    // `{"hold": true}` / `{"hold": false}` -- take the path for the operator, above every other
+    // rank, or give it back. PIXERA's Dominant, and the answer to "a document is driving the
+    // thing I need to fix on air".
+    //
+    // On this endpoint rather than its own, because the operator's intent is one action: set it
+    // and keep it. A separate `POST .../hold` would make a client send two requests and handle
+    // the case where the first landed and the second did not.
+    //
+    // A HOLD WITH NO VALUE holds what is on air at that moment, which is why it is checked
+    // before the value is required: `PUT {"hold": true}` on a ramping parameter means "stop
+    // there", and requiring a value would make the client read the position first and race the
+    // next tick.
+    if (const auto* h = o.if_contains("hold")) {
+        if (!h->is_bool())
+            return api_reply::fail(api_code::bad_request, "\"hold\" takes a boolean");
+        const bool want = h->as_bool();
+
+        core::monitor::vector_t before;
+        if (const auto* fi = target.field)
+            before = fi->get(stage->get_current_transform(target.layer).get().image_transform);
+        else if (const auto* ai = target.audio)
+            before = ai->get(stage->get_current_transform(target.layer).get().audio_transform);
+
+        const bool ok = want ? stage->hold_field(target.layer, std::string(f.path)).get()
+                             : stage->release_field(target.layer, std::string(f.path)).get();
+        if (want && !ok)
+            return api_reply::fail(api_code::not_writable,
+                                   std::string(f.path) + " cannot be held: it has no setter");
+
+        CASPAR_LOG(info) << L"[api] " << u16(peer) << (want ? L" HOLD " : L" RELEASE ") << u16(path);
+
+        json::object r;
+        r["path"]  = path;
+        r["hold"]  = want;
+        r["value"] = vector_to_json(before);
+        // A RELEASE that removed nothing is `ok` with `hold: false`, not an error: "make sure
+        // this is not held" is idempotent, and a client tidying up after a session should not
+        // have to know whether it had held anything.
+        r["changed"] = ok;
+        if (!want) {
+            const auto after = stage->driver_of(target.layer, std::string(f.path));
+            if (!after.first.empty())
+                r["shadowed_by"] = after.first;
+        }
+        return api_reply::ok_with(std::move(r));
+    }
+
     // The operand, for the forms that take one. `toggle` takes none.
     core::monitor::vector_t operand;
     core::monitor::vector_t expect;
@@ -674,29 +733,25 @@ api_reply write_value(const api_context& ctx,
 
     if (!ctx.stage)
         return api_reply::fail(api_code::internal, "the API was built without access to the channels");
-    const auto stage = ctx.stage(target.channel);
-    if (!stage)
-        return api_reply::fail(api_code::channel_not_found, "no channel " + std::to_string(target.channel));
 
-    // A BOUND FIELD IS OWNED BY ITS BINDING, and a write to it is refused rather than applied
-    // and silently overwritten on the next tick.
+    // A WRITE TO A DRIVEN FIELD IS REMEMBERED, NOT REFUSED, and that is the whole change
+    // `field_bound` used to represent.
     //
-    // This is the `icvfx_auto` lesson as a rule. `PREVIZ AUTOPROJECTION` used to write the ICVFX
-    // block on every recompute with no ownership guard, so a hand-set `MIXER PROJECTION_ICVFX`
-    // survived exactly until the next camera move -- and with a tracker bound, that is every
-    // sample. Nobody had chosen that precedence; it was simply not thought about. Here it is
-    // chosen, and `field_bound` is a code of its own rather than `not_writable` so a control
-    // surface can offer UNBIND instead of greying the slider out forever.
-    if (stage->is_bound(target.layer, f.path))
-        return api_reply::fail(api_code::field_bound,
-                               std::string(f.path) +
-                                   " is driven by a binding on this layer. A write would be "
-                                   "applied and then overwritten on the next tick, so it is "
-                                   "refused instead -- `UNBIND " +
-                                   std::to_string(target.channel) + "-" +
-                                   std::to_string(target.layer) + " " + f.path +
-                                   "` hands the field back");
-
+    // It used to be refused, with this reasoning: a write would be applied and then overwritten
+    // on the next tick, which succeeds and does not last, and that is worse than a refusal. The
+    // reasoning was right about the old write path and wrong about what to do. On the old path
+    // the write went into the layer's tween, which is also where a binding wrote, so the two
+    // genuinely could not coexist -- one had to lose, and losing silently was the bad outcome.
+    //
+    // With the ownership stack they do not share a place. The operator's value goes into the
+    // CONSTANT, which nothing else touches, and a driver's value goes into an overlay above it.
+    // So the write lands, is kept, and takes effect the moment the driver ends -- and the reply
+    // says so: `effective: false` with `shadowed_by` naming who has it. A control surface can
+    // show the slider where the operator put it, the value on air beside it, and who to take it
+    // from.
+    //
+    // `field_bound` therefore has no site left. It stays in `api_code` for one release, marked
+    // deprecated in `faults.yaml`, because a client that switches on it should keep compiling.
     // Everything the closure has to report back. It runs on the STAGE executor, so it
     // cannot return a status -- it fills this in and the caller reads it after the future
     // settles.
@@ -837,6 +892,22 @@ api_reply write_value(const api_context& ctx,
     r["previous"] = vector_to_json(out->previous);
     if (duration > 0)
         r["tweening"] = static_cast<std::int64_t>(duration);
+
+    // WHETHER THE WRITE IS WHAT IS ON AIR. `value` is what the field now holds -- the operator's
+    // constant -- and if something above it in the ownership stack is driving the same path,
+    // that is NOT what the picture shows. Saying so is the difference between a slider that
+    // snaps back for no visible reason and one whose panel reads "held by timeline:show/lt1".
+    //
+    // The write was still kept: it takes effect the moment the driver ends. `effective` is
+    // absent rather than true when nothing shadows it, so a client that does not look for it
+    // behaves exactly as before.
+    const auto owner_now = stage->driver_of(target.layer, f.path);
+    if (!owner_now.first.empty()) {
+        r["effective"]   = false;
+        r["shadowed_by"] = owner_now.first;
+        if (owner_now.second != owner_now.first)
+            r["stack"] = owner_now.second;
+    }
     return api_reply::ok_with(std::move(r));
 }
 

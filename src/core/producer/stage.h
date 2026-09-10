@@ -190,6 +190,30 @@ class stage_base
     /// REFUSE rather than be silently overwritten one frame later.
     virtual bool is_bound(int layer, const std::string& target) const { return false; }
 
+    /// WHO IS DRIVING `path` on `layer`, and everyone else who wanted it.
+    ///
+    /// `first` is the effective owner -- the strongest rank writing that path -- and `second` is
+    /// every rank that wanted it, strongest first, comma-separated. Both empty means nobody.
+    ///
+    /// Defaulted to "nobody" rather than pure, so a stage with no drivers needs no override --
+    /// which is what `stage_delayed` is until a batch grows an ownership question of its own.
+    virtual std::pair<std::string, std::string> driver_of(int layer, const std::string& path) const
+    {
+        return {};
+    }
+
+    /// Take a path for the operator, above every other rank, until `release_field`.
+    virtual std::future<bool> hold_field(int layer, const std::string& path)
+    {
+        return make_ready_future(false);
+    }
+
+    /// Give it back. Whatever was underneath takes it again on the next tick.
+    virtual std::future<bool> release_field(int layer, const std::string& path)
+    {
+        return make_ready_future(false);
+    }
+
     /// Hand an input event to every source that wants one. Called from `video_channel::input`.
     virtual void feed_sources(const input_event&) {}
 
@@ -305,6 +329,23 @@ class stage final : public stage_base
         std::size_t instances = 0;
     };
     std::future<timeline_status> timeline_state(const std::string& name);
+
+    /// WHO IS DRIVING `path` on `layer`, and everyone else who wanted it.
+    ///
+    /// `first` is the effective owner -- the strongest rank writing that path -- and `second` is
+    /// every rank that wanted it, strongest first, comma-separated. Both empty means nobody.
+    ///
+    /// NOT on the executor: the caller is a write path that has to answer now, in the reply. The
+    /// same reasoning as `is_bound`, and it reads the same lock.
+    std::pair<std::string, std::string> driver_of(int layer, const std::string& path) const override;
+
+    /// Take a path for the operator, above every other rank, until `release_field`.
+    ///
+    /// `HOLD` is the operator saying "this one is mine now" -- PIXERA's Dominant, and the answer
+    /// to "a document is driving the thing I need to fix on air". Returns false if the path does
+    /// not resolve.
+    std::future<bool> hold_field(int layer, const std::string& path) override;
+    std::future<bool> release_field(int layer, const std::string& path) override;
 
     /// The documents this channel owns, with their playheads. For `TIMELINE <ch> LIST`.
     std::future<std::vector<std::pair<std::string, timeline_status>>> timeline_list();

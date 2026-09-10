@@ -83,15 +83,28 @@ win. *Before any layer is pulled*, because the value must be in the transform wh
 reads it — applied afterwards it lands one frame late, and for an audio-reactive parameter a
 frame of lag is the artefact the feature exists to avoid.
 
-**A bound target is OWNED by its binding.** An explicit write to it is refused with
-`field_bound` rather than applied and overwritten on the next tick.
+**A bound target is OWNED by its binding, and a write to it is REMEMBERED rather than refused.**
+The write lands in the operator's own constant, which nothing else touches, and takes effect the
+moment the binding ends. The reply says so: `effective: false` with `shadowed_by: "binding:<id>"`.
+`layer/{m}/driver/<path>` and `layer/{m}/stack/<path>` carry the same fact in the state tree.
 
 This is the `icvfx_auto` lesson stated as a rule. `PREVIZ AUTOPROJECTION` used to write the ICVFX
 block on every recompute with no ownership guard, so a hand-set `MIXER PROJECTION_ICVFX` survived
 exactly until the next camera move — and with a tracker bound, that is every sample. Nobody had
-chosen that precedence; it was simply not thought about. `field_bound` is a code of its own rather
-than `not_writable` because the field *is* settable and something else owns it: a control surface
-can offer `UNBIND` instead of greying the slider out forever.
+chosen that precedence; it was simply not thought about. Here it is chosen and it is *published*.
+
+**It used to be a refusal, `field_bound`**, and the change is worth understanding rather than
+just noting. The refusal reasoned that a write applied and then overwritten one tick later
+succeeds and does not last, which is worse than a refusal — and that was right about the *old*
+write path, where the operator's value and the binding's both went into the layer's tween. They
+genuinely could not coexist; one had to lose, and losing silently was the bad outcome. With the
+ownership stack (`timeline.md` §10) they do not share a place, so nothing is lost and the
+refusal has no purpose. `field_bound` survives for a driven **producer parameter** only, where
+the value lives inside the producer and there is nowhere to remember a write.
+
+**`HOLD` and `RELEASE` sit above a binding**, for the case a rule cannot cover: the operator
+taking a parameter back mid-show without stopping what is driving it. `timeline.md` §10 has the
+whole rank.
 
 ### 1.2 What is deliberately absent
 
@@ -101,7 +114,7 @@ can offer `UNBIND` instead of greying the slider out forever.
 | **a node graph in the server** | bindings are edges, and the client draws them. Putting a graph here duplicates the client's own job |
 | **more than one binding per target** | two bindings writing one number gives whichever ran last, which is an ordering nobody chose — the same class of accident as the ICVFX overwrite. A second `BIND` on a target replaces the first |
 | **a binding driving a whole vector from one scalar** | a binding drives ONE number, addressed with a `.N` component suffix. Filling three components from a scalar needs a rule (a ramp? a grey?) that nobody has chosen |
-| **stage / previz fields as targets** | the previz renderer lives in `accelerator`, which `core` does not link. A binding would have to reach it through the shell's bridge, which is a synchronous round trip per tick. Real gap, named |
+| **stage / previz fields as targets** | the previz renderer lives in `accelerator`, which `core` does not link. A binding would have to reach it through the shell's bridge, which is a synchronous round trip per tick. Real gap, named — and note it is a gap in BINDINGS only: `core::address::parse` resolves a `previz/screen/...` path, so a timeline document can address one once its writer lands |
 | **cross-channel sources** | a source is created on a channel and belongs to it. BPM sync across a rack is the case that wants sharing, and it wants a *clock* rather than a shared oscillator |
 
 ---

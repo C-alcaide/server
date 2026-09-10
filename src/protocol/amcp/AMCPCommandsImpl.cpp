@@ -1544,6 +1544,56 @@ single_double_animatable_mixer_command(command_context&                 ctx,
 // validated against the SAME range the control API reports, because both read the
 // descriptor rather than a constant named twice.
 // ---------------------------------------------------------------------------------------
+// HOLD / RELEASE -- the operator takes a parameter back
+// ---------------------------------------------------------------------------------------
+//
+// `HOLD 1-10 brightness` pins a parameter to what it is showing RIGHT NOW, above every other
+// rank -- a timeline driving it, a binding driving it, both. `RELEASE 1-10 brightness` hands it
+// back and whatever was underneath takes it again on the next tick.
+//
+// This is the operator's escape hatch, and a show needs one. A document animating a grade is
+// the normal case; a document animating the grade on the shot that has just gone wrong is the
+// case where somebody has to be able to say "not that one, not now" without stopping the show.
+// PIXERA calls it Dominant and binds it to a key.
+//
+// HOLDS WHAT IS ON AIR, not what the operator last typed. Snapping to a value from minutes ago
+// is the opposite of "stop it where it is", which is what the gesture means.
+std::future<std::wstring> hold_command(command_context& ctx)
+{
+    auto stage = ctx.channel.raw_channel->stage();
+    if (!stage)
+        return make_ready_future<std::wstring>(L"501 HOLD FAILED no stage on this channel\r\n");
+    if (ctx.parameters.empty())
+        return make_ready_future<std::wstring>(
+            L"400 HOLD ERROR needs a field: HOLD <ch>-<layer> <field>\r\n");
+
+    const auto path = u8(ctx.parameters.at(0));
+    if (!stage->hold_field(ctx.layer_index(), path).get())
+        return make_ready_future<std::wstring>(
+            L"404 HOLD ERROR no such settable field: " + ctx.parameters.at(0) +
+            L". A field is a registry name, optionally with a .N component -- MIXER <ch>-<layer> "
+            L"FIELD lists them\r\n");
+
+    return make_ready_future<std::wstring>(L"202 HOLD OK\r\n");
+}
+
+std::future<std::wstring> release_command(command_context& ctx)
+{
+    auto stage = ctx.channel.raw_channel->stage();
+    if (!stage)
+        return make_ready_future<std::wstring>(L"501 RELEASE FAILED no stage on this channel\r\n");
+    if (ctx.parameters.empty())
+        return make_ready_future<std::wstring>(
+            L"400 RELEASE ERROR needs a field: RELEASE <ch>-<layer> <field>\r\n");
+
+    const auto path = u8(ctx.parameters.at(0));
+    // 202 whether or not anything was held. "Make sure this is not held" is idempotent, and a
+    // client tidying up after a session should not have to know whether it had held anything.
+    stage->release_field(ctx.layer_index(), path).get();
+    return make_ready_future<std::wstring>(L"202 RELEASE OK\r\n");
+}
+
+// ---------------------------------------------------------------------------------------
 // TIMELINE -- the playhead, and only the playhead
 // ---------------------------------------------------------------------------------------
 //
@@ -6673,6 +6723,8 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER SHAPE", mixer_shape_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER FIELD", mixer_field_command, 0);
     repo->register_channel_command(L"Timeline Commands", L"TIMELINE", timeline_command, 0);
+    repo->register_channel_command(L"Timeline Commands", L"HOLD", hold_command, 1);
+    repo->register_channel_command(L"Timeline Commands", L"RELEASE", release_command, 1);
     repo->register_channel_command(L"Mixer Commands", L"MIXER OPACITY", mixer_opacity_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER BRIGHTNESS", mixer_brightness_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER SATURATION", mixer_saturation_command, 0);

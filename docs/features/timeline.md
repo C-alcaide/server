@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–9 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–10 of 19 shipped. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -15,7 +15,8 @@
 > private `OFX KEY` engine — both removed when the resolver lands, with a `CHANGELOG` measurement
 > **Coverage:** `time_self_test()` and `address::target_self_test()` at boot (§1, §2), and
 > `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, `api-timeline` for §5,
-> **`timeline-ramp`** and **`timeline-clock`** for §6 and §7, and **`timeline-resolved`** for §9.
+> **`timeline-ramp`** and **`timeline-clock`** for §6 and §7, **`timeline-resolved`** for §9, and
+> **`timeline-stack`** plus an inverted **`binding-owner`** for §10.
 > The remaining `timeline-*` batteries do
 > not exist yet and are named in the plan rather than here, because a battery named in a doc is a
 > command a reader will try to run
@@ -670,4 +671,107 @@ least 40 positions must have been compared.
 
 ---
 
-*§10 Ownership beyond two ranks, §11 Known gaps — arrive with commits 10–19.*
+## 10. Ownership — who has a parameter, and what happens next
+
+| rank | writer | lives in | ends by |
+| :--- | :--- | :--- | :--- |
+| 1 | **dominant** — `PUT {"hold": true}`, `HOLD <ch>-<layer> <field>` | `drivers_[layer].dominant` | `RELEASE` |
+| 2 | **binding** | `drivers_[layer].binding` | `UNBIND` |
+| 3 | **timeline** | `drivers_[layer].timeline` | the object's span ends, or `STOP` |
+| 4 | **constant** — `MIXER`, `PUT`, a preset recall, a `MIXER <duration>` tween | `tweens_[layer]` | never; always stored |
+
+Every boundary in that list is a decision somebody could have made differently.
+
+**A binding outranks a document** because a binding is a *live* input — an audio level, a
+tracker, a fader — and a document is authored ahead of time. Every product surveyed gives the
+live thing the parameter, and an operator whose fader stopped working because a show was running
+would not accept the opposite. Per-binding `mode ∈ {replace, multiply, add}` is where WATCHOUT's
+`tweenValue * masterDim` fits later; v1 is `replace`.
+
+**`HOLD` outranks both** because it is the operator saying "this one is mine now". A show needs
+an escape hatch: a document animating a grade is the normal case, and a document animating the
+grade on the shot that has just gone wrong is the case where somebody has to be able to stop it
+*without stopping the show*. PIXERA calls it Dominant and binds it to a key. **A hold takes what
+is on air**, not the operator's last typed value — snapping to a number from minutes ago is the
+opposite of "stop it where it is".
+
+**Nothing but the operator writes rank 4.** That is what makes every step down the stack
+lossless rather than restored: each driver is its own overlay above one constant, so removing a
+driver is clearing an overlay and the constant was never touched.
+
+### 10.1 A write to a driven field is remembered, not refused
+
+`field_bound` is retired. It used to refuse a write to a bound field, reasoning that a write
+applied and then overwritten one tick later succeeds and does not last, which is worse than a
+refusal. **That reasoning was right about the old write path and wrong about what to do.** On
+that path the operator's value and the binding's went to the same place — the layer's tween — so
+they genuinely could not coexist, one had to lose, and losing silently was the bad outcome.
+
+They no longer share a place. The write lands in the constant, is kept, and takes effect the
+moment the driver ends. The reply says which:
+
+```json
+{"path": "…/mixer/opacity", "value": [0.11], "previous": [0.3],
+ "effective": false, "shadowed_by": "binding:1",
+ "stack": "binding:1,timeline:show/lt1"}
+```
+
+`effective` is **absent** rather than `true` when nothing shadows the write, so a client that
+never looks for it behaves exactly as it did before the field existed.
+
+**One site keeps `field_bound`, for a different reason than the code originally gave:** a driven
+**producer parameter**. A producer parameter has no constant on the stage — the value lives
+inside the producer and a binding writes it through the producer's own setter — so there is
+nowhere to remember an operator's write, and it really would be applied and overwritten. That is
+a gap in the ownership stack rather than a policy, and it closes when producer parameters get
+their own overlay. `docs/faults.yaml` says so.
+
+### 10.2 What is published
+
+`layer/{m}/driver/<path>` is the effective owner. `layer/{m}/stack/<path>` is every rank that
+wanted the path, strongest first, comma-separated — `"binding:1,timeline:show/ramp"`.
+
+**The stack is not decoration.** Without it, `UNBIND` looks like it will hand the parameter back
+to the operator when in fact a document underneath takes it, and a client cannot warn anybody.
+With it, the client can say what happens next. It is the same question `field_bound` used to
+answer with a refusal, answered with information instead.
+
+### 10.3 Where it is checked
+
+**`timeline-stack`, 16/16 both mixers.** A document ramping `brightness` and a binding parked at
+0.65 contending for it, then a `HOLD` above both, then each rank removed in turn. Three fixture
+decisions: the binding's parked value sits *inside* the ramp's range, so "the binding has it"
+cannot be confused with "the ramp is at an endpoint"; the operator's constant is a fourth
+distinct number, so the final release is unambiguous; and the `HOLD` is checked *again* after the
+binding is removed, because while the binding was live the held value was also what a hold that
+did nothing would read.
+
+The check that separates an overlay from a write: after `UNBIND`, the document takes the
+parameter **at its own position** — it kept running while it was shadowed — so the value is
+compared against the ramp at that moment, not against the value it had before. A mechanism that
+froze a shadowed driver would resume from where it was when the binding took over.
+
+**`binding-owner`, 8/8 both mixers, inverted.** It used to assert the refusal; it now asserts the
+write is accepted, reports `effective: false` and `shadowed_by`, does not reach the picture, and
+**lands on `UNBIND` with no further write**. Its value is 0.11, which is none of 0.3 (what was
+set before the binding), 0.6 (the binding's value) or 1.0 (the default), so a revert to any of
+those is distinguishable. `tools/linux_smoke.py` is inverted the same way.
+
+**Shown failing first, twice:**
+
+* **the rank inverted** (binding applied before the timeline) fails three `timeline-stack`
+  checks, starting with "a binding OUTRANKS the document".
+* **the binding writing the constant as well** — the old writer — fails
+  `binding-owner`'s "UNBIND lands the write made during the binding" (0.6 instead of 0.11) and
+  `timeline-stack`'s final release (0.65 instead of 0.42). One check in each, and they are the
+  two that describe losslessness.
+
+**And the read forms had to move with it.** `MIXER 1-10 VOLUME` and `MIXER FIELD <name>` read
+through `get_current_transform`, which returned the *constant*. The moment bindings became an
+overlay that stopped being what is on air, and `binding-lfo`'s "both facades agree" check caught
+it. It returns the effective transform now — every caller is a reader, and a writer gets the
+tween handed to its closure.
+
+---
+
+*§11 Known gaps — arrives with commit 19.*

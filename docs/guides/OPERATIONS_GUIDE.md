@@ -1051,6 +1051,28 @@ A verb answers `202` and takes effect on the next frame. Several clients acting 
 are resolved as **stop beats pause beats play** — a stop can never lose to a play that arrived a
 moment later.
 
+### `HOLD` and `RELEASE` — taking a parameter back mid-show
+
+```
+HOLD 1-10 brightness       # pin it to what it is showing RIGHT NOW, above everything
+RELEASE 1-10 brightness    # hand it back; whatever was driving it takes it again
+```
+
+This is the escape hatch. A timeline animating a grade is the normal case; a timeline animating
+the grade on the shot that has just gone wrong is when you need to stop *that one* without
+stopping the show. `HOLD` takes precedence over a timeline **and** over a binding, and it holds
+what is on air at the moment you press it — not whatever you last typed.
+
+`RELEASE` puts it back where it was in the pecking order: a binding if one is live, otherwise the
+timeline, otherwise your own last value.
+
+**You can also just write it.** A `MIXER` or `PUT` to a parameter something else is driving is
+accepted and remembered — it does not change the picture now, and it lands the moment the driver
+lets go. If you want to know why a slider is not moving the picture, read
+`channel/1/stage/layer/10/driver/brightness`, which names what has it, and
+`.../stack/brightness`, which names everything that wants it in order. That second one tells you
+what will happen if you `UNBIND`.
+
 ### Preview senders (Spout)
 
 To feed a preview to another application on the same machine without paying for a

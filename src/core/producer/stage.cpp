@@ -122,7 +122,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     // could not give a field back because nothing remembered what it had been.
     //
     // Here the operator's constant lives in `tweens_` and NOTHING ELSE EVER TOUCHES IT. The
-    // timeline publishes into `timeline_overlay_`, one `resolve_drivers()` per tick composes the
+    // timeline publishes into `drivers_[layer].timeline`, one `resolve_drivers()` composes the
     // two into `resolved_`, and that is what is pushed, published and read. Ending a driver is
     // then just clearing an overlay -- the constant is still there, untouched, and comes back by
     // construction rather than by being restored.
@@ -132,10 +132,26 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         std::unordered_map<std::string, double> values;
         /// Step values -- an enum, a boolean, a name -- which cannot be interpolated (D7).
         std::map<std::string, monitor::vector_t> steps;
-        /// `timeline:<document>/<object>`, which is what a write reply's `shadowed_by` reports.
+        /// `timeline:<document>/<object>`, `binding:<id>` or `hold` -- which is what a write
+        /// reply's `shadowed_by` reports and what `driver/<path>` publishes.
         std::string owner;
+
+        bool empty() const { return values.empty() && steps.empty(); }
     };
-    std::map<int, layer_overlay> timeline_overlay_;
+    /// THE OWNERSHIP STACK, one overlay per rank. The operator's constant is NOT here: it is
+    /// `tweens_`, and nothing in this file writes it but the operator.
+    ///
+    /// Named in rank order, highest first, because that is the order `resolve_drivers` applies
+    /// them in -- a later write wins, so the strongest owner goes last. Before this the rank was
+    /// expressed as the order of two loops in the tick, which is a rule nobody can state without
+    /// reading both of them.
+    struct layer_drivers
+    {
+        layer_overlay dominant; //< rank 1 -- HOLD; beats everything
+        layer_overlay binding;  //< rank 2 -- a live source
+        layer_overlay timeline; //< rank 3 -- an authored document
+    };
+    std::map<int, layer_drivers> drivers_;
 
     /// The composed transform per DRIVEN layer. Absent means "nothing drives this layer", and
     /// the tween is the answer -- which keeps the cost proportional to what is animated rather
@@ -859,7 +875,11 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     /// Every document this channel owns, advanced one tick and evaluated into the overlays.
     void evaluate_timelines(std::uint64_t frame_number, monitor::state& state)
     {
-        timeline_overlay_.clear();
+        // Only THIS rank is cleared. The binding overlay is rebuilt by `evaluate_bindings` and
+        // the dominant one persists until `RELEASE` -- clearing all three here would make a HOLD
+        // last exactly one tick.
+        for (auto& kv : drivers_)
+            kv.second.timeline = layer_overlay{};
         if (!timelines_)
             return;
 
@@ -927,7 +947,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 if (!obj)
                     continue;
 
-                auto& ov = timeline_overlay_[*layer];
+                auto& ov = drivers_[*layer].timeline;
                 ov.owner = "timeline:" + name + "/" + inst->object_id;
 
                 // Step values first, then the curve, so a path in both has the CURVE win (D7).
@@ -953,10 +973,14 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     void resolve_drivers()
     {
         resolved_.clear();
-        if (timeline_overlay_.empty())
+        if (drivers_.empty())
             return;
 
-        for (const auto& kv : timeline_overlay_) {
+        for (const auto& kv : drivers_) {
+            const auto& d = kv.second;
+            if (d.timeline.empty() && d.binding.empty() && d.dominant.empty())
+                continue;
+
             const auto tw = tweens_.find(kv.first);
             if (tw == tweens_.end())
                 continue;
@@ -966,7 +990,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             const auto write = [&t](const std::string& path, const monitor::vector_t& value) {
                 const auto target = address::parse(path);
                 if (!target.meta)
-                    return; // a producer parameter or a stage field: commit 10 gives them writers
+                    return; // a producer parameter or a stage field: they have their own writers
                 if (target.kind == address::target_kind::image) {
                     const auto* f = fields::find(target.field);
                     if (!f || !f->set)
@@ -1001,10 +1025,24 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 }
             };
 
-            for (const auto& sv : kv.second.steps)
-                write(sv.first, sv.second);
-            for (const auto& pv : kv.second.values)
-                write(pv.first, monitor::vector_t{pv.second});
+            // THE RANK, and it is these three lines. Weakest first, so the strongest owner's
+            // write is the one that survives: timeline (3), then binding (2), then dominant (1).
+            //
+            // A binding over a timeline rather than the other way round, because a binding is a
+            // LIVE input -- an audio level, a tracker, a fader -- and a document is authored
+            // ahead of time. Every product surveyed gives the live thing the parameter, and an
+            // operator whose fader stops working because a show is running would not accept the
+            // opposite. `HOLD` is above both because it is the operator saying "this one is
+            // mine now", which nothing else may override.
+            const auto apply = [&](const layer_overlay& ov) {
+                for (const auto& sv : ov.steps)
+                    write(sv.first, sv.second);
+                for (const auto& pv : ov.values)
+                    write(pv.first, monitor::vector_t{pv.second});
+            };
+            apply(d.timeline);
+            apply(d.binding);
+            apply(d.dominant);
 
             resolved_[kv.first] = std::move(t);
         }
@@ -1064,13 +1102,48 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         //
         // Without this a client can see that a value moved and not what moved it, which is how
         // an operator ends up dragging a slider that snaps back every frame with no explanation.
-        const auto ov = timeline_overlay_.find(layer);
-        if (ov == timeline_overlay_.end() || ov->second.owner.empty())
+        const auto dit = drivers_.find(layer);
+        if (dit == drivers_.end())
+            return;
+        const auto& d = dit->second;
+        if (d.timeline.empty() && d.binding.empty() && d.dominant.empty())
             return;
 
         const auto constant = tweens_[layer].fetch();
-        const auto report   = [&](const std::string& path) {
-            ls["driver"][path] = ov->second.owner;
+
+        // WHO OWNS A PATH, and WHO ELSE WANTED IT. `driver/<path>` is the effective owner --
+        // the strongest rank writing that path -- and `stack/<path>` is every rank that wanted
+        // it, strongest first, as a comma-separated list.
+        //
+        // The stack is not decoration. Without it, `UNBIND` looks like it will hand the field
+        // back to the operator when in fact a document underneath will take it, and a client
+        // cannot warn anybody. With it, "binding:3,timeline:show/lt1" says exactly what happens
+        // next. It is the same question `field_bound` used to answer with a refusal, answered
+        // with information instead.
+        const auto rank_of = [&](const std::string& path) {
+            std::string effective;
+            std::string stack;
+            const layer_overlay* ranked[3] = {&d.dominant, &d.binding, &d.timeline};
+            for (const auto* ov : ranked) {
+                if (ov->owner.empty())
+                    continue;
+                if (ov->values.find(path) == ov->values.end() && ov->steps.find(path) == ov->steps.end())
+                    continue;
+                if (effective.empty())
+                    effective = ov->owner;
+                if (!stack.empty())
+                    stack += ",";
+                stack += ov->owner;
+            }
+            return std::make_pair(effective, stack);
+        };
+
+        const auto report = [&](const std::string& path) {
+            const auto who = rank_of(path);
+            if (who.first.empty())
+                return;
+            ls["driver"][path] = who.first;
+            ls["stack"][path]  = who.second;
 
             const auto target = address::parse(path);
             if (!target.meta)
@@ -1094,10 +1167,18 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             if (was != now)
                 ls["constant"][target.field] = was;
         };
-        for (const auto& pv : ov->second.values)
-            report(pv.first);
-        for (const auto& sv : ov->second.steps)
-            report(sv.first);
+
+        // Every path any rank touches, once. A path two ranks write is reported once with both
+        // of them in its stack, rather than twice with the weaker one overwriting the answer.
+        std::set<std::string> paths;
+        for (const auto* ov : {&d.dominant, &d.binding, &d.timeline}) {
+            for (const auto& pv : ov->values)
+                paths.insert(pv.first);
+            for (const auto& sv : ov->steps)
+                paths.insert(sv.first);
+        }
+        for (const auto& path : paths)
+            report(path);
     }
 
     /// The expensive half: which keys this transform contributes, and their values.
@@ -1252,6 +1333,13 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     /// avoid.
     void evaluate_bindings(double dt_ms)
     {
+        // Rebuilt from scratch every tick, like the timeline's. A binding whose source went
+        // BROKEN writes nothing this tick, and clearing first is what makes that fall through to
+        // whatever is underneath rather than freeze at the last good value -- which is D3's
+        // "a broken binding falls through", and which a persistent overlay would silently break.
+        for (auto& kv : drivers_)
+            kv.second.binding = layer_overlay{};
+
         {
             std::lock_guard<std::mutex> lock(binding_lock_);
             for (auto& kv : sources_)
@@ -1334,50 +1422,36 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             return;
         }
 
-        // A mixer field. PATCHED into both ends of the layer's tween, so the value is live on
-        // this very tick and every OTHER field keeps interpolating exactly as it was.
+        // A MIXER FIELD, and it goes into the binding OVERLAY rather than into the layer's tween.
         //
-        // This used to replace the whole tween: `tween = tweened_transform(dst, dst, 0, linear)`.
-        // Correct for the bound field, and it cut every in-flight `MIXER ... <duration>` on the
-        // same layer to its destination on the next tick the binding wrote -- an operator's
-        // 50-frame opacity fade snapped the moment an LFO on brightness ran. `tweened_transform`
-        // kept `source_` private, so this function could not do better until `patch` existed.
-        // Measured by `timeline-tween-survives`: the fade fits its ramp with the binding live.
+        // That is what makes `UNBIND` lossless: the operator's constant is untouched for the
+        // whole life of the binding, so handing the field back is clearing an overlay rather
+        // than restoring a value nobody kept. It also puts the RANK in one place -- a binding
+        // used to outrank the timeline by being written first and overwritten, which is a rank
+        // expressed as the order of two loops and impossible to state without reading both.
+        // `resolve_drivers` now applies timeline, then binding, then dominant, and the rank is
+        // that line.
         //
-        // Both halves of the transform, through their own tables. The audio half is one row
-        // today -- `volume` -- and it goes through the same patch for the same reason: a bound
-        // volume must not cut a `MIXER 1-10 OPACITY 0.2 50` on the same layer.
-        if (const auto* f = fields::find(b.target)) {
-            if (!f->set || !f->get)
-                return;
-            tweens_[b.layer].patch([&](frame_transform& t) {
-                auto v = f->get(t.image_transform);
-                if (v.size() != f->arity)
-                    return;
-                v[std::min<std::size_t>(b.component, v.size() - 1)] = value;
-                if (!f->set(t.image_transform, v))
-                    return;
-                // The same auto-enable a `PUT` or a keyframe applies, so a bound blur radius
-                // switches blur on exactly as a written one does. Without it a binding on
-                // `blur_radius` would move a number that nothing reads.
-                fields::apply_enables(t.image_transform, *f);
-            });
+        // Both halves of the transform, through their own tables. `tweened_transform::patch` is
+        // still what a `MIXER` write uses and is still why it exists; it is no longer on this
+        // path, and the collapse it fixed cannot happen here at all -- an overlay does not touch
+        // the tween.
+        const auto* f = fields::find(b.target);
+        const auto* a = f ? nullptr : fields::find_audio_field(b.target);
+        if (!f && !a)
             return;
-        }
+        if (f ? (!f->set || !f->get) : (!a->set || !a->get))
+            return;
 
-        if (const auto* a = fields::find_audio_field(b.target)) {
-            if (!a->set || !a->get)
-                return;
-            tweens_[b.layer].patch([&](frame_transform& t) {
-                auto v = a->get(t.audio_transform);
-                if (v.size() != a->arity)
-                    return;
-                v[std::min<std::size_t>(b.component, v.size() - 1)] = value;
-                a->set(t.audio_transform, v);
-                // No `apply_enables`: the audio rows declare no subsystem gate, because there is
-                // no audio equivalent of "blur is off until blur_radius moves".
-            });
-        }
+        const auto arity = f ? f->arity : a->arity;
+        auto&      ov    = drivers_[b.layer].binding;
+        ov.owner         = "binding:" + std::to_string(b.id);
+        // The `.N` suffix is re-attached for an arity>1 field, because `resolve_drivers` reads
+        // the path and needs to know which component -- `b.target` had it split off at BIND time.
+        if (arity > 1)
+            ov.values[b.target + "." + std::to_string(static_cast<int>(b.component))] = value;
+        else
+            ov.values[b.target] = value;
     }
 
     std::future<void> add_source(const std::string& name, std::shared_ptr<binding::source> src)
@@ -1540,6 +1614,111 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         });
     }
 
+    std::pair<std::string, std::string> driver_of(int layer, const std::string& path) const
+    {
+        // NOT on the executor: the caller is a write path that has to answer in its reply. The
+        // overlays are written only on the executor, so this reads under the same lock the
+        // binding mutators take -- the identical arrangement `is_bound` uses and for the
+        // identical reason.
+        std::lock_guard<std::mutex> lock(binding_lock_);
+        const auto                  it = drivers_.find(layer);
+        if (it == drivers_.end())
+            return {};
+
+        // The `.N` form is what an overlay keys on for an arity>1 field, and a caller asking
+        // about `fill_translation` means the whole field -- so a prefix match on the component
+        // suffix counts. Otherwise a write to a vector field whose X is bound would report
+        // nobody.
+        const auto touches = [&path](const layer_overlay& ov) {
+            if (ov.values.find(path) != ov.values.end() || ov.steps.find(path) != ov.steps.end())
+                return true;
+            for (const auto& pv : ov.values) {
+                if (pv.first.size() > path.size() + 1 && pv.first.compare(0, path.size(), path) == 0 &&
+                    pv.first[path.size()] == '.')
+                    return true;
+            }
+            return false;
+        };
+
+        const layer_overlay* ranked[3] = {&it->second.dominant, &it->second.binding,
+                                          &it->second.timeline};
+        std::string          effective, stack;
+        for (const auto* ov : ranked) {
+            if (ov->owner.empty() || !touches(*ov))
+                continue;
+            if (effective.empty())
+                effective = ov->owner;
+            if (!stack.empty())
+                stack += ",";
+            stack += ov->owner;
+        }
+        return {effective, stack};
+    }
+
+    std::future<bool> hold_field(int layer, const std::string& path)
+    {
+        return executor_.begin_invoke([this, layer, path] {
+            const auto t = address::parse(path);
+            if (t.kind != address::target_kind::image && t.kind != address::target_kind::audio)
+                return false;
+
+            // THE HELD VALUE IS WHAT IS ON AIR AT THIS MOMENT, not the constant. An operator
+            // holding a parameter a document is driving means "keep it where it is and let me
+            // move it from here" -- snapping to whatever they last typed, possibly minutes ago,
+            // is the opposite of what they asked for.
+            const auto     eff = effective_transform(layer);
+            monitor::vector_t v;
+            if (const auto* f = fields::find(t.field)) {
+                if (!f->get || !f->set)
+                    return false;
+                v = f->get(eff.image_transform);
+            } else if (const auto* a = fields::find_audio_field(t.field)) {
+                if (!a->get || !a->set)
+                    return false;
+                v = a->get(eff.audio_transform);
+            } else {
+                return false;
+            }
+
+            std::lock_guard<std::mutex> lock(binding_lock_);
+            auto&                       ov = drivers_[layer].dominant;
+            ov.owner                       = "hold";
+            // A single NUMBER goes in `values`; anything else -- a name, a boolean, a vector --
+            // goes in `steps`, which is the same split the timeline uses and for the same
+            // reason: only a number can be interpolated, and the overlays are read by one
+            // writer that has to know which it has.
+            if (v.size() == 1 && (boost::get<double>(&v[0]) || boost::get<int32_t>(&v[0]) ||
+                                  boost::get<int64_t>(&v[0]))) {
+                double d = 0;
+                if (const auto* dd = boost::get<double>(&v[0]))
+                    d = *dd;
+                else if (const auto* ii = boost::get<int32_t>(&v[0]))
+                    d = *ii;
+                else
+                    d = static_cast<double>(*boost::get<int64_t>(&v[0]));
+                ov.values[t.path] = d;
+            } else {
+                ov.steps[t.path] = v;
+            }
+            return true;
+        });
+    }
+
+    std::future<bool> release_field(int layer, const std::string& path)
+    {
+        return executor_.begin_invoke([this, layer, path] {
+            std::lock_guard<std::mutex> lock(binding_lock_);
+            const auto                  it = drivers_.find(layer);
+            if (it == drivers_.end())
+                return false;
+            auto&      ov      = it->second.dominant;
+            const auto removed = ov.values.erase(path) + ov.steps.erase(path);
+            if (ov.empty())
+                ov.owner.clear();
+            return removed > 0;
+        });
+    }
+
     std::future<std::vector<std::pair<std::string, stage::timeline_status>>> timeline_list()
     {
         return executor_.begin_invoke([this] {
@@ -1598,7 +1777,16 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<frame_transform> get_current_transform(int index)
     {
-        return executor_.begin_invoke([=, this] { return tweens_[index].fetch(); });
+        // THE EFFECTIVE TRANSFORM, not the constant, because every caller is a READER: the
+        // `MIXER ... ` read forms and `MIXER FIELD <name>` with no value. A read that answered
+        // the operator's constant while the picture showed a driver's value would make the two
+        // facades disagree about what is on air -- and `binding-lfo`'s "both facades agree"
+        // check found exactly that the moment bindings moved into an overlay, because until
+        // then the binding WAS the constant.
+        //
+        // A writer that needs the constant does not come through here: `apply_transform` gets
+        // the tween handed to its closure, which is the value it is composing onto.
+        return executor_.begin_invoke([=, this] { return effective_transform(index); });
     }
 
     /// Offer an event to whichever layer wants it, topmost first.
@@ -2005,6 +2193,21 @@ std::future<stage::timeline_status> stage::timeline_state(const std::string& nam
 std::future<std::vector<std::pair<std::string, stage::timeline_status>>> stage::timeline_list()
 {
     return impl_->timeline_list();
+}
+
+std::pair<std::string, std::string> stage::driver_of(int layer, const std::string& path) const
+{
+    return impl_->driver_of(layer, path);
+}
+
+std::future<bool> stage::hold_field(int layer, const std::string& path)
+{
+    return impl_->hold_field(layer, path);
+}
+
+std::future<bool> stage::release_field(int layer, const std::string& path)
+{
+    return impl_->release_field(layer, path);
 }
 
 void stage::set_timeline_store(std::shared_ptr<timeline::timeline_store> store)
