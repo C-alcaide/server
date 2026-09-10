@@ -27,7 +27,7 @@
 > `timeline-targets` (§12, a **1 LSB picture** check), `timeline-cue` (§13),
 > `timeline-transport` and `timeline-loop` (§14), `timeline-seek-compile` (§15),
 > `timeline-chase` (§16), `api-atframe` (§18), `timeline-crosschannel` (§19),
-> `timeline-media` (§20), `timeline-cost` and `publication-cost` (§21). Plus `conformance`
+> `timeline-media` and `timeline-frame` (§20), `timeline-cost` and `publication-cost` (§21). Plus `conformance`
 > 100/100 within 1 LSB and
 > `grading` 48/48, because this edits the tick
 
@@ -1577,10 +1577,55 @@ commit:
   *successful* PUT echoes the resolution, which names every object — so it passed with the
   refusal removed. It now reads the structured `details` array.
 
-**Not measured:** whether the picture is the right frame **of** the clip. That needs a
-frame-pinned capture against a known frame of a marker clip, which `api-readiness` does not do
-either. And there is no slow-source fixture, so a build that is slow for network reasons is
-unmeasured.
+### 20.5 The clip runs in step with the document — measured off the picture
+
+§20.4 recorded "whether the picture is the right frame **of** the clip" as unmeasurable. It is
+measured now, by **`timeline-frame`**, and the way it became possible is worth recording: the
+harness has **two** frame-number readers and only one of them survives scaling.
+
+`read_frame_number` template-matches the digit panel `testsrc2` draws, and returns nothing on a
+downscaled capture — a ~10 px glyph becomes ~4 px, and it refuses rather than guesses.
+`read_frame_marker` reads a **16-cell black/white strip whose geometry is expressed as fractions
+of the raster**, with sentinels at both ends and a parity cell, drawn one `drawbox` per cell with
+an `enable` on `bitand(n, bit)` — so the marker is a **pure function of the frame number** and
+cannot drift out of step with the frame it labels. A cell is 3% of the width at any size.
+
+Three arms, each its own server because the raster is a startup config:
+
+| arm | ogl | vulkan |
+| :--- | ---: | ---: |
+| HD clip in an HD channel | **+2.0** frames | **+2.0** |
+| 4K clip in an HD channel — the mixer downscales by four | **+2.0** | **+2.0** |
+| 4K clip in a 4K channel | **+2.0** | **+2.0** |
+
+**A constant +2.0 frames in all nine samples of every run, at every raster and on both mixers.**
+Constant is the point: that is the capture pipeline, and it is the same +2 `api-atframe` reports
+for a batch. A clip that started late would lag *permanently* and by exactly how late it was.
+
+**What it measures is being IN STEP, not "the first frame is 0."** A producer that is not ticked
+does not advance, so the first frame *delivered* is frame 0 whether it was prerolled or not — it
+is merely late. Only the lag discriminates. Each sample therefore brackets the capture between
+two position reads and converts the bracket to an expected frame range; comparing against a
+single position read would be measuring the harness's own latency.
+
+**And the marker survives a 4× downscale**, which is asserted rather than assumed because it is
+exactly the case the digit reader provably cannot do.
+
+**What this still does not discriminate: preroll on or off, for a local clip.** The build is
+~40 ms — about one frame — and the bracket is ±4, so a build-at-the-cue start is inside it.
+`timeline-media`'s **ordering** check remains the preroll gate (`ready` observable before the
+cue); this one is the in-step and marker-survival gate. A slow source would separate them, and
+there is still no such fixture.
+
+**A correction to §20.4's own reasoning:** it said this needed a marker clip the harness did not
+have. The harness has had `frame_number.marker_filter` for a while and `media/generate_media.py`
+calls it at three sites — but **the fixtures on this box predate it**, which is
+`output_checks.py`'s "media generated before `marker_filter` existed" seen from the reading end.
+Measured: `m_prores_422.mov`, `prores_static.mov`, `bars.mov` and `L_h264_8_prog.mp4` all answer
+`no marker band: sentinel contrast … is below 40.0`. `core/marked_clip.py` writes its own HD and
+4K fixtures rather than regenerating 235 files that other batteries are gated against.
+
+**Not measured:** a slow-source build, for want of a fixture.
 
 Also green, both mixers: `conformance` **100/100 within 1 LSB**, `grading` **48/48** (with
 `--sequential`, see §19.4), `api-readiness` 7/7, and the eleven other timeline batteries.
@@ -1788,7 +1833,7 @@ here so the numbers above are read as what they are.
 | what | why not, and what would close it |
 | :--- | :--- |
 | **Whether two channels' PICTURES change on the same frame** (§18.4, §19.4) | Both are driving before either renders again, so the state is provably aligned. Proving the *picture* needs a capture per channel on a named frame, which nothing in this harness can take. |
-| **Whether a clip's picture is the right FRAME of the clip** (§20.4) | Needs a frame-pinned capture against a known frame of a marker clip. `api-readiness` does not do this either, so it is a harness capability gap rather than a timeline one. |
+| ~~Whether a clip's picture is the right FRAME of the clip~~ (§20.5) | **MEASURED** by `timeline-frame`, reading the fractional block marker out of the picture: a constant **+2.0** frames at HD-in-HD, 4K-in-HD and 4K-in-4K, both mixers. What it does **not** discriminate is preroll on/off for a local clip — the build is about one frame and the bracket is ±4. |
 | **A slow-source build** (§20.4) | `build_ms` is 40 ms for a local file. There is no fixture that builds slowly, so the "a clip that is not ready does not hold the cue" path is exercised only by `preroll_frames: 0`. |
 | **Where the resolve pass's cost goes** (§21.2) | It has none at 20× the work, so a regression making it ten times slower would pass `timeline-cost`. Nothing measures the pass itself. |
 | ~~Where the BINDING path's cost goes~~ (§21.2) | **ATTRIBUTED** — it is the state publication. 17 leaves per binding against 4.2 per keyed field, into a `flat_map` rebuilt whole each tick; removing it takes 128 bindings to 0 late frames on both mixers, and at equal leaf counts (187 vs 188) the two mechanisms are equally free. `reserve()` is done and made no measurable difference. |
