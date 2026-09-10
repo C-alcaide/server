@@ -1,6 +1,38 @@
 CasparVP — Unreleased
 ==========================================
 
+### A timeline key that names no parameter is refused at PUT, not stored and dropped on air
+
+**Behaviour change, and it will reject documents the previous build accepted.** A PUT whose curve
+or `content` step named a path the registry does not know — `{"opacty": 0.9}` — was **stored**,
+answered `200`, and echoed back by `GET`. Nothing then drove anything: `resolve_drivers`' target
+lookup returned no descriptor and the write was skipped, in silence, on every tick for the life of
+the show. A typo in a cue was therefore discovered **on air**.
+
+`check_path`, over `core::address::parse`, now runs at both decoders — `decode_curve` for numeric
+ramps and `decode_values` for `content` and `keyframes` steps — and a document with an unknown key
+is `timeline_invalid`, is **not stored**, and comes back with `details[0]` naming both the path and
+the object it is in. `transform_fields.h` has claimed this validation since the legacy-alias
+decision; for one release it was intent rather than code.
+
+`producer/*`, `previz/*` and a leading `mixer/` all still pass. Three of the five registries are
+live — a producer parameter exists only while that producer is on that layer — so those resolve to
+a *kind* with a null `field_meta` by design, and the check asks whether the path classified rather
+than whether it produced a descriptor.
+
+**A second wire change in the same commit: a per-object fault is `timeline_invalid` where it used
+to be `bad_request`.** That covers a malformed key, an unknown easing name, a group `loop`, and now
+an unknown path. `bad_request` is left for the envelope alone — no `name`, a `channel` below 1, a
+name in the path disagreeing with the one in the body — which is the class with no object to point
+at. The distinction is what `details` already drew: a client should not have to read the message to
+tell "my JSON is malformed" from "highlight object `lt1`". Whether a rejected document is *stored*
+is a separate axis and unchanged: a resolution fault is kept so the author can read it back, a
+decode fault leaves nothing behind.
+
+Measured: `api-timeline` **31/31 on both mixers**; the four new checks fail against the previous
+binary, and so does the pre-existing *"the listing names it"* check, because the two documents that
+should have been refused were sitting in the store.
+
 ### A realistic channel publishes 78 leaves, so the publication fixes are not worth building
 
 The open question from the previous two entries -- the publication is the per-tick cost, the

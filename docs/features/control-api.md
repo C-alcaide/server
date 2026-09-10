@@ -163,16 +163,27 @@ GET    /v1/timeline/{name}/resolved?at=  instances, and the owner of each layer 
 POST   /v1/timeline/{name}/{verb}        drive it -- play pause stop seek rate loop go next previous
 ```
 
-Documented in [`timeline.md`](timeline.md) §5 and §18. Six things about it are properties of
+Documented in [`timeline.md`](timeline.md) §5 and §18. Seven things about it are properties of
 this API rather than of the timeline:
 
 * **`DELETE` is the only one here**, because a timeline is the first thing this API *owns*.
   Everything else it writes is a property of something the server already had, and there is no
   meaning to deleting an opacity.
-* **An invalid document is `timeline_invalid` and is STORED**, with one fault per object naming
-  the object and quoting the reason. `bad_request` would mean "your request was malformed"; this
-  means "the server understood you and the document does not resolve", and a client acts on those
-  differently.
+* **A bad document is `timeline_invalid`; `bad_request` is only for the envelope.** The line is
+  which question the client got wrong. `bad_request` means "this was not a document" — no `name`,
+  a `channel` below 1, a name in the path disagreeing with the one in the body — and has no object
+  to point at. `timeline_invalid` means "the server understood you and the document has a fault at
+  object X", and carries `details`: one entry per fault with `object`, `expression` and `reason`,
+  which is what an editor highlights.
+* **Whether a rejected document was STORED is a second axis, and a `GET` answers it.** A
+  **resolution** fault is kept, so the author can read back what they sent with the faults against
+  it — an expression legitimately names an object not written yet, and a document whose resolution
+  failed is inert rather than dangerous. A **decode** fault leaves nothing behind: a malformed key,
+  an unknown easing, or **a key that names no parameter**. A path names a registry rather than
+  another object, and the registry does not change while the author types — so storing it helps
+  nobody, while a stored typo would be dropped in silence by the tick, on air. Every key is
+  checked against `address::parse` at PUT, at both decoders; `producer/*` and `previz/*` paths
+  pass, because those registries are live and are resolved on the layer at evaluation time.
 * **A PUT moves `structure_revision`.** The store's revision counter is mixed into every stage's
   structure fingerprint, so the same re-walk a client already does when a layer appears also picks
   up a document changing. Without it a PUT would be invisible to anything reading the tree.

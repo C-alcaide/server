@@ -392,17 +392,49 @@ has two.
 what to send: a number in every other position in the document is a time, and `while: 1` meaning
 "always" is exactly the ambiguity §4.2's separate parser exists to remove.
 
-### 5.2 An invalid document is stored
+### 5.2 A bad document: `timeline_invalid`, and whether it is stored depends on which half
 
-`timeline_invalid` rather than `bad_request`, and the document is kept. A half-authored show is
-the normal state of a document being edited, and a client cannot show the author their mistake if
-the server threw the document away — so `GET` returns what was sent with the faults attached, one
-per object, carrying `object`, `expression` and `reason`. Nothing evaluates a document whose
-resolution failed, so an invalid one is inert rather than dangerous. `docs/faults.yaml` lists the
-usual causes.
+`timeline_invalid` rather than `bad_request` whenever the fault is **inside a named object**, and
+the reply carries `details` — one entry per fault with `object`, `expression` and `reason` — so a
+client highlights the thing the author typed instead of reporting that the document is invalid.
+Only the **envelope** is `bad_request`: no `name`, a `channel` below 1, a `rate` that is not a
+number, or a name in the path disagreeing with the `name` in the body. Those have no object to
+point at, and guessing which of two names is right would store the document under one the client
+does not expect.
 
-A **name in the path that disagrees with the `name` in the body** is `bad_request`. Guessing
-which one is right would store the document under a name the client does not expect.
+**Whether the document is STORED is a separate axis**, and a `GET` afterwards tells the client
+which happened:
+
+| the fault | stored? | why |
+| :--- | :--- | :--- |
+| **resolution** — a reference to an object that does not exist, a cycle, an end before its start | **yes** | a half-authored show is the normal state of a document being edited, and an expression legitimately names an object the author has not written yet. `GET` returns what was sent with the faults attached; nothing evaluates a document whose resolution failed, so an invalid one is inert rather than dangerous |
+| **decode** — a malformed key, an unknown easing name, **a path that names no parameter**, a clip that cannot be built, a group `loop` | **no** | a path names a *registry*, not another object, and the registry does not change while the author types. There is no edit in progress for storing it to help — and a stored typo is dropped in silence by the tick, on air |
+
+`docs/faults.yaml` lists the usual causes of each.
+
+### 5.2.1 A key is validated against the registry at PUT — and that was intent before it was code
+
+`transform_fields.h` has said since the legacy-alias decision that "a path is the only thing a
+document may name, validated against the live registry at PUT". For one release nothing did it.
+Neither decoder consulted anything, so `{"opacty": 0.9}` was **stored**, answered `200`, echoed
+back by `GET`, and then dropped in silence by `resolve_drivers`' `if (!target.meta) return;` on
+every tick for the life of the show.
+
+That is the **202-and-no-picture** class — the one `stage_fields.h`, `producer_params.h` and
+`stage_write::declined` each exist to prevent — and a document is the worst surface for it,
+because a typo in a cue is discovered on air rather than at the moment it is typed.
+
+`check_path`, over `address::parse`, is called at **both** decoders: `decode_curve` for numeric
+ramps and `decode_values` for `content` and `keyframes` steps. Two functions, two chances to
+forget, so the battery drives each of them separately.
+
+**What must still be accepted is the reason the check asks `bool(target)` and not
+`target.meta`.** Three of the five registries are live — a producer parameter exists only while
+that producer is on that layer, a screen only if the channel's previz renderer has one — so those
+come back *classified with a null `meta`*, by `target.h`'s own design. A validator written as
+"must resolve to a `field_meta`" would refuse exactly the two kinds a document most wants to
+drive, which is what the battery's over-refusal guard exists to catch: `producer/level`,
+`previz/camera/position.1`, a `mixer/` prefix and `volume` must all still pass.
 
 ### 5.3 What makes a PUT observable
 
@@ -425,7 +457,7 @@ touch-everything-and-delete-the-PCH sweep on every edit. `core` has a PCH. So th
 
 ### 5.5 Where it is checked
 
-**`api-timeline`, 25/25 on both mixers.** Its reference document is built so that a wrong answer
+**`api-timeline`, 31/31 on both mixers.** Its reference document is built so that a wrong answer
 cannot look right: a transparent anchor with three dependents; two objects sharing a class that
 do *not* nest, so `.lt.start` and `.lt.end` come from **different** members and a resolver that
 took one member's span fails one of the two checks; two objects overlapping on one layer, so the
@@ -433,7 +465,12 @@ owner at t=20 tests last-started-wins rather than document order; and a duration
 so the derived end tests the rate conversion.
 
 **Shown failing first:** removing the store's revision from the structure fingerprint fails *"a
-PUT moves structure_revision"* — `2 -> 2` — and leaves the other 24 passing.
+PUT moves structure_revision"* — `2 -> 2` — and leaves the others passing. The path-validation
+block was shown failing against the shipped binary the same way: `ok` on the refusal, empty
+`details`, `ok` on the GET that should have found nothing — and it also turned the pre-existing
+*"the listing names it"* check red, because two documents that should have been refused were
+sitting in the store. An existing check catching the same defect from another angle is worth more
+than the new one; it is why the old check was left alone rather than made tolerant.
 
 **And it found a real defect on its first run, in commit 1's code.** Thirty seconds came back as
 `29.999999999999996`. `to_seconds` divides, which is exact in IEEE arithmetic, and **this tree is

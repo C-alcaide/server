@@ -46,15 +46,28 @@ enum class api_code
     batch_op_failed,          ///< with the failing index and that op's own status
     not_supported_on_backend, ///< the fork's own: one mixer implements a field, the other does not
     timeline_not_found,       ///< no document by that name
-    timeline_invalid,         ///< the document was stored and does not resolve
+    timeline_invalid,         ///< the document is bad; whether it was STORED depends on which half
                               ///<
-                              ///< STORED, and that is the difference from `bad_request`: the
-                              ///< client can GET back what it sent and see the errors against
-                              ///< it, because a half-authored show is the normal state of a
-                              ///< document being edited. `details` carries one entry per fault
-                              ///< with `object`, `expression` and `reason`, so a client can
-                              ///< highlight the expression the author typed rather than
-                              ///< reporting that the document is invalid.
+                              ///< TWO CASES, and the reply says which by whether a GET finds the
+                              ///< document afterwards:
+                              ///<
+                              ///< A RESOLUTION fault -- a reference to an object that does not
+                              ///< exist, a cycle, an end before its start -- is STORED. That is
+                              ///< the difference from `bad_request`: the client can GET back what
+                              ///< it sent and see the errors against it, because a half-authored
+                              ///< show is the normal state of a document being edited, and an
+                              ///< expression legitimately names an object not written yet.
+                              ///<
+                              ///< A DECODE fault -- a malformed key, an unknown easing, a PATH
+                              ///< THAT NAMES NO PARAMETER -- leaves nothing behind. A path names a
+                              ///< registry, not another object, and the registry does not change
+                              ///< while the author types, so there is no edit in progress for
+                              ///< storing it to help.
+                              ///<
+                              ///< `details` carries one entry per fault with `object`,
+                              ///< `expression` and `reason`, so a client can highlight the
+                              ///< expression the author typed rather than reporting that the
+                              ///< document is invalid.
     unauthorized,
     bad_request,
     internal,

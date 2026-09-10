@@ -312,11 +312,18 @@ void apply_enables(image_transform& tf, const field_desc& field);
 ///    convenience on top of a lookup the client can already do, and it would put a deprecated
 ///    spelling into the one grammar the timeline has.
 ///
-/// So a path is the only thing a document may name, validated against the LIVE registry at PUT.
-/// If that decision is revisited, the lookup is five lines and `keyframe_names` is still there
-/// to build it from. The keyframes module
-/// compares it against its frozen list so a rename or a dropped entry fails at startup
-/// rather than silently changing what a saved timeline animates.
+/// So a path is the only thing a document may name, validated against the live registries at PUT
+/// -- by `check_path` in `api_timeline.cpp`, over `address::parse`, at both decoders. That
+/// sentence was intent rather than code for one release: neither decoder consulted anything, so a
+/// typo was stored, answered 200 and then dropped in silence by `resolve_drivers` on every tick.
+/// It is REFUSED now, and a GET afterwards finds nothing -- which is the opposite of what an
+/// unresolvable EXPRESSION gets, because an expression names another object and a document
+/// mid-edit legitimately refers to one not written yet, while a path names a registry that does
+/// not change while the author types.
+///
+/// If the alias decision is revisited, the lookup is five lines and `keyframe_names` is still
+/// there to build it from -- and it would then have to be applied in `check_path` too, or a
+/// legacy name would be refused before anything got the chance to translate it.
 
 
 /// WHAT A TIMELINE DOCUMENT CAN DO WITH THIS FIELD: `"true"`, `"step"` or `"false"`.

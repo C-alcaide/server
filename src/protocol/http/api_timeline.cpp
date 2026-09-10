@@ -13,6 +13,7 @@
 
 #include "json_state.h"
 
+#include <core/address/target.h>
 #include <core/timeline/curve.h>
 #include <core/timeline/timeline_store.h>
 
@@ -230,10 +231,47 @@ bool decode_enable(const json::value& v, const tl::parse_context& ctx, tl::enabl
     return true;
 }
 
+/// A PATH IS VALIDATED HERE, at PUT, and a document that names nothing is REFUSED.
+///
+/// `transform_fields.h` records the rule -- "a path is the only thing a document may name,
+/// validated against the LIVE registry at PUT" -- and for one release that was intent rather
+/// than code. Neither decoder consulted `address::parse`, so `"opacty"` was stored, answered
+/// 200, echoed back by GET, and then dropped in silence by `resolve_drivers`'s
+/// `if (!target.meta) return;` on every tick for the life of the show. That is the
+/// 202-and-no-picture class that `stage_fields.h`, `producer_params.h` and
+/// `stage_write::declined` each exist to prevent, and a document is the one surface where it is
+/// worst: a typo in a cue is discovered on air.
+///
+/// REFUSED rather than stored-with-a-fault, which is the opposite of what an unresolvable
+/// EXPRESSION gets. The precedent is the unknown-easing check in `decode_curve`, and the
+/// distinction is real: an expression names another OBJECT, so a document mid-edit legitimately
+/// refers to something not written yet and storing it lets an author GET back what they sent. A
+/// path names a REGISTRY, which does not change while the author types. Storing one under a name
+/// a show will trigger buys nothing.
+///
+/// WHAT MUST STILL PASS is the reason this checks `bool(target)` and not `target.meta`. Three of
+/// the five registries are live -- a producer parameter exists only while that producer is on
+/// that layer, a screen only if the previz renderer has one -- so those come back CLASSIFIED
+/// with a null `meta`, by `target.h`'s own design. A validator written as "must have a
+/// `field_meta`" would refuse exactly the two kinds a document most wants to drive.
+bool check_path(std::string_view path, std::string& reason)
+{
+    if (core::address::parse(path))
+        return true;
+    reason = "'" + std::string(path) +
+             "' names no parameter. A key is an address path -- `opacity`, "
+             "`fill_translation.0`, `volume`, `producer/<param>`, `previz/camera/position.1`, "
+             "`previz/screen/<name>/pos_x` -- and every one of them is listed, with its type and "
+             "its `animatable` flag, in the descriptor at /v1/tree";
+    return false;
+}
+
 bool decode_values(const json::object& o, std::map<std::string, core::monitor::vector_t>& out,
                    std::string& reason)
 {
     for (const auto& kv : o) {
+        if (!check_path(kv.key(), reason))
+            return false;
         core::monitor::vector_t vec;
         const auto&             v = kv.value();
         const auto              push = [&](const json::value& e) {
@@ -321,6 +359,8 @@ bool decode_curve(const json::value& v, const tl::parse_context& ctx, const std:
                          "go in \"content\" or \"keyframes\", which merge rather than interpolate";
                 return false;
             }
+            if (!check_path(pv.key(), reason))
+                return false;
             key.values[std::string(pv.key())] = d;
         }
         out.add(std::move(key));
@@ -988,6 +1028,20 @@ api_reply parse_timeline_document(const std::string& body, const std::string& na
     if (!objs || !objs->is_array())
         return api_reply::fail(api_code::bad_request, "a timeline needs an \"objects\" array");
 
+    // A PER-OBJECT DECODE FAULT IS `timeline_invalid`, NOT `bad_request`, and the line between
+    // the two is which QUESTION the client got wrong.
+    //
+    // Everything above this loop is the envelope -- a missing name, a channel below 1, a rate
+    // that is not a number, a name in the path disagreeing with the one in the body. Those are
+    // `bad_request`: the request was not a document at all, and there is no object to point at.
+    // From here down the request IS a document and the fault is INSIDE it, at a named object,
+    // with an expression or a key the author typed. That is the distinction `details` already
+    // draws -- one entry per fault with `object`, `expression` and `reason` -- and answering
+    // `bad_request` while carrying it leaves a client unable to tell "my JSON is malformed" from
+    // "highlight object 'lt1' in the editor" without parsing the message.
+    //
+    // Both halves still REFUSE and store nothing, which is the other axis and is independent of
+    // the code: see `api_status.h` for why a decode fault differs from a resolution fault there.
     for (const auto& ov : objs->as_array()) {
         tl::timeline_object obj;
         if (const auto e = decode_object(ov, ctx, out.defaults.easing, obj); e.bad()) {
@@ -995,7 +1049,7 @@ api_reply parse_timeline_document(const std::string& body, const std::string& na
             d["object"]     = e.object;
             d["expression"] = e.expression;
             d["reason"]     = e.reason;
-            return api_reply::fail(api_code::bad_request,
+            return api_reply::fail(api_code::timeline_invalid,
                                     (e.object.empty() ? std::string("object") : "object '" + e.object + "'") +
                                         ": " + e.reason,
                                     json::array{d});
