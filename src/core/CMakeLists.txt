@@ -65,6 +65,8 @@ set(SOURCES
 		binding/binding_math.cpp
 
 		timeline/curve.cpp
+		timeline/expression.cpp
+		timeline/resolver.cpp
 		timeline/time.cpp
 
 		producer/layer.cpp
@@ -121,6 +123,9 @@ set(HEADERS
 		binding/binding_math.h
 
 		timeline/curve.h
+		timeline/expression.h
+		timeline/model.h
+		timeline/resolver.h
 		timeline/time.h
 
 		producer/producer_params.h

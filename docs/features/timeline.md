@@ -1,6 +1,7 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–4 of 19 shipped (the time base, addressing, the engine). Nothing
+> **State:** **in progress** — commits 1–5 of 19 shipped: the time base, addressing, the engine,
+> and the model, grammar and resolver. Nothing runs in the tick yet. Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
 > each section here lands with the commit that builds it.
 > **Commands:** none yet. The `TIMELINE` family and `HOLD`/`RELEASE` arrive with commit 6; the
@@ -215,5 +216,132 @@ what D2 replaces:
 
 ---
 
-*§4 Model, §5 Precedence, §6 Transport, §7 API and AMCP, §8 Verification, §9 Known gaps — arrive
-with commits 5–19.*
+## 4. The model, the grammar, and the resolver
+
+Three files, all pure: `model.h` says what a timeline is, `expression.*` says when an object is
+active, `resolver.*` turns the second into absolute times. Nothing here touches a clock, a
+channel or the stage, which is what lets `GET …/resolved?at=` answer for any position without
+running the show — the client draws what the server computed rather than reimplementing the
+collision rules and disagreeing (`L28`).
+
+### 4.1 What a timeline is
+
+A tree of objects, each with an `enable` **expression** rather than a start and a duration. Groups
+nest and carry their own `time_remap`, so a sequence can be slowed without touching its contents.
+Two properties are worth naming because a straight port of a video NLE would not have them:
+
+**An object's layer may be empty.** A group, or a bare object, with no layer is a **transparent
+anchor**: it occupies time, other objects reference its start and end, and it writes nothing.
+That is what makes `#interview.end` expressible without inventing a layer to hang the interview
+off — `O22` of the study asks for it, and the cue-stack work needs it.
+
+**Time is local and composed.** A key inside a group inside a group is at its own local time; the
+remaps compose outermost-first to place it. Nothing stores an absolute time except the resolver's
+output, so moving a group moves its contents for free.
+
+### 4.2 The grammar, v1
+
+| written | means |
+| :--- | :--- |
+| `12.5` | seconds |
+| `300f` · `00:00:12:00` · `00:01:00;02` · `4bars` | frames, timecode, drop-frame timecode, bars — against the document's `rate` and `tempo` |
+| `#interview` | that object's **start**; the bare form means `.start` |
+| `#interview.start` · `.end` · `.duration` | explicit |
+| `.lowerthird.start` | the **earliest** start of every object carrying that class |
+| `.lowerthird.end` | the **latest** end of them |
+| `#interview.end + 5` | one offset, a literal, `+` or `-` |
+| `(#a.end) + 5` | parentheses, so a client can round-trip its own formatting |
+| `1` *(in `while` only)* | always active |
+| `#interview` *(in `while`)* | active exactly while that object is |
+
+**`while` is a different vocabulary, and it has its own parser.** In a time position `1` is one
+second; in a `while` position it is *always*. One parser accepting both read every `end: "1"` as
+always-on, which resolved to time zero and gave every repeating object a zero-length span — found
+by the resolver's repeating case, a long way from the cause. `parse_while_expr` also refuses a
+class, because a class's earliest start and latest end belong to different objects and there is no
+single span to be active for.
+
+**Two parse rules that are not obvious and both cost a round of the self-test:**
+
+* **The offset comes off before anything classifies the expression.** Splitting it only after the
+  leading `#` was seen made `(#a.end) + 5` unparseable — it starts with `(` and ends with `5`, so
+  the paren-stripper left it alone and the classifier read the whole string as a literal.
+* **A sign is an operator only when space-separated.** Without that rule `#lower-third` parses as
+  `#lower` minus `third`, and an id with a hyphen in it is the most natural id there is.
+
+`5 + 3` is **refused** rather than answered: arithmetic between two literals is something the
+author expects to be added, and v1 does not do it.
+
+**Deferred, each because it needs something v1 has not got:** `$layer` references (the resolver
+would have to know what is playing), reference-to-reference arithmetic (needs an expression tree
+rather than one offset), boolean `& | !` in `while` (needs a predicate evaluator), `*` and `/`
+(need units), and `seamless`.
+
+### 4.3 What `resolve` does
+
+Flatten the tree composing the remaps · index by id and by class, refusing a duplicate id ·
+order the objects by dependency, depth-first, reporting a cycle **by object** · evaluate in that
+order, so `#a.end + 5` is asked only once `a` has an end · expand a `repeating` spec into its
+instances · stable-sort by start.
+
+Four decisions inside that are choices rather than mechanics:
+
+**Last-started wins, after `priority`.** An operator firing a cue expects it to take over from
+whatever was running, and every product surveyed agrees. Earliest-start would make a long
+background object permanently shadow every cue fired during it. The sort is *stable*, so two
+simultaneous starts fall through to document order — a client-controlled tie-break rather than the
+standard library's.
+
+**An open end is open, not a large number.** Last-started-wins has to tell "runs until told" from
+"runs until 10:00", because a later object with a definite end must not be shadowed forever by an
+earlier one that is merely unfinished. A dependent of an open end **does not resolve**, and that
+is not an error either: firing the trigger re-resolves the document. The triggers a document waits
+on are published, so the transport knows which GO means something.
+
+**A disabled object still resolves its references.** It produces no instance and yet `#its.end`
+still answers, because switching an object off must not break the show around it — which deleting
+it would.
+
+**Over-determined and disagreeing is an error.** Any two of start, end and duration derive the
+third; all three given with `end != start + duration` is a document whose author believes two
+contradictory things, and answering with one of them is how a show goes wrong in a way nobody can
+debug.
+
+**`one_at_a_time` is computed, not authored.** A child of such a group starts where the previous
+sibling ended, rather than the document carrying `#prev.end` on every child — otherwise inserting
+one cue in the middle means rewriting every expression after it.
+
+### 4.4 Where it is checked
+
+`resolver_self_test()` at boot, which runs `expression_self_test()` first: ten resolver cases and
+about fifty grammar cases, over the `#a.end` chain (and the same document declared **backwards**,
+which must land identically), a class reference with an offset, priority against last-started, a
+transparent anchor with three dependents, a group at rate 2 with the local-time inverse asserted,
+`repeating` count 3, a three-cue `one_at_a_time` stack, an open end before and after its trigger
+fires, a disabled object's references, and five named failures — a cycle, a duplicate id, an
+unknown reference, an end before its start, and the over-determined case.
+
+**Shown failing first.** Inverting the tie-break to earliest-start aborts the boot naming *"during
+the cue, LAST-STARTED wins — not the long background object"*. **One** named failure, not the two
+predicted: the self-test stops at the first, and structurally only that check discriminates —
+the priority case passes either way, because priority outranks the tie-break in both directions.
+Two more were found by the self-test during development rather than by prediction: the
+parenthesised-offset parse, and `local_at` double-counting the composed offset, which put a child
+of a group offset by ten seconds at local time −18 s.
+
+**No battery, and none is possible yet.** `resolve` is not reachable from outside the process
+until commit 7 adds the routes; the boot self-test is the whole gate for this commit, and it is
+run on every start rather than on demand. `api-tree`, `api-roundtrip`, `binding-lfo` and
+`keyframes-legacy` were run to show nothing moved.
+
+**The JSON codec is not here.** The plan put `json.*` in `core/timeline`, which would drag
+Boost.JSON into a target that has a precompiled header — `protocol_http` deliberately has none
+for exactly that reason, and its `boost_prelude.h` records the four seconds per translation unit
+it costs. The codec lands with the routes in commit 7, in `protocol_http`, where Boost.JSON
+already compiles. The document **type** is in core, which is what AMCP and the HTTP layer both
+need.
+
+---
+
+*§5 Precedence, §6 Transport, §7 API and AMCP, §8 Verification, §9 Known gaps — arrive with
+commits 6–19.*

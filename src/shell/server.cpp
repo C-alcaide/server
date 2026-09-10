@@ -52,6 +52,7 @@
 #include <core/mixer/audio/audio_analysis.h>
 #include <core/address/target.h>
 #include <core/timeline/curve.h>
+#include <core/timeline/resolver.h>
 #include <core/stage/stage_math_self_test.h>
 #include <core/timeline/time.h>
 
@@ -202,6 +203,7 @@ struct server::impl
         core::timeline::time_self_test();
         core::address::target_self_test();
         core::timeline::curve_self_test();
+        core::timeline::resolver_self_test();
         accelerator::ogl::run_compose_self_test();
 #ifdef ENABLE_VULKAN
         // GUARDED, because the Vulkan accelerator's sources are only compiled when
