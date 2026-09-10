@@ -55,12 +55,20 @@ flowchart LR
     end
     sources --> TICK{{"the channel's TICK<br/><i>stage executor</i>"}}
     TICK --> XF["map: IN -> curve -> GAIN -> MIN..MAX -> LAG"]
-    XF --> T1["a mixer field<br/><i>tween destination</i>"]
+    XF --> T1["a mixer field<br/><i>patched into the tween, both ends</i>"]
     XF --> T2["a producer parameter<br/><i>ISF / OFX setter</i>"]
     T1 --> PIC(["the picture, this frame"])
     T2 --> PIC
     TICK -.->|"published every tick"| PUB[("/channel/n/stage/binding/id/value<br/>/channel/n/stage/source/name/channel")]
 ```
+
+**How the write lands (changed 2026-09-10).** A binding used to write its field by *replacing* the
+layer's whole tween with a zero-duration one — correct for the bound field, destructive for every
+other: an operator's `MIXER 1-10 OPACITY 0.2 50 linear` in flight on the same layer was cut to its
+destination on the next tick an LFO wrote brightness. It now goes through
+`tweened_transform::patch`, which edits *both* ends of the tween in place, so the bound field is
+live this tick and every other field keeps interpolating exactly as it was. Measured by
+`cli.py timeline-tween-survives`: the fade fits its ramp with the binding running.
 
 ### 1.1 Two decisions that are not preferences
 

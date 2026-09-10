@@ -1,6 +1,27 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: a binding no longer cuts an in-flight `MIXER <duration>` tween on its layer
+
+`MIXER 1-10 OPACITY 0.2 50 linear` and an LFO bound to brightness on the same layer: the fade
+snapped to 0.2 on the next tick the binding ran. `apply_binding` wrote its field by replacing the
+layer's whole `tweened_transform` with a zero-duration one — right for the bound field, and it
+discarded the running interpolation of every other. `tweened_transform` kept `source_` private, so
+the writer could not do better from outside.
+
+`tweened_transform::patch(edit)` applies one edit to **both** ends of the tween in place: the bound
+field is live this tick and constant across the remaining tween, every other field keeps
+interpolating as it was. Bindings use it now; the timeline resolver that replaces `KEYFRAMES` will
+use it too (that engine has the same collapse, and goes in the same series).
+
+**Measured**: new battery `timeline-tween-survives`, both mixers — a 50-frame linear opacity fade
+started with an LFO binding live on brightness **fits its ramp** (≥40 frame-stamped samples, max
+error ≤ 0.01, ≥5 distinct values) while the brightness stream still fits the sine. **Shown failing
+first** against the old writer: **1 distinct opacity value** on both mixers -- the fade lands in a
+single tick, so only the origin-to-destination change publishes at all. Rendered output
+changes for any existing config that combines a binding with a mixer tween on one layer — the tween
+now completes.
+
 ### Added: a client can ask what effects are installed — `/v1/catalog`, `INFO OFX`, `INFO ISF`
 
 Nothing enumerated either effect format. `CLS` lists media and `TLS` lists templates; an `.ofx`

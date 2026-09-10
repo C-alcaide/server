@@ -1012,29 +1012,31 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             return;
         }
 
-        // A mixer field. Written into the tween's DESTINATION, which is what the next `fetch()`
-        // interpolates towards -- and with a zero-duration tween, so the value is live on this
-        // very tick rather than one frame later.
+        // A mixer field. PATCHED into both ends of the layer's tween, so the value is live on
+        // this very tick and every OTHER field keeps interpolating exactly as it was.
+        //
+        // This used to replace the whole tween: `tween = tweened_transform(dst, dst, 0, linear)`.
+        // Correct for the bound field, and it cut every in-flight `MIXER ... <duration>` on the
+        // same layer to its destination on the next tick the binding wrote -- an operator's
+        // 50-frame opacity fade snapped the moment an LFO on brightness ran. `tweened_transform`
+        // kept `source_` private, so this function could not do better until `patch` existed.
+        // Measured by `timeline-tween-survives`: the fade fits its ramp with the binding live.
         const auto* f = fields::find(b.target);
         if (!f || !f->set || !f->get)
             return;
 
-        auto&           tween = tweens_[b.layer];
-        frame_transform dst   = tween.dest();
-
-        auto v = f->get(dst.image_transform);
-        if (v.size() != f->arity)
-            return;
-        v[std::min<std::size_t>(b.component, v.size() - 1)] = value;
-        if (!f->set(dst.image_transform, v))
-            return;
-
-        // The same auto-enable a `PUT` or a keyframe applies, so a bound blur radius switches
-        // blur on exactly as a written one does. Without it a binding on `blur_radius` would
-        // move a number that nothing reads.
-        fields::apply_enables(dst.image_transform, *f);
-
-        tween = tweened_transform(dst, dst, 0, tweener(L"linear"));
+        tweens_[b.layer].patch([&](frame_transform& t) {
+            auto v = f->get(t.image_transform);
+            if (v.size() != f->arity)
+                return;
+            v[std::min<std::size_t>(b.component, v.size() - 1)] = value;
+            if (!f->set(t.image_transform, v))
+                return;
+            // The same auto-enable a `PUT` or a keyframe applies, so a bound blur radius switches
+            // blur on exactly as a written one does. Without it a binding on `blur_radius` would
+            // move a number that nothing reads.
+            fields::apply_enables(t.image_transform, *f);
+        });
     }
 
     std::future<void> add_source(const std::string& name, std::shared_ptr<binding::source> src)

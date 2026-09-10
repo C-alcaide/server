@@ -27,6 +27,7 @@
 #include <core/mixer/image/blend_modes.h>
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -704,6 +705,19 @@ class tweened_transform
 
     frame_transform fetch();
     void            tick(int num);
+
+    /// Edit BOTH ends of the tween in place, with the same function, so a write to one field
+    /// lands immediately and every other field keeps interpolating exactly as it was.
+    ///
+    /// This exists because the two live writers -- bindings, and the timeline that is replacing
+    /// KEYFRAMES -- used to write a field by REPLACING the layer's whole tween with a zero-duration
+    /// one: `tween = tweened_transform(dst, dst, 0, linear)`. Correct for the field being written
+    /// and destructive for every other: an operator's `MIXER 1-10 OPACITY 0.2 50 linear` in
+    /// flight on the same layer was cut to its destination on the next tick an LFO wrote
+    /// brightness. `source_` is private, so no caller could do better from outside -- hence a
+    /// method. Applying the edit to `source_` as well as `dest_` is what makes the written field
+    /// constant across the remaining tween rather than ramping from a stale source value.
+    void patch(const std::function<void(frame_transform&)>& edit);
 };
 
 std::optional<chroma::legacy_type> get_chroma_mode(const std::wstring& str);

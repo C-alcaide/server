@@ -582,6 +582,12 @@ frame_transform tweened_transform::fetch()
 
 void tweened_transform::tick(int num) { time_ = std::min(time_ + num, duration_); }
 
+void tweened_transform::patch(const std::function<void(frame_transform&)>& edit)
+{
+    edit(source_);
+    edit(dest_);
+}
+
 std::optional<chroma::legacy_type> get_chroma_mode(const std::wstring& str)
 {
     if (boost::iequals(str, L"none")) {
