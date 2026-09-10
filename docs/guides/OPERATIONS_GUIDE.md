@@ -1058,7 +1058,97 @@ stay where you put it, that is where to look.
 
 A verb answers `202` and takes effect on the next frame. Several clients acting in the same frame
 are resolved as **stop beats pause beats play** — a stop can never lose to a play that arrived a
-moment later.
+moment later. And that is worth remembering at the keyboard: **if you stop a document and
+immediately play it again, you get a stop.** Both commands land in the same frame and the stop
+wins. Leave a frame between them.
+
+### Starting a document on a named frame, and starting two channels together
+
+Every verb above is also an HTTP `POST`, which is how you schedule one:
+
+```
+POST /v1/timeline/show/play    {"at_frame": 6280}
+POST /v1/timeline/show/seek    {"at": 12.5}
+POST /v1/timeline/show/loop    {"from": 20, "to": 45}     or  {"off": true}
+```
+
+**There is no channel in the path.** The document says which channel drives it, so you name the
+document and nothing else.
+
+`at_frame` holds the command until **that channel's** frame counter reaches the frame — read the
+counter from `channel/1/frame`. Two clients that never talk to each other can therefore start two
+channels on the same instant: both `POST` the same `at_frame`, and each channel holds its own copy
+until its own counter arrives. Measured spread: **zero frames**, gated at one.
+
+A frame that has already gone by **fires now**. That is deliberately the opposite of what
+`/v1/batch` does with a stale `at_frame`, where you get a refusal — a batch firing late writes
+stale *values* over whatever has happened since, and a document starting late merely starts late.
+
+You can also put verbs inside a batch, which is the form to use when a start has to land on the
+same frame as some field writes:
+
+```json
+POST /v1/batch
+{"at_frame": 6280, "ops": [
+  {"op": "timeline", "name": "show-left",  "verb": "play"},
+  {"op": "timeline", "name": "show-right", "verb": "play"},
+  {"op": "set", "path": "/channel/1/stage/layer/10/mixer/opacity", "value": 1.0}
+]}
+```
+
+`at_frame` goes on the **batch**, never on an op: a batch lands on one frame, and an op naming its
+own would break that.
+
+### One document, several channels
+
+A document declares one **home** channel and can address layers on others:
+
+```json
+{"channel": 1, "objects": [
+  {"id": "left",  "layer": "1-10", ...},
+  {"id": "right", "layer": "2-10", ...}
+]}
+```
+
+`TIMELINE 1 PLAY span` starts both. **`TIMELINE 2 PLAY span` is a 404** — the home channel owns
+the transport and no other channel can drive it, which is what stops two halves of one show from
+disagreeing about where they are.
+
+*Read the playhead from the home channel only.* `channel/1/stage/timeline/span/position` and
+`.../rate` exist; on channel 2 they do not. What channel 2 publishes is
+`.../timeline/span/follows` (the home channel's index), `.../state`, and `.../active/2-10`. There
+is **one** position for a show, deliberately — two would differ by up to a frame for no fault and
+you would have to choose.
+
+*A bare layer number means the home channel.* `"layer": "10"` in a document for channel 1 is
+channel 1's layer 10, never layer 10 everywhere.
+
+### A document can start a clip
+
+```json
+{"id": "vt1", "layer": "1-10", "enable": {"start": 3, "end": 12},
+ "clip": "bars", "action": "play", "preroll_frames": 25}
+```
+
+`action` is `play`, `load`, `pause`, `resume`, `stop` or `clear`. With a `clip`, **`play` loads
+and starts it; `load` leaves it in the background** so you can cue the next item without putting
+it up. Without a `clip` the action drives whatever you already had on the layer — which is how a
+document starts something somebody else cued.
+
+*`preroll_frames` is you telling the server how much warning the source needs.* The clip is built
+**before** its cue, on a worker thread, so the decode never lands in the frame path. 25 frames
+(one second) is the default and is right for a local file; a network source wants more. A local
+clip measured **40 ms** to build on this box — read the real number from
+`channel/1/stage/timeline/show/media/vt1/build_ms`, along with `ready`, `on_air` and, if a build
+failed, `error`.
+
+*A clip that cannot be built is refused when you PUT the document*, not when it misses its cue.
+The reply names the object and quotes the reason. So a document that got stored is a document
+whose media exists.
+
+*And a clip that is not ready does not hold the cue.* The object starts with nothing on the layer
+and the clip appears the moment its build lands. Late is something you can see and fix; a stalled
+channel is not.
 
 ### Chasing house timecode
 

@@ -1,27 +1,34 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–21 shipped; only the docs-and-register commit remains. **The timeline runs in the tick**: a
-> document animates any layer on the channel's own clock, and releasing it gives the
-> operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
-> below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
-> each section here lands with the commit that builds it.
-> **Commands:** none yet. The `TIMELINE` family and `HOLD`/`RELEASE` arrive with commit 7; the
-> addressing in §2 is reached today through the commands that already exist — `MIXER FIELD`,
-> `BIND`, and `PUT /v1/value`
-> **Modules:** **not a module** — `src/core/timeline/` (the time base today; model, resolver and
-> transport to come) and `src/core/address/` (one target resolver over the four registries), with
-> the commands in `src/protocol/amcp/AMCPCommandsImpl.cpp`
+> **State:** **shipped**, 21 commits, 2026-09-10. A document animates any addressable parameter —
+> mixer field, audio volume, producer parameter, previz camera — on the **channel's own clock**;
+> bindings, documents and operator writes coexist under one published ownership rule; releasing a
+> parameter gives the operator's value back exactly. One document can drive several channels off
+> one playhead, and it can start clips. §22 is what is **not** measured.
+> **Commands:** AMCP `TIMELINE <ch> PLAY|PAUSE|STOP|SEEK|RATE|LOOP|CHASE|GO|NEXT|PREV|INFO|LIST`
+> and `HOLD`/`RELEASE <ch-layer> <field>`. **No `TIMELINE LOAD`** — a document is JSON and arrives
+> over the control API. Every transport verb is also `POST /v1/timeline/{name}/{verb}` (§18.1)
+> **API:** `PUT`/`GET`/`DELETE /v1/timeline/{name}`, `GET /v1/timeline`,
+> `GET /v1/timeline/{name}/resolved?at=`, `POST /v1/timeline/{name}/{verb}`, and
+> `{"op":"timeline"}` inside `POST /v1/batch`. `PUT /v1/value/{path} {"hold":true}` takes a
+> parameter for the operator
+> **Modules:** **not a module** — `src/core/timeline/` (`time`, `curve`, `expression`, `model`,
+> `resolver`, `transport`, `timeline_store`) and `src/core/address/` (one resolver over five
+> registries), with the tick in `src/core/producer/stage.cpp`, the JSON codec in
+> `src/protocol/http/api_timeline.cpp` and the commands in
+> `src/protocol/amcp/AMCPCommandsImpl.cpp`
 > **Replaces:** `src/modules/keyframes/` (the `KEYFRAMES` command family, removed in §8) and the
 > OFX producer's private `OFX KEY` engine (removed in §17). Both with a `CHANGELOG` measurement
-> **Coverage:** `time_self_test()` and `address::target_self_test()` at boot (§1, §2), and
-> `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, `api-timeline` for §5,
-> **`timeline-ramp`** and **`timeline-clock`** for §6 and §7, **`timeline-resolved`** for §9, and
-> **`timeline-stack`** plus an inverted **`binding-owner`** for §10, and
-> **`timeline-step`** for §11, and **`timeline-targets`** for §12 — whose producer arm is a
-> 1 LSB PICTURE check.
-> The remaining `timeline-*` batteries do
-> not exist yet and are named in the plan rather than here, because a battery named in a doc is a
-> command a reader will try to run
+> **Coverage:** ALL ON BOTH MIXERS. Five boot self-tests (`time_self_test`,
+> `target_self_test`, `curve_self_test`, `resolver_self_test`, `transport_self_test`), and
+> sixteen batteries — `api-timeline` (§5), `timeline-tween-survives`,
+> `timeline-ramp`, `timeline-clock` (§6, §7), `timeline-resolved` (§9), `timeline-stack` with an
+> inverted `binding-owner` (§10), `timeline-step` (§11, a **picture** check),
+> `timeline-targets` (§12, a **1 LSB picture** check), `timeline-cue` (§13),
+> `timeline-transport` and `timeline-loop` (§14), `timeline-seek-compile` (§15),
+> `timeline-chase` (§16), `api-atframe` (§18), `timeline-crosschannel` (§19),
+> `timeline-media` (§20) and `timeline-cost` (§21). Plus `conformance` 100/100 within 1 LSB and
+> `grading` 48/48, because this edits the tick
 
 ---
 
@@ -337,17 +344,19 @@ Two more were found by the self-test during development rather than by predictio
 parenthesised-offset parse, and `local_at` double-counting the composed offset, which put a child
 of a group offset by ten seconds at local time −18 s.
 
-**No battery, and none is possible yet.** `resolve` is not reachable from outside the process
-until commit 7 adds the routes; the boot self-test is the whole gate for this commit, and it is
-run on every start rather than on demand. `api-tree`, `api-roundtrip`, `binding-lfo` and
-the legacy-keyframes battery were run to show nothing moved.
+**No battery when this landed, and none was possible.** `resolve` was not reachable from outside
+the process until the routes existed (§5), so the boot self-test was the whole gate — run on
+every start rather than on demand. `api-tree`, `api-roundtrip`, `binding-lfo` and the
+legacy-keyframes battery were run to show nothing moved. It is gated by
+**`timeline-resolved`** now (§9), which compares the resolver's answer with the tick's at every
+position.
 
-**The JSON codec is not here.** The plan put `json.*` in `core/timeline`, which would drag
+**The JSON codec is not in `core`.** The plan put `json.*` in `core/timeline`, which would drag
 Boost.JSON into a target that has a precompiled header — `protocol_http` deliberately has none
 for exactly that reason, and its `boost_prelude.h` records the four seconds per translation unit
-it costs. The codec lands with the routes in commit 7, in `protocol_http`, where Boost.JSON
-already compiles. The document **type** is in core, which is what AMCP and the HTTP layer both
-need.
+it costs. So the codec is in `protocol_http/api_timeline.*` beside the routes, where Boost.JSON
+already compiles, and the document **type** is in core, which is what AMCP and the HTTP layer
+both need.
 
 ---
 
@@ -1194,8 +1203,8 @@ mode's rate predictability is unverified; this does not verify it and does not d
 per-parameter keyframe map, a tweener per parameter, an interpolator, and an `apply_animation`
 call on six render paths.
 
-It went **after** commit 12 rather than with it, for the same reason `KEYFRAMES` went after the
-tick landed: a document could not animate a producer parameter until commit 12, so removing this
+It went **after** §12 rather than with it, for the same reason `KEYFRAMES` went after the tick
+landed: a document could not animate a producer parameter until §12 shipped, so removing this
 first would have left a gap.
 
 **What the private engine could not do**, all four of which a document does:
@@ -1643,4 +1652,58 @@ All three from `binding-cost`, whose first version paid for them:
 
 ---
 
-*§22 Known gaps — arrives with the docs commit.*
+## 22. Known gaps
+
+Everything on this page is measured on both mixers. This section is what is **not**, and it is
+here so the numbers above are read as what they are.
+
+### 22.1 Not measured, though the feature ships
+
+| what | why not, and what would close it |
+| :--- | :--- |
+| **Whether two channels' PICTURES change on the same frame** (§18.4, §19.4) | Both are driving before either renders again, so the state is provably aligned. Proving the *picture* needs a capture per channel on a named frame, which nothing in this harness can take. |
+| **Whether a clip's picture is the right FRAME of the clip** (§20.4) | Needs a frame-pinned capture against a known frame of a marker clip. `api-readiness` does not do this either, so it is a harness capability gap rather than a timeline one. |
+| **A slow-source build** (§20.4) | `build_ms` is 40 ms for a local file. There is no fixture that builds slowly, so the "a clip that is not ready does not hold the cue" path is exercised only by `preroll_frames: 0`. |
+| **Where the resolve pass's cost goes** (§21.2) | It has none at 20× the work, so a regression making it ten times slower would pass `timeline-cost`. Nothing measures the pass itself. |
+| **Where the BINDING path's cost goes** (§21.2) | 128 bindings cost 10–14% of frames and two mutations ruled out the copy count. Needs a profile. This is the one open item of real size. |
+| **Following a real house timecode** (§16) | `LTCInput::is_valid()` is false without a signal and there is no LTC generator on this box, so chase is covered for what it does with **no** signal. F9 stands: the system-clock fallback's rate predictability is unverified, and nothing depends on it. |
+| **The `OFX KEY` refusal's reply** (§17) | Driving it against an ISF producer answered `202` because the `CALL` fell through to the wrapped producer. Instantiating the OFX producer needs a bundle, and there is none here. |
+| **Audio beyond the value stream** | `mixer/volume` is addressable, writable, publishable, bindable and keyable, and every check reads the published value. A recording plus `volumedetect` would prove it is audible. F5. |
+
+### 22.2 Deliberately not in v1
+
+Each with the hook that makes it cheap later, because "not yet" and "not ever" are different
+answers and a reader is entitled to know which:
+
+* **MTC and Art-Net timecode** — no decoder exists. `LTCInput`'s shape is the hook.
+* **A live tempo axis** (BPM, TAP, RESYNC). `tempo` is a PUT-time remap only (§1). A running
+  tempo clock is a transport mode, and Ableton Link is the standard answer rather than an
+  invented model.
+* **OTIO import and export** — the mapping is trivial (`RationalTime(flicks, 705600000)`) and it
+  is a client feature.
+* **DMX channels as tracks** — nothing addressable exists yet. A producer or consumer exposing
+  universe channels as `param_desc` rows makes it free.
+* **ffmpeg filter parameters** — avfilter option strings are outside the address space and are
+  set on the decode thread. `filter_param_tween.h` carries a comment saying so.
+* **A follow-the-media clock** — `time_source: layer_media` per object is cheap to add. The
+  channel clock is the default because §6 is the list of faults the producer clock had.
+* **Blind edit and frozen-instance reset** — the store holds one document per name.
+* **Outbound and bidirectional bindings, and WATCHOUT-style formula blend** — `mode` is declared
+  in the model and only `replace` is implemented.
+* **Bezier tangents** — easing families only, 43 of them.
+* **`seamless`, `$layer` refs, ref±ref arithmetic, boolean `while`** — the grammar refuses them
+  by name rather than mis-parsing them (§4).
+* **Persistence** — the client owns the definition. A document lives until it is replaced or
+  deleted.
+* **A filler chain for missing media** — the PUT refuses instead (§20.2).
+
+### 22.3 Two things that are stated behaviour, not gaps
+
+Both look like defects to a client that has not read this page, which is why they are here:
+
+* **`stop > pause > run` applies WITHIN one tick.** A client that stops a document and
+  immediately plays it in the same frame gets a stop. It cost two fixtures and about half an
+  hour hunting a server defect that was not there (§14.2).
+* **`commit` on a producer parameter or a previz field is a no-op.** Neither has a constant to
+  bake into, so `on_end: commit` has nothing to write. §15 says so where the verb is defined,
+  rather than leaving it to be discovered.
