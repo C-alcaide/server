@@ -92,9 +92,29 @@ PLAY 1-10 [OFX] "com.vendor.dissolve" TRANSITION clipA clipB 50
 CALL 1-10 OFX LIST
 CALL 1-10 OFX SET <name> <v...>          # numeric / bool(0|1) / choice(index)
 CALL 1-10 OFX SETSTR <name> <text...>    # string parameters
-CALL 1-10 OFX KEY <name> <frame> <v...> [tween]
-CALL 1-10 OFX CLEARKEYS <name>
 ```
+
+**`OFX KEY` and `OFX CLEARKEYS` are removed.** The host used to carry its own keyframe engine
+for its own parameters. A parameter now animates from a **timeline document** instead, addressed
+as `producer/<name>`:
+
+```json
+PUT /v1/timeline/effect
+{"channel": 1, "objects": [
+  {"id": "sweep", "layer": "1-10", "enable": {"start": 0, "end": 2},
+   "keys": [{"at": 0, "values": {"producer/scale": 0.0}},
+            {"at": 2, "easing": "easeinoutsine", "values": {"producer/scale": 1.0}}]}
+]}
+```
+```
+TIMELINE 1 PLAY effect
+```
+
+That is more to type for one ramp and it is a better trade, because the private engine could
+not do any of this: it was clocked by the plug-in's own frame number rather than the channel's,
+it had no notion of who owned a parameter, it could not give a parameter back when the animation
+ended, and it was reachable from AMCP only. See [`../features/timeline.md`](../features/timeline.md)
+§12 for what a producer parameter as a timeline target does and does not do.
 
 `LIST` returns machine-readable metadata (ideal for building UIs):
 ```
@@ -111,8 +131,6 @@ Examples:
 CALL 1-10 OFX SET scale 0.5
 CALL 1-10 OFX SET color 1 0 0.5 1          # RGBA, 4 components
 CALL 1-10 OFX SETSTR title "Breaking News"
-CALL 1-10 OFX KEY scale 0 0                 # keyframe: value 0 at frame 0
-CALL 1-10 OFX KEY scale 50 1 easeinoutsine # value 1 at frame 50, eased
 ```
 
 ## 1.5 Choosing the render backend

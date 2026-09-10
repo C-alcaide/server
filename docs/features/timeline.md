@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–16 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–17 of 19 shipped. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -11,8 +11,8 @@
 > **Modules:** **not a module** — `src/core/timeline/` (the time base today; model, resolver and
 > transport to come) and `src/core/address/` (one target resolver over the four registries), with
 > the commands in `src/protocol/amcp/AMCPCommandsImpl.cpp`
-> **Replaces:** `src/modules/keyframes/` (the `KEYFRAMES` command family) and the OFX producer's
-> private `OFX KEY` engine — both removed when the resolver lands, with a `CHANGELOG` measurement
+> **Replaces:** `src/modules/keyframes/` (the `KEYFRAMES` command family, removed in §8) and the
+> OFX producer's private `OFX KEY` engine (removed in §17). Both with a `CHANGELOG` measurement
 > **Coverage:** `time_self_test()` and `address::target_self_test()` at boot (§1, §2), and
 > `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, `api-timeline` for §5,
 > **`timeline-ramp`** and **`timeline-clock`** for §6 and §7, **`timeline-resolved`** for §9, and
@@ -1188,4 +1188,43 @@ mode's rate predictability is unverified; this does not verify it and does not d
 
 ---
 
-*§17 Known gaps — arrives with commit 19.*
+## 17. The OFX producer's private keyframe engine is gone
+
+`CALL … OFX KEY` and `CALL … OFX CLEARKEYS` are removed, along with the engine behind them: a
+per-parameter keyframe map, a tweener per parameter, an interpolator, and an `apply_animation`
+call on six render paths.
+
+It went **after** commit 12 rather than with it, for the same reason `KEYFRAMES` went after the
+tick landed: a document could not animate a producer parameter until commit 12, so removing this
+first would have left a gap.
+
+**What the private engine could not do**, all four of which a document does:
+
+* it was clocked by the **plug-in's own frame number**, so it had the whole family of faults
+  §6 lists — a paused clip froze it, an empty layer pinned it at zero;
+* it had **no notion of ownership**: an operator's `OFX SET` during an animation was silently
+  overwritten on the next frame, and nothing said so;
+* it could not **give a parameter back**. There was no capture, so a finished animation left the
+  parameter wherever it stopped;
+* it was reachable **from AMCP only** — no description, no read-back of what was animating.
+
+A document is more to type for a single ramp. That is the trade, and it is stated in
+`OPENFX_USER_AND_PLUGIN_GUIDE.md` §1.4 beside the replacement rather than left implicit.
+
+**The reply cannot be measured on this machine, and the attempt is worth recording** because it
+is the shape of false-green this project keeps hitting. Driving `CALL 1-10 OFX KEY scale 0 0`
+against an **ISF** producer answered `202 CALL OK` — the `CALL` fell through to the wrapped
+producer, which knows nothing about `OFX` and returned an empty reply. Nothing was measured; the
+"OK" was the fall-through. Instantiating the OFX producer whose `call` handles the verb needs an
+OFX bundle, and there is none here — the same gap `producer-params` reports on its own OFX arm,
+which has never run.
+
+So the removal is supported by the source and the build, and the **reply** is not measured. What
+*is* measured: `timeline-targets` **12/12 both mixers** for the replacement path — a document
+driving a producer parameter, with the picture at 1 LSB — and `producer-params` **18/18 on its ISF
+arm** for the `SET` path that stays. Pointing `--ofx-plugins` at a bundle directory would close
+both this and the older gap in one run.
+
+---
+
+*§18 Known gaps — arrives with commit 19.*

@@ -1,6 +1,46 @@
 CasparVP — Unreleased
 ==========================================
 
+### Removed: the OFX producer's private keyframe engine (`OFX KEY`, `OFX CLEARKEYS`)
+
+`CALL <ch-layer> OFX KEY` and `CALL <ch-layer> OFX CLEARKEYS` no longer exist. The usage line
+the OFX producer answers with now NAMES THE REPLACEMENT, so a client calling one is told where the
+feature went rather than that the verb is unknown.
+
+**BREAKING for any client that animates an OFX parameter with `OFX KEY`.** A parameter animates
+from a timeline document instead, addressed as `producer/<name>`:
+`PUT /v1/timeline/{name}` with `{"keys": [{"at": 0, "values": {"producer/scale": 0.0}}, ...]}`.
+`OFX SET` and `OFX SETSTR` are unchanged.
+
+It went AFTER the commit that made a producer parameter a timeline target, not with it, for the
+same reason `KEYFRAMES` went after the tick landed: removing it first would have left a gap.
+
+**Four things the private engine could not do, all of which a document does.** It was clocked by
+the PLUG-IN's own frame number, so a paused clip froze it and an empty layer pinned it at zero.
+It had no notion of ownership, so an operator's `OFX SET` during an animation was silently
+overwritten on the next frame with nothing saying so. It could not give a parameter back: there
+was no capture, so a finished animation left the parameter wherever it stopped. And it was
+reachable from AMCP only, with no description and no read-back of what was animating.
+
+A document is more to type for a single ramp, and that trade is stated in the OFX guide beside
+the replacement rather than left implicit.
+
+**What went:** a per-parameter keyframe map, a tweener per parameter, `evaluate_anim`,
+`apply_animation` and its six call sites on the render paths, and the two `CALL` branches.
+
+**THE REPLY IS NOT MEASURED, and the attempt is recorded** because it is the shape of false-green
+this project keeps hitting: driving `CALL 1-10 OFX KEY scale 0 0` against an ISF producer answered
+`202 CALL OK`, because the `CALL` fell through to the wrapped producer, which knows nothing about
+`OFX`. Nothing was measured and the "OK" was the fall-through. Instantiating the OFX producer whose
+`call` handles the verb needs an OFX bundle and there is none on this machine -- the same gap
+`producer-params` reports on its own OFX arm, which has never run. So the removal is supported by
+the source and the build, and the reply is not.
+
+**What IS measured:** `timeline-targets` **12/12 both mixers** for the replacement path, with the
+picture at 1 LSB, and `producer-params` **18/18 on its ISF arm** for the `OFX SET`-equivalent path
+that stays. Pointing `--ofx-plugins` at a bundle directory would close this and the older gap in
+one run.
+
 ### Timecode chase: the offset, the freewheel, and PIXERA-style Hot Regions
 
 `TIMELINE <ch> CHASE <name> ON|OFF|OFFSET <s>|FREEWHEEL <n>|REGION <a> <b>|REGIONS OFF`. The

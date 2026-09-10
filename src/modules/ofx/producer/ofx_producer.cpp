@@ -147,56 +147,6 @@ class ofx_producer : public core::frame_producer
     //: MUTABLE, because `state()` is const and publishes the effect's parameter values.
     mutable std::mutex         effect_mutex_;
 
-    /// Per-parameter keyframe animation (decoupled from the MIXER keyframe engine, which
-    /// targets image_transform). Keyframes hold one value per component; interpolation reuses
-    /// CasparCG's tweener. Evaluated each frame and pushed via effect_->set_param().
-    struct keyframe
-    {
-        double              frame = 0.0;
-        std::vector<double> values;
-    };
-    std::map<std::string, std::vector<keyframe>> anim_;   ///< keyframes per param, sorted by frame
-    std::map<std::string, tweener>               tween_;  ///< tween function per param
-
-    std::vector<double> evaluate_anim(const std::vector<keyframe>& keys, const tweener& tw, double frame) const
-    {
-        if (keys.empty())
-            return {};
-        if (frame <= keys.front().frame)
-            return keys.front().values;
-        if (frame >= keys.back().frame)
-            return keys.back().values;
-
-        for (std::size_t i = 1; i < keys.size(); ++i) {
-            if (frame <= keys[i].frame) {
-                const auto&  k0  = keys[i - 1];
-                const auto&  k1  = keys[i];
-                const double dur = k1.frame - k0.frame;
-                const double t   = dur > 0.0 ? (frame - k0.frame) / dur : 0.0;
-
-                const std::size_t   n = std::max(k0.values.size(), k1.values.size());
-                std::vector<double> out(n, 0.0);
-                for (std::size_t c = 0; c < n; ++c) {
-                    const double b = c < k0.values.size() ? k0.values[c] : 0.0;
-                    const double e = c < k1.values.size() ? k1.values[c] : 0.0;
-                    out[c]         = tw(t, b, e - b, 1.0);
-                }
-                return out;
-            }
-        }
-        return keys.back().values;
-    }
-
-    void apply_animation(double frame)
-    {
-        for (const auto& [name, keys] : anim_) {
-            auto it     = tween_.find(name);
-            auto values = evaluate_anim(keys, it != tween_.end() ? it->second : tweener(L"linear"), frame);
-            if (!values.empty())
-                effect_->set_param(name, values, frame);
-        }
-    }
-
     /// (Re)create the effect for the given frame size and bit depth. Must hold effect_mutex_.
     //
     // KNOWN LIMITATION: getImage() (ofx_clip_instance.cpp) hands plugins raw
@@ -440,7 +390,6 @@ class ofx_producer : public core::frame_producer
             double       t     = transition_frames_ > 0 ? frame / static_cast<double>(transition_frames_) : 1.0;
             t                  = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
 
-            apply_animation(frame);
             rendered = effect_->render_transition(
                 src_rgba_.data(), src_to_rgba_.data(), dst_rgba_.data(), w, h, frame, t, to_field_kind(field));
             ++frame_number_of_effect_;
@@ -475,7 +424,6 @@ class ofx_producer : public core::frame_producer
                 std::lock_guard<std::mutex> lock(effect_mutex_);
                 if (!ensure_effect(width_, height_, 1))
                     return core::draw_frame::empty();
-                apply_animation(frame_number_of_effect_);
                 rendered = effect_->render(
                     nullptr, dst_rgba_.data(), width_, height_, frame_number_of_effect_++, to_field_kind(field));
             }
@@ -577,7 +525,6 @@ class ofx_producer : public core::frame_producer
                 // and does the swizzle/flip/premultiply on the device (NPP) and mirrors the plug-in
                 // output back to top-down. The returned buffer is top-down RGBA, ready for a single
                 // contiguous copy into the exportable VK texture.
-                apply_animation(t);
                 void* out_dev = effect_->render_cuda(cf.image_data(0).data(),
                                                      pfd.planes[0].linesize,
                                                      !src_rgba,
@@ -639,7 +586,6 @@ class ofx_producer : public core::frame_producer
             // shape and the preconditions are identical.
             if (ogl_device_ && bytes == 1 && working_bytes_ == 1 && effect_->cuda_capable() &&
                 cf.has_host_image()) {
-                apply_animation(t);
                 void* out_dev = effect_->render_cuda(cf.image_data(0).data(),
                                                      pfd.planes[0].linesize,
                                                      !src_rgba,
@@ -722,7 +668,6 @@ class ofx_producer : public core::frame_producer
             // the self-contained compatibility path.
             if (ogl_device_ && bytes == 1 && working_bytes_ == 1 && effect_->opengl_capable() &&
                 effect_->zerocopy_gl_supported()) {
-                apply_animation(t);
 
                 // Texture-backed zero-copy: if the source frame is already a GPU-native OGL texture
                 // on this mixer, sample it directly through the convert pass — no CPU readback of the
@@ -867,7 +812,6 @@ class ofx_producer : public core::frame_producer
 
             // OFX time follows the source producer's playback position (temporal plug-ins + the
             // per-parameter keyframe timeline both key off this).
-            apply_animation(t);
             rendered = effect_->render(src_rgba_.data(), dst_rgba_.data(), w, h, t, to_field_kind(field));
         }
         if (!rendered)
@@ -952,7 +896,10 @@ class ofx_producer : public core::frame_producer
     /// describe and not round-trip. Groups, pages and push-buttons are layout and actions
     /// rather than values.
     ///
-    /// **The module keeps its own keyframe engine** (`OFX KEY`, `OFX CLEARKEYS`) and this does
+    /// **The module NO LONGER keeps its own keyframe engine.** `OFX KEY` and `OFX CLEARKEYS`
+    /// are removed: a parameter animates from a timeline document through a `producer/<name>`
+    /// path, on the channel's clock, with the same ownership and release rules as every other
+    /// target. What this does
     /// not replace it. That makes the registry a SECOND writer of the same parameters, so a
     /// keyframed parameter written through here is overwritten on the next frame the engine
     /// evaluates -- the same ownership question `icvfx_auto` answers for projection state, and
@@ -1079,9 +1026,11 @@ class ofx_producer : public core::frame_producer
         // OFX control protocol (via AMCP CALL):
         //   CALL <ch-layer> OFX LIST                 -> list parameters
         //   CALL <ch-layer> OFX SET <name> <v...>    -> set a parameter from scalar value(s)
-        //   CALL <ch-layer> OFX KEY <name> <frame> <v...> [tween]
-        //   CALL <ch-layer> OFX CLEARKEYS <name>
         // Anything else is forwarded to the wrapped source producer.
+        //
+        // `OFX KEY` and `OFX CLEARKEYS` were here and are removed: a parameter animates from a
+        // timeline document through a `producer/<name>` path, which gets it the channel's clock,
+        // the ownership stack and a lossless release -- none of which a private engine had.
         if (!params.empty() && boost::iequals(params.at(0), L"OFX")) {
             const std::wstring sub = params.size() > 1 ? params.at(1) : L"";
 
@@ -1154,63 +1103,14 @@ class ofx_producer : public core::frame_producer
                 return pr.get_future();
             }
 
-            // CALL <ch-layer> OFX KEY <name> <frame> <v0> [v1 v2 v3] [tweener]
-            if (boost::iequals(sub, L"KEY") && params.size() >= 5) {
-                const std::string name = u8(params.at(2));
-
-                keyframe            kf;
-                std::wstring        tween_name;
-                try {
-                    kf.frame = std::stod(params.at(3));
-                } catch (...) {
-                    kf.frame = 0.0;
-                }
-                for (std::size_t i = 4; i < params.size(); ++i) {
-                    try {
-                        kf.values.push_back(std::stod(params.at(i)));
-                    } catch (...) {
-                        // A non-numeric trailing token is treated as the tweener name.
-                        tween_name = params.at(i);
-                    }
-                }
-
-                {
-                    std::lock_guard<std::mutex> lock(effect_mutex_);
-                    auto& keys = anim_[name];
-                    if (keys.size() >= 1000) {
-                        std::promise<std::wstring> pr;
-                        pr.set_value(L"402 CALL ERROR (too many keyframes; max 1000 per parameter)\r\n");
-                        return pr.get_future();
-                    }
-                    keys.push_back(kf);
-                    std::sort(keys.begin(), keys.end(), [](const keyframe& a, const keyframe& b) {
-                        return a.frame < b.frame;
-                    });
-                    if (!tween_name.empty())
-                        tween_[name] = tweener(tween_name);
-                }
-
-                std::promise<std::wstring> pr;
-                pr.set_value(L"");
-                return pr.get_future();
-            }
-
-            // CALL <ch-layer> OFX CLEARKEYS <name>
-            if (boost::iequals(sub, L"CLEARKEYS") && params.size() >= 3) {
-                const std::string name = u8(params.at(2));
-                {
-                    std::lock_guard<std::mutex> lock(effect_mutex_);
-                    anim_.erase(name);
-                    tween_.erase(name);
-                }
-                std::promise<std::wstring> pr;
-                pr.set_value(L"");
-                return pr.get_future();
-            }
-
             std::promise<std::wstring> pr;
-            pr.set_value(L"403 CALL ERROR (usage: OFX LIST | OFX SET <name> <v...> | OFX KEY <name> "
-                         L"<frame> <v...> [tween] | OFX CLEARKEYS <name>)\r\n");
+            // `OFX KEY` and `OFX CLEARKEYS` are GONE, and the usage line says what to use
+            // instead rather than merely omitting them: a client that was calling them gets an
+            // error that tells it where the feature went.
+            pr.set_value(L"403 CALL ERROR (usage: OFX LIST | OFX SET <name> <v...>. "
+                         L"OFX KEY and OFX CLEARKEYS are removed -- animate a parameter from a "
+                         L"timeline document with a `producer/<name>` path: "
+                         L"PUT /v1/timeline/{name})\r\n");
             return pr.get_future();
         }
 
