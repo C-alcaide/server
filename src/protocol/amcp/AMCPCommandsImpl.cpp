@@ -70,6 +70,7 @@
 #include <core/producer/transition/transition_producer.h>
 #include <core/video_format.h>
 #include <core/address/target.h>
+#include <core/timeline/transport.h>
 #include <core/binding/binding.h>
 #include <core/mixer/audio/audio_analysis.h>
 #include "../midi/midi_source.h"
@@ -1542,6 +1543,142 @@ single_double_animatable_mixer_command(command_context&                 ctx,
 // settable, readable and animatable over AMCP with no handler written for it -- and it is
 // validated against the SAME range the control API reports, because both read the
 // descriptor rather than a constant named twice.
+// ---------------------------------------------------------------------------------------
+// TIMELINE -- the playhead, and only the playhead
+// ---------------------------------------------------------------------------------------
+//
+// `TIMELINE 1 PLAY show`, `PAUSE`, `STOP`, `SEEK <secs>`, `RATE <n>`, `LOOP <from> <to>` or
+// `LOOP OFF`, `GO [trigger]`, `INFO <name>`, `LIST`.
+//
+// THERE IS NO `TIMELINE LOAD`, and that is a design decision rather than an omission. A timeline
+// document is JSON, and the JSON facade is the one that speaks JSON: `PUT /v1/timeline/{name}`.
+// The codec lives in `protocol_http`, which is a SIBLING of this library rather than something
+// below it -- `api_context.h` states that relationship and the reason for it, and linking it here
+// to obtain a parser would invert exactly the dependency the design is keeping apart. AMCP's own
+// tokenizer is also the wrong shape for a document: `KEYFRAMES SET` had to wrap its JSON in
+// parentheses because the tokenizer splits on spaces, and that wart is not worth reproducing.
+//
+// So the division is: the document comes in over HTTP, and either facade can drive it. That is
+// the same split the rest of this API already has -- both facades over one state, neither
+// wrapping the other.
+std::future<std::wstring> timeline_command(command_context& ctx)
+{
+    namespace tl = core::timeline;
+
+    auto stage = ctx.channel.raw_channel->stage();
+    if (!stage)
+        return make_ready_future<std::wstring>(L"501 TIMELINE FAILED no stage on this channel\r\n");
+
+    const auto verb = [&] {
+        auto v = ctx.parameters.empty() ? std::wstring() : ctx.parameters.at(0);
+        boost::to_upper(v);
+        return v;
+    }();
+
+    const auto describe = [](const std::wstring& name, const core::stage::timeline_status& st) {
+        std::wstring out = name;
+        out += L" ";
+        out += u16(st.state);
+        out += L" position=" + std::to_wstring(st.position);
+        out += L" rate=" + std::to_wstring(st.rate);
+        out += L" instances=" + std::to_wstring(st.instances);
+        if (!st.ok)
+            out += L" INVALID faults=" + std::to_wstring(st.faults);
+        return out;
+    };
+
+    if (verb == L"LIST" || verb.empty()) {
+        auto         rows = stage->timeline_list().get();
+        std::wstring out  = L"201 TIMELINE OK\r\n";
+        for (const auto& r : rows)
+            out += describe(u16(r.first), r.second) + L"\r\n";
+        out += L"\r\n";
+        return make_ready_future<std::wstring>(std::move(out));
+    }
+
+    if (ctx.parameters.size() < 2)
+        return make_ready_future<std::wstring>(
+            L"400 TIMELINE ERROR " + verb + L" needs a document name\r\n");
+
+    const auto name = u8(ctx.parameters.at(1));
+
+    if (verb == L"INFO") {
+        const auto st = stage->timeline_state(name).get();
+        if (!st.exists)
+            return make_ready_future<std::wstring>(
+                L"404 TIMELINE ERROR no document '" + ctx.parameters.at(1) +
+                L"' on this channel. A document declares its own channel; PUT /v1/timeline/{name} "
+                L"loads one\r\n");
+        return make_ready_future<std::wstring>(L"201 TIMELINE OK\r\n" +
+                                               describe(ctx.parameters.at(1), st) + L"\r\n\r\n");
+    }
+
+    if (verb == L"LOAD" || verb == L"SET")
+        return make_ready_future<std::wstring>(
+            L"501 TIMELINE FAILED a document is JSON and arrives over the control API: "
+            L"PUT /v1/timeline/" +
+            ctx.parameters.at(1) +
+            L". Every verb here drives a document that is already loaded\r\n");
+
+    tl::transport_command cmd;
+    if (verb == L"PLAY")
+        cmd.v = tl::transport_command::verb::play;
+    else if (verb == L"PAUSE")
+        cmd.v = tl::transport_command::verb::pause;
+    else if (verb == L"STOP")
+        cmd.v = tl::transport_command::verb::stop;
+    else if (verb == L"SEEK") {
+        cmd.v = tl::transport_command::verb::seek;
+        if (ctx.parameters.size() < 3)
+            return make_ready_future<std::wstring>(L"400 TIMELINE ERROR SEEK needs a position in "
+                                                   L"seconds\r\n");
+        cmd.at = tl::from_seconds(std::stod(ctx.parameters.at(2)));
+    } else if (verb == L"RATE") {
+        cmd.v = tl::transport_command::verb::rate;
+        if (ctx.parameters.size() < 3)
+            return make_ready_future<std::wstring>(L"400 TIMELINE ERROR RATE needs a number\r\n");
+        // A rational at 1/1000, so `0.5` is exactly a half and nesting a slowed group inside a
+        // slowed document composes without drift.
+        const auto r = std::stod(ctx.parameters.at(2));
+        if (r == 0.0)
+            return make_ready_future<std::wstring>(
+                L"400 TIMELINE ERROR rate 0 is PAUSE under another name; use PAUSE\r\n");
+        cmd.new_rate = boost::rational<std::int64_t>(static_cast<std::int64_t>(std::llround(r * 1000)), 1000);
+    } else if (verb == L"LOOP") {
+        if (ctx.parameters.size() >= 3 && boost::iequals(ctx.parameters.at(2), L"OFF")) {
+            cmd.v = tl::transport_command::verb::clear_loop;
+        } else {
+            if (ctx.parameters.size() < 4)
+                return make_ready_future<std::wstring>(
+                    L"400 TIMELINE ERROR LOOP needs <from> <to> in seconds, or OFF\r\n");
+            cmd.v      = tl::transport_command::verb::loop;
+            cmd.region = {tl::from_seconds(std::stod(ctx.parameters.at(2))),
+                          tl::from_seconds(std::stod(ctx.parameters.at(3)))};
+            if (cmd.region.second <= cmd.region.first)
+                return make_ready_future<std::wstring>(
+                    L"400 TIMELINE ERROR a loop region needs <to> after <from>\r\n");
+        }
+    } else if (verb == L"GO") {
+        cmd.v       = tl::transport_command::verb::go;
+        cmd.trigger = ctx.parameters.size() >= 3 ? u8(ctx.parameters.at(2)) : std::string("go");
+    } else {
+        return make_ready_future<std::wstring>(
+            L"400 TIMELINE ERROR no such verb: " + ctx.parameters.at(0) +
+            L". PLAY PAUSE STOP SEEK RATE LOOP GO INFO LIST\r\n");
+    }
+
+    if (!stage->timeline_command(name, cmd).get())
+        return make_ready_future<std::wstring>(
+            L"404 TIMELINE ERROR no document '" + ctx.parameters.at(1) +
+            L"' on this channel. A document declares its own channel, so a document for channel 2 "
+            L"is not driven from channel 1\r\n");
+
+    // 202: QUEUED, and applied on the next tick with a whole frame's worth at once under
+    // `stop > pause > run`. That is what makes several clients acting in the same frame
+    // well-defined rather than a race -- see `transport::apply_all`.
+    return make_ready_future<std::wstring>(L"202 TIMELINE OK\r\n");
+}
+
 std::future<std::wstring> mixer_field_command(command_context& ctx)
 {
     namespace fields = core::fields;
@@ -6535,6 +6672,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER BLUR", mixer_blur_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER SHAPE", mixer_shape_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER FIELD", mixer_field_command, 0);
+    repo->register_channel_command(L"Timeline Commands", L"TIMELINE", timeline_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER OPACITY", mixer_opacity_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER BRIGHTNESS", mixer_brightness_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER SATURATION", mixer_saturation_command, 0);

@@ -32,7 +32,9 @@
 #include <common/future.h>
 
 #include <core/address/target.h>
+#include <core/timeline/resolver.h>
 #include <core/timeline/timeline_store.h>
+#include <core/timeline/transport.h>
 #include <core/frame/frame_transform.h>
 #include <core/frame/transform_fields.h>
 #include <core/producer/route/route_producer.h>
@@ -113,8 +115,55 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     std::size_t  structure_hash_     = 0;
     std::int64_t structure_revision_ = 0;
 
-    /// Server-wide, injected by the shell, and read once per tick for its revision only.
+    /// Server-wide, injected by the shell.
     std::shared_ptr<timeline::timeline_store> timelines_;
+
+    // ── THE TIMELINE, IN THE TICK ───────────────────────────────────────────────────────
+    //
+    // A DRIVER OVERLAY per layer rather than a write into the layer's tween, which is D3 of the
+    // plan and the whole reason this shape differs from the engine it replaces. `KEYFRAMES`
+    // wrote by REPLACING `tweens_[layer]` with a zero-duration tween built from the interpolated
+    // values, and that made four things impossible at once: an in-flight `MIXER <duration>` was
+    // collapsed, an operator's explicit write during an animation was lost rather than
+    // remembered, a holding timeline leaked its last value forever after it ended, and `UNBIND`
+    // could not give a field back because nothing remembered what it had been.
+    //
+    // Here the operator's constant lives in `tweens_` and NOTHING ELSE EVER TOUCHES IT. The
+    // timeline publishes into `timeline_overlay_`, one `resolve_drivers()` per tick composes the
+    // two into `resolved_`, and that is what is pushed, published and read. Ending a driver is
+    // then just clearing an overlay -- the constant is still there, untouched, and comes back by
+    // construction rather than by being restored.
+    struct layer_overlay
+    {
+        /// Registry path (with its `.N` component suffix, if any) -> value, in registry units.
+        std::unordered_map<std::string, double> values;
+        /// Step values -- an enum, a boolean, a name -- which cannot be interpolated (D7).
+        std::map<std::string, monitor::vector_t> steps;
+        /// `timeline:<document>/<object>`, which is what a write reply's `shadowed_by` reports.
+        std::string owner;
+    };
+    std::map<int, layer_overlay> timeline_overlay_;
+
+    /// The composed transform per DRIVEN layer. Absent means "nothing drives this layer", and
+    /// the tween is the answer -- which keeps the cost proportional to what is animated rather
+    /// than to the number of layers.
+    std::map<int, frame_transform> resolved_;
+
+    /// One playhead per document this channel owns. Keyed by document name because that is what
+    /// a client addresses, and because a document may be re-PUT without losing its position.
+    std::map<std::string, timeline::transport>                     transports_;
+    std::map<std::string, std::vector<timeline::transport_command>> pending_transport_;
+    std::map<std::string, timeline::trigger_log>                   trigger_logs_;
+
+    /// The frame number of the last tick, so `timeline_state` can answer a position without
+    /// inventing a frame the channel has not reached.
+    std::uint64_t last_frame_number_ = 0;
+
+    /// What `evaluate_timelines` published this tick, held for the state builder below. A member
+    /// rather than a return value because the state is assembled on a later pass and the
+    /// evaluation must not run twice: a second `position_at` for the same frame would be equal,
+    /// but a second `retrigger` would not.
+    monitor::state timeline_state_;
 
     // -- Input routing (stage executor only, no mutex) --
     //
@@ -352,6 +401,23 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     evaluate_bindings(1000.0 / (fps_for_dt > 0.0 ? fps_for_dt : 25.0));
                 }
 
+                // -- The TIMELINE, then the composition of the two --------------------------
+                //
+                // After the bindings and before the layers are pulled. After, because a
+                // timeline is an explicit authored value for THIS frame and a binding is a
+                // standing rule -- and because in this build a binding still writes the
+                // constant directly, so the timeline overlay composed on top of it is what
+                // makes the timeline outrank it (D3's ranks 3 over 4). Before the layers,
+                // because the value has to be in the transform when compositing reads it: one
+                // frame late is the artefact the whole feature exists to avoid.
+                //
+                // `timeline_state_` is filled here and consumed by the publication below, so
+                // the evaluation happens once per tick rather than once per reader.
+                last_frame_number_ = frame_number;
+                timeline_state_    = monitor::state{};
+                evaluate_timelines(frame_number, timeline_state_);
+                resolve_drivers();
+
                   // ── Keyframe evaluation ────────────────────────────────────
                   // Compute media time per layer and interpolate armed
                   // timelines directly on the stage executor, BEFORE rendering.
@@ -445,6 +511,12 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
                     auto& layer = p->second;
                     auto& tween = tweens_[p->first];
+                    // FETCHED ONCE per layer per tick, and it is the RESOLVED transform where
+                    // anything drives the layer. Both fields of an interlaced frame get the same
+                    // one: they are one tick, and sampling the tween twice would have advanced
+                    // it between them.
+                    const auto effective = effective_transform(p->first);
+                    (void)tween;
 
                     auto has_background_route =
                         std::find(fetch_background.begin(), fetch_background.end(), p->first) != fetch_background.end();
@@ -463,7 +535,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     try {
                         if (l.second) {
                             res.foreground1_raw = layer.receive(field1, result.nb_samples);
-                            res.foreground1     = draw_frame::push(res.foreground1_raw, tween.fetch());
+                            res.foreground1     = draw_frame::push(res.foreground1_raw, effective);
                             res.foreground1.transform().image_transform.enable_geometry_modifiers = true;
                         }
 
@@ -475,7 +547,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                             res.is_interlaced = true;
                             if (l.second) {
                                 res.foreground2_raw = layer.receive(video_field::b, result.nb_samples);
-                                res.foreground2     = draw_frame::push(res.foreground2_raw, tween.fetch());
+                                res.foreground2     = draw_frame::push(res.foreground2_raw, effective);
                                 res.foreground2.transform().image_transform.enable_geometry_modifiers = true;
                             }
                             if (has_background_route)
@@ -626,6 +698,12 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                             state["receive"]["slowest_producer"] = pub.slowest_producer;
                     }
                 }
+
+                // THE PLAYHEADS, one sub-tree per document this channel owns. Merged rather
+                // than rebuilt: `evaluate_timelines` ran at the top of this tick and is the only
+                // thing allowed to advance a transport or fire a trigger, so the state builder
+                // reads what it produced instead of asking again.
+                state.merge(timeline_state_);
 
                 for (auto& p : layers_) {
                     state["layer"][p.first] = p.second.state();
@@ -800,13 +878,221 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     /// A field AT its default is still absent from the wire, which is what keeps the write
     /// cheap. Absence therefore means "at its default", never "unknown" -- a consumer that
     /// reads it the other way shows a stale value forever after a reset.
+    // ── The timeline's tick ────────────────────────────────────────────────────────────
+
+    /// `"1-10"` or `"10"` -> the layer index on THIS channel, or nothing.
+    ///
+    /// A channel-qualified layer that names a different channel is not an error here and not
+    /// this channel's business: cross-channel evaluation is commit 17, and until then a document
+    /// addressing another channel is simply not evaluated by this one. Silently, because it is
+    /// the document's declared intent rather than a mistake.
+    std::optional<int> layer_index_for(const std::string& spec) const
+    {
+        const auto dash = spec.find('-');
+        if (dash == std::string::npos) {
+            if (spec.empty() || spec.find_first_not_of("0123456789") != std::string::npos)
+                return std::nullopt;
+            return std::atoi(spec.c_str());
+        }
+        const auto ch = spec.substr(0, dash);
+        const auto ly = spec.substr(dash + 1);
+        if (ch.empty() || ly.empty() || ch.find_first_not_of("0123456789") != std::string::npos ||
+            ly.find_first_not_of("0123456789") != std::string::npos)
+            return std::nullopt;
+        if (std::atoi(ch.c_str()) != channel_index_)
+            return std::nullopt;
+        return std::atoi(ly.c_str());
+    }
+
+    static const timeline::timeline_object* find_object(const std::vector<timeline::timeline_object>& objs,
+                                                        const std::string&                            id)
+    {
+        for (const auto& o : objs) {
+            if (o.id == id)
+                return &o;
+            if (!o.children.empty())
+                if (const auto* c = find_object(o.children, id))
+                    return c;
+        }
+        return nullptr;
+    }
+
+    /// Every document this channel owns, advanced one tick and evaluated into the overlays.
+    void evaluate_timelines(std::uint64_t frame_number, monitor::state& state)
+    {
+        timeline_overlay_.clear();
+        if (!timelines_)
+            return;
+
+        const auto per_frame = timeline::flicks_per_frame(format_desc_.framerate);
+
+        for (const auto& name : timelines_->names()) {
+            auto entry = timelines_->get(name);
+            if (!entry || entry->document.channel != channel_index_)
+                continue;
+
+            auto& tr = transports_[name];
+
+            // The pending commands for this tick, in the SAFE order rather than arrival order:
+            // stop outranks pause outranks play. See `transport::apply_all`.
+            tr.apply_all(pending_transport_[name], frame_number, per_frame);
+
+            // A GO fired: the document has to be RE-RESOLVED, because an object whose end waits
+            // on a trigger has no end until it fires, and everything downstream of it has no
+            // start. Re-resolving the whole document rather than patching it -- they are small,
+            // this happens on an operator action rather than per frame, and a partial
+            // re-resolution is where the collision semantics would start to diverge from
+            // `/resolved`, which is the one thing that must not happen.
+            if (!tr.fired().empty()) {
+                auto& log = trigger_logs_[name];
+                for (const auto& f : tr.fired())
+                    log.fired[f.first].push_back(f.second);
+                tr.clear_fired();
+                if (auto re = timelines_->retrigger(name, log))
+                    entry = re;
+            }
+
+            auto ts = state["timeline"][name];
+            ts["state"]    = std::string(timeline::to_string(tr.state()));
+            ts["revision"] = entry->document.revision;
+            ts["ok"]       = entry->resolved.ok();
+
+            if (!entry->resolved.ok()) {
+                // An invalid document is INERT rather than dangerous: it is stored so the client
+                // can show the author the faults, and evaluating a half-authored show would be
+                // the wrong reading of "stored".
+                ts["faults"] = static_cast<std::int64_t>(entry->resolved.errors.size());
+                continue;
+            }
+
+            const auto pos = tr.position_at(frame_number, per_frame);
+            ts["position"] = timeline::to_seconds(pos);
+            ts["rate"]     = boost::rational_cast<double>(tr.rate());
+
+            if (tr.state() == timeline::transport_state::stopped) {
+                // STOPPED RELEASES. A stopped document owns nothing, so every layer it was
+                // driving falls back to its constant on this very tick -- which is the
+                // difference between stop and pause (D4), and the reason `pause` re-anchors
+                // instead of clearing.
+                continue;
+            }
+
+            for (const auto& kv : entry->resolved.by_layer) {
+                const auto layer = layer_index_for(kv.first);
+                if (!layer)
+                    continue;
+                const auto* inst = entry->resolved.active_on(kv.first, pos);
+                if (!inst)
+                    continue;
+                const auto* obj = find_object(entry->document.objects, inst->object_id);
+                if (!obj)
+                    continue;
+
+                auto& ov = timeline_overlay_[*layer];
+                ov.owner = "timeline:" + name + "/" + inst->object_id;
+
+                // Step values first, then the curve, so a path in both has the CURVE win (D7).
+                for (const auto& c : obj->content)
+                    ov.steps[c.first] = c.second;
+
+                const auto local = inst->local_at(pos);
+                for (const auto& pv : obj->curves.interpolate(local, timeline::kind_of))
+                    ov.values[pv.first] = pv.second;
+
+                ts["active"][kv.first] = inst->object_id;
+            }
+        }
+    }
+
+    /// Compose the constant and the overlays into `resolved_`, once per driven layer per tick.
+    ///
+    /// The rank is the ownership stack of D3, and only two of its five levels exist yet: the
+    /// timeline (3) over the constant (4). Bindings still write the constant directly through
+    /// `tweened_transform::patch`, and move up to their own overlay in commit 9 -- until then a
+    /// binding and a timeline on the SAME field would fight, which nothing does yet and which
+    /// the plan's own sequence puts at commit 9.
+    void resolve_drivers()
+    {
+        resolved_.clear();
+        if (timeline_overlay_.empty())
+            return;
+
+        for (const auto& kv : timeline_overlay_) {
+            const auto tw = tweens_.find(kv.first);
+            if (tw == tweens_.end())
+                continue;
+
+            auto t = tw->second.fetch();
+
+            const auto write = [&t](const std::string& path, const monitor::vector_t& value) {
+                const auto target = address::parse(path);
+                if (!target.meta)
+                    return; // a producer parameter or a stage field: commit 10 gives them writers
+                if (target.kind == address::target_kind::image) {
+                    const auto* f = fields::find(target.field);
+                    if (!f || !f->set)
+                        return;
+                    if (value.size() == f->arity) {
+                        if (f->set(t.image_transform, value))
+                            fields::apply_enables(t.image_transform, *f);
+                        return;
+                    }
+                    // ONE COMPONENT of a wider field: read-modify-write, because the setter's
+                    // arity check refuses a one-element vector and inventing the other three
+                    // would be a guess.
+                    auto v = f->get(t.image_transform);
+                    if (v.size() != f->arity || value.size() != 1)
+                        return;
+                    v[std::min<std::size_t>(target.component, v.size() - 1)] = value.front();
+                    if (f->set(t.image_transform, v))
+                        fields::apply_enables(t.image_transform, *f);
+                } else if (target.kind == address::target_kind::audio) {
+                    const auto* a = fields::find_audio_field(target.field);
+                    if (!a || !a->set)
+                        return;
+                    if (value.size() == a->arity) {
+                        a->set(t.audio_transform, value);
+                        return;
+                    }
+                    auto v = a->get(t.audio_transform);
+                    if (v.size() != a->arity || value.size() != 1)
+                        return;
+                    v[std::min<std::size_t>(target.component, v.size() - 1)] = value.front();
+                    a->set(t.audio_transform, v);
+                }
+            };
+
+            for (const auto& sv : kv.second.steps)
+                write(sv.first, sv.second);
+            for (const auto& pv : kv.second.values)
+                write(pv.first, monitor::vector_t{pv.second});
+
+            resolved_[kv.first] = std::move(t);
+        }
+    }
+
+    /// What a layer's frame is actually drawn with: the resolved transform if anything drives it,
+    /// the operator's constant if not.
+    frame_transform effective_transform(int layer)
+    {
+        const auto r = resolved_.find(layer);
+        if (r != resolved_.end())
+            return r->second;
+        return tweens_[layer].fetch();
+    }
+
     void publish_layer_transform(monitor::state& state, int layer)
     {
         const auto tw = tweens_.find(layer);
         if (tw == tweens_.end())
             return;
 
-        const auto  ft  = tw->second.fetch();
+        // THE EFFECTIVE TRANSFORM, not the constant. `mixer/*` is what a client reads to draw a
+        // slider, and publishing the constant while the picture showed the driver's value would
+        // make the API disagree with the screen -- which is the one thing a control surface
+        // cannot recover from. The constant is still reachable, under `constant/*` below, and a
+        // client that wants to show "you set 0.5, the timeline is at 0.2" has both.
+        const auto  ft  = effective_transform(layer);
         const auto& tf  = ft.image_transform;
         const auto& at  = ft.audio_transform;
         auto&       pub = layer_publications_[layer];
@@ -829,6 +1115,50 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         auto ls = state["layer"][layer];
         for (const auto& kv : pub.keys)
             ls[kv.first] = kv.second;
+
+        // ── WHO OWNS WHAT, published rather than inferable ─────────────────────────────
+        //
+        // `driver/<path>` names what is writing a field, and `constant/<path>` carries the
+        // operator's own value where it DIFFERS from what is on air. Published unconditionally
+        // for a driven layer -- there is no descriptor default for "who owns this", so an absent
+        // key means "nobody", which is exactly the fact a client needs.
+        //
+        // Without this a client can see that a value moved and not what moved it, which is how
+        // an operator ends up dragging a slider that snaps back every frame with no explanation.
+        const auto ov = timeline_overlay_.find(layer);
+        if (ov == timeline_overlay_.end() || ov->second.owner.empty())
+            return;
+
+        const auto constant = tweens_[layer].fetch();
+        const auto report   = [&](const std::string& path) {
+            ls["driver"][path] = ov->second.owner;
+
+            const auto target = address::parse(path);
+            if (!target.meta)
+                return;
+            monitor::vector_t was, now;
+            if (target.kind == address::target_kind::image) {
+                const auto* f = fields::find(target.field);
+                if (!f || !f->get)
+                    return;
+                was = f->get(constant.image_transform);
+                now = f->get(tf);
+            } else if (target.kind == address::target_kind::audio) {
+                const auto* a = fields::find_audio_field(target.field);
+                if (!a || !a->get)
+                    return;
+                was = a->get(constant.audio_transform);
+                now = a->get(at);
+            } else {
+                return;
+            }
+            if (was != now)
+                ls["constant"][target.field] = was;
+        };
+        for (const auto& pv : ov->second.values)
+            report(pv.first);
+        for (const auto& sv : ov->second.steps)
+            report(sv.first);
     }
 
     /// The expensive half: which keys this transform contributes, and their values.
@@ -1224,6 +1554,78 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                                            }),
                             bindings_.end());
             return static_cast<int>(before - bindings_.size());
+        });
+    }
+
+    std::future<bool> timeline_command(const std::string& name, const timeline::transport_command& cmd)
+    {
+        return executor_.begin_invoke([this, name, cmd] {
+            if (!timelines_)
+                return false;
+            const auto entry = timelines_->get(name);
+            // A document this channel does not own is not this channel's to drive. Refused
+            // rather than queued and ignored: a `TIMELINE 1 PLAY show` against a document that
+            // declares channel 2 is a mistake worth an error, not a no-op with a 202 behind it.
+            if (!entry || entry->document.channel != channel_index_)
+                return false;
+            pending_transport_[name].push_back(cmd);
+            return true;
+        });
+    }
+
+    std::future<stage::timeline_status> timeline_state(const std::string& name)
+    {
+        return executor_.begin_invoke([this, name] {
+            stage::timeline_status out;
+            if (!timelines_)
+                return out;
+            const auto entry = timelines_->get(name);
+            if (!entry || entry->document.channel != channel_index_)
+                return out;
+            out.exists    = true;
+            out.ok        = entry->resolved.ok();
+            out.faults    = entry->resolved.errors.size();
+            out.instances = entry->resolved.instances.size();
+
+            const auto it = transports_.find(name);
+            if (it == transports_.end())
+                return out;
+            out.state = timeline::to_string(it->second.state());
+            out.rate  = boost::rational_cast<double>(it->second.rate());
+            // The position at the LAST tick, not at now: the playhead is derived from the frame
+            // counter and asking for a frame that has not been ticked would report a position
+            // the channel has not reached.
+            out.position = timeline::to_seconds(
+                it->second.position_at(last_frame_number_, timeline::flicks_per_frame(format_desc_.framerate)));
+            return out;
+        });
+    }
+
+    std::future<std::vector<std::pair<std::string, stage::timeline_status>>> timeline_list()
+    {
+        return executor_.begin_invoke([this] {
+            std::vector<std::pair<std::string, stage::timeline_status>> out;
+            if (!timelines_)
+                return out;
+            const auto per_frame = timeline::flicks_per_frame(format_desc_.framerate);
+            for (const auto& name : timelines_->names()) {
+                const auto entry = timelines_->get(name);
+                if (!entry || entry->document.channel != channel_index_)
+                    continue;
+                stage::timeline_status st;
+                st.exists    = true;
+                st.ok        = entry->resolved.ok();
+                st.faults    = entry->resolved.errors.size();
+                st.instances = entry->resolved.instances.size();
+                const auto it = transports_.find(name);
+                if (it != transports_.end()) {
+                    st.state    = timeline::to_string(it->second.state());
+                    st.rate     = boost::rational_cast<double>(it->second.rate());
+                    st.position = timeline::to_seconds(it->second.position_at(last_frame_number_, per_frame));
+                }
+                out.emplace_back(name, st);
+            }
+            return out;
         });
     }
 
@@ -1767,6 +2169,22 @@ std::future<void> stage::add_source(const std::string& name, std::shared_ptr<bin
 }
 std::future<bool> stage::remove_source(const std::string& name) { return impl_->remove_source(name); }
 std::future<std::vector<stage_base::source_info>> stage::list_sources() { return impl_->list_sources(); }
+std::future<bool> stage::timeline_command(const std::string&                 name,
+                                          const timeline::transport_command& cmd)
+{
+    return impl_->timeline_command(name, cmd);
+}
+
+std::future<stage::timeline_status> stage::timeline_state(const std::string& name)
+{
+    return impl_->timeline_state(name);
+}
+
+std::future<std::vector<std::pair<std::string, stage::timeline_status>>> stage::timeline_list()
+{
+    return impl_->timeline_list();
+}
+
 void stage::set_timeline_store(std::shared_ptr<timeline::timeline_store> store)
 {
     // NOT on the executor, and it does not need to be: this is called once, from the shell,

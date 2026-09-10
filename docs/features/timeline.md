@@ -1,7 +1,8 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–6 of 19 shipped: the time base, addressing, the engine,
-> the model, grammar and resolver, and the document over HTTP. Nothing runs in the tick yet. Nothing
+> **State:** **in progress** — commits 1–7 of 19 shipped. **The timeline runs in the tick**: a
+> document animates any layer on the channel's own clock, and releasing it gives the
+> operator's value back. `KEYFRAMES` is still present and is removed next. Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
 > each section here lands with the commit that builds it.
 > **Commands:** none yet. The `TIMELINE` family and `HOLD`/`RELEASE` arrive with commit 7; the
@@ -14,8 +15,9 @@
 > private `OFX KEY` engine — both removed when the resolver lands, with a `CHANGELOG` measurement
 > **Coverage:** `time_self_test()` and `address::target_self_test()` at boot (§1, §2), and
 > `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, `keyframes-legacy` for the
-> engine in §3 through the command it still drives, and `api-timeline` for §5. The remaining
-> `timeline-*` batteries do
+> engine in §3 through the command it still drives, `api-timeline` for §5, and
+> **`timeline-ramp`** and **`timeline-clock`** for §6 and §7. The remaining `timeline-*`
+> batteries do
 > not exist yet and are named in the plan rather than here, because a battery named in a doc is a
 > command a reader will try to run
 
@@ -429,4 +431,168 @@ seven whole-second values.
 
 ---
 
-*§6 Transport, §7 The tick, §8 Verification, §9 Known gaps — arrive with commits 7–19.*
+## 6. The transport
+
+**The clock is the channel's frame counter, never a producer's.** That is the single largest
+behavioural difference from the `KEYFRAMES` engine, which took its time from
+`producer->frame_number()` on the animated layer. The consequences of that were not edge cases:
+
+| the old clock | what it did |
+| :--- | :--- |
+| a **colour** layer | frame number 0 forever, so an animated grade on a colour fill never moved |
+| an **empty** layer | pinned t = 0, so a document animating a layer before its clip loaded started over when the clip arrived |
+| a **paused** clip | froze the animation with it, so a hold on a still frame stopped the grade ramping under it — the one time an operator most wants it to keep going |
+| `SEEK` | unobservable: the next tick recomputed the position from the producer and overwrote it |
+
+`position_at(frame)` advances `flicks_per_frame × rate` from an **anchor pair**, and the playhead
+is derived rather than stored. Storing it and adding every tick would accumulate whatever the
+last rate change rounded, and would make `position_at` unanswerable for any frame but the current
+one. Both matter: an hour of playback lands on exactly an hour, and a client can predict where a
+document will be at a frame it has not reached.
+
+Three details that are choices:
+
+* **`rate` is a rational.** `RATE 1/3` covers one second in three exactly. A double would drift,
+  and a slowed group nested in a slowed document would compound the drift.
+* **The elapsed frame count is signed.** `frame - anchor` in unsigned arithmetic after a backwards
+  seek wraps to near 2⁶⁴ and puts the playhead ten billion years out.
+* **The loop wrap is a floor-modulo.** `%` truncates toward zero, which for a negative rate gives
+  a position *before* the region's start on every backwards pass.
+
+**`rate 0` is refused**: it is `pause` under another name, and two ways to do one thing is two
+things to keep consistent.
+
+### 6.1 Stop > Pause > Run, within one tick
+
+Several clients may act in the same frame, and a stop that loses to a play is a show that keeps
+running after somebody stopped it. So a whole tick's commands are applied together: the
+positional ones (seek, rate, loop, go) in arrival order, then **the strongest single run-state
+command**. WATCHOUT ranks them the same way.
+
+The first implementation sorted by rank and applied every one, which is wrong in the obvious way
+— whichever rank goes last wins, so stop-then-play left it *playing*. `transport_self_test`
+said so at boot, naming the rule.
+
+### 6.2 AMCP drives it; AMCP does not load it
+
+```
+TIMELINE <ch> PLAY|PAUSE|STOP <name>
+TIMELINE <ch> SEEK <name> <seconds>
+TIMELINE <ch> RATE <name> <n>
+TIMELINE <ch> LOOP <name> <from> <to>   ·   TIMELINE <ch> LOOP <name> OFF
+TIMELINE <ch> GO <name> [trigger]
+TIMELINE <ch> INFO <name>   ·   TIMELINE <ch> LIST
+```
+
+**There is no `TIMELINE LOAD`.** A document is JSON, and the JSON façade is the one that speaks
+JSON — `PUT /v1/timeline/{name}`. The codec lives in `protocol_http`, which is a **sibling** of
+the AMCP library rather than something below it, and linking it there to obtain a parser would
+invert exactly the dependency `api_context.h` states the design is keeping apart. AMCP's
+tokenizer is also the wrong shape for a document: `KEYFRAMES SET` had to wrap its JSON in
+parentheses because the tokenizer splits on spaces, and that wart is not worth reproducing. So
+the document arrives over HTTP and either façade drives it — the same split the rest of the API
+already has.
+
+A verb answers **202 = queued**, applied on the next tick under the rank above. A document that
+declares a different channel is `404` from this one rather than a silent no-op.
+
+## 7. The tick
+
+```
+1. tweens_[*].tick(1)                     the operator's constants advance (unchanged)
+2. evaluate_bindings(dt)                  unchanged; still writes the constant through patch()
+3. evaluate_timelines(frame)              per document this channel owns:
+                                            transport.apply_all(pending)   stop > pause > run
+                                            a GO fired -> retrigger, re-resolve
+                                            per layer: active_on(pos) -> the object
+                                            content, then curves.interpolate(local)
+                                            -> timeline_overlay_[layer]
+4. resolve_drivers()                      constant + overlay -> resolved_[layer]
+5. route ordering -> receive              draw_frame::push(raw, effective_transform(layer))
+6. publish                                mixer/* EFFECTIVE, layer/M/driver/<path>,
+                                            layer/M/constant/<path>, timeline/<name>/{state,
+                                            position, rate, revision, active/<layer>}
+```
+
+### 7.1 An overlay, not a write
+
+**Nothing but the operator ever touches `tweens_`.** That is D3, and it is the whole reason this
+shape differs from the engine it replaces. `KEYFRAMES` wrote by *replacing* the layer's tween with
+a zero-duration one built from the interpolated values, and that made four things impossible at
+once: an in-flight `MIXER <duration>` was collapsed; an operator's explicit write during an
+animation was lost rather than remembered; a holding timeline leaked its last value forever after
+it ended; and nothing could give a field back, because nothing remembered what it had been.
+
+Here the constant lives in `tweens_`, the timeline publishes into `timeline_overlay_`, and one
+`resolve_drivers()` per tick composes them into `resolved_`. **Ending a driver is then just
+clearing an overlay** — the constant is still there, untouched, and comes back by construction
+rather than by being restored. Two of the stack's five ranks exist so far: timeline over constant.
+Bindings still write the constant directly and move up to their own overlay later.
+
+`resolved_` holds an entry only for a **driven** layer, so the cost is proportional to what is
+animated rather than to the number of layers.
+
+### 7.2 What is published, and why the effective value
+
+`mixer/*` carries the **effective** value, not the constant. It is what a client reads to draw a
+slider, and publishing the constant while the picture showed the driver's value would make the API
+disagree with the screen — which is the one thing a control surface cannot recover from. The
+constant is still reachable, under `layer/M/constant/<path>`, and only where it *differs*, so a
+client can show "you set 0.5, the timeline is at 0.35" and has both numbers.
+
+`layer/M/driver/<path>` names what is writing a field, published unconditionally for a driven
+layer. There is no descriptor default for "who owns this", so an absent key means *nobody* —
+which is exactly the fact a client needs. Without it a client sees a value move and not what
+moved it, which is how an operator ends up dragging a slider that snaps back every frame with no
+explanation.
+
+`timeline/<name>/{state, position, rate, revision, ok, active/<layer>}` per tick per document.
+An invalid document publishes `ok: false` and a fault count and is **inert** — it is stored so a
+client can show the author the faults, and evaluating a half-authored show would be the wrong
+reading of "stored".
+
+**Stop releases; pause does not.** A stopped document owns nothing, so every layer it drove falls
+back to its constant on that very tick. Pause re-anchors and keeps ownership, which is D4 — a
+paused document holding a still frame is exactly when an operator wants the value held rather
+than reverted.
+
+### 7.3 Where it is checked
+
+**`timeline-ramp`, 15/15 both mixers.** A colour layer's brightness ramped 0.2 → 0.8 over four
+seconds with `easeinquad`, fitted on the frame clock; the picture captured at a **paused**
+position and compared to brightness × 255; `driver/` and `constant/` read back; and the release,
+twice — when the object's own span ends, and again on `STOP`.
+
+Two fixture decisions worth naming. The easing is `easeinquad`, which **shares both endpoints with
+linear**, so a resolver that ignored easing passes a two-point check and fails this fit by eight
+times its gate. And the operator's constant is **0.5, between the authored endpoints**, so
+"released" cannot be confused with "held at an endpoint".
+
+The gate is *derived*: 1.5 frames of the model's own steepest slope. A hand-picked 0.01 failed at
+0.0119, which is one frame of slope — the fit cannot do better with an integer origin frame and a
+PLAY that landed mid-tick, so the gate was failing for a reason that had nothing to do with the
+feature.
+
+**`timeline-clock`, 7/7 both mixers.** The same document over a layer with **no producer**
+(play-then-stop, so the layer exists with an empty foreground) and over a **paused clip** — and it
+gates that the paused clip's own frame number really is still, without which the check would pass
+on a producer clock too and prove nothing.
+
+**Shown failing first, twice, and both mutations are the old design rather than a synthetic
+error:**
+
+* **the clock taken from the producer.** `timeline-clock` fails 4 of 7, and `timeline-ramp` cannot
+  get past its first real check — 13 samples where 101 are needed.
+* **the old lossy writer** — composing into `tweens_` instead of `resolved_`. `timeline-ramp` fails
+  exactly the four release checks: the object's end does not release, `constant/brightness`
+  disappears, `STOP` leaves 0.35 where the operator set 0.5, and the **picture** shows 89 instead
+  of 127. The other eleven pass, which is what makes those four the discriminating ones.
+
+`transport_self_test` at boot covers the arithmetic: exact advance over an hour, pause and resume
+without a jump, seek both ways, rate 2, rate 1/3 and rate −1, a loop region never left in either
+direction, and the rank.
+
+---
+
+*§8 Ownership beyond two ranks, §9 Known gaps — arrive with commits 8–19. `KEYFRAMES` is still
+present and still works; it is removed next.*

@@ -1005,6 +1005,52 @@ The existing commands are unchanged and remain the ones to use where they exist:
 takes a radius, a type, an angle and a centre together and switches blur on for you, which
 `FIELD` will not do.
 
+### `TIMELINE` — driving an authored show
+
+A timeline document animates any parameter on the channel over time, from one object instead of
+twenty `MIXER` commands with matching durations. **The document arrives over the control API**,
+not over AMCP:
+
+```
+PUT /v1/timeline/show     # the document, as JSON. See docs/features/timeline.md
+```
+
+There is no `TIMELINE LOAD`, and that is deliberate — a document is JSON, and the JSON interface
+is the one that speaks JSON. AMCP drives what is already loaded:
+
+```
+TIMELINE 1 LIST                    # every document this channel owns, with its playhead
+TIMELINE 1 INFO show               # one of them: state, position, rate, instance count
+TIMELINE 1 PLAY show               # play from where it is
+TIMELINE 1 PAUSE show              # hold the position AND keep the parameters
+TIMELINE 1 STOP show               # rewind to zero and give every parameter back
+TIMELINE 1 SEEK show 12.5          # a position, in seconds
+TIMELINE 1 RATE show 0.5           # half speed; -1 runs backwards; 0 is refused, use PAUSE
+TIMELINE 1 LOOP show 20 45         # loop that region; LOOP show OFF clears it
+TIMELINE 1 GO show                 # fire a trigger an object is waiting on
+```
+
+**Three things worth knowing before you use it on air.**
+
+*The playhead runs on the channel's clock, not the clip's.* A document keeps animating over a
+paused clip, an empty layer and a colour fill. That is what you want for a hold on a still frame
+with a grade ramping under it, and it means a document's timing does not change when you swap the
+media on a layer.
+
+*`STOP` gives your own values back, exactly.* If you set `MIXER 1-10 BRIGHTNESS 0.5` and a
+document then drives brightness somewhere else, stopping the document returns brightness to 0.5 —
+not to the document's last value, and not to the default. Your write during the animation is
+remembered rather than lost, and it lands when the document lets go. `PAUSE` does **not** release:
+it holds the position and keeps the parameters, which is usually what a hold means.
+
+*Who owns a parameter is published.* `channel/1/stage/layer/10/driver/brightness` names what is
+writing it, and `.../constant/brightness` carries your own value beside it. If a slider will not
+stay where you put it, that is where to look.
+
+A verb answers `202` and takes effect on the next frame. Several clients acting in the same frame
+are resolved as **stop beats pause beats play** — a stop can never lose to a play that arrived a
+moment later.
+
 ### Preview senders (Spout)
 
 To feed a preview to another application on the same machine without paying for a

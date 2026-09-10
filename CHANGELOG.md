@@ -1,6 +1,58 @@
 CasparVP — Unreleased
 ==========================================
 
+### The timeline runs in the tick, on the CHANNEL's clock, and releasing a field is lossless
+
+A loaded document now animates any layer on its channel. `TIMELINE <ch>
+PLAY|PAUSE|STOP|SEEK|RATE|LOOP|GO|INFO|LIST` drives it; the document itself still arrives over
+`PUT /v1/timeline/{name}`, and there is deliberately no `TIMELINE LOAD` -- see
+`docs/features/timeline.md` §6.2.
+
+**Behaviour changes for an existing config.** None: nothing evaluates unless a document has been
+PUT and played, and `KEYFRAMES` is untouched and still works. What is NEW in the published state,
+for any layer a timeline drives:
+
+* `channel/{n}/stage/layer/{m}/mixer/*` reports the **effective** value -- what is on air --
+  rather than the operator's constant. For an undriven layer they are the same thing, which is
+  every layer in a config that loads no timeline.
+* `channel/{n}/stage/layer/{m}/driver/<path>` names what is writing a field, and
+  `.../constant/<path>` carries the operator's own value where it differs.
+* `channel/{n}/stage/timeline/<name>/{state, position, rate, revision, ok, active/<layer>}` once
+  per tick per document.
+
+**THE CLOCK IS THE CHANNEL'S FRAME COUNTER, never a producer's**, and that is the largest
+difference from the engine this replaces. `KEYFRAMES` clocked itself from
+`producer->frame_number()` on the animated layer, so an animated grade on a COLOUR fill never
+moved, an EMPTY layer pinned t = 0, a PAUSED clip froze the animation with it, and `SEEK` was
+unobservable because the next tick recomputed the position and overwrote it. All four now work.
+
+**RELEASE IS LOSSLESS.** Nothing but the operator ever touches a layer's `tweened_transform`. The
+timeline publishes into a per-layer overlay and one `resolve_drivers()` per tick composes the two,
+so ending a driver is just clearing an overlay -- the operator's value is still there, untouched.
+The old writer REPLACED the layer's tween with the interpolated value, so there was nothing to
+come back to.
+
+**MEASURED, both mixers.** New batteries **`timeline-ramp` 15/15** and **`timeline-clock` 7/7**.
+The ramp fits `easeinquad` -- which shares both endpoints with linear, so a resolver ignoring the
+easing fails by eight times the gate -- captures the PICTURE at a paused position against
+brightness x 255, reads `driver/` and `constant/` back, and checks the release twice: at the
+object's own end and again on `STOP`. The operator's constant is 0.5, between the authored 0.2 and
+0.8, so "released" cannot be confused with "held at an endpoint". `timeline-tween-survives`,
+`keyframes-legacy`, `api-timeline`, `api-tree`, `api-roundtrip`, `api-events`, `api-write` and
+`binding-lfo` all green on both.
+
+**Shown failing first, twice, and both mutations are the OLD design rather than a synthetic
+error.** Clocking from the producer fails 4 of `timeline-clock`'s 7 and stops `timeline-ramp` at
+its first real check (13 samples where 101 are needed). Composing into the layer's tween instead
+of the overlay -- literally the old writer -- fails exactly the four release checks: the object's
+end does not release, `constant/brightness` disappears, `STOP` leaves 0.35 where the operator set
+0.5, and the picture shows 89 instead of 127. The other eleven pass.
+
+`transport_self_test` runs at boot: exact advance over an hour, pause and resume without a jump,
+seek both ways, rate 2, rate 1/3 and rate -1, a loop region never left in either direction, and
+`stop > pause > run` within one tick -- which the self-test caught wrong on its first run, because
+the first implementation sorted by rank and applied every one, so whichever went last won.
+
 ### Timeline documents over HTTP, and a `/fp:fast` rounding defect they exposed
 
 `PUT`/`GET`/`DELETE /v1/timeline/{name}`, `GET /v1/timeline` and

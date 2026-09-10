@@ -51,6 +51,7 @@ namespace caspar { namespace core {
 
 namespace timeline {
 class timeline_store;
+struct transport_command;
 }
 
 
@@ -304,6 +305,30 @@ class stage final : public stage_base
     /// the next commit; the pointer is here now because the fingerprint is what makes a PUT
     /// observable from outside the process at all.
     void set_timeline_store(std::shared_ptr<timeline::timeline_store> store);
+
+    /// Queue one transport command for a document, to take effect on the next tick.
+    ///
+    /// QUEUED rather than applied, and that is what makes several clients acting in the same
+    /// frame well-defined: the tick applies a whole frame's worth at once under `stop > pause >
+    /// run`, so a stop can never lose to a play that happened to arrive a microsecond later.
+    /// Returns false only if the document is not one this channel owns.
+    std::future<bool> timeline_command(const std::string& name, const timeline::transport_command& cmd);
+
+    /// A document's playhead as this channel sees it: state, position in seconds, rate.
+    struct timeline_status
+    {
+        bool        exists   = false;
+        std::string state    = "stopped";
+        double      position = 0.0;
+        double      rate     = 1.0;
+        bool        ok       = true;   //< does the document resolve
+        std::size_t faults   = 0;
+        std::size_t instances = 0;
+    };
+    std::future<timeline_status> timeline_state(const std::string& name);
+
+    /// The documents this channel owns, with their playheads. For `TIMELINE <ch> LIST`.
+    std::future<std::vector<std::pair<std::string, timeline_status>>> timeline_list();
 
     std::unique_lock<std::mutex> get_lock() const;
 
