@@ -51,6 +51,9 @@
 #include <core/binding/binding_math.h>
 #include <core/mixer/audio/audio_analysis.h>
 #include <core/address/target.h>
+#include <core/graph/graph_store.h>
+#include <core/graph/registry.h>
+#include <core/graph/validate.h>
 #include <core/timeline/curve.h>
 #include <core/timeline/resolver.h>
 #include <core/timeline/timeline_store.h>
@@ -167,6 +170,15 @@ struct server::impl
     /// to every channel's stage (for the structure fingerprint) and to the HTTP context.
     std::shared_ptr<core::timeline::timeline_store> timelines_ =
         std::make_shared<core::timeline::timeline_store>();
+
+    /// THE NODE GRAPHS, one store for the server.
+    ///
+    /// Server-wide even though a document attaches to exactly ONE layer, because a document
+    /// exists before it is attached and after it is detached -- a look a client is still
+    /// building, or one taken off air and meant to go back. A per-channel store would leave an
+    /// unattached graph with nowhere to live.
+    std::shared_ptr<core::graph::graph_store> graphs_ =
+        std::make_shared<core::graph::graph_store>();
     spl::shared_ptr<core::cg_producer_registry>                   cg_registry_;
     spl::shared_ptr<core::frame_producer_registry>                producer_registry_;
     spl::shared_ptr<core::frame_consumer_registry>                consumer_registry_;
@@ -218,6 +230,14 @@ struct server::impl
         core::timeline::curve_self_test();
         core::timeline::resolver_self_test();
         core::timeline::transport_self_test();
+        // The node graph's three: the class table against its own rules, the validator against
+        // one minimal document per failure mode, and the store's two revision counters. The
+        // validator is the one that matters most -- it is the only thing between a mistyped port
+        // name and a graph that stores, answers 200 and renders nothing, which is a failure
+        // discovered on air.
+        core::graph::node_registry_self_test();
+        core::graph::graph_validate_self_test();
+        core::graph::graph_store_self_test();
         accelerator::ogl::run_compose_self_test();
 #ifdef ENABLE_VULKAN
         // GUARDED, because the Vulkan accelerator's sources are only compiled when
@@ -647,6 +667,7 @@ struct server::impl
 
             const std::wstring lifecycle_key = L"lock" + std::to_wstring(channel_id);
             channel->stage()->set_timeline_store(timelines_);
+            channel->stage()->set_graph_store(graphs_);
 
             // HOW A TIMELINE OBJECT'S CLIP BECOMES A PRODUCER.
             //
@@ -1006,6 +1027,7 @@ struct server::impl
                 };
                 api_ctx.channel_count = [channels] { return static_cast<int>(channels->size()); };
                 api_ctx.timelines     = timelines_;
+                api_ctx.graphs        = graphs_;
 
                 // A CLIP IS CHECKED BY BUILDING IT, at PUT, and the producer is discarded.
                 //

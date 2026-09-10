@@ -17,6 +17,7 @@ set(SOURCES
 		api_events.cpp
 		api_openapi.cpp
 		api_status.cpp
+		api_graph.cpp
 		api_timeline.cpp
 		api_tree.cpp
 		api_value.cpp
@@ -33,6 +34,7 @@ set(HEADERS
 		api_events.h
 		api_openapi.h
 		api_status.h
+		api_graph.h
 		api_timeline.h
 		api_context.h
 		api_tree.h

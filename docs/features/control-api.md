@@ -204,6 +204,44 @@ this API rather than of the timeline:
   already past fires now here and is *refused* by a batch — see `timeline.md` §18.2 for why those
   two answers are both right.
 
+
+### The node graph
+
+```
+GET    /v1/graph                      the documents that are loaded
+PUT    /v1/graph/{name}               store one
+GET    /v1/graph/{name}               as stored, with faults, evaluation order and attachment
+DELETE /v1/graph/{name}               remove it, detaching first
+GET    /v1/graph/{name}/history       the undo stack
+POST   /v1/graph/{name}/{undo|redo}   one step
+```
+
+Documented in [`node-graph.md`](node-graph.md). Four things about it are properties of this API
+rather than of the graph:
+
+* **A rejected graph is STORED, which is the OPPOSITE of the timeline's answer.** A validation
+  fault — an unknown class, a cycle, a value out of range — is `graph_invalid` and the document is
+  kept, because a graph is edited **while it is on air**: an operator who mistypes a port name must
+  not lose the grade that is rendering. `GET` returns it with its faults; an attached layer keeps
+  its last good plan. Only a **decode** fault (malformed JSON, a misspelled `stage`, a `ui` that is
+  not JSON) is `bad_request` and stores nothing. The timeline refuses a path typo because a path
+  names a *registry*, which does not change while the author types; a graph's structure is exactly
+  what the author is changing.
+* **A `coercion` fault is not an error.** `severity` splits "this cannot run" from "this runs and
+  loses something". An image joined to a mask port is a luma reduction: legal, useful, lossy — so it
+  compiles, renders, and is reported, and an editor draws a warning on the edge. Refusing it would
+  make a useful graph unbuildable; doing it silently would hide the reduction inside a picture.
+* **TWO revision counters, and only one is in the stage fingerprint.** `revision` moves on a
+  structure change (put, erase, undo, redo, attach, detach) and is what makes a PUT observable to a
+  client walking the tree. `values_revision` moves on a parameter write and deliberately is **not**:
+  a slider drag, or a timeline ramping a node parameter, changes values fifty times a second, and
+  mixing that in would force every client to re-walk every channel's whole tree once per frame.
+* **A graph has an undo history and a timeline does not**, and undo means the **gesture** rather
+  than the write. Consecutive changes carrying the same `label` coalesce into one entry, so a
+  fifty-write slider drag is one undo. An unlabelled write never coalesces — with no label there is
+  nothing to say two writes belong together, and guessing from timing would fold two deliberate
+  nudges into one.
+
 `PUT /v1/value/channel/{n}/stage/layer/{m}/mixer/{field}` -- mixer fields only in this build.
 
 ```bash

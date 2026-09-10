@@ -1,0 +1,363 @@
+# The node graph — a typed DAG per layer, owned as a document, addressed like every other parameter
+
+> **State:** **in progress.** The DOCUMENT ships — stored, validated, read back, undone, deleted —
+> and **nothing is evaluated yet**: there is no attachment verb and no frame path, so an attached
+> graph does not exist and a stored one renders nothing. That is deliberate sequencing rather than a
+> gap; §8 lists what arrives when and §9 says exactly what is measured today. It replaces the
+> `MIXER GRADE_NODE` prototype, whose largest defect is measured here: a node grades the
+> **display-encoded** pixel, **42 LSB** away from `MIXER CDL` (§2).
+> **Commands:** **none yet.** `GRAPH <ch>-<layer> ATTACH|DETACH <name>` and
+> `MIXER FIELD node/<id>/<param>` arrive with the address grammar (§8). There is deliberately **no
+> `GRAPH LOAD`** — a document is JSON and arrives over the control API, the timeline's precedent.
+> **API:** `PUT`/`GET`/`DELETE /v1/graph/{name}`, `GET /v1/graph`, `GET /v1/graph/{name}/history`,
+> `POST /v1/graph/{name}/{undo|redo}` (§7)
+> **Modules:** **not a module** — `src/core/graph/` (`registry`, `model`, `validate`,
+> `graph_store`), with the JSON codec in `src/protocol/http/api_graph.cpp`, the routes in
+> `src/protocol/http/http_server.cpp` and the store injected into every stage by
+> `src/shell/server.cpp` for the structure fingerprint
+> **Replaces:** the `MIXER GRADE_NODE` prototype — `grade_window`/`grade_node`/`grade_graph` in
+> `src/core/frame/frame_transform.h`, `mixer_grade_command`, and the `grade_nodes` blob row. Not
+> yet removed: the prototype still ships and is still the only thing that renders.
+> **Coverage:** `api-graph` — **33/33 both mixers** (the document, its faults, its evaluation order,
+> its history); `grade-graph` — **8/8 both mixers** (which colour space a node pass runs in, the gap
+> measured at 42.00 LSB); three boot self-tests — `node_registry_self_test`,
+> `graph_validate_self_test`, `graph_store_self_test`. **No picture check exists**, because nothing
+> evaluates a graph yet; `grade-window` covers the prototype's picture and §2 records why its own
+> oracle has to change when the placement moves.
+
+---
+
+## 1. What this replaces, and why it is a replacement rather than an extension
+
+`MIXER GRADE_NODE` is the fork's only node model and it is not a graph. It is a **16-slot array of
+one fixed record** inside `image_transform` — an ellipse window, an exposure, an optional CDL —
+with no edges, no ports, no types, addressed by index, AMCP-only, exposed to the control API as one
+read-only blob row.
+
+Three of those are fatal to a client that draws it, and the third is the one that cannot be patched:
+
+* **Index addressing has no identity.** Delete node 3 and every reference to node 4 means something
+  else. A parameter's address, a timeline key, a binding, an undo entry — all of them name the
+  wrong thing after one edit.
+* **There is no topology at all**, so fan-in is inexpressible. A `mix` of two graded versions of the
+  same picture is the first thing anybody asks a node graph for and the array cannot say it.
+* **And it runs in the wrong colour space** — measured, 42 LSB, see §2.
+
+The design study's own verdict (ch.13): *do not ship the v1 shape — a curated parameter list plus
+one opaque blob is where Wire started and where the fork is now.*
+
+## 2. The placement, measured — 42 LSB
+
+The prototype's node early-out sits at the **end of `main()`** in both shaders, after the whole
+grading chain and after the `do_output_convert` block, so a node operates on the layer's finished,
+**display-encoded** attachment. `MIXER CDL` and every other grading operator run *inside* the chain.
+
+`grade-graph` applies the same CDL both ways on the same source:
+
+| config | `MIXER CDL` | node CDL | apart |
+| :--- | :--- | :--- | ---: |
+| pass-through — nothing non-identity after the CDL's step | `187, 66, 36` | `187, 66, 36` | **0.00 LSB** |
+| `MIXER COLORSPACE REC709 BT709 NONE BT709 REC709 1.0` — an identity round trip through a **linear middle** | `169, 66, 78` | `187, 66, 36` | **42.00 LSB** |
+
+Identical on both mixers, to the byte. The first row is what makes the second attributable, and the
+node's answer is the **same number in both rows** — invariant under `MIXER COLORSPACE`, which is
+what "it runs after everything" looks like from outside.
+
+So `stage` is a property of the document, with two values, and both are real:
+
+* **`working`** (the default) — scene-linear, in the working gamut, before tone-map and the OETF.
+  A node CDL is then the same operation as `MIXER CDL` and a node exposure is a stop of light.
+* **`display`** — the prototype's placement, kept because it is a legitimate thing to want. A
+  correction expressed on the picture *as encoded* — a broadcast-legal trim — is not the same
+  operation in linear light.
+
+A single graph is entirely in one stage; a cross-stage edge is refused rather than converted,
+because inserting an EOTF into the middle of a chain the author did not ask for is exactly the
+assumption the port tags exist to prevent.
+
+## 3. The three orthogonal things, and why that is the whole design
+
+The governing requirement was **compatible with timelines, keyframes, bindings and every other
+workflow — not A or B**. That is achievable without a single new mechanism, because the fork already
+has the two pieces it needs: **one address space** (`core::address::parse`) and **one ownership
+stack** (`drivers_` → `resolve_drivers`).
+
+**A node parameter is an ADDRESS.** `node/<id>/<param>[.N]`, published under
+`channel/N/stage/layer/M/mixer/node/<id>/<param>` so read and write are one path. Then:
+
+| workflow | what it needs | what it gets |
+| :--- | :--- | :--- |
+| a timeline keys it | a path in a document | already works — a curve or a `content` step naming `node/n1/exposure` |
+| a binding drives it | an address `BIND` accepts | already works — one more `target_kind` |
+| `HOLD` holds it | a dominant overlay keyed by path | already works — `layer_overlay::values` is path-keyed |
+| `PUT` writes it | a write path with `effective`/`shadowed_by` | already works — the same reply shape every mixer field has |
+| `animatable` describes it | a `kf_kind` on the descriptor | already works — derived by `fields::animatable_of` |
+| a preset snapshots it | a path and a value | already works |
+
+**The graph itself decides only how IMAGES flow.** That split is the reason the answer is "and"
+rather than "or": three orthogonal things composed through one address space, instead of a fourth
+subsystem with its own vocabulary for animation.
+
+**And the node graph is the COMPOSITING graph, not the binding surface.** A compositing edge carries
+frame data whose *order changes the result*, so topology is intrinsic and the server owns evaluation
+order, validity and cycles. A binding has no topology — one scalar to one address, unordered against
+every other binding — and what an operator asks of it is **membership** ("what drives this?"), which
+`stack/<path>` already answers per address. `reactive.md` §1.2's "a node graph in the server —
+bindings are edges and the client draws them" stands for *bindings*; a compositing graph is a
+different object for this reason.
+
+## 4. The document
+
+```jsonc
+PUT /v1/graph/{name}
+{
+  "name": "look",
+  "stage": "working",                    // or "display". Refused if misspelled, never defaulted
+  "label": "add a highlight roll-off",   // names the GESTURE for the undo history
+  "nodes": [
+    {"id": "in",  "class": "input"},
+    {"id": "e",   "class": "exposure", "params": {"gain": 2.0}, "ui": {"pos": [40, 80]}},
+    {"id": "k",   "class": "mask_ellipse", "params": {"center": [0.5, 0.4], "radius": [0.3, 0.2]}},
+    {"id": "out", "class": "output"}
+  ],
+  "edges": [
+    {"from": "in.out", "to": "e.in"},
+    {"from": "k.out",  "to": "e.mask"},
+    {"from": "e.out",  "to": "out.in"}
+  ],
+  "ui": {"camera": {"x": -120.5, "zoom": 1.75}}
+}
+```
+
+Five things about that shape are decisions rather than syntax:
+
+**Node ids are the CLIENT'S and are required.** A client that draws a graph already has ids for the
+things it drew, and an id is what `node/<id>/<param>` addresses — so it is the one thing that must
+survive an edit. An id containing `/` or `.` is refused, because those are the two characters the
+address grammar splits on and an ambiguous address is a write that silently lands elsewhere.
+
+**Edge ids are server-assigned when absent** (`e1`, `e2`, …), echoed, and stable across a re-PUT.
+Drawing an edge is a gesture with no natural name, so requiring one would only make clients invent
+`e17`; but an edge needs an id for a fault to point at.
+
+**An edge is one string, `"n1.out"`**, split on the last `.`. Unambiguous precisely because a node
+id may not contain one.
+
+**`params` is sparse and carries values only.** The descriptor is in the registry, so a document
+cannot disagree with the server about types. Absent means "at its default", which is
+distinguishable from "explicitly set to the default" — that difference matters for a preset diff.
+
+**`ui` is stored uninterpreted.** Node positions, the client's camera, a collapsed group: raw JSON,
+echoed back verbatim, checked for well-formedness and nothing else. Where a box sits on a client's
+canvas is not something this server should ever have a schema for. Well-formedness *is* checked,
+because a malformed blob would break the next GET rather than the PUT that stored it.
+
+## 5. The node classes that exist
+
+The registry is a fixed table, like `fields::mixer_fields()`, for the same reason: a client needs to
+know what it may build before it builds it.
+
+| class | group | in | out | parameters |
+| :--- | :--- | :--- | :--- | :--- |
+| `input` | root | — | `image` | — |
+| `output` | root | `image` | — | — |
+| `exposure` | grade | `image`, `mask?` | `image` | `gain`, `mix`, `bypass` |
+| `cdl` | grade | `image`, `mask?` | `image` | `slope`, `offset`, `power` (vec3 each), `saturation`, `mix`, `bypass` |
+| `mask_ellipse` | mask | — | `mask` | `center`, `radius`, `feather`, `invert`, `space`, `bypass` |
+| `mix` | combine | `image a`, `image b?`, `mask?` | `image` | `amount`, `bypass` |
+| `over` | combine | `image a`, `image b?` | `image` | `bypass` |
+
+**The table carries exactly the classes the evaluator will implement, and no more.** A class in the
+catalogue that a PUT accepts and the renderer ignores is the *202-and-no-picture* failure seen from
+the other end — the same one the timeline's path validation closed. So the remaining mask families
+(`mask_rect`, `mask_gradient`, `mask_qualifier`, `mask_combine`) and the rest of the grading
+operators arrive **with the shader that implements them**, not before.
+
+**`lut3d` is absent**, though the design lists it: its LUT input needs a `ref_lut` port, reference
+ports are refused in v1, so the class could only ever be a pass-through with a `strength` nobody can
+apply.
+
+**Every class gets an implicit `bypass`**, added by the registry's own constructor so no class author
+can forget it. It is a boolean and therefore `"step"`-animatable: a timeline switches a chain on **at**
+a key rather than sliding through half of it. A bypassed node aliases its primary input and costs no
+draw; a bypassed *mask generator* emits its port's disconnected default — 1.0, "everywhere" — so
+bypassing a mask means "no mask" rather than "mask nothing".
+
+### 5.1 Ports: no new type system
+
+A port is a **`param_snapshot` plus three enums**, and that is the entire type story. The value half
+is the same descriptor a producer parameter carries, so `api_tree.cpp`'s `param_leaf` and
+`api_value.cpp`'s validation describe and check a node parameter with no new descriptor code, and a
+node port carries exactly a mixer field's key set including `animatable`.
+
+| enum | values | what it decides |
+| :--- | :--- | :--- |
+| `direction` | `input`, `output` | not derivable from anything else |
+| `flow` | `signal`, `attribute` (`event` reserved) | whether a change is a value write or a re-compile |
+| `domain` | `value`, `image`, `mask` (`ref_layer`, `ref_channel`, `ref_lut` declared and refused) | what flows |
+
+**The `flow` split is what makes a timeline able to ramp a node parameter at 50 Hz.** A `signal`
+port's value is compared *by value* and lives in a flat array; an `attribute` port's value is part
+of the compiled plan — it changes the step list, the pass count, or a mask's coordinate space — so
+changing it needs a re-PUT and a new plan. Declaring a signal as an attribute would make a ramp
+allocate a graph fifty times a second; declaring an attribute as a signal would make a change
+silently not take effect. So it is declared per port rather than inferred from the type.
+
+**Image ports carry `space` and `alpha` tags from the first commit**, when nothing needs them,
+because the alternative is a conversion that gets *assumed*. This tree has paid for that twice —
+the YCbCr decode counting in 8-bit codes at every depth, and `apply_transform_colour_values`
+silently dropping any field nobody added to it. A tagged handle makes a mismatched join either an
+inserted conversion or a refusal at PUT, never a wrong picture.
+
+**No scalar or math nodes.** Scalar ports *are* parameters, and the server already has two scalar
+dataflow engines addressing them: bindings (LFO, audio, inputs, OSC, trackers) and the timeline
+(curves and steps). A third inside the graph would duplicate both.
+
+### 5.2 Coercion: one table, three callers
+
+`coerce(from, to)` is consulted by `validate` at PUT, by `connections/preview` before a client
+commits a gesture, and by `suggest` when a client asks what may be joined. **One function, because
+two would let a client be offered an edge a PUT then refuses** — which is worse than not offering it.
+
+| join | verdict |
+| :--- | :--- |
+| same domain, same type | legal, exact |
+| `mask` → `image` | legal, exact — replicated across RGB with alpha 1, so a mask can be looked at |
+| `image` → `mask` | legal, **reported** — reduced to the working-space luma, three components to one |
+| `value` → `mask` | legal — a constant mask over the raster |
+| numeric → numeric of another type | legal; **reported** when it rounds or thresholds |
+| `image`/`mask` → `value` | refused — there are no reduction nodes in v1 |
+| anything involving `ref_*` or `event` | refused, naming the version it waits for |
+| `image(working)` ↔ `image(display)` | refused — use the document's `stage` |
+
+The asymmetry between the two mask conversions is asserted in both directions by the boot self-test,
+because a table that made them symmetric would let an image be used as a mask with **no warning**.
+
+## 6. Validation, and the two kinds of refusal
+
+`validate` is pure and every fault names something an author can see: a node id, an edge id, a port
+name. "The graph is invalid" is not something a client can act on.
+
+| checked | why it is a real failure mode |
+| :--- | :--- |
+| unknown class, unknown port | the *202-and-no-picture* class: a typo would store, answer 200, render nothing, and be found on air |
+| duplicate node id, an id with `/` or `.` | every edge and every address naming it becomes ambiguous |
+| direction | checked rather than inferred, so a client that drew the edge backwards is told which end is which |
+| domain, via `coerce` | one table, so PUT and `preview` cannot disagree |
+| fan-in | an input takes **one** edge; two have no defined order. Fan-**out** is unlimited — that is what a graph is for |
+| required inputs | unconnected is an error, not a default: there is no picture to default *to* |
+| parameter type, arity, range | against the port descriptor, the same quantities the write path checks |
+| exactly one `input` and one `output`, and the output **reachable** | two outputs are two answers to what the layer draws; an unreachable one renders black |
+| cycles, by Kahn's at PUT | and the fault **names an edge of the cycle**, not merely one downstream of it. A cycle found on air is a hang; found at PUT it is a message with an edge id in it |
+| at most 16 image passes | **refused, not clamped** — a clamped graph renders something nobody authored |
+
+### 6.1 Whether a rejected document is STORED — and this is the opposite of the timeline's answer
+
+| the fault | code | stored? |
+| :--- | :--- | :--- |
+| **validation** — an unknown class, a cycle, a value out of range | `graph_invalid` | **yes** |
+| **decode** — malformed JSON, a misspelled `stage`, a `ui` that is not JSON, an edge that does not split | `bad_request` | no |
+
+**A graph is edited while it is ON AIR.** An operator who mistypes a port name must not lose the
+grade that is currently rendering — so the document is kept, `GET` returns it with its faults, an
+attached layer keeps its **last good plan**, and the stage publishes `graph_stale`.
+
+That is deliberately the opposite of a timeline path typo, which is refused. The difference is what
+the fault names: a timeline key names a *registry*, which does not change while the author types, so
+storing a typo helps nobody. A graph's structure is exactly what the author is in the middle of
+changing.
+
+**A `coercion` fault is not an error.** It does not produce `graph_invalid`, the graph compiles and
+renders, and the entry exists so an editor can draw a warning on the edge — instead of the server
+either refusing a useful join or performing a luma reduction silently.
+
+## 7. The API
+
+```
+GET    /v1/graph                      every loaded document: revision, counts, ok, faults, attachment
+PUT    /v1/graph/{name}               store one; `graph_invalid` when it will not run, and stored anyway
+GET    /v1/graph/{name}               as stored, with `faults`, `order`, `attached`, `can_undo`/`can_redo`
+DELETE /v1/graph/{name}               remove it, detaching first
+GET    /v1/graph/{name}/history       the undo stack, newest last
+POST   /v1/graph/{name}/{undo|redo}   one step, answering the resulting document
+```
+
+**A PUT answers with `order`** — node ids in evaluation order — because that is the one thing a
+client cannot compute for itself without reimplementing both the topological sort and the coercion
+rules.
+
+**Two revision counters, and keeping them apart is load-bearing.**
+
+| counter | moves on | in the stage fingerprint? |
+| :--- | :--- | :--- |
+| `revision` | put, erase, undo, redo, attach, detach — a **structure** change | **yes** |
+| `values_revision` | a parameter write | **no** |
+
+Mixing the second one in would make a slider drag, or a timeline ramping a node parameter, bump
+`structure_revision` fifty times a second on every channel and force every attached client to
+re-walk every tree. The store's boot self-test asserts the two stay apart, because nothing
+observable from outside would show it in a single run.
+
+**A graph has an undo history and a timeline does not.** That is a difference in how the two are
+used rather than an inconsistency: a graph is edited in dozens of small gestures an operator expects
+to be able to take back, where a timeline document is authored elsewhere and PUT whole.
+
+**Undo is the GESTURE, not the write.** A slider drag is fifty parameter writes and one undo, so
+consecutive changes carrying the same `label` coalesce into one history entry. An *unlabelled* write
+never coalesces — with no label there is nothing to say two writes belong together, and guessing
+from timing would fold two deliberate nudges into one. Depth is 64, chosen rather than measured. A
+PUT clears redo, the ordinary editor rule: once the document has branched, the old future was
+computed against something that no longer exists.
+
+**`DELETE` detaches rather than refusing.** A client deleting a look means "take it off air";
+refusing would leave them holding a document they cannot get rid of without first remembering where
+it was attached. A policy call, flagged as one.
+
+## 8. What is not here yet
+
+Each of these is sequenced rather than open, and the order is riskiest-first:
+
+| next | what it adds |
+| :--- | :--- |
+| the address grammar | `target_kind::node`, `/v1/value/.../mixer/node/{id}/{p}`, the tree, `GRAPH ATTACH/DETACH`, `MIXER FIELD node/…`, and every ownership arm — so a timeline keys a node parameter and a binding drives it |
+| **the seam** | `image_transform::{node_plan, node_values}` replacing `grade_nodes`, the evaluator at `stage: display`, `mixer_grade_command` deleted, `grade-window` migrated |
+| Vulkan fan-out | `renderpass::commit()` barriering any earlier attachment, not only the previous one |
+| fp16 intermediates | working-space values exceed 1.0, so unorm intermediates clip |
+| `stage: working` | the head/tail split, and the CDL parity in §2 turns green |
+| the mask families | `rect`, `gradient`, `qualifier`, `combine`, with materialised masks |
+| the catalogue | `/v1/catalog/node`, `suggest`, `connections/preview`, `ports/{p}/live` |
+| batches and previews | `{"op":"graph"}`, one history entry per gesture, and a per-node preview PNG |
+
+And these are **not v1 at all**, each with its hook: effect and source node families (a texture
+hand-off between GL contexts or Vulkan devices is a *device* feature, not a graph one — the `image`
+tags and K-input steps are ready for it); scalar/math nodes; topology changing over time beyond
+bypass and mute; `group` evaluation (the model carries one, inlining at compile is v2); reference
+ports; fusing linear runs into one pass; preview streams; `duration`/`tween` on a node-parameter
+write, which is the one place "every workflow works on a node parameter" is answered by the timeline
+rather than by the `MIXER` tween.
+
+## 9. Coverage — what is measured today
+
+| what | battery | result |
+| :--- | :--- | :--- |
+| the document, its faults, its order, its history | `api-graph` | **33/33 both mixers** |
+| which colour space a node pass runs in | `grade-graph` | **8/8 both mixers**, the gap measured at 42.00 LSB |
+| what a node computes (the prototype) | `grade-window` | 1 LSB both mixers — **and its oracle asserts the current placement**, so its figures move when §8's working-space commit lands |
+| the class table against its own rules | `node_registry_self_test` | at boot |
+| the validator, one minimal document per failure mode | `graph_validate_self_test` | at boot |
+| the store's two counters, coalescing, attachment | `graph_store_self_test` | at boot |
+
+**Mutations that were shown failing first**, each caught by a different check with a message naming
+the rule it broke:
+
+| mutation | what caught it |
+| :--- | :--- |
+| cycle detection removed | `graph_validate_self_test` — *"a cycle was accepted"*, boot aborted |
+| a parameter write bumps the structure revision | `graph_store_self_test` — *"patch_params moved the STRUCTURE revision"*, boot aborted |
+| the `image → mask` coercion reported as exact | `node_registry_self_test` — *"must be legal and REPORTED as lossy"*, boot aborted |
+| the graph store dropped from the stage fingerprint | `api-graph` — exactly *"a graph PUT moves structure_revision"* at `2 -> 2`, the other 32 green |
+
+**Not measured, and each is honest rather than pending:** anything about a picture, because nothing
+evaluates a graph yet; and the *second* half of the revision rule — that a parameter write must
+**not** move `structure_revision` — which needs a write path for a node parameter and is gated by
+the boot self-test until then.

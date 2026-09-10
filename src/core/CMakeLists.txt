@@ -64,6 +64,10 @@ set(SOURCES
 		binding/binding.cpp
 		binding/binding_math.cpp
 
+		graph/graph_store.cpp
+		graph/model.cpp
+		graph/registry.cpp
+		graph/validate.cpp
 		timeline/curve.cpp
 		timeline/expression.cpp
 		timeline/resolver.cpp
@@ -124,6 +128,10 @@ set(HEADERS
 		binding/binding.h
 		binding/binding_math.h
 
+		graph/graph_store.h
+		graph/model.h
+		graph/registry.h
+		graph/validate.h
 		timeline/curve.h
 		timeline/expression.h
 		timeline/model.h
@@ -188,6 +196,7 @@ source_group(sources\\frame frame/*)
 source_group(sources\\mixer mixer/*)
 source_group(sources\\mixer\\audio mixer/audio/*)
 source_group(sources\\mixer\\image mixer/image/*)
+source_group(sources\\graph graph/*)
 source_group(sources\\stage stage/*)
 source_group(sources\\input input/*)
 source_group(sources\\producer\\color producer/color/*)

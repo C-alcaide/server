@@ -33,6 +33,7 @@
 
 #include <core/address/target.h>
 #include <core/timeline/resolver.h>
+#include <core/graph/graph_store.h>
 #include <core/timeline/timeline_store.h>
 #include <core/timeline/transport.h>
 #include <core/frame/frame_transform.h>
@@ -110,6 +111,11 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     /// Server-wide, injected by the shell.
     std::shared_ptr<timeline::timeline_store> timelines_;
+    /// THE NODE GRAPHS. Held for the same one reason the timeline store is: its STRUCTURE
+    /// revision goes into the fingerprint, so a `PUT /v1/graph/{name}` is observable to a
+    /// client walking the tree. Nothing else in the tick consults it yet -- the frame path
+    /// arrives with the evaluator.
+    std::shared_ptr<graph::graph_store>       graphs_;
 
     /// How a previz screen or camera property is written. Injected by the shell; see stage.h.
     stage::stage_field_writer stage_field_writer_;
@@ -821,6 +827,17 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                     // acquisition per tick per channel is the whole cost.
                     if (timelines_)
                         fp += std::to_string(timelines_->revision());
+                    fp += '|';
+                    // THE GRAPH STORE'S **STRUCTURE** REVISION, and only that one. The store
+                    // keeps two counters and mixing in the wrong one here would be the single
+                    // most expensive mistake available in this file: `values_revision()` moves on
+                    // every parameter write, so a slider drag or a timeline ramping a node
+                    // parameter would bump `structure_revision` fifty times a second on every
+                    // channel and make every attached client re-walk every tree. That is
+                    // `L376`'s rule, and the store's self-test asserts the two counters stay
+                    // apart because nothing here could show it.
+                    if (graphs_)
+                        fp += std::to_string(graphs_->revision());
 
                     const auto h = std::hash<std::string>{}(fp);
                     if (h != structure_hash_) {
@@ -3136,6 +3153,11 @@ std::future<timeline::chase_config> stage::timeline_chase_config(const std::stri
 void stage::set_producer_factory(stage::clip_factory factory)
 {
     impl_->clip_factory_ = std::move(factory);
+}
+
+void stage::set_graph_store(std::shared_ptr<graph::graph_store> store)
+{
+    impl_->graphs_ = std::move(store);
 }
 
 void stage::set_timeline_store(std::shared_ptr<timeline::timeline_store> store)

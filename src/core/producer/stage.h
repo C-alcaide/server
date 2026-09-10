@@ -55,6 +55,10 @@ struct transport_command;
 struct chase_config;
 }
 
+namespace graph {
+class graph_store;
+}
+
 
 struct layer_frame
 {
@@ -325,6 +329,11 @@ class stage final : public stage_base
     /// the next commit; the pointer is here now because the fingerprint is what makes a PUT
     /// observable from outside the process at all.
     void set_timeline_store(std::shared_ptr<timeline::timeline_store> store);
+
+    /// The node graphs. Injected by the shell for the same reason the timeline store is:
+    /// one store for the server, and the stage needs its STRUCTURE revision in the
+    /// fingerprint so a PUT is observable to a client walking the tree.
+    void set_graph_store(std::shared_ptr<graph::graph_store> store);
 
     /// HOW THE TICK BUILDS A CLIP, injected by the shell.
     ///

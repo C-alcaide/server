@@ -68,6 +68,21 @@ enum class api_code
                               ///< `expression` and `reason`, so a client can highlight the
                               ///< expression the author typed rather than reporting that the
                               ///< document is invalid.
+    graph_not_found,          ///< no node graph by that name
+    graph_invalid,            ///< the graph has an `error` fault. STORED, and that is the point:
+                              ///<
+                              ///< a graph is edited WHILE IT IS ON AIR, so an operator who
+                              ///< mistypes a port name must not lose the grade that is
+                              ///< rendering. `details` carries one entry per fault with
+                              ///< `severity`, `node`, `edge`, `port` and `reason`; an attached
+                              ///< layer keeps its LAST GOOD plan and the stage publishes
+                              ///< `graph_stale`.
+                              ///<
+                              ///< A `coercion` entry is NOT an error and does not produce this
+                              ///< code: a legal-but-lossy join (a mask read as an image, a real
+                              ///< rounded to a whole number) compiles and renders, and the entry
+                              ///< exists so an editor can draw a warning on the edge instead of
+                              ///< the server either refusing it or doing it silently.
     unauthorized,
     bad_request,
     internal,

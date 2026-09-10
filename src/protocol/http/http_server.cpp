@@ -18,6 +18,7 @@
 #include "api_openapi.h"
 #include "api_status.h"
 #include "api_tree.h"
+#include "api_graph.h"
 #include "api_timeline.h"
 #include "api_value.h"
 #include "json_state.h"
@@ -420,6 +421,21 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
                 return api_reply::fail(api_code::unknown_path,
                                        "a timeline POST is /v1/timeline/{name}/{verb}");
             }
+            // `POST /v1/graph/{name}/{undo|redo}`, split from the right for the same reason.
+            //
+            // A GRAPH HAS AN UNDO STACK AND A TIMELINE DOES NOT, which looks like an
+            // inconsistency and is a difference in how the two are used: a graph is EDITED --
+            // dozens of small gestures an operator expects to be able to take back -- where a
+            // timeline document is authored elsewhere and PUT whole. Undoing a PUT of a whole
+            // show is what a client's own file history is for.
+            if (starts_with(path, "/v1/graph/")) {
+                const auto rest = path.substr(std::string("/v1/graph/").size());
+                const auto cut  = rest.rfind('/');
+                if (cut != std::string::npos && cut + 1 < rest.size())
+                    return graph_history_verb(context_, rest.substr(0, cut), rest.substr(cut + 1));
+                return api_reply::fail(api_code::unknown_path,
+                                       "a graph POST is /v1/graph/{name}/{undo|redo}");
+            }
             return api_reply::fail(api_code::unknown_path, "nothing accepts POST at " + path);
         }
 
@@ -428,6 +444,8 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
                 return write_value(context_, *hub_, path.substr(std::string("/v1/value").size()), body, peer);
             if (starts_with(path, "/v1/timeline/"))
                 return put_timeline(context_, path.substr(std::string("/v1/timeline/").size()), body);
+            if (starts_with(path, "/v1/graph/"))
+                return put_graph(context_, path.substr(std::string("/v1/graph/").size()), body);
             return api_reply::fail(api_code::unknown_path, "nothing is writable at " + path);
         }
 
@@ -438,6 +456,10 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         if (method == bhttp::verb::delete_) {
             if (starts_with(path, "/v1/timeline/"))
                 return delete_timeline(context_, path.substr(std::string("/v1/timeline/").size()));
+            // A graph is the SECOND thing the API owns, so it is the second thing that can be
+            // deleted. It detaches first -- deleting a look means taking it off air.
+            if (starts_with(path, "/v1/graph/"))
+                return delete_graph(context_, path.substr(std::string("/v1/graph/").size()));
             return api_reply::fail(api_code::unknown_path, "nothing is deletable at " + path);
         }
 
@@ -482,6 +504,19 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
                 return get_timeline_resolved(context_, rest.substr(0, rest.size() - suffix.size()),
                                              query);
             return get_timeline(context_, rest);
+        }
+
+        if (path == "/v1/graph")
+            return list_graphs(context_);
+        if (starts_with(path, "/v1/graph/")) {
+            auto rest = path.substr(std::string("/v1/graph/").size());
+            // `/history` is a sub-resource for the same reason `/resolved` is on a timeline: a
+            // client caches the document and re-fetches only the part that moved.
+            static const std::string suffix = "/history";
+            if (rest.size() > suffix.size() &&
+                rest.compare(rest.size() - suffix.size(), suffix.size(), suffix) == 0)
+                return get_graph_history(context_, rest.substr(0, rest.size() - suffix.size()));
+            return get_graph(context_, rest);
         }
 
         return api_reply::fail(api_code::unknown_path, "no such endpoint: " + path);

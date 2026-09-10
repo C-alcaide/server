@@ -62,11 +62,19 @@ FOLDED = {
         "the substrate the picture capabilities run on rather than a capability beside them. It "
         "appears on nearly every page already, as 'both renderers'.",
     "timeline":
-        "NOT YET A CAPABILITY. Three of its nineteen commits are in the build -- the flicks time "
-        "base and the addressing -- and there is nothing an operator can do with it: no document "
-        "type, no transport, no commands. It earns a page when the resolver runs in the tick, "
-        "because a supervisor asked to fund something deserves a page about what it does rather "
-        "than about what it will do.",
+        "OWES A PAGE, and this reason is a placeholder rather than an argument. It said 'NOT YET "
+        "A CAPABILITY -- three of its nineteen commits are in the build' and set its own "
+        "condition: 'it earns a page when the resolver runs in the tick'. That condition was met "
+        "on 2026-09-10, when all 22 commits shipped -- documents, transport, cue stacks, clips, "
+        "cross-channel, chase, sixteen batteries. So this entry is now WRONG about the state and "
+        "is kept only so the folder still balances; writing the page is tracked as owed rather "
+        "than pretended away.",
+    "node-graph":
+        "NOT YET A CAPABILITY, by the rule the timeline entry set: the DOCUMENT ships -- stored, "
+        "validated, undoable -- and NOTHING EVALUATES IT. There is no attachment verb and no "
+        "frame path, so there is nothing an operator can do with a stored graph and no picture it "
+        "changes. A supervisor asked to fund something deserves a page about what it does rather "
+        "than about what it will do. It earns one when a graph reaches a pixel.",
 }
 
 

@@ -74,7 +74,8 @@ PAGES = [
        ["ffmpeg-producer-and-consumer.md", "decklink-output.md", "screen-consumer.md",
         "image-consumer-and-producer.md", "html-gpu-direct.md"]),
       ("Signal, sync and control",
-       ["control-api.md", "timeline.md", "ltc-timecode.md", "dmx-sacn-artnet.md", "keyframes.md",
+       ["control-api.md", "timeline.md", "node-graph.md", "ltc-timecode.md", "dmx-sacn-artnet.md",
+        "keyframes.md",
         "cluster-sync.md", "replay.md", "remotewall.md", "portaudio.md"]),
       ("Template", ["_TEMPLATE.md"])]),
 

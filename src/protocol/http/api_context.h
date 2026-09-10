@@ -14,6 +14,7 @@
 #include <core/frame/transform_fields.h>
 #include <core/monitor/monitor.h>
 #include <core/producer/stage.h>
+#include <core/graph/graph_store.h>
 #include <core/timeline/timeline_store.h>
 
 #include <functional>
@@ -62,6 +63,14 @@ struct api_context
     /// no dependency to avoid. Server-wide rather than per-channel, because one document may
     /// drive several channels and the transport that owns it lives on exactly one.
     std::shared_ptr<core::timeline::timeline_store> timelines;
+
+    /// The node graphs, and a pointer for the same reason: `core/graph` is in `core`.
+    ///
+    /// Server-wide rather than per-channel even though a document attaches to exactly ONE layer,
+    /// because the document exists before it is attached and after it is detached -- a look a
+    /// client is building, or one it has taken off air and means to put back. A per-channel store
+    /// would make an unattached graph homeless.
+    std::shared_ptr<core::graph::graph_store> graphs;
 
     /// CAN THIS CLIP BE BUILT AT ALL, asked at PUT so a bad path is refused instead of missing
     /// its cue on air.

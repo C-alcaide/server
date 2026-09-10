@@ -161,6 +161,40 @@ status_codes:
       against the descriptor at `/v1/tree`, which lists every path with its type and its
       `animatable` flag.
 
+  - code: graph_not_found
+    meaning: >
+      No node graph by that name. The loaded documents are at `GET /v1/graph`; a graph is
+      server-wide by name rather than per channel, because a document exists before it is attached
+      to a layer and after it is detached -- a look a client is still building, or one taken off
+      air and meant to go back.
+    do: >
+      `GET /v1/graph` for the names. If the graph was deleted, note that DELETE detaches it first:
+      deleting a look means taking it off air, so a layer that was rendering it is now rendering
+      the ungraded picture.
+
+  - code: graph_invalid
+    meaning: >
+      The graph has an `error` fault and will not run. `details` carries one entry per fault with
+      `severity`, `node`, `edge`, `port` and `reason`, so an editor can highlight the node or the
+      edge rather than reporting that the graph is invalid. THE DOCUMENT IS STORED, and that is the
+      opposite of what a timeline decode fault gets: a graph is edited WHILE IT IS ON AIR, so an
+      operator who mistypes a port name must not lose the grade that is currently rendering. An
+      attached layer keeps its LAST GOOD compiled plan and the stage publishes `graph_stale`.
+      A `coercion` entry is NOT an error and does not produce this code -- a legal-but-lossy join,
+      such as an image read as a mask (a luma reduction), compiles and renders, and the entry
+      exists so a client can draw a warning on the edge instead of the server either refusing a
+      useful join or performing the reduction silently.
+    do: >
+      `GET /v1/graph/{name}` returns the document with the same faults attached. The usual causes:
+      a class or port name that does not exist (check it against `/v1/catalog/node`); a CYCLE,
+      whose fault names an edge OF the cycle so it can be deleted; two edges into one input, which
+      have no defined order (fan-OUT from an output is unlimited); a required input with nothing
+      connected; a parameter outside the range its port declares; more than one `input` or
+      `output` node, or an `output` not reachable from `input`; and more than 16 image-producing
+      nodes, which is refused rather than clamped because a clamped graph renders something nobody
+      authored. A malformed body, a misspelled `stage` or a `ui` blob that is not JSON come back as
+      `bad_request` instead and store nothing.
+
   - code: internal
     meaning: >
       The server threw. This is a defect, not a usage error, and the message carries what
