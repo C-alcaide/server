@@ -499,6 +499,21 @@ decode_error decode_object(const json::value& v, const tl::parse_context& parent
             } else {
                 return {out.id, "", "a step keyframe needs \"at\" or \"enable\""};
             }
+            // LITERAL TIMES ONLY, refused rather than accepted and ignored. A step keyframe
+            // referencing another object would need the resolver, and the resolver works on
+            // objects rather than on keys inside them -- so an expression here would be
+            // silently treated as "never", which is the shape of failure this whole API is
+            // built to avoid.
+            for (const auto* e : {&ck.enable.start, &ck.enable.end}) {
+                if (*e && (*e)->k != tl::time_expr::kind::literal)
+                    return {out.id, "",
+                            "a step keyframe's time must be a literal, not an expression -- an "
+                            "expression here would need the resolver, which works on objects "
+                            "rather than on keys inside them"};
+            }
+            if (!ck.enable.start)
+                return {out.id, "", "a step keyframe needs a time"};
+
             const auto* vals = member(ko, "content");
             if (!vals || !vals->is_object())
                 return {out.id, "", "a step keyframe needs \"content\""};

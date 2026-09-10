@@ -1,6 +1,42 @@
 CasparVP — Unreleased
 ==========================================
 
+### Step keyframes and `rebase`
+
+A document's `keyframes` list -- STEP values, as distinct from the numeric `keys` -- is evaluated
+now, and `"rebase": true` makes an object's first segment start from what the parameter was
+showing when the object took over.
+
+**Behaviour changes for an existing config.** None: both are properties of a timeline document,
+and a document that uses neither behaves as before.
+
+**Why two keyframe mechanisms.** A curve interpolates and most parameters want that; an
+enumeration cannot be interpolated, because half-way between `normal` and `screen` is an ordinal
+naming some third blend mode, and half-way between two LUT filenames is nothing. So step values
+-- enums, booleans, names, files -- change AT the key and hold until the next. A path in both a
+curve and a step list has the curve win. A step keyframe's time must be a LITERAL and a `PUT`
+refuses an expression there rather than accepting it and treating it as "never".
+
+**`rebase` applies to the FIRST segment only.** Applied to every segment it would leave a rebased
+object permanently offset from what its author wrote. The captured value comes from the EFFECTIVE
+transform, so an object taking over from another driver starts from what was on air rather than
+from the operator's constant underneath it.
+
+**MEASURED, both mixers.** New battery `timeline-step` **8/8**, and it is a PICTURE check --
+`blend_mode` is the one animatable parameter whose whole effect is the composite, so a value
+stream cannot tell one that stored from one that is composited. Two flat colour producers and a
+display-space blend make `screen` closed-form: **measured 204/176/184 against a model of
+203.9/175.8/183.8**, with `normal` giving 192/128/64. The two results share no colour component
+and the fixture is asymmetric in all three channels. `timeline-ramp` **21/21** with a new rebase
+arm; `curve_self_test` covers the rebase maths at boot. `timeline-stack`, `timeline-clock`,
+`timeline-resolved`, `api-timeline`, `binding-owner`, `binding-lfo`, `api-write`, `api-roundtrip`,
+`api-tree` and `conformance` (100/100 at 1 LSB) all green on both.
+
+**Shown failing first, twice.** Dropping the step's time comparison, so every step keyframe
+applies from the object's entry -- the shape a naive implementation has -- fails three of
+`timeline-step`'s eight including the picture before the key. Rebasing the LAST segment instead
+of the first aborts the boot, naming the entry rule.
+
 ### Ownership: a write to a driven field is REMEMBERED, `HOLD`/`RELEASE`, and `field_bound` retired
 
 Bindings write their own overlay instead of the layer's tween, so the ownership stack has four

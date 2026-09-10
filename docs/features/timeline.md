@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–10 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–11 of 19 shipped. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -16,7 +16,9 @@
 > **Coverage:** `time_self_test()` and `address::target_self_test()` at boot (§1, §2), and
 > `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, `api-timeline` for §5,
 > **`timeline-ramp`** and **`timeline-clock`** for §6 and §7, **`timeline-resolved`** for §9, and
-> **`timeline-stack`** plus an inverted **`binding-owner`** for §10.
+> **`timeline-stack`** plus an inverted **`binding-owner`** for §10, and
+> **`timeline-step`** for §11 — the only timeline battery that looks at a PIXEL for a
+> parameter other than brightness.
 > The remaining `timeline-*` batteries do
 > not exist yet and are named in the plan rather than here, because a battery named in a doc is a
 > command a reader will try to run
@@ -774,4 +776,76 @@ tween handed to its closure.
 
 ---
 
-*§11 Known gaps — arrives with commit 19.*
+## 11. Step keyframes, and `rebase`
+
+### 11.1 Two keyframe mechanisms, and why
+
+A curve interpolates, and most parameters want that. An **enumeration does not**: half-way
+between `normal` and `screen` is an ordinal that names some third blend mode, and half-way
+between two LUT filenames is nothing at all. So a document has two kinds of keyframe:
+
+| | `keys` | `keyframes` |
+| :--- | :--- | :--- |
+| what | numeric **curves** | **step** values |
+| for | anything that can be a number | enums, booleans, names, files |
+| between two keys | interpolated, with easing | the earlier value **holds** |
+| changes | continuously | **at** the key |
+
+A path in both: the **curve wins**. A step keyframe's time must be a **literal** and a `PUT`
+refuses an expression there, rather than accepting it and treating it as "never" — an expression
+would need the resolver, and the resolver works on objects rather than on keys inside them.
+
+The order per tick is `content`, then `keyframes`, then `keys`: what the object sets on entry,
+then what its steps have reached, then its curves.
+
+### 11.2 `rebase` — starting from what is on air
+
+`"rebase": true` on an object makes its **first segment** start from the value the parameter had
+when the object took over, instead of from the authored first key. ossia calls it Tweening,
+Hippotizer a floating keyframe, and the reason is the same in both: an object that takes a
+parameter over mid-show should *move* it from where it is. Jumping to where the author happened
+to be sitting when they wrote the first key is a visible cut on a grade, and not cutting is the
+whole point of an authored ramp.
+
+**Only the first segment.** Once the second key is passed the authored curve is authoritative
+again — applied to every segment it would leave a rebased object permanently offset from what its
+author wrote, which is a different feature and not this one.
+
+**The capture is from the EFFECTIVE transform**, so an object taking over from another driver
+starts from what was on air rather than from the operator's constant underneath it. And **entry
+is detected by comparing an identity string**, `<document>/<object>#<repeat>`: nothing tells the
+tick that an object began, so it compares the active instance to the one it saw last tick. A
+string rather than a pointer, because the resolution is rebuilt on every re-resolve. The identity
+carries the repeat index, which is what makes a `repeating` object rebase on every repetition
+rather than only the first.
+
+### 11.3 Where it is checked
+
+**`timeline-step`, 8/8 both mixers, and it is a PICTURE check.** Every other timeline battery
+reads the value stream, and a value stream cannot tell a `blend_mode` that stored from one that
+is composited — `blend_mode` is the one animatable parameter whose whole effect *is* the
+composite. Two flat colour producers, no decode and no resampling, and both mixers blend in
+display space by default (which is what `blend_domain` establishes), so `screen` is exactly
+`1-(1-a)(1-b)` on 0-1 display values. **Measured 204/176/184 against a model of 203.9/175.8/183.8.**
+
+The colours are asymmetric in all three channels and the two expected results share no
+component: `normal` gives 192/128/64 and `screen` gives 204/176/184. A red/blue exchange, a
+channel-order fault or the wrong blend mode all land somewhere that is neither.
+
+**Shown failing first:** dropping the time comparison, so every step keyframe applies from the
+object's entry — the shape a naive implementation has. Three of eight fail, including the picture
+before the key.
+
+**`rebase` has an arm in `timeline-ramp`** (21/21 both mixers). The operator's constant is 0.5
+and the document's first key is 0.2, so a rebase and a non-rebase differ by **0.3 at entry**,
+thirty times the fit's own tolerance. It also checks that the second key is still reached
+*exactly* and that the segment after it is the authored one — `0.8 → 0.2`, read three quarters
+along — because a capture that leaked past the first key would offset the rest of the curve.
+
+The maths is checked at boot as well: `curve_self_test` covers the rebased first segment, the
+authored second, an unnamed path left alone, and the no-capture case. **Shown failing first:**
+rebasing the *last* segment instead of the first aborts the boot naming the entry rule.
+
+---
+
+*§12 Known gaps — arrives with commit 19.*

@@ -153,6 +153,20 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     };
     std::map<int, layer_drivers> drivers_;
 
+    /// Which instance was active on a layer last tick, and what the layer's parameters were
+    /// when it took over.
+    ///
+    /// The identity is `<document>/<object>#<repeat>` rather than a pointer, because the
+    /// resolution is rebuilt on every re-resolve and a pointer into it would dangle. It changing
+    /// is what "an object took over" MEANS, and it is the only signal the tick gets: nothing
+    /// tells it an object began, so entry is detected by comparing this to the current answer.
+    struct layer_entry
+    {
+        std::string                             active;
+        std::unordered_map<std::string, double> captured; //< for `rebase`
+    };
+    std::map<int, layer_entry> entries_;
+
     /// The composed transform per DRIVEN layer. Absent means "nothing drives this layer", and
     /// the tween is the answer -- which keeps the cost proportional to what is animated rather
     /// than to the number of layers.
@@ -941,8 +955,13 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 if (!layer)
                     continue;
                 const auto* inst = entry->resolved.active_on(kv.first, pos);
-                if (!inst)
+                if (!inst) {
+                    // Nothing owns this layer at this position, so the next object to take it
+                    // is ENTERING -- which is what makes a repeating object rebase on every
+                    // repetition rather than only the first.
+                    entries_.erase(*layer);
                     continue;
+                }
                 const auto* obj = find_object(entry->document.objects, inst->object_id);
                 if (!obj)
                     continue;
@@ -950,12 +969,77 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 auto& ov = drivers_[*layer].timeline;
                 ov.owner = "timeline:" + name + "/" + inst->object_id;
 
-                // Step values first, then the curve, so a path in both has the CURVE win (D7).
+                const auto local = inst->local_at(pos);
+
+                // ENTRY DETECTION, and it has to be done here because nothing tells the tick
+                // that an object began. The identity is `<document>/<object>#<repeat>`: a
+                // string rather than a pointer, because the resolution is rebuilt on every
+                // re-resolve and a pointer into it would dangle.
+                const auto identity =
+                    name + "/" + inst->object_id + "#" + std::to_string(inst->repeat_index);
+                auto&      ent = entries_[*layer];
+                const bool entering = ent.active != identity;
+                if (entering) {
+                    ent.active = identity;
+                    ent.captured.clear();
+
+                    // WHAT THE PARAMETERS WERE WHEN THIS OBJECT TOOK OVER. Captured for
+                    // `rebase` -- and captured from the EFFECTIVE transform, so an object
+                    // taking over from another driver starts from what was on air rather than
+                    // from the operator's constant underneath it.
+                    if (obj->rebase) {
+                        const auto eff = effective_transform(*layer);
+                        for (const auto& path : obj->curves.paths()) {
+                            const auto t = address::parse(path);
+                            monitor::vector_t v;
+                            if (const auto* f = fields::find(t.field)) {
+                                if (f->get)
+                                    v = f->get(eff.image_transform);
+                            } else if (const auto* a = fields::find_audio_field(t.field)) {
+                                if (a->get)
+                                    v = a->get(eff.audio_transform);
+                            }
+                            if (v.empty())
+                                continue;
+                            const auto  idx = std::min<std::size_t>(t.component, v.size() - 1);
+                            if (const auto* d = boost::get<double>(&v[idx]))
+                                ent.captured[path] = *d;
+                            else if (const auto* i32 = boost::get<int32_t>(&v[idx]))
+                                ent.captured[path] = *i32;
+                        }
+                    }
+                }
+
+                // Step values, in three passes and in this order:
+                //
+                //   1. the object's `content` -- what it sets on entry and holds throughout;
+                //   2. its `keyframes` -- STEP values that change at a time, the ones that
+                //      cannot be interpolated (an enum, a boolean, a name, a file). The LAST
+                //      one whose start has passed wins, which is what "step" means: it changes
+                //      AT the key and holds until the next;
+                //   3. the curves, so a path in both has the CURVE win (D7).
                 for (const auto& c : obj->content)
                     ov.steps[c.first] = c.second;
 
-                const auto local = inst->local_at(pos);
-                for (const auto& pv : obj->curves.interpolate(local, timeline::kind_of))
+                for (const auto& kf : obj->keyframes) {
+                    // Literal times only, and the PUT refuses anything else -- a step keyframe
+                    // referencing another object would need the resolver, and the resolver works
+                    // on objects rather than on keys inside them.
+                    for (const auto& spec : {kf.enable}) {
+                        if (!spec.start || spec.start->k != timeline::time_expr::kind::literal)
+                            continue;
+                        if (local < spec.start->literal)
+                            continue;
+                        if (spec.end && spec.end->k == timeline::time_expr::kind::literal &&
+                            local >= spec.end->literal)
+                            continue;
+                        for (const auto& c : kf.content)
+                            ov.steps[c.first] = c.second;
+                    }
+                }
+
+                for (const auto& pv : obj->curves.interpolate(
+                         local, timeline::kind_of, obj->rebase ? &ent.captured : nullptr))
                     ov.values[pv.first] = pv.second;
 
                 ts["active"][kv.first] = inst->object_id;

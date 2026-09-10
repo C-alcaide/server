@@ -155,7 +155,9 @@ void curve::clear()
     index_.clear();
 }
 
-std::unordered_map<std::string, double> curve::interpolate(flicks local, const kind_lookup& kind) const
+std::unordered_map<std::string, double> curve::interpolate(
+    flicks local, const kind_lookup& kind,
+    const std::unordered_map<std::string, double>* rebase_from) const
 {
     std::unordered_map<std::string, double> out;
     if (keys_.empty())
@@ -179,8 +181,18 @@ std::unordered_map<std::string, double> curve::interpolate(flicks local, const k
         const curve_key* after  = after_it != idx.end() ? &keys_[*after_it] : nullptr;
 
         if (before && after) {
-            const double a = before->values.at(path);
+            double       a = before->values.at(path);
             const double b = after->values.at(path);
+
+            // REBASE, and only on the FIRST segment. `after_it == idx.begin() + 1` means the
+            // `before` key is this path's first, which is the only place a captured entry value
+            // belongs -- applied everywhere it would leave a rebased object permanently offset
+            // from what its author wrote.
+            if (rebase_from && after_it == std::next(idx.begin())) {
+                const auto r = rebase_from->find(path);
+                if (r != rebase_from->end())
+                    a = r->second;
+            }
             const auto   k = kind ? kind(path) : fields::kf_kind::continuous;
 
             if (k == fields::kf_kind::discrete) {
@@ -380,6 +392,38 @@ void curve_self_test()
         // ...and the second, whose before-key is linear, is exactly at its midpoint.
         req(close_to(c.interpolate(from_seconds(1.5), kind_of).at("x"), 1.5, 1e-9),
             "the second segment does not inherit the first key's easing");
+    }
+
+    // ---- REBASE: the first segment starts from a captured value -------------------------
+    {
+        curve c;
+        c.add(key(0, "linear", {{"x", 0.2}}));
+        c.add(key(from_seconds(1.0), "linear", {{"x", 0.8}}));
+        c.add(key(from_seconds(2.0), "linear", {{"x", 0.3}}));
+
+        const std::unordered_map<std::string, double> from = {{"x", 0.5}};
+
+        req(close_to(c.interpolate(0, kind_of, &from).at("x"), 0.5),
+            "at entry a rebased path starts from the CAPTURED value, not the authored 0.2");
+        req(close_to(c.interpolate(from_seconds(0.5), kind_of, &from).at("x"), 0.65),
+            "and ramps from it to the second key -- halfway between 0.5 and 0.8");
+        req(close_to(c.interpolate(from_seconds(1.0), kind_of, &from).at("x"), 0.8),
+            "arriving exactly at the second key, which is where the author's curve resumes");
+        req(close_to(c.interpolate(from_seconds(1.5), kind_of, &from).at("x"), 0.55),
+            "and the SECOND segment is the authored one -- 0.8 to 0.3, halfway is 0.55. A rebase "
+            "applied to every segment would leave the object permanently offset from what its "
+            "author wrote, which is a different feature");
+        req(close_to(c.interpolate(from_seconds(0.5), kind_of).at("x"), 0.5),
+            "and with no capture the authored curve is unchanged: 0.2 to 0.8, halfway is 0.5");
+
+        // A path the capture does not name is untouched, so one rebased object may carry a
+        // mixture -- which is what happens when a parameter had no live value to capture.
+        curve d;
+        d.add(key(0, "linear", {{"x", 0.2}, {"y", 0.1}}));
+        d.add(key(from_seconds(1.0), "linear", {{"x", 0.8}, {"y", 0.9}}));
+        const auto mixed = d.interpolate(from_seconds(0.5), kind_of, &from);
+        req(close_to(mixed.at("x"), 0.65), "the named path is rebased");
+        req(close_to(mixed.at("y"), 0.5), "and an unnamed one is not");
     }
 
     // ---- mutation: add replaces within tolerance, patch merges, remove is nearest --------

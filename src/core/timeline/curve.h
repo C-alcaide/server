@@ -119,7 +119,19 @@ class curve
     /// after it that does. Both -> interpolate with the BEFORE key's easing. Only before -> hold.
     /// Only after -> hold at it (pre-roll). Neither -> the path is absent from the result, which
     /// is how a caller distinguishes "not animated" from "animated to its default".
-    std::unordered_map<std::string, double> interpolate(flicks local, const kind_lookup& kind) const;
+    ///
+    /// `rebase_from`, when given, replaces the FIRST key's value for the paths it names -- so
+    /// the first segment ramps from a value captured at entry instead of from the authored one.
+    /// That is ossia's Tweening and Hippotizer's floating keyframe: an object that takes over a
+    /// parameter mid-show should move it from where it is, not jump to where the author happened
+    /// to be sitting when they wrote the first key.
+    ///
+    /// It replaces the value ONLY while the first key is the `before` key. Once the second key
+    /// is passed, the authored curve is authoritative again -- otherwise a rebased object would
+    /// be permanently offset from what its author wrote, which is a different feature.
+    std::unordered_map<std::string, double>
+    interpolate(flicks local, const kind_lookup& kind,
+                const std::unordered_map<std::string, double>* rebase_from = nullptr) const;
 
   private:
     std::vector<curve_key>   keys_;   //< sorted by time
