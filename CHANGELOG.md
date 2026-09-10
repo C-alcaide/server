@@ -1,6 +1,44 @@
 CasparVP — Unreleased
 ==========================================
 
+### What a running timeline costs -- and the cost prediction was right for the wrong reason
+
+No code change. `timeline-cost` measures what the plan predicted and carried as F7: one
+`frame_transform` copy per DRIVEN LAYER per tick plus N slot writes, against three copies per
+BINDING. Arms on ONE binary in one run -- comparing two mechanisms across builds compares two
+machines.
+
+**Four channels at 1080p50, ~2010 frames per arm, two passes A/B/A/B:**
+
+| arm | ogl late | vulkan late |
+| :--- | ---: | ---: |
+| nothing driven | 0 | 0 |
+| 8 keyed / channel (32 total) | 0 | 0 |
+| **32 keyed / channel (128 total)** | **0** | **0** |
+| 8 bound / channel (32 total) | 0 | 0 |
+| **32 bound / channel (128 total)** | **198** | **284** |
+| 32 keyed all on one channel | 0 | 0 |
+| 8 keyed + 8 bound, disjoint fields | 0 | 0 |
+
+The frame period sits at 40.00 ms in every arm and is NOT the discriminator: it is paced by the
+consumer's clock and cannot rise until the thread overruns. **A timeline is decisively cheaper
+than the same number of bindings** -- 128 driven fields cost nothing where 128 bindings cost 10
+to 14 percent of frames.
+
+**THE MECHANISM F7 NAMED IS WRONG, and two mutations say so -- neither was caught, which is the
+result rather than a gap.** `resolve_drivers` fetching and storing the transform PER WRITE (the
+shape F7 called expensive) changed nothing measurable; doing it TWENTY TIMES per path, 2560
+copies and writes per tick at the 128-field arm, also changed nothing. So the resolve pass is not
+the expense at any plausible multiple of it. F7's conclusion holds and its stated reason does
+not: the binding cost is elsewhere in the binding path -- source evaluation, the patch onto the
+constant, the per-binding publication, or the state fan-out -- and that is NOT MEASURED. It needs
+a profile and is recorded as owed.
+
+The battery is not vacuous: the `bind-32` arm reports a real cost on the same measurement path in
+every run, and an instrument that never moves cannot be told from a broken one. What it therefore
+CANNOT see is a regression that made the resolve pass ten times slower, and that is stated rather
+than left implicit.
+
 ### A timeline document starts a clip, built ahead of its cue
 
 `clip`, `action` and `preroll_frames` were parsed, echoed back by `GET`, and read by NOTHING: a

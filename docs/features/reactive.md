@@ -344,3 +344,22 @@ cannot rise until the thread overruns, so the late count is the discriminator.
 6. **One binding per target, and no way to combine two sources.** A parameter driven by "audio
    band 0 *times* an LFO" needs either a second transform stage or an expression language, and
    §1.2 declines both for now.
+
+## A binding costs more than a keyframe, measured
+
+`timeline-cost` drives the same number of fields two ways on one binary, four channels at
+1080p50. At **32 driven fields** both mechanisms are free. At **128**, a timeline costs **0 late
+frames** and the same count of bindings costs **198 on ogl and 284 on vulkan** — 10 to 14 percent
+of frames.
+
+**Where that cost is has NOT been established, and the obvious answer was ruled out.** The
+timeline plan predicted the difference was copy count — one `frame_transform` copy per driven
+layer against three per binding. Two mutations refuted it: making the resolve pass copy and store
+per write changed nothing measurable, and doing it twenty times per path (2560 copies per tick)
+also changed nothing. So the expense is elsewhere in the binding path — source evaluation, the
+`tweened_transform::patch` onto the constant, the per-binding publication, or the state fan-out.
+That needs a profile, and `timeline.md` §21 records it as owed rather than guessing.
+
+The working figure is comfortable and it is a **total** rather than a per-channel one, which the
+"32 all on one channel" arm establishes: **32 continuous bindings cost no late frames on four
+channels, however they are spread.**

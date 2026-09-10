@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–20 shipped (the plan’s 16 and 18 were the last two outstanding; 18 remains). **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–21 shipped; only the docs-and-register commit remains. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -1574,4 +1574,73 @@ Also green, both mixers: `conformance` **100/100 within 1 LSB**, `grading` **48/
 
 ---
 
-*§21 Known gaps — arrives with the docs commit.*
+## 21. What it costs, and F7 closed the wrong way round
+
+§3's cost paragraph predicted one `frame_transform` copy per **driven layer** per tick plus N
+slot writes, against three copies per **binding**. That was **F7**, flagged as a prediction
+because a prediction in a design document reads exactly like a measurement to the next person.
+
+`timeline-cost` measures it, no code change. Arms on **one binary in one run**, because
+comparing two mechanisms across builds compares two machines: 0, 8 and 32 keyed fields per
+channel over four channels, the same counts as **bindings**, 8 of each together on disjoint
+fields, and 32 keyed all on **one** channel to separate a per-channel cost from a total one.
+
+### 21.1 The numbers
+
+Four channels at 1080p50, ~2010 frames per arm, two passes A/B/A/B:
+
+| arm | ogl late | vulkan late |
+| :--- | ---: | ---: |
+| nothing driven | 0 | 0 |
+| 8 keyed / channel (32 total) | 0 | 0 |
+| **32 keyed / channel (128 total)** | **0** | **0** |
+| 8 bound / channel (32 total) | 0 | 0 |
+| **32 bound / channel (128 total)** | **198** | **284** |
+| 32 keyed all on one channel | 0 | 0 |
+| 8 keyed + 8 bound, disjoint fields | 0 | 0 |
+
+The frame period sits at 40.00 ms in every arm and is **not** the discriminator: it is paced by
+the consumer's own clock and cannot rise until the thread overruns. The late count and
+`consume_max` are what move.
+
+**A timeline is decisively cheaper than the same number of bindings**, and the margin is not
+marginal: 128 driven fields cost nothing where 128 bindings cost 10 to 14 percent of frames.
+
+### 21.2 The mechanism F7 named is wrong, and two mutations say so
+
+**Neither mutation was caught**, which is the result rather than a gap:
+
+* `resolve_drivers` fetching and storing the transform **per write** — the shape F7 named as
+  expensive — changed nothing measurable.
+* the same thing **twenty times per path**, which is 2560 copies and writes per tick at the
+  128-field arm, also changed nothing measurable.
+
+So the resolve pass is not the expense at any plausible multiple of it. **F7's conclusion holds
+and its stated reason does not.** The binding cost is elsewhere in the binding path — source
+evaluation, the `tweened_transform::patch` onto the constant, the per-binding publication, or
+the state fan-out — and that is **not measured**. It needs a profile, and it is recorded as owed
+rather than guessed at, which is the same limit `binding-cost` reached from the other side.
+
+**The battery is not vacuous**, and the `bind-32` arm is the reason: it reports a real cost on
+the same measurement path in every run. An instrument that never moves cannot be told from a
+broken one; this one moves.
+
+**What it therefore cannot see:** a regression that made the resolve pass ten times slower.
+That pass is free at 20×, so nothing here would notice. Stated rather than left implicit.
+
+### 21.3 The traps this battery inherited
+
+All three from `binding-cost`, whose first version paid for them:
+
+* **the targets come from the server's own tree**, filtered to scalar reals that are writable
+  and carry **no `enables`**. A field with an `enables` switches its subsystem on when written,
+  so keying `blur_radius` would add a blur pass to every frame and the arm would be measuring
+  render work attributed to the timeline.
+* **one layer per channel, identical in every arm.** `binding-cost`'s first version spread 32
+  bindings over four layers and reported a real-looking 19% that was twelve extra layers.
+* **A/B/A/B on one binary**, so drift over the run shows as disagreement between the passes
+  rather than as a difference between the arms.
+
+---
+
+*§22 Known gaps — arrives with the docs commit.*
