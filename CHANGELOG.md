@@ -1,6 +1,61 @@
 CasparVP — Unreleased
 ==========================================
 
+### One timeline document can drive several channels
+
+A show spanning two channels was two documents, each with its own transport, and nothing kept
+them together. A document now declares ONE HOME CHANNEL that owns its transport; every other
+channel it addresses is a GUEST that reads the home channel's published playhead and drives only
+its own layers. `TIMELINE 1 PLAY span` starts both; `TIMELINE 2 PLAY span` is a 404.
+
+A guest has no command queue, no seek compilation and no re-resolve on a GO -- each absent by
+design. What it publishes is a SUBSET: `follows`, `state` and `active`, and NOT `position` or
+`rate`. One playhead per show means one place publishing it: two positions for one document would
+be two numbers a client has to choose between, differing by up to a frame for no fault.
+
+**Why a snapshot rather than a shared transport.** The transport is mutated per tick (the chase
+correction, the anchor on a re-rate) and each channel ticks on its own thread, so sharing it would
+put a mutex inside every channel's frame path and make one channel's chase visible to another's
+arithmetic. Four scalars, replaced whole, cannot be raced into an inconsistent state.
+
+**A bare layer number is the HOME channel's.** `"layer": "10"` in a document for channel 1 means
+channel 1's layer 10; a guest resolving it too would drive layer 10 everywhere the document
+happens to reach.
+
+**Measured, `timeline-crosschannel` 17/17 BOTH MIXERS.** The two layers get MIRRORED ramps over
+the same 8 s, so `up + down` is exactly 1.0 at every position -- comparing the sum frame by frame
+measures the two channels against each other with no model in between:
+
+| | ogl | vulkan |
+| :--- | :--- | :--- |
+| frames carrying both channels | 99 | 93 |
+| worst \|up + down - 1\| | 0.003000 | 0.003000 |
+| gate (1.5 frames of the combined slope) | 0.009000 | 0.009000 |
+| `active` first published | home 206, guest 207 | home 204, guest 204 |
+
+The gate is DERIVED: one frame late reads 0.006000. A guest running its own transport drifts
+without bound; a guest one frame behind is inside what the design promises.
+
+**Found by the battery on its first run:** the guest reported a separate `unstarted` state for a
+never-played document, and the check asserting it FAILED -- because the home channel publishes a
+playhead every tick including while stopped, so "never played" is a transient of at most one frame
+no client can rely on seeing. The state name was removed rather than the check weakened.
+
+**Mutations, and the second is the interesting result.** The guest evaluating at position 0 instead
+of the playhead's: 1 sample instead of 93, one named failure -- a frozen guest is not a subtly
+wrong one. A guest resolving a bare layer number at ONE of its two guard sites: NOT CAUGHT, 17/17.
+The check is defended twice, so no single-site mutation reaches it; mutating both fails exactly one
+check. Recorded rather than smoothed over -- a reader who removes one guard gets a green run.
+
+**NOT measured: the picture.** Both channels drive before either renders again, and proving they
+change on the same frame needs a capture per channel on a named frame.
+
+`conformance` **100/100 within 1 LSB** and `grading` **48/48 inside their gate** on both mixers,
+because this edits the tick. `grading` needed `--sequential`, and not because of this change:
+its parallel mode could not START -- `env::ensure_writable` probes with a FIXED filename and three
+servers sharing one `build/shell` race on it. Recorded in the harness rather than treated as a
+finding.
+
 ### The transport over HTTP, and two channels starting on one frame
 
 `POST /v1/timeline/{name}/{verb}` drives a loaded document over the control API -- `play` `pause`

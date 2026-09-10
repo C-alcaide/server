@@ -163,7 +163,7 @@ GET    /v1/timeline/{name}/resolved?at=  instances, and the owner of each layer 
 POST   /v1/timeline/{name}/{verb}        drive it -- play pause stop seek rate loop go next previous
 ```
 
-Documented in [`timeline.md`](timeline.md) §5 and §18. Four things about it are properties of
+Documented in [`timeline.md`](timeline.md) §5 and §18. Five things about it are properties of
 this API rather than of the timeline:
 
 * **`DELETE` is the only one here**, because a timeline is the first thing this API *owns*.
@@ -176,6 +176,11 @@ this API rather than of the timeline:
 * **A PUT moves `structure_revision`.** The store's revision counter is mixed into every stage's
   structure fingerprint, so the same re-walk a client already does when a layer appears also picks
   up a document changing. Without it a PUT would be invisible to anything reading the tree.
+* **A document may address SEVERAL channels, and only its home channel publishes a playhead.**
+  `channel/{home}/stage/timeline/{name}` carries `position` and `rate`;
+  `channel/{guest}/stage/timeline/{name}` carries `follows`, `state` and `active` and neither of
+  the first two. A client reading a document's position reads it from the channel `follows` names
+  -- there is one number, not one per channel. See `timeline.md` §19.
 * **A verb takes no channel, and `at_frame` schedules it.** The document declares its channel, so
   the path does not; `{"at_frame": n}` holds the command until that channel's counter reaches `n`,
   which is how two clients start two channels on one instant with no batch between them. A frame

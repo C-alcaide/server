@@ -33,6 +33,7 @@
 // every frame on every channel, and a resolve of a large document inside it.
 
 #include "resolver.h"
+#include "transport.h"
 
 #include <memory>
 #include <mutex>
@@ -49,6 +50,34 @@ struct stored_timeline
     timeline_document document;
     resolved_timeline resolved;
     trigger_log       triggers; //< what the resolution above was computed against
+};
+
+/// WHERE THE HOME CHANNEL'S PLAYHEAD IS, so another channel can follow it.
+///
+/// A document declares ONE channel and that channel owns its transport: it takes the commands,
+/// advances the position off its own frame counter, and chases house timecode if asked. Every
+/// other channel the document addresses is a GUEST -- it evaluates the same resolution at the
+/// same position and drives only its own layers.
+///
+/// WHY A SNAPSHOT RATHER THAN A SHARED TRANSPORT. The transport is mutated per tick (the chase
+/// correction, the anchor on a re-rate) and each channel ticks on its own thread, so sharing the
+/// object would put a mutex inside the frame path of every channel and make one channel's chase
+/// visible to another's arithmetic. A snapshot published once per tick by the owner and read once
+/// per tick by each guest is a copy of four scalars and cannot be raced into an inconsistent
+/// state, because it is replaced whole.
+///
+/// `frame` is the HOME channel's frame counter, which is the one thing a guest cannot compute for
+/// itself: a guest reading a snapshot has no way to know whether it is this frame's or the
+/// previous one's, and a stale snapshot is a document that appears to have stopped. It is
+/// published rather than gated on, because two channels on the same format are within a frame of
+/// each other by construction and gating would make a guest stutter on the normal case.
+struct playhead
+{
+    flicks          position = 0;
+    transport_state state    = transport_state::stopped;
+    std::uint64_t   frame    = 0;         //< the home channel's counter when this was taken
+    std::int64_t    revision = 0;         //< the document revision it was taken against
+    bool            chasing  = false;
 };
 
 class timeline_store
@@ -84,9 +113,24 @@ class timeline_store
     /// that may be large.
     std::int64_t revision() const;
 
+    /// The home channel says where its playhead is. Once per tick, from the stage executor.
+    ///
+    /// Does NOT bump `revision()`: the fingerprint exists so a client re-walks the tree when its
+    /// STRUCTURE changes, and a playhead moves every frame. Mixing it in would make every client
+    /// re-walk every channel's whole tree once per frame on every playing document.
+    void publish_playhead(const std::string& name, const playhead& p);
+
+    /// Where the home channel's playhead was when it last published. Null if nothing has -- which
+    /// is the honest answer for a document nobody has ever played, and the reason a guest drives
+    /// nothing rather than driving position zero.
+    std::optional<playhead> playhead_of(const std::string& name) const;
+
   private:
     mutable std::mutex                                                        lock_;
     std::unordered_map<std::string, std::shared_ptr<const stored_timeline>>   docs_;
+    /// SEPARATE from `docs_`, so a PUT that replaces a document mid-show does not rewind it. An
+    /// operator editing a cue while the show runs is the normal case, not an exception.
+    std::unordered_map<std::string, playhead>                                 playheads_;
     std::int64_t                                                              revision_ = 0;
 };
 

@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–18 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–19 of 19 shipped. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -1341,4 +1341,116 @@ arithmetic, so a mutation there aborts the boot and says nothing about the batte
 
 ---
 
-*§19 Known gaps — arrives with the docs commit.*
+## 19. One document, several channels
+
+A show spanning two channels was two documents until now, and nothing kept them together. A
+document declares **one home channel** that owns its transport; every other channel it addresses
+is a **guest**.
+
+```json
+PUT /v1/timeline/span
+{"channel": 1, "rate": 25, "objects": [
+  {"id": "left",  "layer": "1-10", "enable": {"start": 0, "end": 8},
+   "keys": [{"at": 0, "values": {"brightness": 0.2}}, {"at": 8, "values": {"brightness": 0.8}}]},
+  {"id": "right", "layer": "2-10", "enable": {"start": 0, "end": 8},
+   "keys": [{"at": 0, "values": {"brightness": 0.8}}, {"at": 8, "values": {"brightness": 0.2}}]}
+]}
+```
+
+`TIMELINE 1 PLAY span` starts both. `TIMELINE 2 PLAY span` is a **404**.
+
+### 19.1 One playhead, published once
+
+| | home channel | guest channel |
+| :--- | :--- | :--- |
+| takes transport commands | yes | **no — 404** |
+| advances the position | off its own frame counter | reads the home channel's |
+| chases house timecode | yes | inherits `chasing` |
+| compiles a seek | yes | its own release path only |
+| re-resolves on a GO | yes | picks up the new resolution next tick |
+| publishes `position`, `rate` | **yes** | **no** |
+| publishes `state`, `active` | yes | yes |
+| publishes `follows` | no | **yes** — the home channel's index |
+
+**Why a snapshot rather than a shared transport.** The transport is mutated per tick — the chase
+correction, the anchor on a re-rate — and each channel ticks on its own thread. Sharing the object
+would put a mutex inside the frame path of every channel and make one channel's chase visible to
+another's arithmetic. A `playhead` published once per tick by the owner and read once per tick by
+each guest is four scalars, replaced whole, so it cannot be raced into an inconsistent state.
+
+**Why not a transport each.** Two channels would then each have a position and a run state for one
+show, and any difference between them — a chase correction, a dropped frame, a command that
+reached one executor first — would be a split brain a client can see and nothing can reconcile.
+There is one playhead per show by construction, which is also why only one channel publishes it:
+two `position` values for one document would be two numbers a client has to choose between,
+differing by up to a frame for reasons that are not a fault.
+
+### 19.2 A bare layer number is the home channel's
+
+`"layer": "10"` means the *document's own* channel. A guest resolving it too would drive layer 10
+on every channel the document happens to address, which is the opposite of what an author writing
+an unqualified layer means.
+
+This is guarded at **two sites** — the gate that asks whether a document concerns this channel at
+all, and the per-layer resolution inside it — and §19.4 records what that costs a mutation test.
+
+### 19.3 What a guest deliberately does not have
+
+Each of these is absent by design rather than by omission, and each has a reason that is not
+"not yet":
+
+* **no command queue.** `timeline_command` refuses a document this channel does not own, so a
+  guest has nothing queued and no second run state to reconcile.
+* **no seek compilation.** The constants a `SEEK` replays are the ones on the channel whose
+  operator set them. A guest's own constants are handled by its own release path.
+* **no re-resolve on a GO.** The home channel re-resolves and swaps the store's pointer, so a
+  guest picks up the new resolution on its next tick — within one frame, and stated as such.
+* **`entries_` and `live_captures_` are per channel.** A guest's rebase capture and its producer
+  parameter restore are about *its* layers, so they belong to its own stage.
+
+### 19.4 What is measured
+
+`timeline-crosschannel` **17/17 both mixers**. The two layers get **mirrored** ramps over the same
+8 s, so `up + down` is exactly 1.0 at every position — which means comparing the sum frame by
+frame measures the two channels' positions **against each other with no model in between**:
+
+| | ogl | vulkan |
+| :--- | :--- | :--- |
+| frames carrying both channels | 99 | 93 |
+| worst \|up + down − 1\| | 0.003000 | 0.003000 |
+| gate (1.5 frames of the combined slope) | 0.009000 | 0.009000 |
+| `active` first published | home 206, guest 207 | home 204, guest 204 |
+
+The gate is **derived**: one frame late reads 0.006000, so 1.5 frames is 0.009. A guest running
+its own transport drifts without bound and fails on the first pass; a guest one frame behind is
+inside what the design promises and passes.
+
+**Found by the battery on its first run.** The guest reported a separate `unstarted` state for a
+never-played document, and the check asserting it **failed against the intended behaviour** —
+because the home channel publishes a playhead every tick *including while stopped*, so "never
+played" is a transient of at most one frame that no client can rely on seeing. The state name was
+removed rather than the check weakened: a name that is always wrong is worse than no name.
+
+**Mutations, and the second one is the interesting result:**
+
+* the guest evaluating at position 0 instead of the playhead's → the guest published **1 sample
+  instead of 93**, failing "the GUEST channel drove". A frozen guest is not a subtly wrong one.
+* a guest resolving a bare layer number, at **one** site → **not caught, 17/17**. The check is
+  defended twice, so no single-site mutation reaches it. Mutating **both** sites fails exactly
+  the one check. Recorded rather than smoothed over: the check gates the *pair*, and a reader who
+  removes one guard will get a green run.
+
+**Not measured: the picture.** Both channels are driving before either renders again, and proving
+they change on the same frame needs a capture per channel on a named frame, which nothing in this
+harness can take.
+
+Also green because this edits the tick: `conformance` **100/100 within 1 LSB** and `grading`
+**48/48 inside their gate**, both mixers, plus the ten other timeline batteries and the six API
+ones. `grading` needed `--sequential`, for a reason that is not this change: its parallel mode
+could not START, because `env::ensure_writable` probes with a FIXED filename and three servers
+sharing one `build/shell` race on it. Recorded in the harness `CLAUDE.md` rather than treated as
+a finding — a battery that cannot start has measured nothing.
+
+---
+
+*§20 Known gaps — arrives with the docs commit.*

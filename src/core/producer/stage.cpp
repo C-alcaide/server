@@ -888,10 +888,18 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     /// this channel's business: cross-channel evaluation is commit 17, and until then a document
     /// addressing another channel is simply not evaluated by this one. Silently, because it is
     /// the document's declared intent rather than a mistake.
-    std::optional<int> layer_index_for(const std::string& spec) const
+    /// `"1-10"` or `"10"` -> this channel's layer index, or nothing if it is not this channel's.
+    ///
+    /// A BARE layer number means "the document's own channel", so it resolves here only on the
+    /// home channel -- `home` is false when this stage is a guest. Without that a document
+    /// declaring channel 1 and writing `"10"` would drive layer 10 on every channel it also
+    /// addresses, which is the opposite of what an author writing an unqualified layer means.
+    std::optional<int> layer_index_for(const std::string& spec, bool home = true) const
     {
         const auto dash = spec.find('-');
         if (dash == std::string::npos) {
+            if (!home)
+                return std::nullopt;
             if (spec.empty() || spec.find_first_not_of("0123456789") != std::string::npos)
                 return std::nullopt;
             return std::atoi(spec.c_str());
@@ -1018,6 +1026,206 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         }
     }
 
+    /// Drive this channel's layers from one document at one position.
+    ///
+    /// SHARED BY THE HOME CHANNEL AND EVERY GUEST, and that sharing is the whole of cross-channel
+    /// rather than an economy. A guest that ran its own copy of this would be a second
+    /// implementation of entry detection, rebase capture, step-keyframe precedence and the curve
+    /// evaluation -- four rules that have to agree across channels for a show to look like one
+    /// show, and that would agree only by being re-read every time either was edited.
+    ///
+    /// `home` is passed down to `layer_index_for`, which is the ONLY difference between the two
+    /// callers: a bare layer number means the document's own channel.
+    void drive_layers(const std::string&               name,
+                      const timeline::stored_timeline& entry,
+                      timeline::flicks                 pos,
+                      monitor::state&                  state,
+                      std::set<int>&                   owned,
+                      bool                             home)
+    {
+        auto ts = state["timeline"][name];
+
+        for (const auto& kv : entry.resolved.by_layer) {
+            const auto layer = layer_index_for(kv.first, home);
+            if (!layer)
+                continue;
+            const auto* inst = entry.resolved.active_on(kv.first, pos);
+            if (!inst)
+                continue; //< the sweep in `evaluate_timelines` handles the release
+            const auto* obj = find_object(entry.document.objects, inst->object_id);
+            if (!obj)
+                continue;
+
+            auto& ov = drivers_[*layer].timeline;
+            ov.owner = "timeline:" + name + "/" + inst->object_id;
+
+            const auto local = inst->local_at(pos);
+
+            // ENTRY DETECTION, and it has to be done here because nothing tells the tick
+            // that an object began. The identity is `<document>/<object>#<repeat>`: a
+            // string rather than a pointer, because the resolution is rebuilt on every
+            // re-resolve and a pointer into it would dangle.
+            const auto identity =
+                name + "/" + inst->object_id + "#" + std::to_string(inst->repeat_index);
+            auto&      ent = entries_[*layer];
+            const bool entering = ent.active != identity;
+            if (entering) {
+                ent.active   = identity;
+                ent.document = name;
+                ent.object   = inst->object_id;
+                ent.captured.clear();
+
+                // THE LIVE REGISTRIES ARE CAPTURED ON ENTRY WHATEVER `rebase` SAYS, and for
+                // a different reason from the rebase below. A producer parameter's value
+                // lives inside the producer and a screen's inside the renderer -- there is
+                // no constant for an overlay to sit above, so the only way releasing them
+                // can be lossless is to remember what was there. `rebase` is about where a
+                // ramp STARTS; this is about what is given back when it ends.
+                for (const auto& path : obj->curves.paths()) {
+                    const auto t = address::parse(path);
+                    if (t.kind != address::target_kind::producer_param)
+                        continue;
+                    const auto key = std::to_string(*layer) + "|" + path;
+                    if (live_captures_.count(key))
+                        continue;
+                    auto v = read_live_target(*layer, t);
+                    if (!v.empty())
+                        live_captures_[key] = std::move(v);
+                }
+
+                // WHAT THE PARAMETERS WERE WHEN THIS OBJECT TOOK OVER. Captured for
+                // `rebase` -- and captured from the EFFECTIVE transform, so an object
+                // taking over from another driver starts from what was on air rather than
+                // from the operator's constant underneath it.
+                if (obj->rebase) {
+                    const auto eff = effective_transform(*layer);
+                    for (const auto& path : obj->curves.paths()) {
+                        const auto t = address::parse(path);
+                        monitor::vector_t v;
+                        if (const auto* f = fields::find(t.field)) {
+                            if (f->get)
+                                v = f->get(eff.image_transform);
+                        } else if (const auto* a = fields::find_audio_field(t.field)) {
+                            if (a->get)
+                                v = a->get(eff.audio_transform);
+                        }
+                        if (v.empty())
+                            continue;
+                        const auto  idx = std::min<std::size_t>(t.component, v.size() - 1);
+                        if (const auto* d = boost::get<double>(&v[idx]))
+                            ent.captured[path] = *d;
+                        else if (const auto* i32 = boost::get<int32_t>(&v[idx]))
+                            ent.captured[path] = *i32;
+                    }
+                }
+            }
+
+            // Step values, in three passes and in this order:
+            //
+            //   1. the object's `content` -- what it sets on entry and holds throughout;
+            //   2. its `keyframes` -- STEP values that change at a time, the ones that
+            //      cannot be interpolated (an enum, a boolean, a name, a file). The LAST
+            //      one whose start has passed wins, which is what "step" means: it changes
+            //      AT the key and holds until the next;
+            //   3. the curves, so a path in both has the CURVE win (D7).
+            for (const auto& c : obj->content)
+                ov.steps[c.first] = c.second;
+
+            for (const auto& kf : obj->keyframes) {
+                // Literal times only, and the PUT refuses anything else -- a step keyframe
+                // referencing another object would need the resolver, and the resolver works
+                // on objects rather than on keys inside them.
+                for (const auto& spec : {kf.enable}) {
+                    if (!spec.start || spec.start->k != timeline::time_expr::kind::literal)
+                        continue;
+                    if (local < spec.start->literal)
+                        continue;
+                    if (spec.end && spec.end->k == timeline::time_expr::kind::literal &&
+                        local >= spec.end->literal)
+                        continue;
+                    for (const auto& c : kf.content)
+                        ov.steps[c.first] = c.second;
+                }
+            }
+
+            for (const auto& pv : obj->curves.interpolate(
+                     local, timeline::kind_of, obj->rebase ? &ent.captured : nullptr))
+                ov.values[pv.first] = pv.second;
+
+            owned.insert(*layer);
+            ts["active"][kv.first] = inst->object_id;
+        }
+    }
+
+    /// Does this document address any layer on THIS channel?
+    ///
+    /// Asked before a guest does any work, so a four-channel server does not walk every
+    /// document's resolution on every channel once per frame. A document that names no layer here
+    /// is not this channel's business at all.
+    bool document_addresses_this_channel(const timeline::stored_timeline& entry) const
+    {
+        for (const auto& kv : entry.resolved.by_layer)
+            if (layer_index_for(kv.first, false))
+                return true;
+        return false;
+    }
+
+    /// A document whose HOME is another channel, evaluated here at the home channel's position.
+    ///
+    /// Everything transport-shaped is absent by design and not by omission: no command queue (a
+    /// `TIMELINE 2 PLAY show` for a document declaring channel 1 is refused by
+    /// `timeline_command`, so a guest has nothing queued), no seek compilation (the constants a
+    /// seek replays are the HOME channel's -- a guest's own constants are compiled by its own
+    /// release path), and no re-resolve on a GO (the home channel does it and swaps the store's
+    /// pointer, so a guest picks up the new resolution on its next tick, within one frame).
+    ///
+    /// What it publishes is deliberately a SUBSET: `follows`, `state` and `active`, and NOT
+    /// `position` or `rate`. One playhead per show means one place publishing it -- two channels
+    /// each publishing a `position` for one document would be two numbers a client has to choose
+    /// between, and they would differ by up to a frame for reasons that are not a fault.
+    void evaluate_guest_timeline(const std::string&               name,
+                                 const timeline::stored_timeline& entry,
+                                 monitor::state&                  state,
+                                 std::set<int>&                   owned)
+    {
+        auto ts = state["timeline"][name];
+        ts["follows"] = entry.document.channel;
+
+        if (!entry.resolved.ok()) {
+            ts["ok"]     = false;
+            ts["faults"] = static_cast<std::int64_t>(entry.resolved.errors.size());
+            return;
+        }
+        ts["ok"] = true;
+
+        const auto ph = timelines_->playhead_of(name);
+        if (!ph) {
+            // NOTHING HAS PUBLISHED A PLAYHEAD YET, which means the home channel has not ticked
+            // since this document was stored. Reported as `stopped` and NOT as a state of its
+            // own, and the distinction was measured away rather than reasoned away:
+            // `timeline-crosschannel` asserted a separate `unstarted` on its first run and got
+            // `stopped`, because the home channel publishes every tick including while stopped.
+            // So "never played" is a transient of at most one frame that no client can rely on
+            // seeing, and a state name for it would be a state name that is always wrong.
+            //
+            // Either way the guest drives NOTHING -- not position zero, which would put every
+            // guest layer under a driver the moment a document was stored and take it from the
+            // operator who had set it by hand.
+            ts["state"] = std::string(timeline::to_string(timeline::transport_state::stopped));
+            return;
+        }
+
+        ts["state"]    = std::string(timeline::to_string(ph->state));
+        ts["revision"] = entry.document.revision;
+        if (ph->chasing)
+            ts["chasing"] = true;
+
+        if (ph->state == timeline::transport_state::stopped)
+            return; //< the release sweep at the end of `evaluate_timelines` gives the layers back
+
+        drive_layers(name, entry, ph->position, state, owned, /* home */ false);
+    }
+
     /// Every document this channel owns, advanced one tick and evaluated into the overlays.
     void evaluate_timelines(std::uint64_t frame_number, monitor::state& state)
     {
@@ -1040,9 +1248,31 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
         for (const auto& name : timelines_->names()) {
             auto entry = timelines_->get(name);
-            if (!entry || entry->document.channel != channel_index_)
+            if (!entry)
                 continue;
 
+            // HOME OR GUEST. The document declares ONE channel and that channel owns its
+            // transport -- it takes the commands, advances off its own frame counter, and chases
+            // house timecode. Every other channel it addresses is a guest: it reads the home
+            // channel's published playhead and drives only its own layers.
+            //
+            // Why not give every channel its own transport for the same document? Because then
+            // two channels would each have a position and a run state for one show, and any
+            // difference between them -- a chase correction, a dropped frame, a command that
+            // reached one executor first -- would be a split-brain a client could see and
+            // nothing could reconcile. There is one playhead per show by construction.
+            const bool home = entry->document.channel == channel_index_;
+            if (!home && !document_addresses_this_channel(*entry))
+                continue;
+
+            if (!home) {
+                evaluate_guest_timeline(name, *entry, state, owned);
+                continue;
+            }
+
+            // AFTER the guest branch, because `operator[]` would otherwise give every guest
+            // channel an empty transport for a document it does not own -- and `timeline_state`
+            // would then answer "stopped at zero" for a running show instead of refusing.
             auto& tr = transports_[name];
 
             // A SEEK IN THIS TICK'S COMMANDS needs its compilation run, and the target has to
@@ -1112,6 +1342,14 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             }
             ts["position"] = timeline::to_seconds(pos);
             ts["rate"]     = boost::rational_cast<double>(tr.rate());
+            ts["home"]     = channel_index_;
+
+            // WHERE THE GUESTS READ FROM. Published every tick including while stopped, because
+            // a guest has to be able to tell "stopped" from "never played" -- the first releases
+            // its layers and the second drives nothing at all, and they are not the same state.
+            timelines_->publish_playhead(name, timeline::playhead{pos, tr.state(), frame_number,
+                                                                  entry->document.revision,
+                                                                  tr.chasing()});
 
             if (tr.state() == timeline::transport_state::stopped) {
                 // STOPPED RELEASES. A stopped document owns nothing, so every layer it was
@@ -1121,116 +1359,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 continue;
             }
 
-            for (const auto& kv : entry->resolved.by_layer) {
-                const auto layer = layer_index_for(kv.first);
-                if (!layer)
-                    continue;
-                const auto* inst = entry->resolved.active_on(kv.first, pos);
-                if (!inst)
-                    continue; //< the sweep at the end of this function handles the release
-                const auto* obj = find_object(entry->document.objects, inst->object_id);
-                if (!obj)
-                    continue;
-
-                auto& ov = drivers_[*layer].timeline;
-                ov.owner = "timeline:" + name + "/" + inst->object_id;
-
-                const auto local = inst->local_at(pos);
-
-                // ENTRY DETECTION, and it has to be done here because nothing tells the tick
-                // that an object began. The identity is `<document>/<object>#<repeat>`: a
-                // string rather than a pointer, because the resolution is rebuilt on every
-                // re-resolve and a pointer into it would dangle.
-                const auto identity =
-                    name + "/" + inst->object_id + "#" + std::to_string(inst->repeat_index);
-                auto&      ent = entries_[*layer];
-                const bool entering = ent.active != identity;
-                if (entering) {
-                    ent.active   = identity;
-                    ent.document = name;
-                    ent.object   = inst->object_id;
-                    ent.captured.clear();
-
-                    // THE LIVE REGISTRIES ARE CAPTURED ON ENTRY WHATEVER `rebase` SAYS, and for
-                    // a different reason from the rebase below. A producer parameter's value
-                    // lives inside the producer and a screen's inside the renderer -- there is
-                    // no constant for an overlay to sit above, so the only way releasing them
-                    // can be lossless is to remember what was there. `rebase` is about where a
-                    // ramp STARTS; this is about what is given back when it ends.
-                    for (const auto& path : obj->curves.paths()) {
-                        const auto t = address::parse(path);
-                        if (t.kind != address::target_kind::producer_param)
-                            continue;
-                        const auto key = std::to_string(*layer) + "|" + path;
-                        if (live_captures_.count(key))
-                            continue;
-                        auto v = read_live_target(*layer, t);
-                        if (!v.empty())
-                            live_captures_[key] = std::move(v);
-                    }
-
-                    // WHAT THE PARAMETERS WERE WHEN THIS OBJECT TOOK OVER. Captured for
-                    // `rebase` -- and captured from the EFFECTIVE transform, so an object
-                    // taking over from another driver starts from what was on air rather than
-                    // from the operator's constant underneath it.
-                    if (obj->rebase) {
-                        const auto eff = effective_transform(*layer);
-                        for (const auto& path : obj->curves.paths()) {
-                            const auto t = address::parse(path);
-                            monitor::vector_t v;
-                            if (const auto* f = fields::find(t.field)) {
-                                if (f->get)
-                                    v = f->get(eff.image_transform);
-                            } else if (const auto* a = fields::find_audio_field(t.field)) {
-                                if (a->get)
-                                    v = a->get(eff.audio_transform);
-                            }
-                            if (v.empty())
-                                continue;
-                            const auto  idx = std::min<std::size_t>(t.component, v.size() - 1);
-                            if (const auto* d = boost::get<double>(&v[idx]))
-                                ent.captured[path] = *d;
-                            else if (const auto* i32 = boost::get<int32_t>(&v[idx]))
-                                ent.captured[path] = *i32;
-                        }
-                    }
-                }
-
-                // Step values, in three passes and in this order:
-                //
-                //   1. the object's `content` -- what it sets on entry and holds throughout;
-                //   2. its `keyframes` -- STEP values that change at a time, the ones that
-                //      cannot be interpolated (an enum, a boolean, a name, a file). The LAST
-                //      one whose start has passed wins, which is what "step" means: it changes
-                //      AT the key and holds until the next;
-                //   3. the curves, so a path in both has the CURVE win (D7).
-                for (const auto& c : obj->content)
-                    ov.steps[c.first] = c.second;
-
-                for (const auto& kf : obj->keyframes) {
-                    // Literal times only, and the PUT refuses anything else -- a step keyframe
-                    // referencing another object would need the resolver, and the resolver works
-                    // on objects rather than on keys inside them.
-                    for (const auto& spec : {kf.enable}) {
-                        if (!spec.start || spec.start->k != timeline::time_expr::kind::literal)
-                            continue;
-                        if (local < spec.start->literal)
-                            continue;
-                        if (spec.end && spec.end->k == timeline::time_expr::kind::literal &&
-                            local >= spec.end->literal)
-                            continue;
-                        for (const auto& c : kf.content)
-                            ov.steps[c.first] = c.second;
-                    }
-                }
-
-                for (const auto& pv : obj->curves.interpolate(
-                         local, timeline::kind_of, obj->rebase ? &ent.captured : nullptr))
-                    ov.values[pv.first] = pv.second;
-
-                owned.insert(*layer);
-                ts["active"][kv.first] = inst->object_id;
-            }
+            drive_layers(name, *entry, pos, state, owned, /* home */ true);
         }
 
         // ---- the release sweep -------------------------------------------------------

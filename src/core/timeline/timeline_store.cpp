@@ -50,6 +50,10 @@ bool timeline_store::erase(const std::string& name)
     std::lock_guard<std::mutex> l(lock_);
     if (docs_.erase(name) == 0)
         return false;
+    // THE PLAYHEAD GOES WITH IT. Leaving it would mean a document PUT again under the same name
+    // resumes a show that no longer exists -- from a position no client asked for and none can
+    // see, because nothing publishes a playhead for a document that is not loaded.
+    playheads_.erase(name);
     ++revision_;
     return true;
 }
@@ -97,6 +101,21 @@ std::shared_ptr<const stored_timeline> timeline_store::retrigger(const std::stri
         it->second               = entry;
     }
     return entry;
+}
+
+void timeline_store::publish_playhead(const std::string& name, const playhead& p)
+{
+    std::lock_guard<std::mutex> guard(lock_);
+    playheads_[name] = p;
+}
+
+std::optional<playhead> timeline_store::playhead_of(const std::string& name) const
+{
+    std::lock_guard<std::mutex> guard(lock_);
+    const auto                  it = playheads_.find(name);
+    if (it == playheads_.end())
+        return std::nullopt;
+    return it->second;
 }
 
 std::int64_t timeline_store::revision() const
