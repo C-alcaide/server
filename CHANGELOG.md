@@ -1,6 +1,33 @@
 CasparVP — Unreleased
 ==========================================
 
+### The transport measured through the tick: rate, pause/resume, and a loop region
+
+No code change to the transport itself -- `transport_self_test` already covered the arithmetic at
+boot. What was missing was any check that the TICK asks it the right question: a channel passing
+the wrong frame number, asking once every two ticks, or evaluating before applying the pending
+commands would leave every self-test number correct and the picture wrong.
+
+**MEASURED, both mixers.** Two new batteries. `timeline-transport` **12/12** -- rate 2, rate 1/3,
+rate -1, rate 0 refused, and pause/resume, with the SLOPE PER FRAME as the discriminating
+quantity rather than the endpoints (two rates reach the same two values, and `abs(rate)` still
+descends from a seek). `timeline-loop` **9/9** -- a `[20,45)` region of a sixty-second ramp,
+every sample inside it rather than merely "it wrapped", the value re-ramping on each pass, the
+same in reverse, and `LOOP OFF` as the control.
+
+**Shown failing first, and which gate caught what is worth recording.** `abs(rate)` and a
+truncating modulo both abort the BOOT -- `transport_self_test` is the stronger gate for the
+arithmetic and catches them before a battery starts. So the mutation that shows the batteries
+discriminate had to be in the tick: `position_at(frame_number / 2)` leaves `timeline-transport`
+with no stream at all and fails three of `timeline-loop`'s nine, including its own control.
+
+**A CONSEQUENCE OF THE RANK, worth knowing as a client.** `stop > pause > run` within one tick
+means a client that stops and immediately plays IN THE SAME FRAME gets a stop. Three AMCP sends
+take well under a frame, so it is easy to hit: it cost two fixtures in these batteries -- one read
+zero samples and the other a position of 0.000000 -- before the cause was found. That is the rank
+working as specified rather than a defect, and it is now documented in
+`docs/features/timeline.md` §14.2.
+
 ### A group is a cue stack: each cue waits for a GO, and `TIMELINE NEXT`/`PREV`
 
 `one_at_a_time` without `auto_play` now makes every cue after the first wait for a GO, which is

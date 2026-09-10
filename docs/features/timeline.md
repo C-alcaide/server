@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–13 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–14 of 19 shipped. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -978,4 +978,58 @@ unordered_map key` — a test that had encoded the only behaviour there was.
 
 ---
 
-*§14 Known gaps — arrives with commit 19.*
+## 14. The transport, measured through the tick
+
+`transport_self_test` already checks `position_at` against a table of numbers — exact advance
+over an hour, rate 1/3 landing on a whole second, a loop region never left. It runs in
+microseconds and **it cannot see whether the tick asks it the right question.** A channel that
+passed the wrong frame number, asked once every two ticks, or evaluated before applying the
+pending commands would leave every one of those numbers correct and the picture wrong.
+
+So two batteries measure the resulting value stream on the frame clock.
+
+**`timeline-transport`, 12/12 both mixers.** Rate 2, rate 1/3, rate −1, rate 0 refused, and
+pause/resume. **The slope per frame is the discriminating quantity**, not the endpoints: two
+rates reach the same two values, so a check on where it got to passes on either. `abs(rate)` — a
+plausible mistake — gives the positive slope and *still descends from a seek*, which a direction
+check would pass and the slope check fails.
+
+The resume is **modelled on the frame clock**: the value must have advanced by exactly the
+elapsed frames since the resume, and not by the frames that passed during the pause. A fixed
+tolerance failed here against a correct engine, because the fixture's own settle is a second of
+show at rate 1.
+
+**`timeline-loop`, 9/9 both mixers.** The region is `[20, 45)` of a sixty-second ramp — **not
+starting at zero and not the whole document**, so it cannot be confused with no region or with a
+restart. **Every sample must be inside it**, not merely "it wrapped": an off-by-one at the
+boundary is one sample outside, and a wrap count would miss it. The value must **re-ramp** on
+each pass, because a loop that moved the playhead without re-evaluating the objects would hold
+whatever it had at the region's end. And it runs **backwards**, where a truncating modulo puts
+the playhead *before* the region's start on every pass — a defect invisible while the rate is
+positive. `LOOP OFF` is the control: without it, "inside the region" could be true of a document
+that never got there.
+
+### 14.1 What the mutations showed, and which gate caught them
+
+**`abs(rate)`** and **a truncating modulo** both abort the boot: `transport_self_test` is the
+stronger gate for the arithmetic and catches them before a battery can start. That is worth
+stating rather than glossing — the batteries are not there to re-check the arithmetic.
+
+So the mutation that shows *they* discriminate had to be in the **tick**: asking
+`position_at(frame_number / 2)`. `timeline-transport` cannot even get a stream (0 samples where
+50 are needed) and `timeline-loop` fails three checks including its own control.
+
+### 14.2 A consequence of the rank, found by a fixture
+
+`stop > pause > run` within one tick means **a client that stops and immediately plays in the
+same frame gets a stop.** Three AMCP sends take well under a frame, so an unseparated fixture
+measures a stopped document: `timeline-loop`'s reverse arm read zero samples and
+`timeline-transport`'s pause arm read a position of `0.000000` for exactly this reason. Both now
+leave a tick between a `STOP` and what follows, and both say why.
+
+It is the rank working as specified rather than a defect — but it is a real consequence for a
+client, and it is written here because it took two fixtures to notice.
+
+---
+
+*§15 Known gaps — arrives with commit 19.*
