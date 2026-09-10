@@ -309,6 +309,21 @@ class stage final : public stage_base
     /// observable from outside the process at all.
     void set_timeline_store(std::shared_ptr<timeline::timeline_store> store);
 
+    /// How the stage writes a previz screen or camera property, injected by the shell.
+    ///
+    /// A BRIDGE for the reason `api_context::set_stage_field` is one: the previz renderer lives
+    /// in `accelerator`, which `core` does not link and must not. `object` is `"camera"`,
+    /// `"view_camera"` or `"screen/<name>"`, and `field` is a row's `path` out of
+    /// `fields::screen_fields()` / `camera_fields()`.
+    ///
+    /// Called from the STAGE executor, which the http path was not -- see the write-on-change
+    /// note in `apply_stage_overlay`. Without this the timeline can address a previz path (the
+    /// address space resolves it) and cannot write it, which is the shape of gap that gets
+    /// recorded as "implemented" and is not.
+    using stage_field_writer =
+        std::function<bool(const std::string& object, const std::string& field, const monitor::vector_t& value)>;
+    void set_stage_field_writer(stage_field_writer w);
+
     /// Queue one transport command for a document, to take effect on the next tick.
     ///
     /// QUEUED rather than applied, and that is what makes several clients acting in the same

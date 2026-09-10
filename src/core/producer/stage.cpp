@@ -111,6 +111,28 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     /// Server-wide, injected by the shell.
     std::shared_ptr<timeline::timeline_store> timelines_;
 
+    /// How a previz screen or camera property is written. Injected by the shell; see stage.h.
+    stage::stage_field_writer stage_field_writer_;
+
+    /// The last value written through each of the two LIVE registries, so a tick that changes
+    /// nothing writes nothing.
+    ///
+    /// For the previz half that is not an optimisation but a correctness question the plan flagged
+    /// (F1): every screen mutator also re-applies the mesh transform and calls
+    /// `update_projections()`, so writing an unchanged value every tick would recompute the
+    /// projection fifty times a second for nothing. For the producer half it keeps a `set_param`
+    /// -- which may reach a shader upload -- off the tick when the value has not moved.
+    std::map<std::string, monitor::vector_t> last_live_write_;
+
+    /// What a producer parameter or stage field held when the object driving it took over.
+    ///
+    /// THESE TWO REGISTRIES HAVE NO CONSTANT. A mixer field's operator value lives in `tweens_`
+    /// and nothing else touches it, so releasing a driver is free. A producer parameter's value
+    /// lives inside the producer and a screen's inside the renderer -- there is nowhere for an
+    /// overlay to sit above, so the only way to be lossless is to remember what was there and
+    /// put it back. Keyed `<layer>|<path>`.
+    std::map<std::string, monitor::vector_t> live_captures_;
+
     // ── THE TIMELINE, IN THE TICK ───────────────────────────────────────────────────────
     //
     // A DRIVER OVERLAY per layer rather than a write into the layer's tween, which is D3 of the
@@ -444,6 +466,11 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 timeline_state_    = monitor::state{};
                 evaluate_timelines(frame_number, timeline_state_);
                 resolve_drivers();
+                // The two LIVE registries, which are not part of the frame transform: a
+                // producer's own parameters and the previz stage. Same overlays, same rank, a
+                // different destination -- and write-on-change, because a screen mutator
+                // recomputes the projection.
+                apply_live_targets();
 
                 // build a map of layers that are sourced from route producers
                 std::map<int, std::pair<int, int>> routed_layers;
@@ -899,6 +926,13 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
         const auto per_frame = timeline::flicks_per_frame(format_desc_.framerate);
 
+        // WHICH LAYERS STILL HAVE AN OWNER after this pass. Gathered across every document
+        // rather than per document, because the restore below has to fire when a document is
+        // STOPPED, deleted, invalid, or simply has no object active -- and only three of those
+        // four reach the per-layer loop at all. Doing it per document meant `STOP` restored
+        // nothing, which `timeline-targets` caught on its first run.
+        std::set<int> owned;
+
         for (const auto& name : timelines_->names()) {
             auto entry = timelines_->get(name);
             if (!entry || entry->document.channel != channel_index_)
@@ -955,13 +989,8 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 if (!layer)
                     continue;
                 const auto* inst = entry->resolved.active_on(kv.first, pos);
-                if (!inst) {
-                    // Nothing owns this layer at this position, so the next object to take it
-                    // is ENTERING -- which is what makes a repeating object rebase on every
-                    // repetition rather than only the first.
-                    entries_.erase(*layer);
-                    continue;
-                }
+                if (!inst)
+                    continue; //< the sweep at the end of this function handles the release
                 const auto* obj = find_object(entry->document.objects, inst->object_id);
                 if (!obj)
                     continue;
@@ -982,6 +1011,24 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 if (entering) {
                     ent.active = identity;
                     ent.captured.clear();
+
+                    // THE LIVE REGISTRIES ARE CAPTURED ON ENTRY WHATEVER `rebase` SAYS, and for
+                    // a different reason from the rebase below. A producer parameter's value
+                    // lives inside the producer and a screen's inside the renderer -- there is
+                    // no constant for an overlay to sit above, so the only way releasing them
+                    // can be lossless is to remember what was there. `rebase` is about where a
+                    // ramp STARTS; this is about what is given back when it ends.
+                    for (const auto& path : obj->curves.paths()) {
+                        const auto t = address::parse(path);
+                        if (t.kind != address::target_kind::producer_param)
+                            continue;
+                        const auto key = std::to_string(*layer) + "|" + path;
+                        if (live_captures_.count(key))
+                            continue;
+                        auto v = read_live_target(*layer, t);
+                        if (!v.empty())
+                            live_captures_[key] = std::move(v);
+                    }
 
                     // WHAT THE PARAMETERS WERE WHEN THIS OBJECT TOOK OVER. Captured for
                     // `rebase` -- and captured from the EFFECTIVE transform, so an object
@@ -1042,8 +1089,35 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                          local, timeline::kind_of, obj->rebase ? &ent.captured : nullptr))
                     ov.values[pv.first] = pv.second;
 
+                owned.insert(*layer);
                 ts["active"][kv.first] = inst->object_id;
             }
+        }
+
+        // ---- the release sweep -------------------------------------------------------
+        //
+        // Every layer that had an owner and does not now. This is the only place that knows a
+        // driver ENDED, and it has to be here rather than inside the per-document loop because
+        // three of the four ways a driver can end -- the document stopped, deleted, or turned
+        // invalid -- never reach that loop.
+        //
+        // A mixer field needs nothing: its release is the overlay being cleared, which happens
+        // at the top of this function. The two LIVE registries do: a producer parameter's value
+        // lives inside the producer, so it has to be written back.
+        std::vector<int> ended;
+        for (const auto& e : entries_)
+            if (!owned.count(e.first))
+                ended.push_back(e.first);
+
+        for (const auto layer : ended) {
+            const auto               prefix = std::to_string(layer) + "|";
+            std::vector<std::string> paths;
+            for (const auto& c : live_captures_)
+                if (c.first.compare(0, prefix.size(), prefix) == 0)
+                    paths.push_back(c.first.substr(prefix.size()));
+            for (const auto& path : paths)
+                restore_live_target(layer, path);
+            entries_.erase(layer);
         }
     }
 
@@ -1130,6 +1204,133 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
             resolved_[kv.first] = std::move(t);
         }
+    }
+
+    /// Write the overlay entries that are NOT part of the frame transform: producer parameters
+    /// and previz screen/camera properties.
+    ///
+    /// Separate from `resolve_drivers` because those compose into a `frame_transform` and these
+    /// do not -- a producer parameter is set through the producer's own setter and a screen
+    /// property through the renderer's mutator. Same overlays, same rank, a different
+    /// destination.
+    ///
+    /// WRITE-ON-CHANGE, which for the previz half answers F1 of the plan conservatively rather
+    /// than measuring it later: every screen mutator re-applies the mesh transform and calls
+    /// `update_projections()`, so writing an unchanged value every tick would recompute the
+    /// projection fifty times a second for nothing. The comparison is against what THIS code
+    /// last wrote, not against what the renderer holds -- reading the renderer back per tick is
+    /// the round trip the bridge exists to avoid.
+    void apply_live_targets()
+    {
+        for (const auto& kv : drivers_) {
+            const auto layer = kv.first;
+            const auto& d    = kv.second;
+
+            // The rank again, weakest first, so the strongest owner's value is the one that
+            // survives into `wanted`.
+            std::map<std::string, monitor::vector_t> wanted;
+            for (const auto* ov : {&d.timeline, &d.binding, &d.dominant}) {
+                for (const auto& sv : ov->steps)
+                    wanted[sv.first] = sv.second;
+                for (const auto& pv : ov->values)
+                    wanted[pv.first] = monitor::vector_t{pv.second};
+            }
+
+            for (const auto& w : wanted) {
+                const auto t = address::parse(w.first);
+                if (t.kind != address::target_kind::producer_param &&
+                    t.kind != address::target_kind::screen && t.kind != address::target_kind::camera &&
+                    t.kind != address::target_kind::view_camera)
+                    continue;
+
+                const auto key = std::to_string(layer) + "|" + w.first;
+                const auto it  = last_live_write_.find(key);
+                if (it != last_live_write_.end() && it->second == w.second)
+                    continue;
+
+                if (write_live_target(layer, t, w.second))
+                    last_live_write_[key] = w.second;
+            }
+        }
+    }
+
+    /// One write into a live registry. Returns whether it landed.
+    bool write_live_target(int layer, const address::target& t, const monitor::vector_t& value)
+    {
+        if (t.kind == address::target_kind::producer_param) {
+            const auto it = layers_.find(layer);
+            if (it == layers_.end())
+                return false;
+            auto producer = it->second.foreground();
+            if (producer == frame_producer::empty())
+                return false;
+            for (const auto& p : producer->parameters()) {
+                if (p.name != t.field || !p.set)
+                    continue;
+                // ONE COMPONENT of a wider parameter: read-modify-write, for the reason
+                // `apply_binding` gives -- the setter's arity check refuses a one-element vector
+                // and inventing the rest would be a guess.
+                if (p.arity > 1 && value.size() == 1) {
+                    if (!p.get)
+                        return false;
+                    auto v = p.get();
+                    if (v.size() != p.arity)
+                        return false;
+                    v[std::min<std::size_t>(t.component, v.size() - 1)] = value.front();
+                    return p.set(v);
+                }
+                return p.set(value);
+            }
+            return false;
+        }
+
+        if (!stage_field_writer_)
+            return false;
+        const std::string object = t.kind == address::target_kind::screen
+                                       ? ("screen/" + t.object)
+                                       : (t.kind == address::target_kind::view_camera ? "view_camera" : "camera");
+        // A wider stage field driven one component at a time needs the whole vector, and the
+        // renderer is the only thing that knows the other components -- so a partial write is
+        // refused rather than guessed. `previz/screen/wall/position` with all three values in a
+        // document works; `position.0` alone does not, and that is stated in timeline.md.
+        if (t.meta && value.size() != t.meta->arity)
+            return false;
+        return stage_field_writer_(object, t.field, value);
+    }
+
+    /// Give a live registry back what it held before a driver took it.
+    void restore_live_target(int layer, const std::string& path)
+    {
+        const auto key = std::to_string(layer) + "|" + path;
+        const auto cap = live_captures_.find(key);
+        if (cap == live_captures_.end())
+            return;
+        const auto t = address::parse(path);
+        write_live_target(layer, t, cap->second);
+        last_live_write_[key] = cap->second;
+        live_captures_.erase(cap);
+    }
+
+    /// Read a live registry's current value, for the capture.
+    monitor::vector_t read_live_target(int layer, const address::target& t)
+    {
+        if (t.kind == address::target_kind::producer_param) {
+            const auto it = layers_.find(layer);
+            if (it == layers_.end())
+                return {};
+            auto producer = it->second.foreground();
+            if (producer == frame_producer::empty())
+                return {};
+            for (const auto& p : producer->parameters())
+                if (p.name == t.field && p.get)
+                    return p.get();
+            return {};
+        }
+        // No reader for a stage field from here: the renderer is behind a one-way bridge, and
+        // adding a read to it would be the synchronous round trip per tick that the bridge's
+        // whole shape avoids. A previz field is restored to its DOCUMENT-declared value at
+        // release instead, which is what `timeline-previz` asserts and what timeline.md says.
+        return {};
     }
 
     /// What a layer's frame is actually drawn with: the resolved transform if anything drives it,
@@ -2292,6 +2493,11 @@ std::future<bool> stage::hold_field(int layer, const std::string& path)
 std::future<bool> stage::release_field(int layer, const std::string& path)
 {
     return impl_->release_field(layer, path);
+}
+
+void stage::set_stage_field_writer(stage::stage_field_writer w)
+{
+    impl_->stage_field_writer_ = std::move(w);
 }
 
 void stage::set_timeline_store(std::shared_ptr<timeline::timeline_store> store)

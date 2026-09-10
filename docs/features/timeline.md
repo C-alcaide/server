@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–11 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–12 of 19 shipped. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -17,8 +17,8 @@
 > `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, `api-timeline` for §5,
 > **`timeline-ramp`** and **`timeline-clock`** for §6 and §7, **`timeline-resolved`** for §9, and
 > **`timeline-stack`** plus an inverted **`binding-owner`** for §10, and
-> **`timeline-step`** for §11 — the only timeline battery that looks at a PIXEL for a
-> parameter other than brightness.
+> **`timeline-step`** for §11, and **`timeline-targets`** for §12 — whose producer arm is a
+> 1 LSB PICTURE check.
 > The remaining `timeline-*` batteries do
 > not exist yet and are named in the plan rather than here, because a battery named in a doc is a
 > command a reader will try to run
@@ -848,4 +848,70 @@ rebasing the *last* segment instead of the first aborts the boot naming the entr
 
 ---
 
-*§12 Known gaps — arrives with commit 19.*
+## 12. The two targets that are not on the transform
+
+A `producer/<name>` path and a `previz/camera/<field>` path resolve like any other (§2), and a
+document can drive both. What is different is that **neither has a constant.**
+
+Every other target is a field of the layer's `frame_transform`: the operator's value lives in the
+stage's own tween, an overlay sits above it, and releasing a driver costs nothing because nothing
+was overwritten. A producer parameter's value lives **inside the producer** and a camera's
+**inside the renderer**, so there is nowhere for an overlay to sit above.
+
+So they are applied by their own pass, `apply_live_targets`, after `resolve_drivers` — same
+overlays, same rank, a different destination — and released differently:
+
+| | driven by | released by |
+| :--- | :--- | :--- |
+| a **producer parameter** | the producer's own setter | writing back a value **captured on entry** |
+| a **previz camera field** | the renderer's mutator, through a bridge the shell injects | **nothing** — it stays where the document left it |
+
+**The asymmetry is deliberate and it is measured, not assumed.** Restoring a previz field would
+need its value read back per tick, and reading the renderer from the stage is the synchronous
+round trip the bridge's whole shape exists to avoid. `timeline-targets` asserts the camera stays
+put after `STOP`, so the behaviour is a checked property rather than something for a reader to
+discover.
+
+### 12.1 Write-on-change, which is F1 answered rather than deferred
+
+Every previz mutator re-applies the mesh transform and calls `update_projections()`. Writing an
+unchanged value every tick would recompute the projection fifty times a second for nothing, so
+the pass compares against **what it last wrote** — not against what the renderer holds, since
+reading it back is the round trip being avoided. The plan flagged this as F1, "calling
+`set_stage_field` every tick from the stage executor is unverified"; it is answered by
+construction.
+
+**Cameras only in this build.** A camera's position, rotation and fov are settable from their own
+values alone. A screen's are not: `size` and `arc` have no mutator at all (they are set when the
+screen is created, and re-creating it would discard every other property), and the mutators that
+do exist need a whole `screen_meta` read back out of the renderer. Both facts are already
+recorded in the HTTP bridge; the timeline inherits them.
+
+**A wider stage field needs all its components in the document.** The renderer's mutator takes
+the whole vector and the stage **refuses a partial write** rather than guessing the rest, so
+`previz/camera/position` with three values works and `position.0` alone does not.
+
+### 12.2 Where it is checked
+
+**`timeline-targets`, 12/12 both mixers.**
+
+The producer arm **gates the picture at 1 LSB**, which is possible only because it borrows
+`producer-params`' fixture shader: a flat fill computed from the shader's own parameters, no
+decode and no resampling, so `level × 255` is a closed-form model rather than a previous capture.
+Measured **159 against 159.4** while driven, and **94 against 94.3** after the release. A
+parameter that stores and does not reach the shader is the `MIXER EXPOSURE` class, which is why
+that check is a pixel and not a value.
+
+The camera arm gates the value at two positions, that a paused document holds it without
+stalling the channel, and the release asymmetry above. It does **not** gate a picture and cannot:
+where a camera is pointing is A16 — no battery in this project looks at that, which
+`previz-picture` records.
+
+**Found by this battery on its first run:** `STOP` restored nothing. The release was written into
+the per-layer branch of the evaluation loop, and three of the four ways a driver can end — the
+document stopped, deleted, or turned invalid — never reach that loop. It is a sweep over the
+whole entry map now.
+
+---
+
+*§13 Known gaps — arrives with commit 19.*

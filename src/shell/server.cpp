@@ -645,6 +645,63 @@ struct server::impl
 
             const std::wstring lifecycle_key = L"lock" + std::to_wstring(channel_id);
             channel->stage()->set_timeline_store(timelines_);
+
+            // HOW THE STAGE WRITES A PREVIZ PROPERTY, which is the same bridge the control API
+            // uses and for the same reason: the previz renderer is in `accelerator`, which
+            // `core` does not link. Wired per channel because the renderer is per channel.
+            //
+            // The stage calls it from ITS OWN executor, which the http path never did, and it
+            // writes only when the value CHANGES -- each mutator re-applies the mesh transform
+            // and calls `update_projections()`, so an unchanged write per tick would recompute
+            // the projection fifty times a second for nothing. That is F1 of the timeline plan,
+            // answered conservatively rather than measured later.
+            {
+                auto weak_channel = channel;
+                channel->stage()->set_stage_field_writer(
+                    [weak_channel](const std::string&             object,
+                                   const std::string&             field,
+                                   const core::monitor::vector_t& value) -> bool {
+                        auto img = weak_channel->mixer().get_image_mixer();
+
+                        accelerator::ogl::previz_renderer* previz = nullptr;
+                        if (auto* o = dynamic_cast<accelerator::ogl::image_mixer*>(img.get()))
+                            previz = &o->get_previz_renderer();
+#ifdef ENABLE_VULKAN
+                        else if (auto* v = dynamic_cast<accelerator::vulkan::image_mixer*>(img.get()))
+                            previz = v->get_previz_renderer();
+#endif
+                        if (!previz)
+                            return false;
+
+                        // CAMERAS ONLY in this build, and the reason is in the http bridge above:
+                        // `size` and `arc` have no mutator, and the screen mutators that do exist
+                        // need a whole `screen_meta` read back out of the renderer -- which is
+                        // the synchronous round trip per tick this bridge exists to avoid. A
+                        // camera's position, rotation and fov are settable from their own values
+                        // alone, so they are what a document can drive today. Stated in
+                        // timeline.md rather than left as a silent partial.
+                        const bool view = object == "view_camera";
+                        if (object != "camera" && !view)
+                            return false;
+
+                        // Every camera mutator takes all seven components at once, so setting
+                        // `fov` alone means re-sending the other six -- which is why the current
+                        // object is read first. `stage_snapshot()` is the same read the http
+                        // bridge does, and it is the one place a per-tick round trip is
+                        // unavoidable: there is no partial setter to write into.
+                        const auto  snap = previz->stage_snapshot();
+                        auto        cam  = view ? snap.view_camera : snap.camera;
+                        const auto* cf   = core::fields::find_camera_field(field);
+                        if (!cf || !cf->set || !cf->set(cam, value))
+                            return false;
+
+                        if (view)
+                            previz->set_view_camera(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.roll, cam.fov);
+                        else
+                            previz->set_camera(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.roll, cam.fov);
+                        return true;
+                    });
+            }
             channels_->emplace_back(channel, channel->stage(), lifecycle_key);
         }
 

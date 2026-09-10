@@ -1,6 +1,42 @@
 CasparVP — Unreleased
 ==========================================
 
+### A document can drive a producer parameter and the previz camera
+
+`producer/<name>` and `previz/camera/<field>` (and `view_camera`) are timeline targets now. They
+already RESOLVED as addresses; they had no writer, which is the shape of "implemented" that is
+not.
+
+**Behaviour changes for an existing config.** None -- both are properties of a timeline document.
+The stage gains an injected previz writer, wired per channel by the shell, and it is the same
+bridge the control API already uses.
+
+**Neither target has a constant**, and that changes how they are released. Every other target is
+a field of the layer's `frame_transform`, where the operator's value lives in the stage's own
+tween and an overlay sits above it. A producer parameter's value lives inside the producer and a
+camera's inside the renderer, so a producer parameter is released by writing back a value
+CAPTURED ON ENTRY, and a previz field is NOT released -- it stays where the document left it,
+because reading the renderer back per tick is the synchronous round trip the bridge exists to
+avoid. The asymmetry is asserted by a battery rather than left to be discovered.
+
+**Writes are on-change**, which for previz is a correctness question rather than an optimisation:
+every mutator re-applies the mesh transform and calls `update_projections()`. Cameras only in this
+build -- a screen's `size` and `arc` have no mutator at all, and the ones that do exist need a
+whole `screen_meta` read back out of the renderer. A wider stage field needs all its components in
+the document; a partial write is refused rather than guessed.
+
+**MEASURED, both mixers.** New battery `timeline-targets` **12/12**. The producer arm gates the
+PICTURE at **1 LSB** by borrowing `producer-params`' fixture shader -- a flat fill computed from
+its own parameters -- measuring **159 against 159.4** while driven and **94 against 94.3** after
+release. `timeline-ramp` 21/21, `timeline-step` 8/8, `timeline-stack` 16/16 all still green.
+(`producer-params` reports its OFX arm unmeasured for want of an `--ofx-plugins` directory, which
+is a pre-existing fixture requirement and not a regression.)
+
+**Found by the new battery on its first run:** `STOP` restored nothing. The release had been
+written into the per-layer branch of the evaluation loop, and three of the four ways a driver can
+end -- the document stopped, deleted, or turned invalid -- never reach that loop. It is a sweep
+over the whole entry map now.
+
 ### Step keyframes and `rebase`
 
 A document's `keyframes` list -- STEP values, as distinct from the numeric `keys` -- is evaluated
