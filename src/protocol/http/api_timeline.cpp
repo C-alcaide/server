@@ -579,6 +579,18 @@ decode_error decode_object(const json::value& v, const tl::parse_context& parent
         if (!flag("one_at_a_time", out.play.one_at_a_time) ||
             !flag("auto_play", out.play.auto_play) || !flag("loop", out.play.loop))
             return {out.id, "", "group flags take booleans"};
+
+        // GROUP `loop` IS REFUSED rather than accepted and ignored, which is the difference
+        // between a named gap and a silent one. Looping a cue stack means the resolution has no
+        // end -- child (i mod n) repeats forever -- and the resolver produces a finite instance
+        // list on purpose, because that list is what `/resolved` hands a client to draw. A
+        // transport-level loop region does what most shows want and exists today
+        // (`TIMELINE <ch> LOOP <name> <from> <to>`).
+        if (out.play.loop)
+            return {out.id, "",
+                    "group `loop` is not implemented: it would need an unbounded instance list, "
+                    "and the resolution is what `/resolved` hands a client to draw. Use the "
+                    "transport's loop region instead -- TIMELINE <ch> LOOP <name> <from> <to>"};
     }
 
     if (const auto* c = member(o, "children")) {

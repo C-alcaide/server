@@ -1708,13 +1708,23 @@ std::future<std::wstring> timeline_command(command_context& ctx)
                 return make_ready_future<std::wstring>(
                     L"400 TIMELINE ERROR a loop region needs <to> after <from>\r\n");
         }
+    } else if (verb == L"NEXT" || verb == L"PREV" || verb == L"PREVIOUS") {
+        // NOT a `transport_command`, because the transport takes a position and knows nothing
+        // about a document's contents. The stage reads the resolution, works out the position,
+        // and issues an ordinary seek.
+        if (!stage->timeline_seek_relative(name, verb == L"NEXT").get())
+            return make_ready_future<std::wstring>(
+                L"404 TIMELINE ERROR no " + std::wstring(verb == L"NEXT" ? L"later" : L"earlier") +
+                L" cue in '" + ctx.parameters.at(1) +
+                L"', or the document does not resolve\r\n");
+        return make_ready_future<std::wstring>(L"202 TIMELINE OK\r\n");
     } else if (verb == L"GO") {
         cmd.v       = tl::transport_command::verb::go;
         cmd.trigger = ctx.parameters.size() >= 3 ? u8(ctx.parameters.at(2)) : std::string("go");
     } else {
         return make_ready_future<std::wstring>(
             L"400 TIMELINE ERROR no such verb: " + ctx.parameters.at(0) +
-            L". PLAY PAUSE STOP SEEK RATE LOOP GO INFO LIST\r\n");
+            L". PLAY PAUSE STOP SEEK RATE LOOP GO NEXT PREV INFO LIST\r\n");
     }
 
     if (!stage->timeline_command(name, cmd).get())

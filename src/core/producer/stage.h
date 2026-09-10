@@ -332,6 +332,13 @@ class stage final : public stage_base
     /// Returns false only if the document is not one this channel owns.
     std::future<bool> timeline_command(const std::string& name, const timeline::transport_command& cmd);
 
+    /// Seek to the start of the next (`forward`) or previous instance in the document.
+    ///
+    /// Here rather than on `transport` because the transport is pure and takes a position -- it
+    /// knows nothing about a document's contents, which is what keeps it testable at boot
+    /// against a table of numbers. False if there is no such instance.
+    std::future<bool> timeline_seek_relative(const std::string& name, bool forward);
+
     /// A document's playhead as this channel sees it: state, position in seconds, rate.
     struct timeline_status
     {

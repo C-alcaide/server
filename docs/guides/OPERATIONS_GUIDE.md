@@ -1027,7 +1027,9 @@ TIMELINE 1 STOP show               # rewind to zero and give every parameter bac
 TIMELINE 1 SEEK show 12.5          # a position, in seconds
 TIMELINE 1 RATE show 0.5           # half speed; -1 runs backwards; 0 is refused, use PAUSE
 TIMELINE 1 LOOP show 20 45         # loop that region; LOOP show OFF clears it
-TIMELINE 1 GO show                 # fire a trigger an object is waiting on
+TIMELINE 1 GO show                 # fire a trigger an object is waiting on -- take the next cue
+TIMELINE 1 NEXT show               # move the playhead to the next cue's start
+TIMELINE 1 PREV show               # ...and back
 ```
 
 **Three things worth knowing before you use it on air.**
@@ -1042,6 +1044,13 @@ document then drives brightness somewhere else, stopping the document returns br
 not to the document's last value, and not to the default. Your write during the animation is
 remembered rather than lost, and it lands when the document lets go. `PAUSE` does **not** release:
 it holds the position and keeps the parameters, which is usually what a hold means.
+
+*A group can be a cue stack.* Give a group `one_at_a_time` and leave `auto_play` off, and every
+cue after the first waits for a `TIMELINE 1 GO`. The first one does not wait -- `PLAY` starts the
+stack. A GO takes the next cue *now*, whenever you press it, even if the current one has not
+finished; the new cue takes the layer. Turn `auto_play` on and it runs straight through instead.
+`NEXT` and `PREV` move the playhead between cue starts without firing anything, and `NEXT` past
+the last cue answers 404 rather than pretending.
 
 *Who owns a parameter is published.* `channel/1/stage/layer/10/driver/brightness` names what is
 writing it, and `.../constant/brightness` carries your own value beside it. If a slider will not

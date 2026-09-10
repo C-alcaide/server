@@ -1,6 +1,46 @@
 CasparVP — Unreleased
 ==========================================
 
+### A group is a cue stack: each cue waits for a GO, and `TIMELINE NEXT`/`PREV`
+
+`one_at_a_time` without `auto_play` now makes every cue after the first wait for a GO, which is
+the difference between a sequence and a stack. `TIMELINE <ch> NEXT|PREV <name>` move the playhead
+between cue starts.
+
+**Behaviour change for an existing document.** A group with `one_at_a_time` and WITHOUT
+`auto_play` no longer runs straight through -- it waits. Back-to-back sequencing is the
+`auto_play` behaviour now, and a document that relied on the old behaviour needs the flag. Nothing
+that does not use `one_at_a_time` is affected, and no such document can predate this release,
+since the timeline is new in it.
+
+**Group `loop` is REFUSED at PUT with a reason**, rather than accepted and ignored. Looping a cue
+stack means child *i mod n* repeats forever, so the resolution has no end -- and the resolution is
+the finite list `/resolved` hands a client to draw. The message points at the transport's loop
+region, which does what most shows want.
+
+**A GO takes the next cue NOW, whenever it is pressed** -- cue N starts at the Nth firing
+at-or-after the group's start, not at the first firing after the previous cue ENDED. The first
+implementation did the latter, which meant a GO pressed while a cue was still running did nothing;
+`resolver_self_test` said so at boot. A waiting cue has NO position rather than a position of
+zero, which would put it on air.
+
+`NEXT`/`PREV` are not transport verbs: the transport takes a position and knows nothing about a
+document's contents, so the stage reads the resolution and issues an ordinary seek. `PREV` has a
+one-frame guard, because without it a `PREV` pressed just after a cue started lands on that same
+cue. `NEXT` past the last cue answers **404** rather than 202-and-nothing.
+
+**MEASURED, both mixers.** New battery `timeline-cue` **14/14** -- three cues with distinct
+brightnesses AND distinct durations, so "cue 2 is on air" cannot be confused with "cue 1 is still
+running" or with a stack that used one cue's length for all three. `timeline-ramp` 21/21,
+`timeline-step` 8/8, `timeline-stack` 16/16, `timeline-targets` 12/12, `timeline-resolved` 9/9 and
+`api-timeline` 25/25 all green.
+
+**Shown failing first:** making any firing advance any cue -- the "has anything fired" shape --
+aborts the boot at "and the third still waits". And an existing self-test case had to be
+corrected: the `one_at_a_time` case predated the distinction, did not set `auto_play`, and threw
+`invalid unordered_map key` the moment cue stacks learned to wait. A test that had encoded the
+only behaviour there was.
+
 ### A document can drive a producer parameter and the previz camera
 
 `producer/<name>` and `previz/camera/<field>` (and `view_camera`) are timeline targets now. They

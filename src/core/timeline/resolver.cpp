@@ -333,18 +333,33 @@ resolved_timeline resolve(const timeline_document& doc, const trigger_log& trigg
         // than expressed as `#prev.end` in the document, because the client should not have to
         // rewrite every child's expression when one is inserted in the middle.
         std::optional<flicks> sequence_cursor;
+        std::optional<flicks> group_start;
+        bool                  waits_for_go = false;
+        int                   cue_index    = 0;
         if (!f.parent_id.empty()) {
             const auto pit = by_id.find(f.parent_id);
             if (pit != by_id.end() && flat[pit->second].obj->play.one_at_a_time) {
-                for (const auto& sib : flat[pit->second].obj->children) {
+                const auto& parent = *flat[pit->second].obj;
+                for (const auto& sib : parent.children) {
                     if (sib.id == o.id)
                         break;
+                    ++cue_index;
                     const auto en = object_end(sib.id);
                     if (en && *en)
                         sequence_cursor = **en;
                 }
+                group_start = object_start(f.parent_id);
                 if (!sequence_cursor)
-                    sequence_cursor = object_start(f.parent_id).value_or(0);
+                    sequence_cursor = group_start.value_or(0);
+
+                // A CUE STACK WITHOUT `auto_play` WAITS FOR A GO between cues, which is what
+                // distinguishes a cue stack from a sequence. `auto_play` is Hippotizer's and
+                // WATCHOUT's "follow-on"; without it every cue after the first starts on the
+                // Nth firing of the group's trigger, so an operator's GO advances the stack.
+                //
+                // The FIRST cue does not wait: the group's own start is when the stack begins,
+                // and making cue 1 need a GO as well would mean two actions to start a show.
+                waits_for_go = !parent.play.auto_play && cue_index > 0;
             }
         }
 
@@ -383,12 +398,48 @@ resolved_timeline resolve(const timeline_document& doc, const trigger_log& trigg
                                        o.id, open_end, reason);
                 }
             } else {
-                if (spec.start)
+                if (spec.start) {
                     start = resolve_expr(*spec.start, o.id, open_start, reason);
-                else if (sequence_cursor)
+                } else if (waits_for_go) {
+                    // THE Nth FIRING AT-OR-AFTER THE GROUP'S START. Counted from the group's
+                    // start rather than from the previous cue's END, and that is the semantic
+                    // choice rather than an implementation detail: a GO takes the next cue NOW,
+                    // whenever it is pressed, which is what a lighting desk does and what an
+                    // operator expects. Counting from the previous cue's end would mean a GO
+                    // pressed while a cue was still running did nothing -- and would leave cue 3
+                    // waiting for a THIRD firing, which is what the first version did and what
+                    // `resolver_self_test` said at boot.
+                    //
+                    // A GO pressed early therefore starts the next cue while the current one's
+                    // span is still open; last-started-wins gives the layer to the new cue,
+                    // which is again what a desk does.
+                    const auto from = group_start.value_or(0);
+                    const auto it   = triggers.fired.find("go");
+                    int        seen = 0;
+                    std::optional<flicks> at;
+                    if (it != triggers.fired.end()) {
+                        for (const auto t : it->second) {
+                            if (t < from)
+                                continue;
+                            if (++seen == cue_index) {
+                                at = t;
+                                break;
+                            }
+                        }
+                    }
+                    if (at) {
+                        start = *at;
+                    } else {
+                        // Waiting. NOT an error and not a start of zero: an unfired cue has no
+                        // position, and giving it one would put it on air.
+                        open_start = true;
+                        out.pending_triggers.push_back("go");
+                    }
+                } else if (sequence_cursor) {
                     start = *sequence_cursor;
-                else
+                } else {
                     start = 0;
+                }
 
                 if (spec.end)
                     end = resolve_expr(*spec.end, o.id, open_end, reason);
@@ -700,13 +751,20 @@ void resolver_self_test()
         req(*r.instances[1].end == from_seconds(6.0), "with the span carried along");
     }
 
-    // ---- 7. one_at_a_time: children in sequence -----------------------------------------
+    // ---- 7. one_at_a_time + auto_play: children in sequence, no GO needed ---------------
+    //
+    // `auto_play` was added to this fixture when cue stacks learned to WAIT: back-to-back
+    // sequencing is the auto_play behaviour, and without the flag every cue after the first now
+    // waits for a GO. The case below covers that half. This test threw `invalid unordered_map
+    // key` the moment the distinction existed, which is a fixture that had encoded the only
+    // behaviour there was.
     {
         timeline_document d;
         timeline_object   stack;
         stack.id                 = "stack";
         stack.is_group           = true;
         stack.play.one_at_a_time = true;
+        stack.play.auto_play     = true;
         stack.enable.push_back(spec_expr("2", "100"));
 
         // NO start on any child. That is the point: a cue stack's children say how LONG they
@@ -732,6 +790,69 @@ void resolver_self_test()
             "the second where the first ended");
         req(r.instances[r.by_object.at("c3").front()].start == from_seconds(10.0),
             "and the third where the second did");
+    }
+
+    // ---- 7b. one_at_a_time WITHOUT auto_play: each cue waits for a GO --------------------
+    {
+        timeline_document d;
+        timeline_object   stack;
+        stack.id                 = "stack";
+        stack.is_group           = true;
+        stack.play.one_at_a_time = true;
+        stack.play.auto_play     = false; //< the difference from the case above
+        stack.enable.push_back(spec_expr("0", "1000"));
+
+        for (const char* id : {"c1", "c2", "c3"}) {
+            timeline_object c;
+            c.id    = id;
+            c.layer = "1-10";
+            enable_spec s;
+            time_expr   dur;
+            dur.literal = from_seconds(4.0);
+            s.duration  = dur;
+            c.enable.push_back(s);
+            stack.children.push_back(c);
+        }
+        d.objects.push_back(stack);
+
+        // Nothing fired: the FIRST cue is live and the other two are waiting.
+        const auto r0 = resolve(d, no_triggers);
+        req(r0.ok(), "an unfired cue stack resolves");
+        req(r0.by_object.count("c1") == 1, "the first cue does not wait -- the group's start is "
+                                           "when the stack begins, and needing a GO to start as "
+                                           "well would mean two actions to start a show");
+        req(r0.by_object.count("c2") == 0, "the second waits");
+        req(r0.by_object.count("c3") == 0, "and so does the third");
+        req(!r0.pending_triggers.empty(), "and the trigger they wait on is published");
+
+        // One GO, at 10 s: cue 2 starts there. Cue 3 still waits.
+        trigger_log one;
+        one.fired["go"] = {from_seconds(10.0)};
+        const auto r1   = resolve(d, one);
+        req(r1.ok() && r1.by_object.count("c2") == 1, "one GO starts the second cue");
+        req(r1.instances[r1.by_object.at("c2").front()].start == from_seconds(10.0),
+            "at the moment the GO fired, not where the first cue ended");
+        req(r1.by_object.count("c3") == 0, "and the third still waits");
+
+        // Two GOs: the SECOND one starts cue 3. Counting matters -- one GO must not advance
+        // two cues, which a "has anything fired" test would do.
+        trigger_log two;
+        two.fired["go"] = {from_seconds(10.0), from_seconds(25.0)};
+        const auto r2   = resolve(d, two);
+        req(r2.by_object.count("c3") == 1, "two GOs start the third cue");
+        req(r2.instances[r2.by_object.at("c3").front()].start == from_seconds(25.0),
+            "at the SECOND firing -- one GO must not advance two cues");
+        req(r2.instances[r2.by_object.at("c2").front()].start == from_seconds(10.0),
+            "and the second cue is still where its own GO put it");
+
+        // A GO BEFORE THE STACK BEGAN does not advance it. The group starts at 0 here, so
+        // a firing at a negative position is the only way to express "before" -- which is
+        // what a seek backwards produces.
+        trigger_log early;
+        early.fired["go"] = {from_seconds(-5.0)};
+        const auto r3     = resolve(d, early);
+        req(r3.by_object.count("c2") == 0,
+            "a GO from before the stack began does not advance it");
     }
 
     // ---- 8. an OPEN end, and what it does to a dependent ---------------------------------

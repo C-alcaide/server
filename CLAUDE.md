@@ -374,6 +374,20 @@ cmake --build d:\Github\CasparVP\build --target casparcg
   `C1083: cannot open precompiled header file`. Measured 2026-08-21, following this very
   line in its shorter form;
   `BUILDING_WORKFLOW.md` has the sweep.
+- **`Copy-Item` PRESERVES the write time, so reverting a file by copying a backup over it can
+  be invisible to ninja.** Measured 2026-09-10 while reverting a deliberate mutation: the backup
+  had been taken minutes earlier, `Copy-Item` restored it carrying that older timestamp, the
+  object file was newer, and the build reported success without recompiling anything. Four
+  battery runs then measured the MUTATED binary and reported the mutation as a real failure --
+  the same class as the stale-exe trap above, reached from the other direction, and it costs a
+  fabricated defect every time. `cp` in the Bash tool behaves the same way.
+
+  **Touch the file after any revert-by-copy**, and confirm the exe's timestamp moved:
+
+  ```
+  python -c "import pathlib; pathlib.Path('src/core/...').touch()"
+  ```
+
 - A wrong `vcvars` path fails as `C1083: cannot open include file 'cstdint'` on every
   translation unit. Missing *standard library* headers means the environment was never
   initialised — don't go looking at the includes.

@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–12 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–13 of 19 shipped. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -486,6 +486,7 @@ TIMELINE <ch> SEEK <name> <seconds>
 TIMELINE <ch> RATE <name> <n>
 TIMELINE <ch> LOOP <name> <from> <to>   ·   TIMELINE <ch> LOOP <name> OFF
 TIMELINE <ch> GO <name> [trigger]
+TIMELINE <ch> NEXT <name>   ·   TIMELINE <ch> PREV <name>
 TIMELINE <ch> INFO <name>   ·   TIMELINE <ch> LIST
 ```
 
@@ -914,4 +915,67 @@ whole entry map now.
 
 ---
 
-*§13 Known gaps — arrives with commit 19.*
+## 13. Cue stacks
+
+A **group** is a cue stack, rather than a new object type. `one_at_a_time` runs its children in
+sequence, each starting where the previous ended, and the sequence is **computed** — inserting a
+cue in the middle does not mean rewriting every expression after it.
+
+| flags | behaviour |
+| :--- | :--- |
+| `one_at_a_time` + `auto_play` | runs straight through: a sequence |
+| `one_at_a_time` alone | **every cue after the first waits for a GO**: a stack |
+| `loop` | **refused at PUT**, with a reason — see below |
+
+**The first cue does not wait.** The group's own start is when the stack begins, and needing a GO
+to start as well would mean two operator actions to start a show.
+
+**A GO takes the next cue NOW, whenever it is pressed.** Cue N starts at the Nth firing at-or-after
+the *group's* start — not at the first firing after the previous cue *ended*, which is what the
+first implementation did and which meant a GO pressed while a cue was still running did nothing.
+`resolver_self_test` said so at boot. A GO pressed early therefore starts the next cue while the
+current one's span is still open, and last-started-wins gives it the layer — which is again what a
+lighting desk does.
+
+**A waiting cue has no position at all**, not a position of zero. A position of zero would put it
+on air. It is absent from `instances` and the trigger it waits on appears in `pending_triggers`,
+so a client can grey out a button that would do nothing.
+
+`TIMELINE <ch> NEXT|PREV <name>` move the playhead between cue starts. They are **not** transport
+verbs: the transport is pure and takes a position, so the stage reads the resolution, works out
+the position and issues an ordinary seek — which is what keeps `transport_self_test` a table of
+numbers rather than a table of documents. `NEXT` looks strictly *after* the playhead and `PREV`
+strictly before it **with a one-frame guard**, because without the guard `PREV` pressed just after
+a cue started lands on that same cue and looks like it did nothing. Neither is a silent no-op:
+past the last cue, `NEXT` answers **404**.
+
+**Group `loop` is refused rather than ignored.** Looping a cue stack means child *i mod n* repeats
+forever, so the resolution has no end — and the resolution is the finite list `/resolved` hands a
+client to draw. The refusal message points at the transport's loop region, which does what most
+shows want and exists today. A flag accepted and silently ignored is the failure this whole API is
+built to avoid.
+
+### 13.1 Where it is checked
+
+**`timeline-cue`, 14/14 both mixers.** Three cues with distinct brightnesses *and* distinct
+durations, so "cue 2 is on air" cannot be confused with "cue 1 is still running", with a default,
+or with a stack that used one cue's length for all three. It gates that only the first cue has a
+position before any GO, that the pending trigger is published, that **one GO advances exactly one
+cue**, that `NEXT`/`PREV` move strictly past the playhead, that `NEXT` past the end is a 404, and
+that group `loop` is refused with a reason.
+
+`resolver_self_test` covers the counting at boot: nothing fired, one GO, two GOs, and a GO from
+*before* the stack began (which must not advance it).
+
+**Shown failing first:** making any firing advance any cue — the "has anything fired" test —
+aborts the boot at *"and the third still waits"*. One GO doing three cues' work is the failure
+that shape has.
+
+**And an existing self-test case had to be corrected**, which is the more interesting finding: the
+`one_at_a_time` case predated the distinction and did not set `auto_play`, so it asserted
+back-to-back sequencing. The moment cue stacks learned to wait, that fixture threw `invalid
+unordered_map key` — a test that had encoded the only behaviour there was.
+
+---
+
+*§14 Known gaps — arrives with commit 19.*

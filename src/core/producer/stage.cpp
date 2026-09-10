@@ -1855,6 +1855,54 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         });
     }
 
+    /// Seek to the start of the next or previous instance in the document.
+    ///
+    /// NOT a transport verb, because the transport is pure and knows nothing about a document's
+    /// contents -- it takes a position. So this reads the resolution, computes the position, and
+    /// issues an ordinary seek. That keeps `transport` testable at boot against a table of
+    /// numbers rather than against a document.
+    ///
+    /// "The next instance" is the earliest start strictly after the playhead, over every layer
+    /// AND the transparent anchors: an anchor is a cue point that writes nothing, which is
+    /// exactly the thing an operator wants to jump to.
+    std::future<bool> timeline_seek_relative(const std::string& name, bool forward)
+    {
+        return executor_.begin_invoke([this, name, forward] {
+            if (!timelines_)
+                return false;
+            const auto entry = timelines_->get(name);
+            if (!entry || entry->document.channel != channel_index_ || !entry->resolved.ok())
+                return false;
+
+            const auto per_frame = timeline::flicks_per_frame(format_desc_.framerate);
+            auto&      tr        = transports_[name];
+            const auto pos       = tr.position_at(last_frame_number_, per_frame);
+
+            // STRICTLY after / strictly before, with a one-frame guard on the backwards case.
+            // Without the guard, `PREVIOUS` pressed just after a cue started lands on that same
+            // cue and looks like it did nothing -- which is the one behaviour an operator will
+            // press twice and then report as broken.
+            std::optional<timeline::flicks> target;
+            for (const auto& in : entry->resolved.instances) {
+                if (forward) {
+                    if (in.start > pos && (!target || in.start < *target))
+                        target = in.start;
+                } else {
+                    if (in.start < pos - per_frame && (!target || in.start > *target))
+                        target = in.start;
+                }
+            }
+            if (!target)
+                return false;
+
+            timeline::transport_command c;
+            c.v  = timeline::transport_command::verb::seek;
+            c.at = *target;
+            pending_transport_[name].push_back(c);
+            return true;
+        });
+    }
+
     std::future<bool> timeline_command(const std::string& name, const timeline::transport_command& cmd)
     {
         return executor_.begin_invoke([this, name, cmd] {
@@ -2468,6 +2516,11 @@ std::future<bool> stage::timeline_command(const std::string&                 nam
                                           const timeline::transport_command& cmd)
 {
     return impl_->timeline_command(name, cmd);
+}
+
+std::future<bool> stage::timeline_seek_relative(const std::string& name, bool forward)
+{
+    return impl_->timeline_seek_relative(name, forward);
 }
 
 std::future<stage::timeline_status> stage::timeline_state(const std::string& name)
