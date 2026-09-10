@@ -1,6 +1,33 @@
 CasparVP — Unreleased
 ==========================================
 
+### `GET /v1/timeline/{name}/resolved?at=` carries the per-path VALUES
+
+The endpoint already reported the instances and, with `at`, the object owning each layer and its
+own local time. It now also carries the value every animated path holds at that position,
+computed by the same `curve::interpolate` and the same kind lookup the tick uses.
+
+**Behaviour change for an existing config.** None -- an added field on an endpoint added in the
+same release. A client that ignores `values` sees no difference.
+
+**Why it matters.** Without the values a client knows WHICH cue owns a layer and has to
+interpolate the curve itself to draw the parameter, and a client's own interpolation is a second
+implementation of the easing, the per-kind angular modulus and the discrete hold. That is where
+it comes to disagree with the server about what is on air, which is worse than not drawing at all
+-- an operator trusts the picture in front of them.
+
+**MEASURED, both mixers.** New battery `timeline-resolved`, **9/9**, worst difference
+**0.000e+00** over 67 positions spread across an eight-second document with three keys and two
+easings. Both sides run the same interpolation on the same local time, so the gate is 1e-6 rather
+than a frame of tolerance -- and the COUNT of comparisons is part of the gate, because `worst`
+starts at zero and a run that compared nothing would report a perfect match.
+
+**Shown failing first, twice.** Reading the curve at the DOCUMENT's position instead of the
+object's own local time fails the late-starting object's check while the layer whose object starts
+at zero still agrees -- which is why the fixture has two layers with different starts. And one
+frame late fails the position-by-position check at 1.54e-2, one frame of the steepest segment; a
+gate of one frame's tolerance would have passed both mutations.
+
 ### Removed: the `KEYFRAMES` command family and `src/modules/keyframes`
 
 `KEYFRAMES SET|ARM|DISARM|CLEAR|GET|PATCH|SEEK|STATUS` no longer exist. **Measured: `KEYFRAMES

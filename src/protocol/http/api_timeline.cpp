@@ -13,6 +13,7 @@
 
 #include "json_state.h"
 
+#include <core/timeline/curve.h>
 #include <core/timeline/timeline_store.h>
 
 #include <common/log.h>
@@ -829,6 +830,19 @@ json::value encode_resolution(const tl::resolved_timeline& r)
     return j;
 }
 
+/// The object an instance came from, by id, depth-first.
+const tl::timeline_object* find_object(const std::vector<tl::timeline_object>& objs, const std::string& id)
+{
+    for (const auto& o : objs) {
+        if (o.id == id)
+            return &o;
+        if (!o.children.empty())
+            if (const auto* c = find_object(o.children, id))
+                return c;
+    }
+    return nullptr;
+}
+
 std::string query_value(const std::string& query, const std::string& key)
 {
     // `at=12.5`, `?at=12.5`, or one of several separated by `&`. Hand-parsed because this is the
@@ -1077,7 +1091,28 @@ api_reply get_timeline_resolved(const api_context& ctx, const std::string& name,
                 o["object"] = inst->object_id;
                 o["start"]  = encode_time(inst->start);
                 o["end"]    = inst->end ? json::value(encode_time(*inst->end)) : json::value(nullptr);
-                o["local"]  = encode_time(inst->local_at(t));
+                const auto local = inst->local_at(t);
+                o["local"]       = encode_time(local);
+
+                // THE VALUES, which is what makes this endpoint worth having rather than a
+                // convenience. Without them a client knows WHICH object owns a layer at a
+                // position and has to interpolate the curve itself to draw the parameter -- and
+                // a client's own interpolation is a second implementation of the easing, the
+                // per-kind angular modulus and the discrete hold, which is where it comes to
+                // disagree with the server about what is on air.
+                //
+                // Computed by the SAME `curve::interpolate` and the same `kind_of` the tick
+                // uses, on the same local time. `timeline-resolved` gates the two against each
+                // other for a spread of positions.
+                if (const auto* obj = find_object(e->document.objects, inst->object_id)) {
+                    json::object values;
+                    for (const auto& sv : obj->content)
+                        values[sv.first] = vector_to_json(sv.second);
+                    for (const auto& pv : obj->curves.interpolate(local, tl::kind_of))
+                        values[pv.first] = pv.second;
+                    if (!values.empty())
+                        o["values"] = values;
+                }
                 active[kv.first] = o;
             }
         }

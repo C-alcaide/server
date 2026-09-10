@@ -1,6 +1,6 @@
 # Timeline — one time model, one resolver, one owner per parameter
 
-> **State:** **in progress** — commits 1–8 of 19 shipped. **The timeline runs in the tick**: a
+> **State:** **in progress** — commits 1–9 of 19 shipped. **The timeline runs in the tick**: a
 > document animates any layer on the channel's own clock, and releasing it gives the
 > operator's value back. **`KEYFRAMES` is removed** (§8). Nothing
 > below §2 exists in the server yet; the plan is `~/.claude/plans/zesty-skipping-engelbart.md` and
@@ -14,9 +14,9 @@
 > **Replaces:** `src/modules/keyframes/` (the `KEYFRAMES` command family) and the OFX producer's
 > private `OFX KEY` engine — both removed when the resolver lands, with a `CHANGELOG` measurement
 > **Coverage:** `time_self_test()` and `address::target_self_test()` at boot (§1, §2), and
-> `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, `api-timeline` for §5, and
-> **`timeline-ramp`** and **`timeline-clock`** for §6 and §7. The remaining `timeline-*`
-> batteries do
+> `api-roundtrip` and `binding-lfo` for the audio rows §2.1 adds, `api-timeline` for §5,
+> **`timeline-ramp`** and **`timeline-clock`** for §6 and §7, and **`timeline-resolved`** for §9.
+> The remaining `timeline-*` batteries do
 > not exist yet and are named in the plan rather than here, because a battery named in a doc is a
 > command a reader will try to run
 
@@ -630,4 +630,44 @@ verbs, and then the family removed. That is the most that can be said without a 
 
 ---
 
-*§9 Ownership beyond two ranks, §10 Known gaps — arrive with commits 9–19.*
+## 9. `/resolved` and the tick agree
+
+`GET /v1/timeline/{name}/resolved?at=<seconds>` carries, per layer, the object that owns it, that
+object's own **local** time, and the **values** every animated path holds there. The values are
+what make the endpoint worth having: without them a client knows *which* cue owns a layer and has
+to interpolate the curve itself to draw the parameter — and a client's own interpolation is a
+second implementation of the easing, the per-kind angular modulus and the discrete hold, which is
+where it comes to disagree with the server about what is on air.
+
+Both sides run the same `curve::interpolate` on the same local time, so they must agree to
+floating-point noise rather than to a tolerance.
+
+**`timeline-resolved`, 9/9 both mixers, worst difference 0.000e+00 over 67 positions.** The
+method is worth stating because it is what makes the comparison meaningful: `/resolved?at=p` is a
+question about a *position* and the tick publishes at a *frame*, so the document is played once
+with the value stream captured against `Event.frame`, the transport's origin frame is anchored
+from the stream against the document's own first key, and each sample's frame is turned back into
+the position the tick must have been at. Nothing compares a wall-clock instant to anything.
+
+The fixture has **two objects on two layers with different easings and different spans**, and the
+second one starts late — its curve is authored 0..8 in local time while it runs 2..10 in the
+document, so at position 5 it is 3 s into its own curve. Reading an object's curve at the
+*document's* position rather than its own is the commonest way to draw a timeline wrong, and it
+has its own check.
+
+**The count is part of the gate.** `worst` starts at zero, so a run that compared nothing would
+report a perfect match — the false-green shape this project has recorded five times over. At
+least 40 positions must have been compared.
+
+**Shown failing first, twice:**
+
+* **the document's position instead of the object's local time** — the late-starting object's
+  value is wrong and its own check fails, while the layer whose object starts at zero still
+  agrees. That is precisely why the fixture has two layers with different starts.
+* **one frame late** — the position-by-position check fails at 1.54e-2, which is one frame of the
+  steepest segment, and the late-start value check goes with it. A gate of one frame's tolerance
+  here would have passed both.
+
+---
+
+*§10 Ownership beyond two ranks, §11 Known gaps — arrive with commits 10–19.*
