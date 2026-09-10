@@ -69,6 +69,7 @@ Reference Gamut Compress" in three places, which claims conformance the code doe
 | Grading operators, single and neutral | `grading` | 1 LSB |
 | Operators at extremes | `grade-extremes` | 1 LSB |
 | Windowed / masked grading | `grade-window` | 1 LSB |
+| **WHICH SPACE a node pass runs in** | `grade-graph` | 1 LSB agree / **≥ 8 LSB apart** |
 | Gamut compression | `flat-gamut-compress`, `gamut-sweep` | 1 LSB |
 | Gamut compression, real sources | `gamut-compress` | **currently exits non-zero — see below** |
 | Working-space tone mapping | `ws-tonemap` | 1 LSB |
@@ -176,6 +177,27 @@ Operator syntax and worked examples live in
 | Per-node CDL, asymmetric operands | 0.38 | 0.38 | 1.0 |
 | CDL saturation 0 must be neutral | 0.00 | 0.00 | 1.0 |
 | Composite under a `screen` blend | 0.00 | 0.00 | 1.0 |
+
+**And the placement, measured 2026-09-11 — the largest thing about this feature and the last to be
+measured.** A node operates on the layer's **display-encoded** attachment, because its early-out
+sits at the end of `main()` after `do_output_convert`. Every other operator in this document runs
+inside the chain. `grade-graph` applies the *same* CDL both ways:
+
+| config | `MIXER CDL` | node CDL | apart | both mixers |
+| :--- | :--- | :--- | ---: | :--- |
+| pass-through | `187, 66, 36` | `187, 66, 36` | **0.00 LSB** | identical |
+| `MIXER COLORSPACE REC709 BT709 NONE BT709 REC709 1.0` (a linear middle) | `169, 66, 78` | `187, 66, 36` | **42.00 LSB** | identical |
+
+The first row is the control that makes the second attributable: with nothing non-identity after
+the CDL's step the two placements are provably indistinguishable, and they agree exactly — so the
+node's arithmetic, operand order and channel swizzle are right and only its SPACE is wrong. The
+node's answer is the **same number in both rows**, invariant under `MIXER COLORSPACE`.
+
+`grade-graph`'s placement check is written **inverted** — it asserts the gap exists — so the node
+graph's move into working space cannot land silently. And note what that move does to the table
+above: **`grade-window`'s window-operation oracle is `measured outside × exposure`, which asserts
+the display-encoded placement**, so those figures are measurements of the current behaviour and
+have to be re-derived when it changes.
 
 **Three things this feature taught that generalise beyond it:**
 

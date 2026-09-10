@@ -1349,7 +1349,47 @@ property, applied after the layer's items composite, against the real target; `k
 belongs to the mix branch, which a node graph cannot reach; and the keys only scale the item's
 alpha. Measured at **0.00 LSB on both mixers** and now guarded by a regression check.
 
-The real limits are the ordinary ones: one window shape, one operation, frame space only.
+### A node grades the DISPLAY-ENCODED pixel, not the working-space one — measured
+
+**This is the prototype's largest limit and it was undocumented until 2026-09-11.** The node
+early-out sits at the **end of `main()`** in both shaders — after the whole grading chain and
+after the `do_output_convert` block — so a node operates on the layer's finished, output-encoded
+attachment. Every other grading operator in this document, `MIXER CDL` included, runs *inside* the
+chain, before tone-map and OETF.
+
+**So a node CDL is not `MIXER CDL`, and the gap is 42 LSB.** Measured by the `grade-graph` battery,
+which applies the *same* CDL both ways on the same source and reports the two answers:
+
+| config | `MIXER CDL` | node CDL | apart |
+| :--- | :--- | :--- | ---: |
+| pass-through — nothing non-identity after the CDL step | `187, 66, 36` | `187, 66, 36` | **0.00 LSB** |
+| `MIXER COLORSPACE REC709 BT709 NONE BT709 REC709 1.0` — an identity round trip through a **linear middle** | `169, 66, 78` | `187, 66, 36` | **42.00 LSB** |
+
+Identical on both mixers, to the byte.
+
+**The first row is what makes the second attributable.** With no encoding step between the CDL's
+position and the end of `main()` the two placements are indistinguishable and they agree exactly —
+so the node's CDL arithmetic, its operand order and its channel swizzle are all correct, and a
+disagreement under a linear middle can only be the *space* it runs in. Note also that the node's
+answer is the **same number in both rows**: it is invariant under `MIXER COLORSPACE`, which is what
+"it runs after everything" looks like from the outside.
+
+**What this means for an operator today:** a node's exposure and CDL behave like a *display-referred*
+correction — a curve applied to the picture as encoded — not like the scene-linear operators above
+it. On a pass-through SDR channel with no conversion the distinction does not arise, which is why
+it went unnoticed; on any channel with a transfer, a tone map or `MIXER COLORSPACE`, it does.
+
+The design (`../plans/GRADING_NODE_GRAPH_STUDY.md` §4.2) puts nodes in working space, and the node
+graph replacing this prototype moves them there. `grade-graph`'s last check is written **inverted**
+— it asserts the gap exists — so the move cannot land silently.
+
+**And `grade-window`'s own oracle asserts the current placement.** Its headline check is
+`inside ≈ outside × exposure`: the *measured, already-encoded* outside value times the exposure. It
+passes at 1 LSB because that is exactly what the prototype does, so when the placement moves, that
+expectation has to move with it. A green `grade-window` after the fix would mean the fix did not
+land.
+
+The other limits are the ordinary ones: one window shape, one operation, frame space only.
 
 **Coverage:** the `grade-window` battery, which is spatial by construction rather than a flat-patch
 check — a flat patch is invariant under any mask covering it, so a single-patch battery could not
@@ -1374,4 +1414,6 @@ field-order mismatch rather than the maths, and it had also corrupted the YCbCr 
 **Not covered**: window shape beyond a centred ellipse, the feather profile itself (both samples
 sit in flat regions, so the falloff is untested), source-UV windows, more than two nodes,
 non-concentric chains, tweening (there is none — see above), and `keyer additive`, which a node
-graph cannot reach anyway.
+graph cannot reach anyway. **The placement above is covered by `grade-graph`, not by
+`grade-window`** — and it could not have been: `grade-window` runs a pass-through config, where the
+two placements are provably indistinguishable.
