@@ -130,6 +130,28 @@ struct draw_params final
     /// disagree. The prototype carried `bool grade_node_only` beside a `core::grade_node`, and
     /// a state where one said yes and the other was default was expressible.
     core::graph::node_draw node{};
+
+    /// This LAYER draw feeds a node graph running in **working** space.
+    ///
+    /// The shader stops at the working-space boundary -- before tone-map, the gamut matrix and
+    /// the OETF -- and the TAIL pass applies that half once, against the real target. Distinct
+    /// from `node` above: this is set on the ordinary layer draw, not on a node pass.
+    bool graph_head = false;
+
+    /// This draw IS that tail: apply the output half **only**, using the configuration the
+    /// head's own draw would have used.
+    ///
+    /// NOT the same as `output_convert_only`, and the difference is the whole reason the first
+    /// attempt at this was reverted. `output_convert_only` forces the output half ON using the
+    /// CHANNEL's target values; a layer under `MIXER COLORSPACE` has its own output transfer and
+    /// leaves the gamut matrix in the input half, and a layer converting nothing must have its
+    /// tail convert nothing. So this flag lets the kernel select its branch exactly as it would
+    /// for the head, and then forces the INPUT half off.
+    ///
+    /// The grading chain does not run on a tail pass because the tail's transform is a DEFAULT
+    /// `image_transform` carrying only `color_grade` -- every operator's enable is at its
+    /// default, so there is nothing to double-apply.
+    bool graph_tail = false;
 };
 
 class image_kernel final

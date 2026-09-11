@@ -1100,6 +1100,25 @@ struct image_kernel::impl
             shader_->set("do_output_convert", false);
         }
 
+        // ── THE TAIL OF A WORKING-SPACE GRAPH ───────────────────────────────────
+        //
+        // The chain above has just decided what THIS item's conversion is. A tail pass wants
+        // exactly that decision with the INPUT half removed: the head already took the pixel
+        // into the working space, and the nodes ran there.
+        //
+        // FORCED HERE RATHER THAN VIA `output_convert_only`, which is a different thing and is
+        // why the first attempt at this commit was reverted. That flag forces the output half ON
+        // using the CHANNEL's target values -- so it converts a layer that converts nothing, and
+        // it uses the wrong transfer for a layer under `MIXER COLORSPACE`, which keeps its gamut
+        // matrix in the input half and its own OETF in the output one. Measured: 68 LSB out in a
+        // pass-through arm where head+node+tail should have been a no-op, and the same number in
+        // both configs because the channel's values are fixed.
+        //
+        // Doing it after the chain means the tail inherits every branch for free, including the
+        // ones this comment does not enumerate.
+        if (params.graph_tail)
+            shader_->set("do_input_convert", false);
+
         // Setup blend_func
 
         if (transforms.image_transform.is_key) {
@@ -1365,6 +1384,10 @@ struct image_kernel::impl
         // `gn_op` IS the flag: -1 means "not a node pass", so there is no second boolean that
         // could disagree with it. The prototype carried `grade_node_only` beside a struct and a
         // state where one said yes and the other was default was expressible.
+        // BOTH WAYS, unconditionally: a bool uniform persists in the program until the next
+        // draw overwrites it, so a head pass leaking into an ordinary layer would suppress that
+        // layer's output conversion entirely -- a black or wildly wrong frame, not a subtle one.
+        shader_->set("graph_head", params.graph_head);
         shader_->set("gn_op", params.node.op);
         if (params.node) {
             // THE VALUES COME OUT OF THE PLAN'S FLAT ARRAY IN PORT ORDER, which is the contract

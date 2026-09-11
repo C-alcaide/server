@@ -1582,6 +1582,11 @@ struct image_kernel::impl
         //
         // `gn_op` defaults to -1 in the struct, which IS "not a node pass": there is no
         // separate flag that could disagree with it, and `F2_GRADE_NODE` is gone.
+        // The head pass: stop at the working-space boundary. A fresh uniform_block per draw
+        // means there is nothing to clear on the false branch, unlike the OpenGL kernel.
+        if (params.graph_head)
+            uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::graph_head);
+
         if (params.node) {
             const auto& nd = params.node;
             uniforms.gn_op      = nd.op;
@@ -2029,6 +2034,15 @@ struct image_kernel::impl
         if (ocio_out || ws_composite) {
             uniforms.flags2 &= ~static_cast<uint32_t>(shader_flags2::output_convert);
         }
+
+        // ── THE TAIL OF A WORKING-SPACE GRAPH ───────────────────────────────────
+        //
+        // Mirror of the OpenGL kernel, where the full account lives: the chain above has just
+        // decided what THIS item's conversion is, and a tail wants exactly that decision with
+        // the INPUT half removed. Forced after the chain rather than via `output_convert_only`,
+        // which uses the CHANNEL's target values and was 68 LSB out in a pass-through arm.
+        if (params.graph_tail)
+            uniforms.flags2 &= ~static_cast<uint32_t>(shader_flags2::input_convert);
 
         // ── White Balance ─────────────────────────────────────────────
         if (std::abs(transforms.image_transform.temperature) > epsilon ||

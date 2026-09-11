@@ -901,6 +901,9 @@ All color grading runs on the GPU in a single fragment shader pass. The processi
 | 24 | **Keying** | `MIXER KEYER` |
 | 25 | **Blend Mode** | `MIXER BLEND` |
 | 26 | **Chroma Key** | `MIXER CHROMA` |
+| **26b** | **NODE GRAPH — head pass ENDS HERE** | Automatic, only on a layer with a graph declaring `"stage": "working"` (the default). The layer draw stops at this line and writes an **fp16** attachment; steps 27–30 do not run on it |
+| **26c** | **the node passes** | `GRAPH <ch>-<layer> ATTACH`, one full-screen pass per live node, in the working space — so a node CDL is the same operation as step 8 |
+| **26d** | **NODE GRAPH — tail pass** | Automatic. Steps 27–29 applied ONCE to the graph's output against the real target, using the **item's own** colour configuration rather than the channel's. A graph declaring `"stage": "display"` sets none of 26b–d and runs after step 30 instead, which is the prototype's placement |
 | 27 | **Tone Mapping** | `MIXER COLORSPACE` tonemapping / auto (ACES RRT for HDR→SDR) |
 | 28 | **Working Space → Output Gamut** | `MIXER COLORSPACE` or auto-color-convert (see below). **Moves to step 31 under `<working-space-composite>`** |
 | 29 | **OETF** (encode for display) | `MIXER COLORSPACE` or auto-color-convert. **Moves to step 31 under `<working-space-composite>`** |
@@ -1306,6 +1309,11 @@ MIXER 1-10 QUALIFIER 210 30 0.2 1.0 0.3 1.0 0.1 0.2 0.3 0.0
 > `"stage":"display"` reproduces the prototype's placement exactly. Leave it out and the graph
 > runs in **working space**, which is where the design puts it — the 42 LSB below is the
 > difference, and it is a choice now rather than an accident.
+>
+> **Working space is reached by SPLITTING the layer draw**, not by moving the node pass: steps
+> 26b–d in [Internal Pipeline](#internal-pipeline) above. Measured on both mixers, to the byte —
+> under `MIXER COLORSPACE REC709 BT709 NONE BT709 REC709 1.0`, a node CDL and `MIXER CDL` both
+> read `169, 66, 78` where the same graph declared `display` reads `187, 66, 36`.
 
 ### The prototype, as it was (historical)
 

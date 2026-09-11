@@ -118,6 +118,9 @@ uniform vec3  icvfx_outer_gain;   // outer-region gain, RGB order; swizzled at t
 // Every path that existed before this split sets both to the same value.
 uniform bool  do_input_convert;
 uniform bool  do_output_convert;
+// This layer draw feeds a WORKING-space node graph: stop at the working-space
+// boundary and leave the output half to the tail pass.
+uniform bool  graph_head;
 uniform int   input_transfer;    // 0=linear,1=srgb,2=rec709,3=pq,4=hlg,5=logc3,6=slog3
 uniform int   output_transfer;
 uniform mat3  input_to_working;  // input gamut -> ACEScg (AP1)
@@ -2153,6 +2156,20 @@ void main()
     // This ensures correct compositing when layers have different color
     // spaces/transfers (e.g. HDR PQ over SDR) and makes blend modes
     // (Multiply, Screen, etc.) operate on 0-1 display values as designed.
+    // ── THE WORKING-SPACE BOUNDARY, and the head pass stops here ────────────────
+    // `graph_head` means this layer draw feeds a node graph running in WORKING space, so
+    // the output half belongs to the TAIL pass, which applies it once against the real
+    // target. Everything above this point has already run: the head IS the ordinary layer
+    // draw, stopped one step early rather than a special one.
+    //
+    // This single statement is what the 42 LSB was about. The prototype's node pass ran
+    // AFTER this block, so it graded display-encoded pixels; stopping here puts the nodes
+    // where `MIXER CDL` already is.
+    if (graph_head) {
+        fragColor = col.bgra;
+        return;
+    }
+
     if (do_output_convert) {
         // Tone Mapping (LDR compression)
         if (tone_mapping_op > 0) {

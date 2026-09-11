@@ -1,6 +1,39 @@
 CasparVP — Unreleased
 ==========================================
 
+### A node graph runs in WORKING space by default — rendered output changes for graphed layers
+
+**Behaviour change, measured.** `"stage": "working"` is a graph document's default, and the layer
+draw is now SPLIT at the working-space boundary to honour it: a head pass that stops before
+tone-map, the gamut matrix and the OETF; the node passes in that space; and a tail pass that
+applies the output half once against the real target, carrying the ITEM's colour configuration.
+
+A node CDL is therefore the same operation as `MIXER CDL`, where before it was not:
+
+| config | `MIXER CDL` | node CDL | apart |
+| :--- | :--- | :--- | ---: |
+| pass-through | `187, 66, 36` | `187, 66, 36` | 0.00 LSB, before and after |
+| `MIXER COLORSPACE REC709 BT709 NONE BT709 REC709 1.0` — a linear middle | `169, 66, 78` | **was** `187, 66, 36`, **now** `169, 66, 78` | **42.00 → 0.00 LSB** |
+
+Both mixers, to the byte. So **a graph on a channel with any non-identity encoding step renders
+differently than it did** — it now grades the linear pixel instead of the re-encoded one. The
+old placement is still available and is not deprecated: declare `"stage": "display"` and the
+graph renders byte for byte as before, which is why the stage is a compatibility guarantee
+rather than a label.
+
+Unchanged: a layer with no graph, an empty graph, or every node bypassed stays on the
+single-draw fast path and is byte-identical — `conformance` clean on both mixers (worst
+**0.40 LSB** on the OpenGL arm, against a 1 LSB gate), `grading` clean on both, and `blend-domain` and
+`alpha-domain` clean on both. **`mixer-parity` is not part of this**: it drives no graph, so it
+cannot fail for this change, and running it would be a green result that means nothing.
+
+**The first implementation of this was measured wrong and reverted rather than shipped**, and the
+reason is recorded in `node-graph.md` §2.1 because it is a trap rather than a slip: a tail built
+from fresh `draw_params` sets no `transforms`, so the kernel took its `output_convert_only`
+branch and converted using the **channel's** target values instead of the layer's — the same
+number in both configs, and 68 LSB out even in the pass-through arm where the whole split should
+be a no-op.
+
 ### `MIXER GRADE_NODE` is removed, and a node graph renders in its place
 
 **Behaviour change, and it removes a command.** `MIXER GRADE_NODE` answers `unknown command`. A

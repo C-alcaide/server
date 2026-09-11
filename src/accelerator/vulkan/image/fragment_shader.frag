@@ -187,6 +187,10 @@ const uint F2_BLEND_MASK=1u<<2;
 // only pin is a comment in uniform_block.h is the silent-mismatch class that file warns
 // about at length.
 const uint F2_GRADE_NODE_INVERT=1u<<7;
+// This layer draw feeds a WORKING-space node graph: stop at the working-space
+// boundary and leave the output half to the tail pass. Must equal
+// shader_flags2::graph_head in util/uniform_block.h.
+const uint F2_GRAPH_HEAD=1u<<8;
 
 // WHICH NODE CLASS. An index into `node_classes()`, and `node_registry_self_test` asserts
 // every one of these against that table: a reordering compiles perfectly and would make an
@@ -741,6 +745,10 @@ void main(){
     // (matches ogl/image/shader.frag — blend modes must operate on 0-1
     // display values, and mixing a graded layer with an already-encoded
     // background must not double-encode either one).
+    // ── THE WORKING-SPACE BOUNDARY, and the head pass stops here ────────────
+    // Mirror of ogl/image/shader.frag, where the full account lives.
+    if(flag2(F2_GRAPH_HEAD)){fragColor=flag2(F2_OUTPUT_BGRA)?col.bgra:col;return;}
+
     if(flag2(F2_OUTPUT_CONVERT)){if(tone_mapping_op>0)col.rgb=apply_tone_mapping(col.rgb,tone_mapping_op);col.rgb=ubo_mat3(working_to_output_c0,working_to_output_c1,working_to_output_c2)*col.rgb;if(tone_mapping_op==0)col.rgb=clamp(col.rgb,0.0,1.0);col.rgb=apply_oetf(col.rgb,output_transfer);}
     // A generated DISPLAY transform's call is spliced here, replacing the output block above
     // rather than following it: it owns the tone map, the gamut compression and the display's

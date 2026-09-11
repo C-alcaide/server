@@ -80,6 +80,72 @@ A single graph is entirely in one stage; a cross-stage edge is refused rather th
 because inserting an EOTF into the middle of a chain the author did not ask for is exactly the
 assumption the port tags exist to prevent.
 
+### 2.1 How `working` is reached — the layer draw is SPLIT, not duplicated
+
+The layer draw stops one statement early and a second pass finishes it:
+
+```mermaid
+flowchart LR
+    src[the item] --> head["HEAD PASS<br/>the ordinary layer draw,<br/>stopped at the working-space boundary"]
+    head --> att["fp16 attachment<br/>scene-linear, working gamut"]
+    att --> nodes["the node passes<br/>exposure · cdl · mask · mix · over"]
+    nodes --> tail["TAIL PASS<br/>tone-map · gamut matrix · OETF,<br/>with the ITEM's configuration"]
+    tail --> tgt[the channel target]
+```
+
+**The head is not a new kind of draw.** `graph_head` is one statement in each shader, placed
+immediately before the `do_output_convert` block — so everything above it has already run
+(decode, geometry, the keys, the whole grading chain including `MIXER CDL`) and the pixel is
+exactly where `MIXER CDL` left it. That single statement is the whole of the 42 LSB.
+
+**The tail is the layer's own output half, applied once.** And this is the part that was built
+wrong first and reverted, so it is worth stating as a rule rather than as a detail: the kernel
+chooses among four conversion branches, in this order —
+
+| branch | input half | output half | target values |
+| :--- | :---: | :---: | :--- |
+| `ocio_in \|\| output_convert_only` | off | **on** | the **channel's** |
+| `cg.enable` — `MIXER COLORSPACE` | **on** | **on** | the **layer's**, and its gamut matrix lives in the INPUT half |
+| `auto_color_convert` and the spaces differ | **on** | **on** | the channel's |
+| otherwise | off | off | — |
+
+— and then a channel display transform or `<working-space-composite>` clears the output half
+outright. A tail must reproduce **whichever branch the head took**, with the input half removed.
+So `graph_tail` is applied *after* the entire chain, and the tail pass carries **the item's own
+`draw_params`** — its `pix_desc` colour fields, its `auto_color_convert`, its
+`transforms.image_transform.color_grade`, its OCIO names.
+
+**What it must NOT be is `output_convert_only`**, which is a different thing that looks like the
+right one: it forces the output half *on*, using the **channel's** target values. Measured, that
+gives `node_ws [255, 130, 102]` in **both** configs — identical with `MIXER COLORSPACE` on and
+off, which is the signature of a pass ignoring the layer entirely — and **68 LSB** out in the
+pass-through arm, where head + node + tail should be a no-op because the EOTF and OETF are both
+the identity. The first attempt at this shipped nothing for exactly that reason.
+
+With the item's params carried over, the placement gap closes:
+
+| config | `MIXER CDL` | node CDL, `stage: working` | apart |
+| :--- | :--- | :--- | ---: |
+| pass-through | `187, 66, 36` | `187, 66, 36` | **0.00 LSB** |
+| `MIXER COLORSPACE` with a linear middle | `169, 66, 78` | `169, 66, 78` | **0.00 LSB** |
+
+Both mixers, to the byte — and in the second row the same graph declared `stage: display` still
+reads `187, 66, 36`, 42.00 LSB away, which is what makes the zero attributable rather than
+merely agreeable.
+
+Three properties of the split that are decisions, not consequences:
+
+* **The grading chain does not run twice.** The tail's `image_transform` is a DEFAULT one
+  carrying only `color_grade` — every operator's enable is at its default, so there is nothing
+  to double-apply. `color_grade` is not an operator; it is the conversion configuration, which
+  is why it is the one field copied.
+* **The keys are not re-applied.** `local_key`/`layer_key` mask the *item*, and the head pass
+  already consumed them; applying them again would double-darken every soft edge.
+  `grade-window`'s composite check and `alpha-domain` are what adjudicate that.
+* **`stage: display` sets neither flag**, so that graph renders through the path that existed
+  before this commit, byte for byte. That is what makes the stage a compatibility guarantee
+  rather than a label.
+
 ## 3. The three orthogonal things, and why that is the whole design
 
 The governing requirement was **compatible with timelines, keyframes, bindings and every other
@@ -553,7 +619,8 @@ Each of these is sequenced rather than open, and the order is riskiest-first:
 | :--- | :--- |
 | ~~the address grammar~~ | **DONE** — see §3.1 and §3.2 |
 | ~~**the seam**~~ | **DONE** — see §3.3 |
-| `stage: working` | the head/tail split, and the CDL parity in §2 turns green |
+| ~~`stage: working`~~ | **DONE** — the head/tail split; see §2.1. The CDL parity in §2 is green on both mixers |
+| source-space masks | `gn_uv_inv`, the item's inverse affine, so a mask node's coordinates are the ITEM's and not the FRAME's. **A real gap today**: a graphed layer under a non-default `MIXER FILL` has its mask in frame space, which nothing measures because every mask arm uses the default fill |
 | the mask families | `rect`, `gradient`, `qualifier`, `combine`, with materialised masks |
 | the catalogue | `/v1/catalog/node`, `suggest`, `connections/preview`, `ports/{p}/live` |
 | batches and previews | `{"op":"graph"}`, one history entry per gesture, and a per-node preview PNG |
@@ -576,8 +643,8 @@ rather than by the `MIXER` tween.
 | fp16 INTERMEDIATES — `×4` then `×0.25` is the identity | `grade-graph` | **0.00 LSB** both mixers; **76 LSB** when forced to unorm |
 | what a node COMPUTES, and its window | `grade-window`, **migrated to the graph** | inside **0.50** LSB, leak **0.00**, separation 77.0, move 76.7, restore 0.00, chain **0.75**, invert 0.00/77.0, composite **0.00**, CDL **0.38**, desat **0.00** — identical to the prototype's figures, on both mixers |
 | the no-graph fast path | `conformance`, `grading` | **100/100 at 1 LSB**, **48/48** |
-| which colour space a node pass runs in | `grade-graph` | **8/8 both mixers**, the gap measured at 42.00 LSB |
-| what a node computes (the prototype) | `grade-window` | 1 LSB both mixers — **and its oracle asserts the current placement**, so its figures move when §8's working-space commit lands |
+| which colour space a node pass runs in | `grade-graph` | **16/16 both mixers** — `working` agrees with `MIXER CDL` at **0.00 LSB** in both configs, and the same graph declared `display` still reads 42.00 LSB away, which is what makes the zero attributable |
+| what a node computes | `grade-window` | 1 LSB both mixers. **Its oracle asserts the DISPLAY placement** — *inside == measured outside x exposure*, which is only true of an already-encoded value — so it drives a pass-through config, where the two placements are provably indistinguishable and its figures did not move when the split landed. That is also why it cannot see a placement at all, and why `grade-graph` owns the question |
 | the class table against its own rules | `node_registry_self_test` | at boot |
 | the validator, one minimal document per failure mode | `graph_validate_self_test` | at boot |
 | the store's two counters, coalescing, attachment | `graph_store_self_test` | at boot |

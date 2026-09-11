@@ -671,6 +671,14 @@ class image_renderer
             // No graph = the path that existed before this feature, unchanged: one draw
             // straight into the target, no attachment. `live_passes == 0` covers no graph, an
             // empty graph and a graph with everything bypassed.
+            // THE ITEM'S PARAMS, COPIED BEFORE THE HEAD DRAW MOVES THEM. The tail needs the
+            // item's colour configuration -- that is the correction over the first attempt at
+            // this commit, which built fresh params and so got the channel's conversion instead
+            // of the layer's.
+            struct draw_params item_params_for_tail;
+            const bool         working_stage =
+                plan && plan->stage == core::graph::graph_stage::working;
+
             std::shared_ptr<texture> head_texture;
             if (live_passes > 0) {
                 // Once feared to break the composite, MEASURED NOT TO. The worry was that
@@ -712,6 +720,18 @@ class image_renderer
             }
             draw_params.local_key  = std::move(local_key_texture);
             draw_params.layer_key  = layer_key_texture;
+
+            // ── WORKING SPACE: the head stops at the boundary ───────────────────────
+            //
+            // `stage: working` is the default and the design: the nodes then run where
+            // `MIXER CDL` already does, and the output half is applied ONCE by the tail
+            // against the real target. `stage: display` sets nothing here, so that graph
+            // keeps the prototype's placement byte for byte -- which is what makes the stage
+            // a compatibility guarantee rather than a label.
+            if (live_passes > 0 && working_stage) {
+                draw_params.graph_head = true;
+                item_params_for_tail   = draw_params;
+            }
 
             pass->draw(std::move(draw_params));
 
@@ -768,7 +788,12 @@ class image_renderer
                 auto        final_tex = out_step.in0 >= 0 && alias[out_step.in0] >= 0
                                             ? outputs[alias[out_step.in0]]
                                             : head_texture;
-                draw(target_texture, std::move(final_tex), format_desc, pass, core::blend_mode::normal);
+                if (working_stage)
+                    apply_graph_tail(final_tex, target_texture, format_desc, pass,
+                                     item_params_for_tail);
+                else
+                    draw(target_texture, std::move(final_tex), format_desc, pass,
+                         core::blend_mode::normal);
             }
         }
     }
@@ -893,6 +918,72 @@ class image_renderer
         draw_params.geometry                = core::frame_geometry::get_default();
 
         pass->draw(std::move(draw_params));
+    }
+
+    /// The TAIL of a working-space graph: the layer's output half, applied once.
+    ///
+    /// Mirror of the OpenGL mixer's version, where the full account lives. The one thing worth
+    /// repeating here because it is the correction over the first attempt at this commit: it
+    /// takes the ITEM'S OWN `draw_params` rather than building fresh ones. The kernel decides
+    /// what to convert from `transforms.image_transform.color_grade`, `auto_color_convert` and
+    /// `pix_desc`'s colour fields, so a tail carrying none of them gets the CHANNEL's conversion
+    /// instead of the LAYER's -- which converts a layer that converts nothing, and uses the
+    /// wrong transfer for a layer under `MIXER COLORSPACE`.
+    ///
+    /// A DEFAULT `image_transform` carrying only `color_grade`, so the grading chain does not run
+    /// a second time: every operator's enable is at its default. `color_grade` is not an operator
+    /// -- it is the conversion configuration -- which is why it is the one field copied.
+    void apply_graph_tail(const std::shared_ptr<texture>& source_texture,
+                          std::shared_ptr<texture>&       target_texture,
+                          const core::video_format_desc&  format_desc,
+                          spl::shared_ptr<renderpass>     pass,
+                          const draw_params&              item)
+    {
+        if (!source_texture)
+            return;
+
+        draw_params tail;
+        tail.target_width  = format_desc.square_width;
+        tail.target_height = format_desc.square_height;
+
+        // The PLANE geometry is the attachment's; the COLOUR metadata is the item's, so every
+        // branch in the kernel decides exactly as it did for the head. `node_fp16` stays FALSE:
+        // the tail READS the fp16 attachment and WRITES the channel's own format, and on this
+        // backend that flag selects the pipeline's colour-attachment format rather than the
+        // sampler's.
+        tail.pix_desc.format = (source_texture->depth() == common::bit_depth::bit8)
+                                   ? core::pixel_format::bgra
+                                   : core::pixel_format::rgba;
+        tail.pix_desc.planes = {core::pixel_format_desc::plane(
+            source_texture->width(), source_texture->height(), 4, source_texture->depth())};
+        tail.pix_desc.color_space    = item.pix_desc.color_space;
+        tail.pix_desc.color_transfer = item.pix_desc.color_transfer;
+
+        tail.target_color_space      = item.target_color_space;
+        tail.target_color_transfer   = item.target_color_transfer;
+        tail.auto_color_convert      = item.auto_color_convert;
+        tail.auto_tone_map           = item.auto_tone_map;
+        tail.display_peak_luminance  = item.display_peak_luminance;
+        tail.sdr_reference_white     = item.sdr_reference_white;
+        tail.working_space_composite = item.working_space_composite;
+        tail.straight_alpha_grading  = item.straight_alpha_grading;
+        tail.ocio_display            = item.ocio_display;
+        tail.ocio_view               = item.ocio_view;
+        tail.ocio_look               = item.ocio_look;
+
+        // ONLY `color_grade`. Everything else defaults, so no grading operator runs twice.
+        tail.transforms.image_transform.color_grade = item.transforms.image_transform.color_grade;
+
+        // THE KEYS ARE NOT RE-APPLIED. The head pass already consumed them -- they mask the
+        // ITEM -- and applying them twice would double-darken every soft edge. `grade-window`'s
+        // composite check and `alpha-domain` are what adjudicate that.
+        tail.graph_tail = true;
+        tail.textures   = {spl::make_shared_ptr(source_texture)};
+        tail.blend_mode = core::blend_mode::normal;
+        tail.background = target_texture;
+        tail.geometry   = core::frame_geometry::get_default();
+
+        pass->draw(std::move(tail));
     }
 
     void apply_output_convert(std::shared_ptr<texture>&      source_texture,

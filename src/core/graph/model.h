@@ -118,6 +118,15 @@ struct graph_document
     /// own numbering could not be ordered by a third, which is the whole use of the number.
     std::int64_t revision = 0;
 
+    /// `working` IS THE DEFAULT, stated here rather than left to the initialiser because the
+    /// consequence is not local: a document that does not mention `stage` renders through the
+    /// head/tail split, so a split that is broken or half-landed is the path EVERY graph takes.
+    ///
+    /// That is not hypothetical. The first implementation of the split was measured 68 LSB out
+    /// and reverted rather than half-landed for exactly this reason, and neither `api-graph` nor
+    /// `graph-stack` could see it -- neither looks at a pixel. `grade-graph` is the only thing
+    /// that adjudicates this field, and it captures BOTH stages in one arm so an agreement
+    /// cannot be confused with a graph that never ran.
     graph_stage stage = graph_stage::working;
 
     std::vector<graph_node> nodes;

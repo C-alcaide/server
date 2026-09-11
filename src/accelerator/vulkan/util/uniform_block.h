@@ -397,6 +397,10 @@ enum class shader_flags2 : uint32_t
     // Mask inverted (grade outside the ellipse rather than inside). Must equal
     // F2_GRADE_NODE_INVERT.
     grade_node_invert = 1u << 7,
+    // This layer draw feeds a WORKING-space node graph: stop at the working-space boundary
+    // and leave the output half to the tail pass. Must equal F2_GRAPH_HEAD in
+    // image/fragment_shader.frag.
+    graph_head = 1u << 8,
 };
 
 }}} // namespace caspar::accelerator::vulkan
