@@ -669,8 +669,28 @@ class image_renderer
                 // Guarded by `grade-window`'s composite check: a two-layer scene under a
                 // `screen` blend, sampled outside the window where the node does nothing, with
                 // and without a graph. 0.00 LSB on both mixers.
-                head_texture = ogl_->create_texture(
-                    target_texture->width(), target_texture->height(), 4, depth_, true, render_format_);
+                // ── fp16, REGARDLESS OF THE CHANNEL'S FORMAT ───────────────────────────
+                //
+                // A node's intermediate is not a picture on its way to a display, it is a
+                // value on its way to the next node -- and those legitimately exceed 1.0.
+                // `MIXER EXPOSURE 4.0` followed by `0.25` is the identity in arithmetic and
+                // CLIPS TO WHITE through a unorm attachment, which is the same reason
+                // `<working-space-composite>` refuses to run on one.
+                //
+                // MEASURED BY THE DIAMOND ARM BEFORE THIS CHANGE: its `a` branch at gain 2.0
+                // put red at 1.1 and the check failed on OpenGL by exactly the clip. That was
+                // a fixture error at the time -- the expectation had not modelled the ceiling
+                // -- but it is the same ceiling, and this is what removes it.
+                //
+                // A pool HIT rather than an allocation: the device's attachment pool is keyed
+                // by format, so an fp16 attachment comes from the fp16 bucket. The cost is
+                // memory for a second bucket, not a new allocation per frame.
+                head_texture = ogl_->create_texture(target_texture->width(),
+                                                    target_texture->height(),
+                                                    4,
+                                                    depth_,
+                                                    true,
+                                                    common::render_format::fp16);
                 draw_params.background = head_texture;
             } else {
                 draw_params.background = target_texture;
@@ -712,8 +732,15 @@ class image_renderer
                             nd.has_mask_texture = true;
                     }
 
-                    auto dst = ogl_->create_texture(
-                        target_texture->width(), target_texture->height(), 4, depth_, true, render_format_);
+                    // fp16 for the same reason the head pass is -- see there. Every
+                    // intermediate in the chain, so a value above 1.0 survives the whole way
+                    // to the tail rather than being clipped at whichever step first exceeds it.
+                    auto dst = ogl_->create_texture(target_texture->width(),
+                                                    target_texture->height(),
+                                                    4,
+                                                    depth_,
+                                                    true,
+                                                    common::render_format::fp16);
                     apply_node(outputs[alias[st.in0]],
                                nd.has_in1 ? outputs[alias[st.in1]] : outputs[alias[st.in0]],
                                dst, format_desc, nd);

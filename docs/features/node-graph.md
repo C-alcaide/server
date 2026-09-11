@@ -240,7 +240,44 @@ anchors stand unchanged and no field above them moved. The design's generic `gn_
 that every class in this commit already has a named field for. They earn their size when the mask
 families arrive.
 
-### 3.3.3 Fan-out, pool reuse, and what the plan predicted wrongly
+### 3.3.3 Intermediates are fp16, on both backends, whatever the channel is
+
+A node's intermediate is **not a picture on its way to a display** — it is a value on its way to
+the next node, and those legitimately exceed 1.0. `exposure 4.0` followed by `exposure 0.25` is
+the identity in arithmetic and **clips to white** through a unorm attachment, which is the same
+reason `<working-space-composite>` refuses to run on one.
+
+**Measured, both mixers:** `×4` then `×0.25` returns `[140, 89, 51]` against an ungraded
+`[140, 89, 51]` — **0.00 LSB**. Forced back to unorm it reads `[64, 64, 51]`, **76 LSB** out,
+which is exactly the clipping prediction: red (2.2) and green (1.4) clamp to white and are then
+scaled by a quarter.
+
+The attachment pools are keyed by format on both backends, so this is a pool hit in a second
+bucket rather than an allocation per frame. **On Vulkan the format is only half the change**: a
+pipeline carries its colour-attachment format in its own creation info, so writing fp16 through a
+unorm pipeline is a format *mismatch* rather than a conversion. `draw_params::node_fp16` reaches
+the kernel, which hands back the matching pipeline through the same per-layer hook OCIO uses —
+and that hook is per layer precisely because one pass composites layers that may each need a
+different one. OpenGL needs no equivalent: a GL program does not carry its target's format.
+
+> **THE CHECK FOR THIS COULD NOT FAIL WHEN IT WAS FIRST WRITTEN, and that is the more useful half
+> of this commit.** Its correct answer — *"the picture is unchanged"* — is **identical to its
+> not-running answer**, so a capture that raced the attach read the ungraded picture and the check
+> **passed**. The same binary and the same fixture gave **0.00 (a false pass)** and then **76.00
+> (the correct failure)** on consecutive runs, and the first was very nearly recorded as evidence
+> that fp16 worked.
+>
+> Every other arm here expects a picture *different* from the base, so a race makes those fail.
+> This one it makes succeed. The fix is a **control in the same arm** whose answer is nothing like
+> the base: the same graph with the second node bypassed, so only the `×4` runs and the picture
+> must visibly clip — `[255, 255, 204]`, 166 LSB out. The check is now a *relationship*, and
+> neither half can be satisfied by a graph that is not running.
+>
+> The general form: **a check whose expected value coincides with its failure mode cannot fail.**
+> That is the same family as an empty or stale input, reached from a direction that looks like
+> careful oracle design.
+
+### 3.3.4 Fan-out, pool reuse, and what the plan predicted wrongly
 
 **Fan-out is a `shared_ptr` copy**, so two consumers of one output cost one draw. That is the
 thing the prototype's ping-pong pair could not express at all, and it is the whole reason `mix`
@@ -280,7 +317,7 @@ branches an octave apart, would have shown noise.
 > and 0.4 now. The clip is itself the argument for fp16 intermediates (§8): working-space values
 > legitimately exceed 1.0, and this fixture will use that headroom once they land.
 
-### 3.3.4 Two defects the seam fixed, one of them shipping
+### 3.3.5 Two defects the seam fixed, one of them shipping
 
 **`image_transform::tween` never assigned the graph.** `lut3d`, `hue_curves` and `blend_mask` are
 all assigned to the destination on the lines around it; `grade_nodes` was not. So for the whole
@@ -516,7 +553,6 @@ Each of these is sequenced rather than open, and the order is riskiest-first:
 | :--- | :--- |
 | ~~the address grammar~~ | **DONE** — see §3.1 and §3.2 |
 | ~~**the seam**~~ | **DONE** — see §3.3 |
-| fp16 intermediates | working-space values exceed 1.0, so unorm intermediates clip |
 | `stage: working` | the head/tail split, and the CDL parity in §2 turns green |
 | the mask families | `rect`, `gradient`, `qualifier`, `combine`, with materialised masks |
 | the catalogue | `/v1/catalog/node`, `suggest`, `connections/preview`, `ports/{p}/live` |
@@ -537,6 +573,7 @@ rather than by the `MIXER` tween.
 | the document, its faults, its order, its history | `api-graph` | **34/34 both mixers** |
 | a node parameter through the whole OWNERSHIP STACK | `graph-stack` | **29/29 both mixers** |
 | FAN-OUT (one output, two consumers) and POOL REUSE (a 6-step chain) | `grade-graph` | diamond **0.70 LSB**, chain **0.67 LSB**, both mixers |
+| fp16 INTERMEDIATES — `×4` then `×0.25` is the identity | `grade-graph` | **0.00 LSB** both mixers; **76 LSB** when forced to unorm |
 | what a node COMPUTES, and its window | `grade-window`, **migrated to the graph** | inside **0.50** LSB, leak **0.00**, separation 77.0, move 76.7, restore 0.00, chain **0.75**, invert 0.00/77.0, composite **0.00**, CDL **0.38**, desat **0.00** — identical to the prototype's figures, on both mixers |
 | the no-graph fast path | `conformance`, `grading` | **100/100 at 1 LSB**, **48/48** |
 | which colour space a node pass runs in | `grade-graph` | **8/8 both mixers**, the gap measured at 42.00 LSB |

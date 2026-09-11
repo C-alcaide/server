@@ -133,6 +133,16 @@ struct draw_params final
     /// disagree. The prototype carried `bool grade_node_only` beside a `core::grade_node`, and
     /// a state where one said yes and the other was default was expressible.
     core::graph::node_draw node{};
+
+    /// This draw's destination is an **fp16** attachment.
+    ///
+    /// Vulkan-only, and it exists because a pipeline carries its colour-attachment format in
+    /// its own creation info: writing fp16 through a unorm pipeline is a format MISMATCH rather
+    /// than a conversion. The kernel reads this and hands back the matching pipeline through
+    /// the existing per-layer hook, which OCIO already uses for the same reason.
+    ///
+    /// OpenGL needs no equivalent: a GL program does not carry its target's format.
+    bool node_fp16 = false;
 };
 
 }}} // namespace caspar::accelerator::vulkan

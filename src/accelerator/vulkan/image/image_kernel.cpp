@@ -1243,6 +1243,20 @@ struct image_kernel::impl
             current_lut_views_.ocio = ocio->views;
             current_ocio_pipeline_  = ocio->pipeline;
         }
+
+        // ── A NODE PASS WRITING fp16 NEEDS THE fp16 PIPELINE ───────────────────────
+        //
+        // A pipeline carries its colour-attachment format in its own creation info, so a draw
+        // into an fp16 attachment through a unorm pipeline is a FORMAT MISMATCH -- not a
+        // conversion, and not something the API reports as a value you could read back.
+        //
+        // Through the SAME per-layer hook OCIO uses, which is why that hook is per layer rather
+        // than per pass: a pass composites layers that may each need a different pipeline.
+        // Checked after the OCIO assignment above and not before, because a node pass never
+        // carries an OCIO transform -- both conversion halves are off on it by construction --
+        // so there is nothing here to overwrite.
+        if (params.node_fp16)
+            current_ocio_pipeline_ = vulkan_->get_pipeline(depth_, common::render_format::fp16);
     }
 
     /// Record GPU upload commands for any LUTs that were prepared.

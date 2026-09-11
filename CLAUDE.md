@@ -427,6 +427,38 @@ disagreed about the struct's size. The A/B that "proved" the fault was pre-exist
 the same inconsistent objects every time. **When a fault survives removing the code that could
 cause it, suspect the build before the code.**
 
+## A check whose expected value IS its failure mode cannot fail
+
+Measured 2026-09-11 on the node graph's fp16 intermediates. The check was `exposure 4.0` followed
+by `exposure 0.25` — exactly the identity, so the oracle is *"the picture is unchanged"*, which
+needs no model of anything. That is usually a virtue and here it was fatal: **"unchanged" is also
+what a capture that raced the attach reads**, so a graph that never ran passed it.
+
+The same binary and the same fixture gave **0.00 LSB (a false pass)** and then **76.00 LSB (the
+correct failure, under a deliberate unorm mutation)** on consecutive runs. The first was very
+nearly written up as evidence that the feature worked.
+
+**What makes this hard to see is that it looks like good oracle design.** An expectation that
+needs no model is exactly what the rest of this file asks for — `flat-decoded`'s "neutral in,
+neutral out", the YCbCr account's "no model at all". The difference is whether the expected value
+is *distinguishable from nothing happening*:
+
+| oracle | expected | what "nothing happened" reads as | can it fail? |
+| :--- | :--- | :--- | :--- |
+| `inside == outside × exposure` | different from the base | equal to the base | yes |
+| `×4 then ×0.25 == the input` | **equal to the base** | **equal to the base** | **no** |
+
+So the rule is not "avoid model-free oracles" — it is: **when the expected picture equals the
+untouched picture, the check needs a companion whose expected picture does not.** Here that is the
+same graph with the second node bypassed, so only the `×4` runs and the result must visibly clip
+(`[255, 255, 204]`, 166 LSB out). The verdict becomes a relationship over two captures, and
+neither half is satisfiable by a feature that is switched off.
+
+Every arm that already differs from the base is fine, which is why this had not come up before.
+Look for it wherever a check asserts an IDENTITY: a round trip, a no-op, a restore, a release, a
+`CLEAR`. `sampled-captures-cannot-resolve-a-short-loop` and `false-green-from-wrong-input` are the
+same family reached from other directions.
+
 ## A per-tick published node costs more than the work behind it
 
 `monitor::state` is a **`boost::container::flat_map<std::string, vector_t>`** (`core/monitor/monitor.h`)

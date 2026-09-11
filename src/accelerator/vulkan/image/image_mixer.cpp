@@ -694,7 +694,18 @@ class image_renderer
                 // Guarded by `grade-window`'s composite check: a two-layer scene under a
                 // `screen` blend, sampled outside the window where the node does nothing, with
                 // and without a graph. 0.00 LSB on both mixers.
-                head_texture           = pass->create_attachment();
+                // fp16, REGARDLESS OF THE CHANNEL'S FORMAT -- see the OpenGL mixer for the
+                // full account. A node's intermediate is a value on its way to the next node,
+                // and those legitimately exceed 1.0; a unorm attachment clips them, which is
+                // the same reason `<working-space-composite>` refuses to run on one.
+                //
+                // AND ON THIS BACKEND THE ATTACHMENT FORMAT IS HALF THE CHANGE: the pipeline
+                // carries the colour-attachment format in its own creation info, so writing
+                // fp16 through a unorm pipeline is a format mismatch rather than a conversion.
+                // `apply_node` sets `draw_params.node_fp16` and the kernel hands back the
+                // matching pipeline through the existing per-layer hook.
+                head_texture           = pass->create_attachment_as(common::render_format::fp16);
+                draw_params.node_fp16  = true;
                 draw_params.background = head_texture;
             } else {
                 draw_params.background = target_texture;
@@ -742,7 +753,7 @@ class image_renderer
                             nd.has_mask_texture = true;
                     }
 
-                    auto dst = pass->create_attachment();
+                    auto dst = pass->create_attachment_as(common::render_format::fp16);
                     apply_node(outputs[alias[st.in0]],
                                nd.has_in1 ? outputs[alias[st.in1]] : outputs[alias[st.in0]],
                                dst, format_desc, pass, nd);
@@ -804,6 +815,9 @@ class image_renderer
         draw_params.background              = target_texture;
         draw_params.geometry                = core::frame_geometry::get_default();
         draw_params.node                    = nd;
+        // The destination is an fp16 attachment, so this draw needs the fp16 pipeline. See the
+        // head pass above for why the format is not just a property of the image here.
+        draw_params.node_fp16               = true;
 
         pass->draw(std::move(draw_params));
     }
