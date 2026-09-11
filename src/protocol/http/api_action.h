@@ -39,6 +39,23 @@ struct batch_timeline
     core::timeline::transport_command cmd;
 };
 
+/// `{"op": "graph", "name": "look", "verb": "attach", "layer": 1}`.
+struct batch_graph
+{
+    std::string name;
+    std::string verb;
+    int         layer = 0;
+};
+
+/// A node-parameter write inside a batch: the address split, the value, and the gesture label.
+struct batch_node
+{
+    int                     layer = 0;
+    std::string             path;   ///< `node/<id>/<param>`
+    core::monitor::vector_t value;
+    std::string             label;
+};
+
 struct batch_op
 {
     std::size_t index  = 0;
@@ -48,9 +65,24 @@ struct batch_op
     /// A third flag rather than an enum, because `is_set` was already a bool and turning it into
     /// an enum would touch every reader for no information they do not already have.
     bool           is_timeline = false;
+
+    /// A GRAPH verb -- `attach`, `detach`, `undo`, `redo` -- addressed by document name.
+    bool is_graph = false;
+
+    /// A NODE-PARAMETER write. Distinct from `is_set` because it does not go through
+    /// `apply_transform`: a node parameter's constant lives in the attached DOCUMENT, not on
+    /// the layer's transform, so the write is `set_node_param` and nothing else reaches it.
+    ///
+    /// THIS IS WHY IT IS A FOURTH FLAG rather than a special case inside `is_set`: routing it
+    /// through the transform path is what it did before, and a transform write for an address
+    /// no transform has silently did nothing while the batch reported success.
+    bool is_node = false;
+
     prepared_set   set;
     action_target  action;
     batch_timeline timeline;
+    batch_graph    graph;
+    batch_node     node;
     int            channel = 0;
 };
 

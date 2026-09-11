@@ -3080,6 +3080,61 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         });
     }
 
+    /// ONE GRAPH VERB, by document name -- the batch's entry point.
+    ///
+    /// The four verbs a client wants on a FRAME rather than whenever HTTP got to them:
+    /// `attach` and `detach` because putting a look on air is a cut, and `undo`/`redo` because
+    /// taking a gesture back on the same frame as the field writes around it is the difference
+    /// between an undo and a flicker.
+    ///
+    /// EVERY ONE OF THEM GOES THROUGH THE SAME CODE THE ROUTE USES. `attach` is `attach_graph`,
+    /// `detach` is `detach_graph_here`, and undo/redo are the store's -- so the batch cannot
+    /// develop its own idea of what a verb means, which is the failure mode a second
+    /// implementation always takes.
+    std::future<bool> graph_command(const std::string& name, const std::string& verb, int layer)
+    {
+        if (verb == "attach")
+            return executor_.begin_invoke([this, layer, name] {
+                if (!graphs_ || !graphs_->get(name))
+                    return false;
+                std::lock_guard<std::mutex> lock(binding_lock_);
+                const auto                  mine = graph_attach_.find(layer);
+                if (mine != graph_attach_.end() && mine->second != name)
+                    return false;
+                if (!graphs_->claim(name, graph::attachment{channel_index_, layer}))
+                    return false;
+                graph_attach_[layer] = name;
+                return true;
+            });
+
+        if (verb == "detach")
+            return executor_.begin_invoke([this, name] {
+                if (!graphs_)
+                    return false;
+                // WHERE it is attached comes from the STORE, not from the op. A client taking a
+                // look off air knows the look's name; making it also send the layer would mean
+                // it had to remember, and could then get it wrong -- the same reasoning the
+                // `detach` route already follows.
+                const auto where = graphs_->attached(name);
+                if (!where || where->channel != channel_index_)
+                    return false;
+                return detach_graph_here(where->layer);
+            });
+
+        if (verb == "undo" || verb == "redo")
+            return executor_.begin_invoke([this, name, verb] {
+                if (!graphs_)
+                    return false;
+                const auto after = verb == "undo" ? graphs_->undo(name) : graphs_->redo(name);
+                // `undo` with nothing to undo is FALSE rather than an exception: a batch that
+                // asked for one step too many should report that it did not happen, not abort
+                // the frame.
+                return static_cast<bool>(after);
+            });
+
+        return make_ready_future(false);
+    }
+
     std::string graph_of(int layer) const
     {
         std::lock_guard<std::mutex> lock(binding_lock_);
@@ -3684,6 +3739,11 @@ std::future<std::vector<param_snapshot>> stage::describe_graph(int layer)
     return impl_->describe_graph(layer);
 }
 
+std::future<bool> stage::graph_command(const std::string& name, const std::string& verb, int layer)
+{
+    return impl_->graph_command(name, verb, layer);
+}
+
 std::future<bool> stage::set_node_param(int                      layer,
                                         const std::string&       path,
                                         const monitor::vector_t& value,
@@ -3862,6 +3922,26 @@ std::future<bool> stage_delayed::timeline_command(const std::string&            
     // land on the same tick. Calling the real stage from here instead would deadlock: the
     // delayed stage is holding that executor.
     return executor_.begin_invoke([=, this]() { return stage_->timeline_command(name, cmd).get(); });
+}
+
+std::future<bool> stage_delayed::set_node_param(int                      layer,
+                                               const std::string&       path,
+                                               const monitor::vector_t& value,
+                                               const std::string&       label)
+{
+    // Queued on the DELAYED executor, like every other op, so a node-parameter write in a batch
+    // reaches the store in the same released burst as the batch's field writes. The base class's
+    // default returns false and does nothing, which would make a batch report success for a
+    // write that never happened.
+    return executor_.begin_invoke(
+        [=, this]() { return stage_->set_node_param(layer, path, value, label).get(); });
+}
+
+std::future<bool> stage_delayed::graph_command(const std::string& name,
+                                               const std::string& verb,
+                                               int                layer)
+{
+    return executor_.begin_invoke([=, this]() { return stage_->graph_command(name, verb, layer).get(); });
 }
 
 // ── Keyframe management (stage_delayed forwarding) ───────────────────────

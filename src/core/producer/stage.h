@@ -267,6 +267,23 @@ class stage_base
     ///
     /// `label` names the GESTURE for the store's undo history, so a slider drag under one label
     /// is one undo rather than fifty.
+    /// One graph VERB, by document name: `attach`, `detach`, `undo` or `redo`.
+    ///
+    /// ON `stage_base` RATHER THAN ONLY ON `stage`, for the reason `timeline_command` is: a
+    /// batch applies against a `stage_delayed`, and reaching past it to the real stage would
+    /// both miss the batch's frame and deadlock the HTTP thread on an executor the delayed
+    /// stage is holding.
+    ///
+    /// `layer` is read only by `attach`; the other three take it and ignore it, because where a
+    /// document is attached is the STORE's business and a client asking to undo should not have
+    /// to remember where the look happens to be.
+    virtual std::future<bool> graph_command(const std::string& /*name*/,
+                                            const std::string& /*verb*/,
+                                            int /*layer*/)
+    {
+        return make_ready_future(false);
+    }
+
     virtual std::future<bool> set_node_param(int                      layer,
                                              const std::string&       path,
                                              const monitor::vector_t& value,
@@ -496,6 +513,10 @@ class stage final : public stage_base
     std::future<bool>                       detach_graph(int layer) override;
     std::string                             graph_of(int layer) const override;
     std::future<std::vector<param_snapshot>> describe_graph(int layer) override;
+    std::future<bool>                       graph_command(const std::string& name,
+                                                          const std::string& verb,
+                                                          int                layer) override;
+
     std::future<bool>                       set_node_param(int                      layer,
                                                            const std::string&       path,
                                                            const monitor::vector_t& value,
@@ -562,6 +583,21 @@ class stage_delayed final : public stage_base
     std::future<void>            execute(std::function<void()> k) override;
     std::future<bool>            timeline_command(const std::string&                 name,
                                                   const timeline::transport_command& cmd) override;
+
+    /// FORWARDED, and it has to be. `stage_base`'s default returns `false` without doing
+    /// anything, so a node-parameter write inside a batch would be accepted by the route,
+    /// counted by the batch, and then silently do nothing -- which is exactly the shape the
+    /// timeline's own delayed-stage defect took, and that one cost two red checks to find.
+    std::future<bool>            set_node_param(int                      layer,
+                                                const std::string&       path,
+                                                const monitor::vector_t& value,
+                                                const std::string&       label) override;
+
+    /// The same for a graph VERB -- attach, detach, undo, redo -- so `{"op": "graph"}` lands on
+    /// the batch's frame beside the field writes rather than whenever HTTP got to it.
+    std::future<bool>            graph_command(const std::string& name,
+                                               const std::string& verb,
+                                               int                layer) override;
 
 
     std::unique_lock<std::mutex> get_lock() const { return stage_->get_lock(); }

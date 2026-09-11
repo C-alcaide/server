@@ -470,6 +470,19 @@ Look for it wherever a check asserts an IDENTITY: a round trip, a no-op, a resto
 `CLEAR`. `sampled-captures-cannot-resolve-a-short-loop` and `false-green-from-wrong-input` are the
 same family reached from other directions.
 
+**And it does not need an identity oracle to bite -- a MISREAD FIELD produces the same thing.**
+Measured 2026-09-11 on the graph batch: a check read `history.depth`, a key the reply does not
+have, so `.get("depth", 0)` gave 0 both before and after. It compared **0 to 0**. That passes
+trivially for any expectation of the form "unchanged", and the only reason it failed loudly is
+that the expectation was `before + 1`.
+
+So the rule has a second half. **Prefer an expectation that DIFFERS from zero, empty and absent**,
+because those three are what a wrong key, a missing field and a request that never happened all
+degrade to. A check written as "this count went up by one" survives a misread field; the same
+check written as "this count did not change" is indistinguishable from reading nothing at all.
+Asserting a DELTA rather than a state is the cheapest version of this, and it is why
+`state_leaves` and the history-depth checks are written that way.
+
 ## A per-tick published node costs more than the work behind it
 
 `monitor::state` is a **`boost::container::flat_map<std::string, vector_t>`** (`core/monitor/monitor.h`)

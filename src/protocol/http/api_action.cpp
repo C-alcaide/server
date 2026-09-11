@@ -295,6 +295,153 @@ api_reply parse_timeline_batch_op(const api_context& ctx, const json::object& op
     return parse_transport_verb(verb, op, out.timeline.cmd);
 }
 
+
+
+/// Nine segments, `.../mixer/node/<id>/<param>` -- the same test the write route applies, and
+/// applied here for the same reason: `resolve_write_target` reads seven segments and would take
+/// `node` for a field name.
+bool is_node_batch_path(const std::string& path)
+{
+    const auto seg = split_path(path);
+    return seg.size() == 9 && seg[0] == "channel" && seg[2] == "stage" && seg[3] == "layer" &&
+           seg[5] == "mixer" && seg[6] == "node";
+}
+
+/// One JSON value -> one `monitor::vector_t`, the three shapes a parameter takes anywhere in
+/// this API: a scalar, a boolean, or an array of those. A node parameter is not validated
+/// against its descriptor here -- see `parse_node_batch_op` for why that would be wrong rather
+/// than merely absent.
+bool decode_batch_value(const json::value& v, core::monitor::vector_t& out)
+{
+    const auto push = [&](const json::value& e) {
+        double d = 0;
+        if (e.is_bool())
+            out.push_back(e.as_bool());
+        else if (e.is_double()) {
+            out.push_back(e.as_double());
+        } else if (e.is_int64()) {
+            out.push_back(static_cast<double>(e.as_int64()));
+        } else if (e.is_uint64()) {
+            out.push_back(static_cast<double>(e.as_uint64()));
+        } else if (e.is_string()) {
+            out.push_back(std::string(e.as_string().c_str()));
+        } else
+            return false;
+        (void)d;
+        return true;
+    };
+    if (v.is_array()) {
+        for (const auto& e : v.as_array())
+            if (!push(e))
+                return false;
+        return true;
+    }
+    return push(v);
+}
+
+/// `{"op": "graph", "name": "look", "verb": "attach", "layer": 1}` -- one graph verb in a batch.
+///
+/// WHY A BATCH NEEDS THIS. Putting a look on air is a CUT, and before this a client could pin
+/// the field writes around it to a frame and not the attach that made them mean anything. The
+/// same argument the timeline op already makes, for the same reason.
+///
+/// ADDRESSED BY DOCUMENT NAME and not by a path, like the timeline op: a graph document is
+/// server-wide rather than a property of a channel, so it is the second thing in this API with
+/// no path. `layer` is read only by `attach`; `detach` takes the layer from the STORE, because
+/// a client taking a look off air knows the look's name and making it also remember where the
+/// look is gives it something to get wrong.
+api_reply parse_graph_batch_op(const api_context& ctx, const json::object& op, batch_op& out)
+{
+    if (!ctx.graphs)
+        return api_reply::fail(api_code::internal, "no graph store is wired into this build");
+
+    const auto* n = op.if_contains("name");
+    if (!n || !n->is_string())
+        return api_reply::fail(api_code::field_missing, "a graph op needs a document \"name\"");
+    out.graph.name = n->as_string().c_str();
+
+    if (!ctx.graphs->get(out.graph.name))
+        return api_reply::fail(api_code::graph_not_found,
+                               "no graph named '" + out.graph.name + "'");
+
+    const auto* v = op.if_contains("verb");
+    if (!v || !v->is_string())
+        return api_reply::fail(api_code::field_missing, "a graph op needs a \"verb\"");
+    out.graph.verb = v->as_string().c_str();
+    if (out.graph.verb != "attach" && out.graph.verb != "detach" && out.graph.verb != "undo" &&
+        out.graph.verb != "redo")
+        return api_reply::fail(api_code::bad_request,
+                               "no such graph verb: " + out.graph.verb +
+                                   ". Known: attach, detach, undo, redo");
+
+    // THE CHANNEL, and where it comes from differs by verb -- which is worth being explicit
+    // about rather than defaulting. `attach` is told; everything else reads the store, because
+    // the document already knows where it is.
+    if (out.graph.verb == "attach") {
+        const auto* c = op.if_contains("channel");
+        const auto* l = op.if_contains("layer");
+        if (!c || !c->is_number() || !l || !l->is_number())
+            return api_reply::fail(api_code::field_missing,
+                                   "a graph attach needs \"channel\" and \"layer\"");
+        out.channel     = static_cast<int>(c->to_number<double>());
+        out.graph.layer = static_cast<int>(l->to_number<double>());
+    } else {
+        const auto where = ctx.graphs->attached(out.graph.name);
+        if (!where)
+            return api_reply::fail(api_code::bad_request,
+                                   "'" + out.graph.name + "' is not attached to anything, so a " +
+                                       out.graph.verb + " has no channel to land on");
+        out.channel     = where->channel;
+        out.graph.layer = where->layer;
+    }
+
+    if (op.if_contains("at_frame") != nullptr)
+        return api_reply::fail(api_code::bad_request,
+                               "at_frame belongs on the batch, not on an op: a batch lands on one "
+                               "frame and an op that named its own would break that");
+    return api_reply{};
+}
+
+/// A NODE-PARAMETER write inside a batch.
+///
+/// VALIDATED ONLY AS FAR AS ITS ADDRESS, which is the same limit the `action` op already
+/// declares and for the same reason: whether the value is in range depends on the document
+/// ATTACHED AT THE TIME, and a batch that validated against the document as it is now would
+/// still be wrong by the time its frame arrives. `prepare_*` touches no stage by design.
+///
+/// So the batch's all-or-nothing promise covers the ADDRESS being resolvable and stops there --
+/// stated, because the alternative is to pretend otherwise.
+api_reply parse_node_batch_op(const std::string& path, const json::object& op, batch_op& out)
+{
+    const auto seg = split_path(path);
+    if (seg.size() != 9 || !is_number(seg[1]) || !is_number(seg[4]))
+        return api_reply::fail(api_code::bad_request,
+                               "a node path is channel/N/stage/layer/M/mixer/node/<id>/<param>: " +
+                                   path);
+    out.channel    = std::atoi(seg[1].c_str());
+    out.node.layer = std::atoi(seg[4].c_str());
+    out.node.path  = "node/" + seg[7] + "/" + seg[8];
+
+    const auto* v = op.if_contains("value");
+    if (!v)
+        return api_reply::fail(api_code::field_missing, "no value for " + path);
+    if (!decode_batch_value(*v, out.node.value))
+        return api_reply::fail(api_code::field_wrong_type,
+                               "a node parameter takes a number, a boolean, a name, or an array "
+                               "of those");
+
+    // THE GESTURE LABEL, which is the whole reason a batch of node writes is different from
+    // three separate ones: consecutive writes carrying the same label fold into ONE undo entry,
+    // so a slider drag is one step back rather than fifty.
+    if (const auto* l = op.if_contains("label"); l && l->is_string())
+        out.node.label = l->as_string().c_str();
+
+    if (op.if_contains("at_frame") != nullptr)
+        return api_reply::fail(api_code::bad_request,
+                               "at_frame belongs on the batch, not on an op");
+    return api_reply{};
+}
+
 api_reply queue_verb(const std::shared_ptr<core::stage_base>& stage,
                      const action_target&                     target,
                      std::future<void>&                       out)
@@ -495,10 +642,43 @@ api_reply validate_batch(const api_context& ctx, const std::string& body, batch_
             continue;
         }
 
+        // A GRAPH OP IS ADDRESSED BY DOCUMENT NAME, like a timeline op, so it is handled before
+        // the path requirement below is imposed.
+        if (kind == "graph") {
+            batch_op pl;
+            pl.index    = i;
+            pl.is_graph = true;
+            if (auto r = parse_graph_batch_op(ctx, op, pl); r.code != api_code::ok)
+                return fail(std::move(r));
+            if (!ctx.stage || !ctx.stage(pl.channel))
+                return fail(api_reply::fail(api_code::channel_not_found,
+                                            "no channel " + std::to_string(pl.channel)));
+            out.ops.push_back(std::move(pl));
+            continue;
+        }
+
         const auto* p = op.if_contains("path");
         if (!p || !p->is_string())
             return fail(api_reply::fail(api_code::field_missing, "an op needs a path"));
         const std::string path = p->as_string().c_str();
+
+        // A NODE PARAMETER IS A `set` WITH A DIFFERENT WRITER, and it has to be split out here
+        // rather than inside `prepare_set`: `resolve_write_target` reads a seven-segment path
+        // and would try to read `node` as a field name, answering `unknown_path` for a
+        // parameter that exists. The write path's route already tests this first for exactly
+        // the same reason.
+        if (kind == "set" && is_node_batch_path(path)) {
+            batch_op pl;
+            pl.index   = i;
+            pl.is_node = true;
+            if (auto r = parse_node_batch_op(path, op, pl); r.code != api_code::ok)
+                return fail(std::move(r));
+            if (!ctx.stage || !ctx.stage(pl.channel))
+                return fail(api_reply::fail(api_code::channel_not_found,
+                                            "no channel " + std::to_string(pl.channel)));
+            out.ops.push_back(std::move(pl));
+            continue;
+        }
 
         batch_op pl;
         pl.index = i;
@@ -527,7 +707,8 @@ api_reply validate_batch(const api_context& ctx, const std::string& body, batch_
             pl.channel = pl.action.channel;
         } else {
             return fail(api_reply::fail(api_code::bad_request,
-                                        "unknown op in a batch: " + kind + " (set, action, timeline)"));
+                                        "unknown op in a batch: " + kind +
+                                            " (set, action, timeline, graph)"));
         }
 
         if (!ctx.stage || !ctx.stage(pl.channel))
@@ -606,6 +787,25 @@ api_reply apply_batch(const api_context& ctx, const batch_plan& plan)
                 // a `DELETE` can land between the two.
                 verdicts.emplace_back(pl.index, pl.timeline.name,
                                       st->timeline_command(pl.timeline.name, pl.timeline.cmd));
+                continue;
+            }
+            if (pl.is_graph) {
+                // The same `bool` shape a timeline op has, and checked after the release for the
+                // same reason: `attach` can fail because another layer claimed the document
+                // between validation and the frame, and the store is mutable in between.
+                verdicts.emplace_back(pl.index, pl.graph.name,
+                                      st->graph_command(pl.graph.name, pl.graph.verb,
+                                                        pl.graph.layer));
+                continue;
+            }
+            if (pl.is_node) {
+                // NOT `apply_transform`. A node parameter's constant lives in the attached
+                // DOCUMENT, so `set_node_param` is the only writer that reaches it -- and the
+                // transform path this used to fall into had no node arm at all, so the write
+                // did nothing while the batch reported success.
+                verdicts.emplace_back(pl.index, pl.node.path,
+                                      st->set_node_param(pl.node.layer, pl.node.path,
+                                                         pl.node.value, pl.node.label));
                 continue;
             }
             if (pl.is_set) {

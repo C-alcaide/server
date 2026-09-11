@@ -350,13 +350,26 @@ missing file is `unknown_path`, a bad argument is `bad_request`, and neither say
   {"op":"set","path":"/channel/1/stage/layer/10/mixer/opacity","value":0.25},
   {"op":"set","path":"/channel/2/stage/layer/10/mixer/opacity","value":0.75},
   {"op":"action","path":"/channel/1/stage/layer/10/pause"},
-  {"op":"timeline","name":"show-right","verb":"play"}
+  {"op":"timeline","name":"show-right","verb":"play"},
+  {"op":"graph","name":"look","verb":"attach","channel":1,"layer":10}
 ]}
 ```
 
-**Three kinds of op:** `set` writes a field, `action` drives a layer, `timeline` drives a
-document. A timeline op is the only one addressed by NAME rather than by a path, because a
-document is server-wide -- see `timeline.md` §18.3.
+**Four kinds of op:** `set` writes a field, `action` drives a layer, `timeline` drives a
+document, `graph` drives a node-graph document. The last two are addressed by NAME rather than
+by a path, because both kinds of document are server-wide -- see `timeline.md` §18.3 and
+`node-graph.md` §7.2.
+
+**A `set` on a NODE parameter is routed differently, and it had to be.** A node parameter's
+constant lives in the attached graph document rather than on the layer's transform, so it goes
+to `set_node_param`; sent down the transform path it silently did nothing while the batch
+reported success. The address is the ordinary one --
+`channel/1/stage/layer/1/mixer/node/<id>/<param>` -- so a client writes it like any other field.
+
+**`label` on a node write coalesces the undo history.** Consecutive writes carrying the same
+label are one entry, so a slider drag is one step back rather than fifty; an unlabelled write
+never coalesces, because there is nothing to say two of them are one gesture. The batch's own
+top-level `label` names the batch; the per-op one names the gesture inside the graph's history.
 
 **Every op is validated before any op is applied.** A failure answers `batch_op_failed` with the
 failing index and that op's own status, and **nothing is written**:

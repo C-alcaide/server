@@ -790,6 +790,49 @@ failed all nine classes — the check was wrong, not the server.)
 `default` deliberately omits `id`: ids are the client's stable handles, and inventing one here
 would either collide or teach a client to accept ours and then wonder why it changed.
 
+### 7.2 A graph in a batch, and one history entry per gesture
+
+```json
+POST /v1/batch
+{"at_frame": 1200, "ops": [
+  {"op": "graph", "name": "look", "verb": "attach", "channel": 1, "layer": 1},
+  {"op": "set", "path": "channel/1/stage/layer/1/mixer/node/e/gain", "value": 1.6,
+   "label": "drag"}
+]}
+```
+
+**Why a batch needs a graph op at all:** putting a look on air is a *cut*. Before this a client
+could pin the field writes around it to a frame and not the `attach` that made them mean
+anything. The same argument the timeline op already makes.
+
+Four verbs — `attach`, `detach`, `undo`, `redo` — addressed by **document name** and not by a
+path, because a graph document is server-wide rather than a property of a channel. `attach` is
+told its channel and layer; the other three read the **store**, because a client taking a look
+off air knows the look's name and making it also remember the layer only gives it something to
+get wrong.
+
+**A node-parameter write inside a batch did not work at all**, and the way it failed is the
+interesting part: `{"op": "set"}` on a node address fell into the *transform* path, which has no
+node arm — so the write silently did nothing while the batch reported success. Two things were
+needed. The batch now routes a nine-segment node path to `set_node_param` (the write route
+already tests this first, because `resolve_write_target` reads seven segments and would take
+`node` for a field name). And **`stage_delayed` had to override `set_node_param`**: `stage_base`'s
+default returns `false` without doing anything, which is exactly the shape the timeline's own
+delayed-stage defect took.
+
+**`label` is what makes a slider drag one undo.** Consecutive writes carrying the same label
+coalesce into one history entry, so three writes are one step back rather than three. An
+*unlabelled* write never coalesces — with no label there is nothing to say two of them are one
+gesture. Measured: three writes under one label take the history from 1 entry to 2, and one
+`undo` returns the parameter to its pre-gesture value rather than to the middle of the drag.
+
+**Validation stops at the address**, for a node op and for an action alike: whether a value is in
+range depends on the document attached *when the frame arrives*, and a batch that validated
+against the document as it is now would still be wrong by then. So the all-or-nothing promise
+covers the address resolving and stops there — stated, because the alternative is to pretend
+otherwise. A verb the channel then refuses is reported after the batch lands, in `details`,
+alongside the timeline's.
+
 ## 8. What is not here yet
 
 Each of these is sequenced rather than open, and the order is riskiest-first:
@@ -802,7 +845,8 @@ Each of these is sequenced rather than open, and the order is riskiest-first:
 | ~~source-space masks~~ | **DONE** — see §2.2 |
 | ~~the mask families~~ | **DONE** — see §5.0 |
 | ~~the catalogue~~ | **DONE** for `/v1/catalog/node`, `default`, `suggest` and `connections/preview` — see §7.1. **`ports/{p}/live` is NOT done**: a node parameter's live value is already readable at `/v1/value/channel/N/stage/layer/M/mixer/node/<id>/<param>`, which is the address the ownership stack publishes, so a second spelling under the catalogue would be a second way to ask one question. Recorded as a deliberate omission rather than an oversight |
-| batches and previews | `{"op":"graph"}`, one history entry per gesture, and a per-node preview PNG |
+| ~~batches~~ | **DONE** — `{"op": "graph"}`, a node write, and one history entry per gesture; see §7.2 |
+| previews | a per-node preview PNG, and the cost arms |
 
 And these are **not v1 at all**, each with its hook: effect and source node families (a texture
 hand-off between GL contexts or Vulkan devices is a *device* feature, not a graph one — the `image`
@@ -828,6 +872,7 @@ rather than by the `MIXER` tween.
 | a mask read by TWO consumers (the materialised path) | `grade-graph` | **3 checks, both mixers** — and the sample that matters is OUTSIDE the mask, because a dropped mask reads identically to a correct one from inside |
 | which space a MASK's numbers are in | `grade-graph` | **4 checks, both mixers** — the two interpretations are disjoint by construction, so each failure mode fails a different check |
 | the source-uv matrix against `transform_coords` | `node_uv_self_test` | at boot, **fatal** — five placements, and the row/column convention is the thing it exists to pin |
+| a graph VERB and a node WRITE inside a batch, and label coalescing | `api-graph` | **6 checks, both mixers** — including that three writes under one label are ONE undo, which is the claim a client's slider depends on |
 | the CATALOGUE, and that `suggest`/`preview`/PUT agree | `api-graph` | **6 checks, both mixers** — 65 (class, port) pairs walked, 0 disagreements. The agreement is the claim; any one endpoint answering is not |
 | the class table against its own rules | `node_registry_self_test` | at boot |
 | the validator, one minimal document per failure mode | `graph_validate_self_test` | at boot |
