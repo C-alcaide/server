@@ -833,6 +833,51 @@ covers the address resolving and stops there — stated, because the alternative
 otherwise. A verb the channel then refuses is reported after the batch lands, in `details`,
 alongside the timeline's.
 
+## 7.3 What it costs — sixteen passes, measured
+
+The design is bounded by a **16-pass cap** and an attachment pool. `grade-graph-cost` measures
+the cap at 0/4/8/16 nodes on one layer of four channels:
+
+| nodes | late frames | published leaves (ch 1) |
+| ---: | :--- | ---: |
+| 0 (no graph) | 0–1 / ~2000 | 18 |
+| 4 | 0 | 25 |
+| 8 | 0 | 29 |
+| 16 — the cap | **0** | 37 |
+| 16, all bypassed | 0 | 53 |
+
+**2160p50 on four channels**, both mixers, worst of two interleaved passes. The no-graph arm
+itself reports 1 late frame in one pass, so a graph at the cap is inside the noise floor.
+
+**Read this as "sixteen passes fit comfortably at 4K/50 on this box", not as "passes are
+free".** The consumer paces the frame period, so a cost that does not overrun the tick is
+invisible to this measurement whatever it is. What the battery establishes is that the budget is
+not exceeded, not how much of it is used.
+
+**The raster is part of the result.** At 1080p25 — the fixture's first choice, and what
+`timeline-cost` uses — *every* arm read 0 including the cap, which is a battery with no
+discriminating power rather than a finding. 2160p50 is eight times the pixel rate; it still does
+not reach the edge, and that is now a statement about the hardware.
+
+**Two controls, and the first is what gives the zeroes any meaning.** Every arm reads 0 late —
+and 0 late is exactly what a graph that *never drew* would report. The leaf counts prove the
+documents are attached and published, and prove nothing about whether the passes executed. So
+the battery captures the picture at the cap and requires it to be `0.98^16` down: **0.42 LSB**
+against a predicted `[101.3, 64.4, 36.9]`. The second control is a bypassed ladder of the same
+size — same document, same publication, no draws — so the difference between the two arms is the
+passes and nothing else.
+
+**Why the bypassed arm publishes MORE**, which is the sparse rule working rather than an
+anomaly: a parameter at its default is omitted, so the live ladder publishes `gain` alone and
+the bypassed one publishes `gain` *and* `bypass: true`. Exactly one extra leaf per node. **What
+is published is the off-default parameters, not the parameters** — so a leaf count is not a node
+count.
+
+**This is a different mechanism from the timeline's cost**, and neither battery substitutes for
+the other. `timeline-cost` found the timeline's expense to be the per-tick state publication
+into a `flat_map` — 17.0 leaves per binding against 4.2 per keyed field. A graph publishes a
+handful of leaves whatever its size and spends its budget on GPU passes.
+
 ## 8. What is not here yet
 
 Each of these is sequenced rather than open, and the order is riskiest-first:
@@ -873,6 +918,7 @@ rather than by the `MIXER` tween.
 | which space a MASK's numbers are in | `grade-graph` | **4 checks, both mixers** — the two interpretations are disjoint by construction, so each failure mode fails a different check |
 | the source-uv matrix against `transform_coords` | `node_uv_self_test` | at boot, **fatal** — five placements, and the row/column convention is the thing it exists to pin |
 | a graph VERB and a node WRITE inside a batch, and label coalescing | `api-graph` | **6 checks, both mixers** — including that three writes under one label are ONE undo, which is the claim a client's slider depends on |
+| what sixteen passes COST, and that they ran at all | `grade-graph-cost` | **5/5 both mixers** — 0 late at the cap on four 2160p50 channels, with a picture control at **0.42 LSB** because 0 late is also what a graph that never drew reports |
 | the CATALOGUE, and that `suggest`/`preview`/PUT agree | `api-graph` | **6 checks, both mixers** — 65 (class, port) pairs walked, 0 disagreements. The agreement is the claim; any one endpoint answering is not |
 | the class table against its own rules | `node_registry_self_test` | at boot |
 | the validator, one minimal document per failure mode | `graph_validate_self_test` | at boot |
