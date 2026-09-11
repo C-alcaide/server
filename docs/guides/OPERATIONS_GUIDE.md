@@ -1054,10 +1054,28 @@ you what it is doing.
 the document keeps running; re-attach it and the parameter goes straight back under the ramp where
 it would have been. `MIXER 1-10 CLEAR` detaches too, because clearing a layer clears its look.
 
-> **At this build a graph changes no picture.** It stores, validates, attaches, publishes its
-> parameters and answers every ownership question — and the renderer does not consult it yet. The
-> looks you can actually put on screen today are still the `MIXER` grading chain and
-> `MIXER GRADE_NODE`. `docs/features/node-graph.md` §8 is the order the rest arrives in.
+*A graph renders, and it renders in the working space by default.* A document's `stage` is
+`working` unless it says otherwise, which means a node CDL is **the same operation** as
+`MIXER CDL` — measured at 0.00 LSB against it on both mixers, where the old placement was 42 LSB
+away. If you want the old behaviour — a correction on the picture *as encoded*, which is a
+legitimate thing to want for a broadcast-legal trim — say `"stage": "display"` and the graph
+renders exactly as it did.
+
+*Eleven node classes.* Two roots, two grading operators (`exposure`, `cdl`), five masks
+(`mask_ellipse`, `mask_rect`, `mask_gradient`, `mask_qualifier`, `mask_combine`) and two combines
+(`mix`, `over`). A mask feeding one node costs no extra draw; one feeding several gets a pass of
+its own. `GET /v1/catalog/node` lists them all with their parameters, and
+`GET /v1/catalog/node/{class}/default` hands you a node ready to add.
+
+*A mask can follow the picture.* `mask_ellipse` and the other shapes carry a `space` port:
+`frame` is the raster, `source` is the layer's own space, so the mask moves with the picture
+under `MIXER FILL`. Send it as `0` or `1` — a name is currently accepted and silently ignored.
+
+> **What a graph costs, measured:** sixteen node passes — the most a document may have — cost
+> **0 late frames** on four 2160p50 channels, and a realistic look (a windowed CDL and a second
+> graded region) adds **14 published leaves** to a channel that breaks at about 600. Neither is
+> a limit you will meet at the keyboard. `docs/features/node-graph.md` §7.3 has the numbers and
+> what they do *not* cover.
 
 ### `TIMELINE` — driving an authored show
 

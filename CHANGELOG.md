@@ -1,6 +1,33 @@
 CasparVP — Unreleased
 ==========================================
 
+### The node graph is complete bar previews — what it costs, measured
+
+Closing out the feature. `GRAPH` and `/v1/graph` now carry eleven node classes, render in the
+**working** space by default, address every parameter like any other, and answer the catalogue a
+client needs to build a graph at all.
+
+**What it costs, on this box:**
+
+* **Sixteen node passes — the most a document may have — cost 0 late frames** on four 2160p50
+  channels, both mixers. The no-graph arm itself reports 1 late frame in one pass of two, so a
+  graph at the cap is inside the noise floor. `grade-graph-cost`.
+* **A realistic look adds 14 published leaves.** A windowed CDL and a second graded region takes
+  a fully dressed channel from 78 to **92**, against the **596** where publication starts costing
+  13% of frames. 15.4% of it. `publication-cost`.
+
+Both are stated with their limits rather than as headlines. The consumer paces the frame period,
+so a cost that does not overrun the tick is invisible to the first measurement whatever it is;
+what it establishes is that the budget is not exceeded, not how much of it is used. And the
+raster is part of the result — at 1080p25 every arm read 0 including the cap, which is a battery
+with no discriminating power rather than a finding.
+
+**Still not built: a per-node preview PNG**, and it is larger than the one-word version suggests.
+It needs a readback of a node's *intermediate* attachment on both mixers (neither exposes one —
+the IMAGE consumer reads the finished frame, which is a different thing), a PNG encoder reachable
+from `protocol_http` (which cannot link one today), and a binary response path. Sized in
+`docs/features/node-graph.md` §8 rather than left open.
+
 ### Four more mask classes — `mask_rect`, `mask_gradient`, `mask_qualifier`, `mask_combine`
 
 `mask_ellipse` was the only mask a node graph had. Four more, all usable on any grading node's

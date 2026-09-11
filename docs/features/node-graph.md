@@ -557,14 +557,20 @@ know what it may build before it builds it.
 | `exposure` | grade | `image`, `mask?` | `image` | `gain`, `mix`, `bypass` |
 | `cdl` | grade | `image`, `mask?` | `image` | `slope`, `offset`, `power` (vec3 each), `saturation`, `mix`, `bypass` |
 | `mask_ellipse` | mask | — | `mask` | `center`, `radius`, `feather`, `invert`, `space`, `bypass` |
+| `mask_rect` | mask | — | `mask` | the same five; `radius` is the **half-extent** |
+| `mask_gradient` | mask | — | `mask` | the same five plus `angle`; `radius.0` is the **run** |
+| `mask_qualifier` | mask | `image` | `mask` | `hue`, `hue_width`, `sat_low/high`, `luma_low/high`, `softness`, `invert`, `bypass` |
+| `mask_combine` | mask | `mask a`, `mask b` | `mask` | `op`, `invert`, `bypass` |
 | `mix` | combine | `image a`, `image b?`, `mask?` | `image` | `amount`, `bypass` |
 | `over` | combine | `image a`, `image b?` | `image` | `bypass` |
 
-**The table carries exactly the classes the evaluator will implement, and no more.** A class in the
+**Eleven classes**, and §5.0 has the mask families' parameters in full.
+
+**The table carries exactly the classes the evaluator implements, and no more.** A class in the
 catalogue that a PUT accepts and the renderer ignores is the *202-and-no-picture* failure seen from
-the other end — the same one the timeline's path validation closed. So the remaining mask families
-(`mask_rect`, `mask_gradient`, `mask_qualifier`, `mask_combine`) and the rest of the grading
-operators arrive **with the shader that implements them**, not before.
+the other end — the same one the timeline's path validation closed. So each family arrived **with
+the shader that implements it**: the four mask classes above landed together with their four
+shader cases and the boot self-test that asserts every op constant against the table.
 
 **`lut3d` is absent**, though the design lists it: its LUT input needs a `ref_lut` port, reference
 ports are refused in v1, so the class could only ever be a pass-through with a `strength` nobody can
@@ -878,6 +884,32 @@ the other. `timeline-cost` found the timeline's expense to be the per-tick state
 into a `flat_map` — 17.0 leaves per binding against 4.2 per keyed field. A graph publishes a
 handful of leaves whatever its size and spends its budget on GPU passes.
 
+### 7.3.1 …and what it costs the PUBLICATION, which is the other half
+
+`publication-cost` walks a channel from idle to fully dressed and reads `state_leaves` at each
+step. A **realistic look** — a windowed CDL and a second graded region, five nodes on one layer —
+is the arm that matters here:
+
+| step | leaves |
+| :--- | ---: |
+| idle | 7 |
+| one clip | 27 |
+| three layers | 50 |
+| + a grade (five fields × three layers) | 68 |
+| + previz (published under `mixer/`, not `stage/`) | 68 |
+| + an ISF producer | 78 |
+| **+ a node graph** | **92** |
+| + 32 bindings — the pathological reference, not a show | 667 |
+
+**A five-node look costs 14 leaves**, and a fully dressed channel sits at **92 against the 596
+that cost 13% of frames** in `timeline-cost`'s 32-binding arm — **15.4%** of it. Identical on
+both mixers.
+
+That is the number that keeps `timeline.md` §21.2's container fix unbuilt: a real configuration
+is nowhere near the count where publication starts costing frames, and a graph is a small part
+of what gets it there. **Publication is sparse** — a parameter at its default is omitted — which
+is why a five-node look costs 14 leaves rather than one per port.
+
 ## 8. What is not here yet
 
 Each of these is sequenced rather than open, and the order is riskiest-first:
@@ -891,7 +923,8 @@ Each of these is sequenced rather than open, and the order is riskiest-first:
 | ~~the mask families~~ | **DONE** — see §5.0 |
 | ~~the catalogue~~ | **DONE** for `/v1/catalog/node`, `default`, `suggest` and `connections/preview` — see §7.1. **`ports/{p}/live` is NOT done**: a node parameter's live value is already readable at `/v1/value/channel/N/stage/layer/M/mixer/node/<id>/<param>`, which is the address the ownership stack publishes, so a second spelling under the catalogue would be a second way to ask one question. Recorded as a deliberate omission rather than an oversight |
 | ~~batches~~ | **DONE** — `{"op": "graph"}`, a node write, and one history entry per gesture; see §7.2 |
-| previews | a per-node preview PNG, and the cost arms |
+| ~~the cost arms~~ | **DONE** — `grade-graph-cost` (§7.3) and a `publication-cost` graph arm (§7.3.1) |
+| **a per-node preview PNG** | **THE ONE FEATURE ITEM LEFT, and it is larger than it sounds.** It needs three things this server does not have: a readback of a node's INTERMEDIATE attachment on both mixers (neither exposes one — the IMAGE consumer reads the finished frame, which is a different thing); a PNG **encoder** reachable from `protocol_http`, which cannot link one today (the IMAGE consumer encodes through FFmpeg, in `modules/image`, and `protocol_http` has no FFmpeg dependency and should not gain one — the injected-factory pattern the timeline uses for producers is the shape that fits); and a **binary** response path, since every reply this API makes is JSON. Sized here rather than left as "previews" because the one-word version reads like an afternoon |
 
 And these are **not v1 at all**, each with its hook: effect and source node families (a texture
 hand-off between GL contexts or Vulkan devices is a *device* feature, not a graph one — the `image`
@@ -918,6 +951,7 @@ rather than by the `MIXER` tween.
 | which space a MASK's numbers are in | `grade-graph` | **4 checks, both mixers** — the two interpretations are disjoint by construction, so each failure mode fails a different check |
 | the source-uv matrix against `transform_coords` | `node_uv_self_test` | at boot, **fatal** — five placements, and the row/column convention is the thing it exists to pin |
 | a graph VERB and a node WRITE inside a batch, and label coalescing | `api-graph` | **6 checks, both mixers** — including that three writes under one label are ONE undo, which is the claim a client's slider depends on |
+| what a realistic look costs the PUBLICATION | `publication-cost` | a graph arm: **+14 leaves**, taking a fully dressed channel to 92 against the 596 that cost frames. Both mixers |
 | what sixteen passes COST, and that they ran at all | `grade-graph-cost` | **5/5 both mixers** — 0 late at the cap on four 2160p50 channels, with a picture control at **0.42 LSB** because 0 late is also what a graph that never drew reports |
 | the CATALOGUE, and that `suggest`/`preview`/PUT agree | `api-graph` | **6 checks, both mixers** — 65 (class, port) pairs walked, 0 disagreements. The agreement is the claim; any one endpoint answering is not |
 | the class table against its own rules | `node_registry_self_test` | at boot |
