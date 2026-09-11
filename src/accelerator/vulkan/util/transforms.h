@@ -8,6 +8,7 @@
 #include <core/frame/geometry.h>
 #include <core/frame/pixel_format.h>
 
+#include <array>
 #include <utility>
 
 #include "matrix.h"
@@ -29,6 +30,11 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
 /// divergence names the FIELD, so the report says which rule disagrees rather than only
 /// that one does.
 void run_compose_self_test();
+
+/// Check that `source_uv_inverse` returns the matrix the SHADERS use, by round-tripping the
+/// default quad through the real `transform_coords`. Fatal on failure -- see transforms.cpp for
+/// why this one throws where `run_compose_self_test` warns.
+void run_node_uv_self_test();
 
 struct draw_crop_region
 {
@@ -84,5 +90,17 @@ struct draw_transforms
     [[nodiscard]] std::vector<core::frame_geometry::coord>
     transform_coords(const std::vector<core::frame_geometry::coord>& coords) const;
 };
+
+
+/// See transforms.cpp for the account of both of these.
+draw_transforms apply_geometry_scale_mode(const draw_transforms&      transforms,
+                                          const core::frame_geometry& geometry,
+                                          int                         target_width,
+                                          int                         target_height,
+                                          int                         plane_width,
+                                          int                         plane_height,
+                                          double                      aspect_ratio);
+
+bool source_uv_inverse(const draw_transforms& transforms, std::array<float, 9>& out);
 
 } // namespace caspar::accelerator::vulkan

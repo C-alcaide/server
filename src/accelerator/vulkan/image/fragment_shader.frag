@@ -141,6 +141,12 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     float gn_mix;
     int   gn_has_in1;
     int   gn_has_mask;
+    // Three ROWS of the frame-uv -> item-uv matrix, then the pad that keeps the block a
+    // multiple of 16. A plain float array because this block is `layout(scalar)`, so the
+    // stride is 4 and it matches the C++ `float[9]` exactly -- see util/uniform_block.h.
+    // APPENDED here because it is appended there; the two orders are one contract.
+    float gn_uv_inv[9];
+    float gn_uv_pad[3];
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;
@@ -191,6 +197,9 @@ const uint F2_GRADE_NODE_INVERT=1u<<7;
 // boundary and leave the output half to the tail pass. Must equal
 // shader_flags2::graph_head in util/uniform_block.h.
 const uint F2_GRAPH_HEAD=1u<<8;
+// `mask_ellipse`'s `space` port, ANDed with whether the placement was invertible. Must equal
+// shader_flags2::node_uv_source in util/uniform_block.h.
+const uint F2_NODE_UV_SOURCE=1u<<9;
 
 // WHICH NODE CLASS. An index into `node_classes()`, and `node_registry_self_test` asserts
 // every one of these against that table: a reordering compiles perfectly and would make an
@@ -633,7 +642,23 @@ void main(){
         // working the moment somebody changed a default.
         float m=1.0;
         if(gn_has_mask!=0){
-            vec2 d=(buv-vec2(gn_center_x,gn_center_y))/max(vec2(gn_radius_x,gn_radius_y),vec2(1e-6));
+            // ── WHICH SPACE THE MASK'S NUMBERS ARE IN ───────────────────────────
+            // `frame` is this raster; `source` follows the layer's own geometry, so the mask
+            // moves with the picture under `MIXER FILL`. The rows multiply a column vector,
+            // and `run_node_uv_self_test` is what pins that convention down against the real
+            // `transform_coords` -- a row/column slip masks the wrong region and compiles.
+            //
+            // The homogeneous divide is defensive rather than reachable: `source_uv_inverse`
+            // REFUSES a corner pin rather than approximating it, so `w` is 1 for every matrix
+            // that gets here.
+            vec2 muv=buv;
+            if(flag2(F2_NODE_UV_SOURCE)){
+                vec3 h=vec3(gn_uv_inv[0]*buv.x+gn_uv_inv[1]*buv.y+gn_uv_inv[2],
+                            gn_uv_inv[3]*buv.x+gn_uv_inv[4]*buv.y+gn_uv_inv[5],
+                            gn_uv_inv[6]*buv.x+gn_uv_inv[7]*buv.y+gn_uv_inv[8]);
+                if(abs(h.z)>1e-6)muv=h.xy/h.z;
+            }
+            vec2 d=(muv-vec2(gn_center_x,gn_center_y))/max(vec2(gn_radius_x,gn_radius_y),vec2(1e-6));
             float f=max(gn_feather,1e-4);
             m=1.0-smoothstep(1.0-f,1.0+f,length(d));
             if(flag2(F2_GRADE_NODE_INVERT))m=1.0-m;

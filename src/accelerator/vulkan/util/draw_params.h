@@ -23,6 +23,8 @@
 
 #include "transforms.h"
 #include <common/memory.h>
+#include <array>
+
 #include <core/graph/node_draw.h>
 #include <core/frame/frame_transform.h>
 #include <core/frame/geometry.h>
@@ -155,6 +157,21 @@ struct draw_params final
     /// `image_transform` carrying only `color_grade` -- every operator's enable is at its
     /// default, so there is nothing to double-apply.
     bool graph_tail = false;
+
+    /// FRAME uv -> the ITEM's own uv, as three ROWS of a matrix the shader multiplies
+    /// `vec3(uv, 1)` by. Set on a node pass so a `mask_ellipse` declaring `space = source`
+    /// follows the layer's own geometry instead of the raster.
+    ///
+    /// Identity by default, and `node_uv_valid` is what gates it rather than comparing against
+    /// the identity: a layer at its default fill HAS the identity here, and a mask must not
+    /// behave differently depending on whether the matrix happened to be interesting.
+    std::array<float, 9> node_uv_inv{1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
+
+    /// False when the placement could not be inverted -- a corner-pin `perspective`, which is
+    /// not a 3x3 by construction, or a singular scale. The pass then masks in FRAME space, which
+    /// is a visible, explicable answer; an approximated corner pin would put the mask somewhere
+    /// plausible and wrong, and nothing downstream could tell.
+    bool node_uv_valid = false;
 
     /// This draw's destination is an **fp16** attachment.
     ///

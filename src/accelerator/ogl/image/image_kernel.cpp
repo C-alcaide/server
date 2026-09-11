@@ -404,46 +404,18 @@ struct image_kernel::impl
 
         auto transforms = params.transforms;
 
-        auto const first_plane = params.pix_desc.planes.at(0);
-        if (params.geometry.mode() != core::frame_geometry::scale_mode::stretch && first_plane.width > 0 &&
-            first_plane.height > 0) {
-            auto width_scale  = static_cast<double>(params.target_width) / static_cast<double>(first_plane.width);
-            auto height_scale = static_cast<double>(params.target_height) / static_cast<double>(first_plane.height);
-
-            core::image_transform transform;
-            double                target_scale;
-            switch (params.geometry.mode()) {
-                case core::frame_geometry::scale_mode::fit:
-                    target_scale = std::min(width_scale, height_scale);
-
-                    transform.fill_scale[0] *= target_scale / width_scale;
-                    transform.fill_scale[1] *= target_scale / height_scale;
-                    break;
-
-                case core::frame_geometry::scale_mode::fill:
-                    target_scale = std::max(width_scale, height_scale);
-                    transform.fill_scale[0] *= target_scale / width_scale;
-                    transform.fill_scale[1] *= target_scale / height_scale;
-                    break;
-
-                case core::frame_geometry::scale_mode::original:
-                    transform.fill_scale[0] /= width_scale;
-                    transform.fill_scale[1] /= height_scale;
-                    break;
-
-                case core::frame_geometry::scale_mode::hfill:
-                    transform.fill_scale[1] *= width_scale / height_scale;
-                    break;
-
-                case core::frame_geometry::scale_mode::vfill:
-                    transform.fill_scale[0] *= height_scale / width_scale;
-                    break;
-
-                default:;
-            }
-
-            transforms = transforms.combine_transform(transform, params.aspect_ratio);
-        }
+        // ONE TABLE, TWO CALLERS. This was inline here; the node path needs the SAME placement
+        // to build the inverse affine a source-space mask is evaluated in, and a mask computed
+        // without the scale mode would be off by exactly the fit/fill scale on any layer whose
+        // native raster is not the channel's -- a 4K clip in an HD channel, which is most of
+        // them. See `apply_geometry_scale_mode` in util/transforms.cpp.
+        transforms = apply_geometry_scale_mode(transforms,
+                                               params.geometry,
+                                               params.target_width,
+                                               params.target_height,
+                                               params.pix_desc.planes.at(0).width,
+                                               params.pix_desc.planes.at(0).height,
+                                               params.aspect_ratio);
 
         coords = transforms.transform_coords(coords);
 
@@ -1444,6 +1416,21 @@ struct image_kernel::impl
             // what makes a windowed grade one draw rather than two.
             //
             //   mask_ellipse  bypass, center[2], radius[2], feather, invert, space
+            // ── WHICH SPACE THE MASK'S NUMBERS ARE IN ───────────────────────────────
+            //
+            // `space` is `mask_ellipse`'s port 7 -- `bypass, center.0, center.1, radius.0,
+            // radius.1, feather, invert, space`, in the port order `compile()` lays the slots
+            // out in, which is the same order the reads below use. `node_registry_self_test`
+            // is what stops that order drifting.
+            //
+            // ANDed with `node_uv_valid`, so a layer whose placement could not be inverted
+            // masks in frame space rather than through a matrix that does not describe it.
+            // Set in BOTH states on every node pass: a bool uniform persists in the program,
+            // and a stale `true` would mask the next node through the previous layer's geometry.
+            const bool gn_uv_source = params.node_uv_valid && params.node.mask_values != nullptr &&
+                                      params.node.mask_values[7] != 0.0;
+            shader_->set("gn_uv_source", gn_uv_source);
+            shader_->set_matrix3("gn_uv_inv", params.node_uv_inv.data());
             shader_->set("gn_has_mask", params.node.mask_values != nullptr);
             if (params.node.mask_values) {
                 const auto* m = params.node.mask_values;

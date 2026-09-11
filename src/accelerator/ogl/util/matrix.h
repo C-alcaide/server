@@ -15,6 +15,15 @@ typedef boost::numeric::ublas::vector<double, std::vector<double>> t_point;
 
 t_matrix get_vertex_matrix(const core::image_transform& transform, double aspect_ratio);
 
+/// The inverse of a 3x3, by adjugate over determinant.
+///
+/// Returns false on a singular matrix rather than producing infinities -- an item scaled to zero
+/// on either axis is legal (`MIXER FILL x y 0 1` is how a layer is hidden without clearing it)
+/// and reaches here as a determinant of zero. The caller must have a fallback; it must not get
+/// a matrix full of NaN and put it in a uniform.
+bool invert_3x3(const t_matrix& m, t_matrix& out);
+
+
 } // namespace caspar::accelerator::ogl
 
 namespace boost::numeric::ublas {

@@ -1,5 +1,9 @@
 #include "transforms.h"
 
+#include <array>
+
+// CASPAR_THROW_EXCEPTION in run_node_uv_self_test, which is FATAL rather than a warning.
+#include <common/except.h>
 #include <common/log.h>
 #include <common/utf.h>
 #include <core/frame/transform_fields.h>
@@ -7,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_set>
+#include <vector>
 
 namespace caspar::accelerator::vulkan {
 
@@ -780,6 +785,257 @@ void run_compose_self_test()
     // version.
     CASPAR_LOG(warning) << L"[core] compose self-test: " << BACKEND_NAME << L" " << rep.divergences << L" of "
                         << rep.iterations << L" iterations diverged, in: " << names;
+}
+
+
+/// The geometry SCALE MODE's contribution to an item's placement, as a further composed
+/// transform.
+///
+/// Extracted from both kernels' `draw()`, which is where it lived, because the node path needs
+/// the same answer: a source-space mask is evaluated through the inverse of the item's full
+/// placement, and the scale mode is part of that placement. Two hand-written copies of this
+/// switch would diverge exactly the way `apply_transform_colour_values` already warns about.
+///
+/// `stretch` and a zero-sized plane both return the input unchanged, which is why the caller
+/// does not have to test for them.
+draw_transforms apply_geometry_scale_mode(const draw_transforms&      transforms,
+                                          const core::frame_geometry& geometry,
+                                          int                         target_width,
+                                          int                         target_height,
+                                          int                         plane_width,
+                                          int                         plane_height,
+                                          double                      aspect_ratio)
+{
+    if (geometry.mode() == core::frame_geometry::scale_mode::stretch || plane_width <= 0 || plane_height <= 0)
+        return transforms;
+
+    const auto width_scale  = static_cast<double>(target_width) / static_cast<double>(plane_width);
+    const auto height_scale = static_cast<double>(target_height) / static_cast<double>(plane_height);
+
+    core::image_transform transform;
+    double                target_scale;
+    switch (geometry.mode()) {
+        case core::frame_geometry::scale_mode::fit:
+            target_scale = std::min(width_scale, height_scale);
+            transform.fill_scale[0] *= target_scale / width_scale;
+            transform.fill_scale[1] *= target_scale / height_scale;
+            break;
+
+        case core::frame_geometry::scale_mode::fill:
+            target_scale = std::max(width_scale, height_scale);
+            transform.fill_scale[0] *= target_scale / width_scale;
+            transform.fill_scale[1] *= target_scale / height_scale;
+            break;
+
+        case core::frame_geometry::scale_mode::original:
+            transform.fill_scale[0] /= width_scale;
+            transform.fill_scale[1] /= height_scale;
+            break;
+
+        case core::frame_geometry::scale_mode::hfill:
+            transform.fill_scale[1] *= width_scale / height_scale;
+            break;
+
+        case core::frame_geometry::scale_mode::vfill:
+            transform.fill_scale[0] *= height_scale / width_scale;
+            break;
+
+        default:;
+    }
+
+    return transforms.combine_transform(transform, aspect_ratio);
+}
+
+/// FRAME UV -> the item's own 0..1 source UV, as a 3x3 in the row-vector convention
+/// `transform_coords` uses.
+///
+/// `transform_coords` walks the steps BACK TO FRONT -- `vertex = vertex * steps[i].vertex_matrix`
+/// for i from last to first -- so a vertex placed by the chain equals `v * M[n-1] * ... * M[0]`,
+/// and THAT product is what has to be inverted. The default geometry's vertex and texture
+/// coordinates are the same 0..1 quad (`frame_geometry::get_default`), so the forward product
+/// maps source UV to frame UV and its inverse is exactly what a node pass masking in source
+/// space needs.
+///
+/// Returns FALSE, and the caller must then fall back to frame space and say so, in two cases:
+///
+///   * any step carries a non-default `perspective`. A corner pin is not a 3x3 by construction --
+///     `apply_perspective_to_vertex` reads x and y of the coord, which is why `transform_vertex`
+///     applies it per step instead of folding it into the matrix. Approximating it would put the
+///     mask somewhere plausible and wrong, which is worse than putting it in frame space and
+///     saying so.
+///   * the placement is singular. `MIXER FILL x y 0 1` is how a layer is hidden without being
+///     cleared, and it reaches here as a determinant of zero.
+///
+/// WHAT `out` HOLDS IS DEFINED BY HOW THE SHADER USES IT, not by the maths that produced it:
+/// three ROWS of a matrix R for which `R * vec3(uv, 1)` is the item's uv, so both shaders write
+/// exactly that and neither has to know which way `transform_coords` composes. `inv` is in the
+/// row-vector convention, so R is its transpose -- `out[r * 3 + c] = inv(c, r)`.
+///
+/// THE CONVENTION IS NOT ASSERTED HERE, IT IS MEASURED, and in the same form: `node_uv_self_test`
+/// runs the default quad through `transform_coords` and checks that `R * vec3(placed_vertex, 1)`
+/// returns each vertex's own texture coordinate. A row/column slip produces a matrix that looks
+/// right and masks the wrong region, and nothing else in the build would notice.
+bool source_uv_inverse(const draw_transforms& transforms, std::array<float, 9>& out)
+{
+    // `is_default_perspective` rather than a hand-rolled comparison: it is the same predicate
+    // `combine_transform` uses to decide whether a perspective needs its own STEP, so the two
+    // cannot disagree about what counts as a corner pin.
+    for (const auto& step : transforms.steps)
+        if (!is_default_perspective(step.perspective))
+            return false;
+
+    t_matrix composed = boost::numeric::ublas::identity_matrix<double>(3, 3);
+    for (int i = static_cast<int>(transforms.steps.size()) - 1; i >= 0; --i)
+        composed = composed * transforms.steps[i].vertex_matrix;
+
+    t_matrix inv;
+    if (!invert_3x3(composed, inv))
+        return false;
+
+    // TRANSPOSED on the way out, so `out` is the row form both shaders multiply a column vector
+    // by. See the note above -- this one line is the whole convention.
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            out[r * 3 + c] = static_cast<float>(inv(c, r));
+    return true;
+}
+
+
+void run_node_uv_self_test()
+{
+    // THE CONVENTION, MEASURED RATHER THAN ASSERTED.
+    //
+    // `source_uv_inverse` hands back three rows of a matrix R for which `R * vec3(uv, 1)` is the
+    // item's own uv. Whether that is the transpose of the composed placement or the placement
+    // itself depends on which way `transform_coords` multiplies, and getting it backwards
+    // produces a matrix that looks entirely reasonable and masks the wrong region of the frame.
+    // Nothing else in the build would notice: it compiles, it runs, and only a picture under a
+    // non-default `MIXER FILL` disagrees.
+    //
+    // So the check is the round trip that defines the quantity: place the default quad through
+    // the real `transform_coords`, then take each PLACED vertex back through R and require its
+    // own TEXTURE coordinate. The default quad's vertex and texture coordinates are the same
+    // 0..1 pair (`frame_geometry::get_default`), which is what makes the item's uv well defined
+    // in the first place.
+    //
+    // Cases chosen so a single mistake cannot pass all of them: identity (passes under almost
+    // any error), a pure translation (catches a dropped or negated offset), a non-uniform scale
+    // (catches a row/column swap, which a uniform scale is invariant under), an off-centre
+    // anchor with rotation (catches an order-of-composition error, which translation alone is
+    // invariant under), and a corner pin (must be REFUSED, not approximated).
+    struct arm
+    {
+        const wchar_t*        name;
+        core::image_transform t;
+        bool                  expect_affine;
+    };
+
+    std::vector<arm> arms;
+    {
+        arm a{L"identity", core::image_transform(), true};
+        arms.push_back(a);
+    }
+    {
+        arm a{L"translation", core::image_transform(), true};
+        a.t.fill_translation = {0.25, -0.125};
+        arms.push_back(a);
+    }
+    {
+        // NON-UNIFORM on purpose: a square scale is invariant under a row/column swap, which is
+        // exactly the error this whole self-test exists to catch.
+        arm a{L"non-uniform scale + offset", core::image_transform(), true};
+        a.t.fill_scale       = {0.5, 1.0};
+        a.t.fill_translation = {0.25, 0.0};
+        arms.push_back(a);
+    }
+    {
+        arm a{L"anchored rotation", core::image_transform(), true};
+        a.t.anchor           = {0.5, 0.5};
+        a.t.angle            = 0.4;
+        a.t.fill_scale       = {0.8, 0.6};
+        a.t.fill_translation = {0.1, 0.2};
+        arms.push_back(a);
+    }
+    {
+        arm a{L"corner pin -- must be refused", core::image_transform(), false};
+        // BOTH, and the flag is the half that is easy to miss: `combine_transform` only splits a
+        // perspective into its own step when `enable_geometry_modifiers` is set, so without this
+        // line the corner pin is silently dropped, the placement stays affine, and the arm would
+        // have asserted a refusal that never had anything to refuse.
+        a.t.enable_geometry_modifiers = true;
+        a.t.perspective.ur            = {0.9, 0.05};
+        arms.push_back(a);
+    }
+
+    int failures = 0;
+    for (const auto& a : arms) {
+        const auto placement = draw_transforms().combine_transform(a.t, 1.0);
+
+        std::array<float, 9> r{};
+        const bool           ok = source_uv_inverse(placement, r);
+
+        if (ok != a.expect_affine) {
+            CASPAR_LOG(error) << L"[core] node-uv self-test: " << BACKEND_NAME << L" " << a.name
+                              << L" -- source_uv_inverse returned " << (ok ? L"true" : L"false")
+                              << L", expected " << (a.expect_affine ? L"true" : L"false");
+            ++failures;
+            continue;
+        }
+        if (!ok)
+            continue;
+
+        const auto placed = placement.transform_coords(core::frame_geometry::get_default().data());
+        for (const auto& c : placed) {
+            // `R * vec3(vertex, 1)`, spelled exactly as both shaders spell it.
+            const double x = r[0] * c.vertex_x + r[1] * c.vertex_y + r[2];
+            const double y = r[3] * c.vertex_x + r[4] * c.vertex_y + r[5];
+            const double w = r[6] * c.vertex_x + r[7] * c.vertex_y + r[8];
+            if (std::abs(w) < 1e-9)
+                continue;
+
+            // 1e-4 of a normalised coordinate: a fifth of a pixel at 1080p, and four orders
+            // coarser than double precision needs -- because the uniform is a `float` and this
+            // check has to be about the CONVENTION rather than about rounding.
+            // NORMALISED BY `texture_q`, and the self-test found that for me on its first run.
+            // `transform_coords` ends with `fill_texture_q_for_quad`, which multiplies
+            // `texture_x`/`texture_y` by a per-corner perspective factor and stores it in
+            // `texture_q` -- and for a quad with NO perspective that factor is 2, not 1
+            // (`calc_q` is (close + distant) / distant, and the two diagonals are equal). So the
+            // coordinates coming out of here are HOMOGENEOUS, the shader divides by `texture_q`
+            // when it samples, and comparing against the raw `texture_x` expects 2 where the
+            // answer is 1.
+            //
+            // All four affine arms failed by exactly that factor on the first run, which is how
+            // a wrong EXPECTATION was told apart from a wrong matrix: a row/column slip would
+            // have produced four DIFFERENT wrong answers, not one consistent factor.
+            const double tx = c.texture_q != 0.0 ? c.texture_x / c.texture_q : c.texture_x;
+            const double ty = c.texture_q != 0.0 ? c.texture_y / c.texture_q : c.texture_y;
+            if (std::abs(x / w - tx) > 1e-4 || std::abs(y / w - ty) > 1e-4) {
+                CASPAR_LOG(error) << L"[core] node-uv self-test: " << BACKEND_NAME << L" " << a.name
+                                  << L" -- vertex (" << c.vertex_x << L", " << c.vertex_y
+                                  << L") came back as source uv (" << (x / w) << L", " << (y / w)
+                                  << L"), expected (" << tx << L", " << ty << L")";
+                ++failures;
+                break;
+            }
+        }
+    }
+
+    if (failures == 0) {
+        CASPAR_LOG(info) << L"[core] node-uv self-test: " << BACKEND_NAME << L" " << arms.size()
+                         << L" placements, 0 failures.";
+        return;
+    }
+
+    // FATAL, unlike `run_compose_self_test` above, and the difference is which way the mistake
+    // points. A compose divergence is between two tables, only one of which is on the frame
+    // path. This matrix IS on the frame path the moment a mask declares `space: source`, and a
+    // wrong one puts a grade over the wrong part of the picture with no error anywhere -- which
+    // is the class of defect this repository has paid for most often.
+    CASPAR_THROW_EXCEPTION(caspar_exception()
+                           << msg_info(L"node-uv self-test failed with " + std::to_wstring(failures) +
+                                       L" failure(s) -- see the log. A source-space node mask would "
+                                       L"grade the wrong region."));
 }
 
 } // namespace caspar::accelerator::vulkan

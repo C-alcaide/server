@@ -219,6 +219,13 @@ uniform vec2  gn_center;    // in the space `space` names, 0..1
 uniform vec2  gn_radius;
 uniform float gn_feather;   // fraction of radius, isotropic
 uniform bool  gn_invert;
+// SOURCE-SPACE MASKS. `gn_uv_source` is `mask_ellipse`'s `space` port resolved against whether
+// the item's placement could actually be inverted; `gn_uv_inv` is three rows of a matrix that
+// takes a frame uv to the ITEM's own uv, so a mask follows the picture when the layer is moved,
+// scaled or rotated. Both set on every node pass, in both states -- a stale `true` here would
+// mask through the previous layer's geometry.
+uniform bool  gn_uv_source;
+uniform mat3  gn_uv_inv;
 uniform float gn_exposure;
 // Per-node ASC CDL. RGB ON UPLOAD, swizzled to `.bgr` at the call site like every other
 // per-channel vec3 in this shader -- see the ICVFX account below for what happens when one
@@ -1463,6 +1470,23 @@ vec2 get_equirect_uv(vec2 screen_uv) {
 //
 // Normalising the offset by the radii turns the ellipse into a unit circle, so the
 // distance is already dimensionless and one smoothstep covers both axes.
+// FRAME uv -> the space the mask's numbers are in.
+//
+// `gn_uv_inv` is uploaded as the rows of a matrix multiplying a column vector, so this is
+// `R * vec3(uv, 1)` and nothing here has to know how the CPU composed the placement --
+// `run_node_uv_self_test` is what pins that down, by round-tripping the real `transform_coords`.
+//
+// The homogeneous divide is defensive rather than reachable: `source_uv_inverse` refuses a
+// corner pin, so `w` is 1 for every matrix that gets here. It costs one divide on a pass that
+// already does a length() and a smoothstep.
+vec2 grade_node_mask_uv(vec2 uv)
+{
+    if (!gn_uv_source)
+        return uv;
+    vec3 t = gn_uv_inv * vec3(uv, 1.0);
+    return abs(t.z) > 1e-6 ? t.xy / t.z : uv;
+}
+
 float grade_node_mask(vec2 uv)
 {
     vec2  d = (uv - gn_center) / max(gn_radius, vec2(1e-6));
@@ -1894,7 +1918,7 @@ void main()
         // NO MASK MEANS EVERYWHERE, and `gn_has_mask` is what says so rather than the
         // geometry. A radius large enough to cover the raster would work today and stop
         // working the moment somebody changed a default.
-        float m = gn_has_mask ? grade_node_mask(base_uv) : 1.0;
+        float m = gn_has_mask ? grade_node_mask(grade_node_mask_uv(base_uv)) : 1.0;
         // ...times the node's own `mix`, so a node can be dialled back without a `mix`
         // node behind it. One multiply, and it is why every grading class carries the port.
         m *= gn_mix;
@@ -1920,12 +1944,12 @@ void main()
             graded = mix(col.rgb, b.rgb, gn_mix);
             // `gn_mix` IS the amount for this class, so the mask must not multiply it a
             // second time. Reset to the mask alone.
-            m = gn_has_mask ? grade_node_mask(base_uv) : 1.0;
+            m = gn_has_mask ? grade_node_mask(grade_node_mask_uv(base_uv)) : 1.0;
         } else if (gn_op == GN_OVER) {
             // Premultiplied source-over: a + (1-a.alpha) * b.
             vec4 b = gn_has_in1 ? texture(plane[1], base_uv).bgra : vec4(0.0);
             graded = col.rgb + (1.0 - col.a) * b.rgb;
-            m      = gn_has_mask ? grade_node_mask(base_uv) : 1.0;
+            m      = gn_has_mask ? grade_node_mask(grade_node_mask_uv(base_uv)) : 1.0;
         }
         // Anything else -- the roots, a mask generator that somehow reached a draw -- is the
         // identity, which is the safe answer: a class the shader does not know renders the

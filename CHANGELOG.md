@@ -1,6 +1,38 @@
 CasparVP — Unreleased
 ==========================================
 
+### A node mask can follow the picture — `mask_ellipse`'s `space` port does something now
+
+`mask_ellipse` has always declared `space` as `frame,source`, and only `frame` was implemented:
+a node pass is a full-screen draw over a frame-sized attachment, so the mask was evaluated at
+the raster's own uv. Under any non-default `MIXER FILL` that is not where the picture is.
+
+`source` now hands the pass the item's **composed placement, inverted**, so the mask moves with
+the layer. Measured by `grade-graph` on both mixers with a fixture whose two interpretations are
+**disjoint** — the layer filled into the right half of the frame and the mask in the left fifth
+of the item, so source space grades a band and frame space grades nothing at all.
+
+**This changes rendered output only for a graph that declares `space: source`**, which nothing
+could have done usefully before. `frame` is unchanged and remains the default.
+
+Two things worth knowing:
+
+* **A corner-pin `perspective` is refused, not approximated** — it is not expressible as a 3×3,
+  which is why the vertex path applies it per step — and the mask then stays in frame space. So
+  does a singular placement, which `MIXER FILL x y 0 1` reaches.
+* **An enum port sent by NAME is silently ignored.** `{"space": "source"}` is accepted, echoed
+  back, and renders as `frame`: the per-tick value path converts numbers and leaves a
+  non-number at the port's default. `space` is the registry's first enum port, so nothing could
+  have hit this before. Send `0` or `1`.
+
+Also: the geometry scale mode (`fit`/`fill`/`original`/`hfill`/`vfill`) moved out of both
+kernels' `draw()` into `apply_geometry_scale_mode` — one table, two callers, because the mask
+matrix needs the same placement the picture got. No behaviour change intended and none measured.
+It touches every layer's placement, so the batteries that actually cover it are the geometry
+ones: `mixer-parity` **6/6 rasters byte-identical between the backends** and `geometry` **5/5
+rasters within 1.5 texels**, plus `conformance` **100/100 within 1.0 LSB** and `grading` clean —
+all on both mixers.
+
 ### A node graph runs in WORKING space by default — rendered output changes for graphed layers
 
 **Behaviour change, measured.** `"stage": "working"` is a graph document's default, and the layer

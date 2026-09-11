@@ -642,6 +642,40 @@ class image_renderer
             //
             // `live_passes == 0` covers no graph, an empty graph AND a graph with everything
             // bypassed -- one path for all three, gated byte-identically.
+            // ── THE ITEM'S PLACEMENT, INVERTED, FOR SOURCE-SPACE MASKS ──────────────
+            //
+            // Computed ONCE per graphed layer rather than per node: every node pass of one
+            // layer masks through the same geometry, and the matrix costs a 3x3 inverse.
+            //
+            // `apply_geometry_scale_mode` FIRST, because the kernel applies it inside `draw()`
+            // and the mask has to agree with where the picture actually landed -- a 4K clip
+            // `fit` into an HD channel is placed by that scale and by nothing in
+            // `item.transforms`.
+            //
+            // A layer whose placement is not invertible (a corner-pin `perspective`, a zero
+            // scale) leaves `node_uv_valid` false and its masks stay in FRAME space. That is
+            // deliberately a visible answer rather than an approximation: a mask that plainly
+            // did not follow the picture is diagnosable, and one that followed it to somewhere
+            // plausible and wrong is not.
+            // FROM `draw_params`, NOT `item`: `item.transforms`, `item.geometry` and
+            // `item.pix_desc` were all MOVED into `draw_params` above, so reading them here
+            // would read moved-from objects -- an empty plane list and an identity placement,
+            // which is a mask that silently never follows anything.
+            std::array<float, 9> node_uv_inv{1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
+            const bool           node_uv_valid = source_uv_inverse(
+                apply_geometry_scale_mode(draw_params.transforms,
+                                          draw_params.geometry,
+                                          draw_params.target_width,
+                                          draw_params.target_height,
+                                          draw_params.pix_desc.planes.empty()
+                                              ? 0
+                                              : draw_params.pix_desc.planes[0].width,
+                                          draw_params.pix_desc.planes.empty()
+                                              ? 0
+                                              : draw_params.pix_desc.planes[0].height,
+                                          draw_params.aspect_ratio),
+                node_uv_inv);
+
             // THE ITEM'S PARAMS, COPIED BEFORE THE HEAD DRAW MOVES THEM. The tail needs the
             // item's colour configuration -- that is the correction over the first attempt at
             // this commit, which built fresh params and so got the channel's conversion instead
@@ -767,7 +801,7 @@ class image_renderer
                                                     common::render_format::fp16);
                     apply_node(outputs[alias[st.in0]],
                                nd.has_in1 ? outputs[alias[st.in1]] : outputs[alias[st.in0]],
-                               dst, format_desc, nd);
+                               dst, format_desc, nd, node_uv_inv, node_uv_valid);
                     outputs[i] = dst;
 
                     // LAST USE: every attachment nothing reads any more goes back to the pool.
@@ -809,7 +843,9 @@ class image_renderer
                     const std::shared_ptr<texture>& source_b,
                     std::shared_ptr<texture>&       target_texture,
                     const core::video_format_desc&  format_desc,
-                    const core::graph::node_draw&   nd)
+                    const core::graph::node_draw&   nd,
+                    const std::array<float, 9>&     node_uv_inv,
+                    bool                            node_uv_valid)
     {
         if (!source_a)
             return;
@@ -832,6 +868,10 @@ class image_renderer
         draw_params.background              = target_texture;
         draw_params.geometry                = core::frame_geometry::get_default();
         draw_params.node                    = nd;
+        // Per-LAYER, the same for every node pass of this layer. The kernel ANDs it with the
+        // mask's own `space` port, so a `frame`-space mask is unaffected by its presence.
+        draw_params.node_uv_inv             = node_uv_inv;
+        draw_params.node_uv_valid           = node_uv_valid;
 
         kernel_.draw(std::move(draw_params));
     }

@@ -1340,46 +1340,18 @@ struct image_kernel::impl
                                                            /*on_frame_path=*/true,
                                                            params.ocio_look);
 
-        auto const first_plane = params.pix_desc.planes.at(0);
-        if (params.geometry.mode() != core::frame_geometry::scale_mode::stretch && first_plane.width > 0 &&
-            first_plane.height > 0) {
-            auto width_scale  = static_cast<double>(params.target_width) / static_cast<double>(first_plane.width);
-            auto height_scale = static_cast<double>(params.target_height) / static_cast<double>(first_plane.height);
-
-            core::image_transform transform;
-            double                target_scale;
-            switch (params.geometry.mode()) {
-                case core::frame_geometry::scale_mode::fit:
-                    target_scale = std::min(width_scale, height_scale);
-
-                    transform.fill_scale[0] *= target_scale / width_scale;
-                    transform.fill_scale[1] *= target_scale / height_scale;
-                    break;
-
-                case core::frame_geometry::scale_mode::fill:
-                    target_scale = std::max(width_scale, height_scale);
-                    transform.fill_scale[0] *= target_scale / width_scale;
-                    transform.fill_scale[1] *= target_scale / height_scale;
-                    break;
-
-                case core::frame_geometry::scale_mode::original:
-                    transform.fill_scale[0] /= width_scale;
-                    transform.fill_scale[1] /= height_scale;
-                    break;
-
-                case core::frame_geometry::scale_mode::hfill:
-                    transform.fill_scale[1] *= width_scale / height_scale;
-                    break;
-
-                case core::frame_geometry::scale_mode::vfill:
-                    transform.fill_scale[0] *= height_scale / width_scale;
-                    break;
-
-                default:;
-            }
-
-            transforms = transforms.combine_transform(transform, params.aspect_ratio);
-        }
+        // ONE TABLE, TWO CALLERS. This was inline here; the node path needs the SAME placement
+        // to build the inverse affine a source-space mask is evaluated in, and a mask computed
+        // without the scale mode would be off by exactly the fit/fill scale on any layer whose
+        // native raster is not the channel's -- a 4K clip in an HD channel, which is most of
+        // them. See `apply_geometry_scale_mode` in util/transforms.cpp.
+        transforms = apply_geometry_scale_mode(transforms,
+                                               params.geometry,
+                                               params.target_width,
+                                               params.target_height,
+                                               params.pix_desc.planes.at(0).width,
+                                               params.pix_desc.planes.at(0).height,
+                                               params.aspect_ratio);
 
         coords = transforms.transform_coords(coords);
 
@@ -1641,6 +1613,20 @@ struct image_kernel::impl
             //
             //   mask_ellipse  bypass, center[2], radius[2], feather, invert, space
             uniforms.gn_has_mask = nd.mask_values ? 1 : 0;
+            // ── WHICH SPACE THE MASK'S NUMBERS ARE IN ───────────────────────────────
+            //
+            // Mirror of the OpenGL kernel. `space` is `mask_ellipse`'s port 7 in the order
+            // `compile()` lays the slots out in -- `bypass, center.0, center.1, radius.0,
+            // radius.1, feather, invert, space` -- which is the same order the reads above
+            // use; `node_registry_self_test` is what stops that order drifting.
+            //
+            // ANDed with `node_uv_valid`, so a layer whose placement could not be inverted (a
+            // corner pin, a zero scale) masks in FRAME space rather than through a matrix that
+            // does not describe it.
+            if (params.node_uv_valid && nd.mask_values && nd.mask_values[7] != 0.0)
+                uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::node_uv_source);
+            for (int i = 0; i < 9; ++i)
+                uniforms.gn_uv_inv[i] = params.node_uv_inv[i];
             if (nd.mask_values) {
                 const auto* m          = nd.mask_values;
                 uniforms.gn_center_x   = static_cast<float>(m[1]);

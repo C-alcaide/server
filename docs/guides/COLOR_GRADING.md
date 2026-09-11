@@ -1310,6 +1310,13 @@ MIXER 1-10 QUALIFIER 210 30 0.2 1.0 0.3 1.0 0.1 0.2 0.3 0.0
 > runs in **working space**, which is where the design puts it — the 42 LSB below is the
 > difference, and it is a choice now rather than an accident.
 >
+> **A node MASK has its own space, and it is not the same question.** `mask_ellipse` carries a
+> `space` port: `frame` (the default) is the raster, `source` is the layer's own 0..1 space, so
+> the mask moves with the picture under `MIXER FILL`, `MIXER FILL`'s scale, and `MIXER ROTATION`.
+> A corner-pin `perspective` is refused rather than approximated and the mask stays in frame
+> space. Send the port as an INDEX (`0` or `1`) — a name is currently accepted and silently
+> ignored; see `../features/node-graph.md` §2.2.
+>
 > **Working space is reached by SPLITTING the layer draw**, not by moving the node pass: steps
 > 26b–d in [Internal Pipeline](#internal-pipeline) above. Measured on both mixers, to the byte —
 > under `MIXER COLORSPACE REC709 BT709 NONE BT709 REC709 1.0`, a node CDL and `MIXER CDL` both

@@ -241,6 +241,7 @@ struct server::impl
         core::graph::graph_plan_self_test();
         core::graph::graph_store_self_test();
         accelerator::ogl::run_compose_self_test();
+        accelerator::ogl::run_node_uv_self_test();
 #ifdef ENABLE_VULKAN
         // GUARDED, because the Vulkan accelerator's sources are only compiled when
         // `ENABLE_VULKAN` is on -- `accelerator/CMakeLists.txt` gates the whole file list on it.
@@ -253,6 +254,7 @@ struct server::impl
         // stays at its default of OFF. It was the ONLY unresolved symbol in the whole binary:
         // all 294 translation units compiled.
         accelerator::vulkan::run_compose_self_test();
+        accelerator::vulkan::run_node_uv_self_test();
 #endif
 
         // Before the channels: a channel may carry <ocio-display>/<ocio-view> on a consumer,

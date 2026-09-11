@@ -146,6 +146,57 @@ Three properties of the split that are decisions, not consequences:
   before this commit, byte for byte. That is what makes the stage a compatibility guarantee
   rather than a label.
 
+### 2.2 `space` — which space a MASK's numbers are in, which is a different question
+
+The colour maths and the mask geometry are independent, and conflating them is easy because
+both sound like "where does the node run". A node pass is a **full-screen draw over a
+frame-sized attachment**, so a mask evaluated at the fragment's own uv is in **frame** space —
+and under any non-default `MIXER FILL` that is not where the picture is.
+
+`mask_ellipse` therefore carries a `space` port, `frame` (the default) or `source`:
+
+* **`frame`** — the raster. A vignette pinned to the output, a broadcast-safe corner.
+* **`source`** — the layer's own 0..1 space, so the mask **moves with the picture** when the
+  layer is translated, scaled or rotated. A face-light that stays on the face.
+
+`source` works by handing the pass the item's **composed placement, inverted** — three rows of
+a matrix the shader multiplies `vec3(uv, 1)` by. Three things about that are decisions:
+
+* **The geometry SCALE MODE is part of the placement**, and it used to be applied inline inside
+  each kernel's `draw()`. It is now `apply_geometry_scale_mode` in each backend's
+  `util/transforms.cpp` — one table, two callers — because a matrix built without it is off by
+  exactly the fit/fill scale on any layer whose native raster is not the channel's, which is
+  most of them (a 4K clip in an HD channel).
+* **A corner pin is REFUSED, not approximated.** `perspective` is applied per step by
+  `apply_perspective_to_vertex` precisely because it is not expressible as a 3×3, so
+  `source_uv_inverse` returns false for it — and for a singular placement, which is what
+  `MIXER FILL x y 0 1` (how a layer is hidden without being cleared) reaches it as. The pass
+  then masks in **frame** space. That is deliberately a visible answer: a mask that plainly did
+  not follow the picture is diagnosable, and one that followed it to somewhere plausible and
+  wrong is not.
+* **The convention is measured, not asserted.** Whether the uploaded matrix is the composed
+  placement or its transpose depends on which way `transform_coords` multiplies, and getting it
+  backwards produces a matrix that compiles, runs, and masks the wrong region. So
+  `node_uv_self_test` runs the default quad through the **real** `transform_coords` and requires
+  that each placed vertex comes back as its own texture coordinate — five placements, chosen so
+  one mistake cannot pass all of them (a uniform scale is invariant under a row/column swap; a
+  pure translation is invariant under a composition-order error). It is **fatal** at boot, where
+  `run_compose_self_test` beside it only warns, because this matrix is on the frame path the
+  moment a mask says `source`.
+
+Measured by `grade-graph`, both mixers: the layer filled into the right half of the frame with
+the mask in the left fifth of the **item**, so the two interpretations are **disjoint** — source
+space grades a band at frame *x* ∈ [0.55, 0.65], and frame space puts the same ellipse entirely
+off the layer and grades nothing at all. Four checks, and each failure mode fails a different
+one: a matrix never applied, a matrix always applied, and a `space` port read as "no mask".
+
+**A finding, recorded rather than worked around: an enum port sent by NAME is silently
+ignored.** `values_of` fills each slot with `as_number(v[k])` and leaves it at the port's
+default when that fails — so `{"space": "source"}` is accepted by the PUT, echoed back by the
+GET, and renders as `frame`, with no fault anywhere. `space` is the first enum port in the
+registry, so nothing could have reached this before. Send the index (`0`/`1`) until the
+catalogue commit resolves names at PUT time against the port's declared values.
+
 ## 3. The three orthogonal things, and why that is the whole design
 
 The governing requirement was **compatible with timelines, keyframes, bindings and every other
@@ -620,7 +671,7 @@ Each of these is sequenced rather than open, and the order is riskiest-first:
 | ~~the address grammar~~ | **DONE** — see §3.1 and §3.2 |
 | ~~**the seam**~~ | **DONE** — see §3.3 |
 | ~~`stage: working`~~ | **DONE** — the head/tail split; see §2.1. The CDL parity in §2 is green on both mixers |
-| source-space masks | `gn_uv_inv`, the item's inverse affine, so a mask node's coordinates are the ITEM's and not the FRAME's. **A real gap today**: a graphed layer under a non-default `MIXER FILL` has its mask in frame space, which nothing measures because every mask arm uses the default fill |
+| ~~source-space masks~~ | **DONE** — see §2.2 |
 | the mask families | `rect`, `gradient`, `qualifier`, `combine`, with materialised masks |
 | the catalogue | `/v1/catalog/node`, `suggest`, `connections/preview`, `ports/{p}/live` |
 | batches and previews | `{"op":"graph"}`, one history entry per gesture, and a per-node preview PNG |
@@ -645,6 +696,8 @@ rather than by the `MIXER` tween.
 | the no-graph fast path | `conformance`, `grading` | **100/100 at 1 LSB**, **48/48** |
 | which colour space a node pass runs in | `grade-graph` | **16/16 both mixers** — `working` agrees with `MIXER CDL` at **0.00 LSB** in both configs, and the same graph declared `display` still reads 42.00 LSB away, which is what makes the zero attributable |
 | what a node computes | `grade-window` | 1 LSB both mixers. **Its oracle asserts the DISPLAY placement** — *inside == measured outside x exposure*, which is only true of an already-encoded value — so it drives a pass-through config, where the two placements are provably indistinguishable and its figures did not move when the split landed. That is also why it cannot see a placement at all, and why `grade-graph` owns the question |
+| which space a MASK's numbers are in | `grade-graph` | **4 checks, both mixers** — the two interpretations are disjoint by construction, so each failure mode fails a different check |
+| the source-uv matrix against `transform_coords` | `node_uv_self_test` | at boot, **fatal** — five placements, and the row/column convention is the thing it exists to pin |
 | the class table against its own rules | `node_registry_self_test` | at boot |
 | the validator, one minimal document per failure mode | `graph_validate_self_test` | at boot |
 | the store's two counters, coalescing, attachment | `graph_store_self_test` | at boot |

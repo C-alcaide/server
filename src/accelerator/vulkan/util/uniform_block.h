@@ -280,7 +280,21 @@ struct alignas(16) uniform_block
     float    gn_mix        = 1.0f;          // 932  this node's contribution, times its mask
     int32_t  gn_has_in1    = 0;             // 936  a SECOND image is bound (mix, over)
     int32_t  gn_has_mask   = 0;             // 940  a fused mask's parameters are present
-    // Total: 944 bytes (59 x 16) -- unchanged, which is the point of using the padding
+    // SOURCE-SPACE MASK MATRIX -- three ROWS of a 3x3 that takes a frame uv to the ITEM's own
+    // uv, so a `mask_ellipse` declaring `space = source` follows the layer's geometry.
+    //
+    // A PLAIN float[9], and that is only correct because this block is declared
+    // `layout(scalar, ...)` in fragment_shader.frag rather than std140: under scalar layout the
+    // array stride is 4 and this matches the shader's `float gn_uv_inv[9]` byte for byte. Under
+    // std140 the stride would be 16 and three quarters of it would be padding -- so if the
+    // block's layout qualifier ever changes, THIS FIELD IS THE FIRST ONE TO BREAK, and it will
+    // break silently as a mask over the wrong region.
+    float    gn_uv_inv[9]  = {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f}; // 944
+    // Padding to a multiple of 16, declared in the shader too so the two agree explicitly.
+    // Not spare space for a future field: a field here would have to be added in both places
+    // and the pad shrunk in both, which is the same work as appending.
+    float    gn_uv_pad[3]  = {0.f, 0.f, 0.f};                               // 980
+    // Total: 992 bytes (62 x 16)
 };
 
 // ── THE SHADER'S DECLARATION ORDER IS PART OF THIS LAYOUT ───────────────────
@@ -314,7 +328,7 @@ struct alignas(16) uniform_block
 // The three anchors are deliberate rather than exhaustive: the FIRST field pins the start, and
 // the last two pin everything after the large projection/ICVFX block -- which is where fields
 // have actually been added. A drift anywhere before them moves at least one.
-static_assert(sizeof(uniform_block) == 944,
+static_assert(sizeof(uniform_block) == 992,
               "uniform_block must stay a multiple of 16 and match ParamsBlock in "
               "fragment_shader.frag -- see the measurement in the comment above");
 static_assert(offsetof(uniform_block, color_space_index) == 0,
@@ -325,6 +339,10 @@ static_assert(offsetof(uniform_block, ycbcr_full_range) == 876,
 static_assert(offsetof(uniform_block, chroma_cosited) == 880,
               "uniform_block: a field was inserted above chroma_cosited without updating "
               "the shader's ParamsBlock");
+static_assert(offsetof(uniform_block, gn_uv_inv) == 944,
+              "uniform_block: a field was inserted above gn_uv_inv, so the shader is reading "
+              "36 bytes of something else as the source-space mask matrix -- which puts a node "
+              "mask over an arbitrary region of the picture with no error anywhere");
 
 // Bit flags for `flags` field
 enum class shader_flags : uint32_t
@@ -401,6 +419,9 @@ enum class shader_flags2 : uint32_t
     // and leave the output half to the tail pass. Must equal F2_GRAPH_HEAD in
     // image/fragment_shader.frag.
     graph_head = 1u << 8,
+    // `mask_ellipse`'s `space` port resolved against whether the item's placement could
+    // actually be inverted. Must equal F2_NODE_UV_SOURCE in image/fragment_shader.frag.
+    node_uv_source = 1u << 9,
 };
 
 }}} // namespace caspar::accelerator::vulkan

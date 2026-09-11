@@ -23,9 +23,14 @@ namespace caspar { namespace accelerator { namespace ogl {
 /// Compare the OpenGL backend's hand-written layer composition against
 /// `core::fields::compose_colour`, and log the result. See `ogl/util/transforms.h`.
 void run_compose_self_test();
+
+/// Check the source-space node-mask matrix against `transform_coords`. See
+/// `ogl/util/transforms.h`.
+void run_node_uv_self_test();
 }}} // namespace caspar::accelerator::ogl
 
 namespace caspar { namespace accelerator { namespace vulkan {
 /// The same for the Vulkan backend.
 void run_compose_self_test();
+void run_node_uv_self_test();
 }}} // namespace caspar::accelerator::vulkan
