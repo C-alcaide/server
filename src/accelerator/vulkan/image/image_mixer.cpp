@@ -202,6 +202,11 @@ class image_renderer
     };
     std::mutex                       preview_lock_;
     std::unique_ptr<pending_preview> preview_;
+    //: The request this channel saw at the top of the PREVIOUS frame, compared by pointer so a
+    //: request that has survived a whole frame unclaimed can be told from one that just
+    //: arrived. Render-thread only; the pointer is read under `preview_lock_` with the unique_ptr
+    //: it refers to, and never dereferenced outside it.
+    const pending_preview*           preview_seen_ = nullptr;
 
     //: A preview that has been DRAWN this frame and not yet copied back. Resolved after the
     //: frame's single `commit()`, because a mid-frame commit corrupts the command stream --
@@ -338,6 +343,39 @@ class image_renderer
     std::future<core::render_output>
     operator()(std::vector<layer> layers, const core::video_format_desc& format_desc)
     {
+        // ── A PREVIEW THIS CHANNEL CANNOT SERVE IS REFUSED, AFTER ONE FULL FRAME ───────
+        //
+        // The shell resolves a preview by ARMING EVERY CHANNEL and waiting on each one's
+        // future in turn, so a channel that is not drawing the requested document has to SAY
+        // so. Before this it simply never answered, and the wait is two seconds -- so a graph
+        // on channel 4 of 4 cost SIX SECONDS before the first byte while channels 1-3 timed
+        // out in series. Measured at 6099 ms against 79 ms on channel 1 (`node-preview-cost`),
+        // which is the difference between an editor that feels live and one that looks broken.
+        //
+        // REFUSED ON THE FRAME AFTER THE ONE THAT SAW IT, never on the frame it arrived: a
+        // request armed while this frame was already mid-draw has not had its chance yet, and
+        // rejecting it immediately would fail a perfectly good request that merely raced the
+        // tick. Comparing the POINTER is what makes "has this survived a whole frame"
+        // answerable at all -- a new request is a new object, so every request gets a frame of
+        // its own whatever arrives after it.
+        //
+        // AT THE TOP, BEFORE EVERY EARLY RETURN, and that is the reason it is here rather than
+        // at the end of the draw: this function returns early for an empty layer list and
+        // again for a still-frame cache hit, and an idle channel is exactly the one that will
+        // never claim a request. Putting the refusal after the evaluator would leave the two
+        // commonest cases waiting the full two seconds.
+        {
+            std::lock_guard<std::mutex> lock(preview_lock_);
+            if (preview_ && preview_.get() == preview_seen_) {
+                core::node_preview_image img;
+                img.reason = "no layer on this channel is rendering a graph named '" +
+                             preview_->graph_name + "'";
+                preview_->promise.set_value(std::move(img));
+                preview_.reset();
+            }
+            preview_seen_ = preview_.get();
+        }
+
         // Counted, because this bypass is the ONLY path out of this function that returns a
         // null texture, and a null texture makes every GPU-native consumer fall back to a
         // blank frame — a silently black SDI output. Distinguishing "no layers, correctly"
@@ -896,6 +934,9 @@ class image_renderer
                             preview_want = static_cast<std::int32_t>(k);
                     if (preview_want < 0) {
                         core::node_preview_image img;
+                        // FROM THE CHANNEL THAT HAS THE DOCUMENT, so the shell keeps this one
+                        // over three other channels' "not here".
+                        img.from_matching_graph = true;
                         img.reason = "no node '" + preview_req->node_id + "' in the attached graph";
                         preview_req->promise.set_value(std::move(img));
                         preview_req.reset();
@@ -904,6 +945,7 @@ class image_renderer
                         // own. Saying so beats previewing what it aliases -- a client asking
                         // what this node produces should be told it produces nothing right now.
                         core::node_preview_image img;
+                        img.from_matching_graph = true;
                         img.reason = "node '" + preview_req->node_id +
                                      "' is bypassed or unreachable, so it has no output this frame";
                         preview_req->promise.set_value(std::move(img));

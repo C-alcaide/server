@@ -114,6 +114,16 @@ struct node_preview_image
     int         height = 0;
     std::string reason; ///< empty on success
 
+    /// Did THIS channel have the document at all?
+    ///
+    /// The distinction exists because the shell asks EVERY channel and only one can be right,
+    /// so the refusals it collects are not equal in value: "no node `e9` in the attached graph"
+    /// comes from the channel that HAS the graph and is the answer the client needs, while "no
+    /// layer on this channel is rendering a graph named `look`" is three other channels saying
+    /// nothing useful. Without this flag the last channel's generic miss overwrites the one
+    /// specific message, and a typo reports as a missing graph.
+    bool from_matching_graph = false;
+
     /// THE READBACK, STILL PENDING -- and it has to be, which cost a deadlock to learn.
     ///
     /// The obvious shape is for this struct to carry the bytes, with the mixer calling `.get()`

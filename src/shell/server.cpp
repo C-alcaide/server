@@ -1069,12 +1069,22 @@ struct server::impl
                         }
                         auto result = fut.get();
                         if (!result.ok()) {
-                            // KEPT AND KEPT LOOKING. A channel that does not have this graph
-                            // answers with a reason, and reporting the LAST one is what makes a
-                            // typo say "no node 'x' in the attached graph" rather than whatever
-                            // channel 4 thought.
                             if (!result.reason.empty())
                                 reason = result.reason;
+                            // A MATCHING CHANNEL'S REFUSAL IS FINAL. A document is attached to
+                            // exactly one layer, so the channel that HAS it is the only one
+                            // whose answer means anything -- asking the rest can only replace
+                            // "no node 'e9' in the attached graph" with "not here", which is
+                            // the message the client cannot act on.
+                            //
+                            // This used to be a comment explaining that the LAST reason was
+                            // kept for exactly this purpose. That worked only while a channel
+                            // without the document stayed silent; once it refuses promptly --
+                            // which is what took a preview on channel 4 from 6 s to one frame
+                            // -- "last" became "whichever channel is last", and the specific
+                            // message was overwritten every time.
+                            if (result.from_matching_graph)
+                                break;
                             continue;
                         }
                         // RESOLVED HERE, on the API executor, which is the whole point of the
