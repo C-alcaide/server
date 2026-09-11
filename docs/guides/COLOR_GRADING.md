@@ -1310,6 +1310,12 @@ MIXER 1-10 QUALIFIER 210 30 0.2 1.0 0.3 1.0 0.1 0.2 0.3 0.0
 > runs in **working space**, which is where the design puts it — the 42 LSB below is the
 > difference, and it is a choice now rather than an accident.
 >
+> **Five mask classes, not one.** `mask_ellipse`, `mask_rect` and `mask_gradient` are analytic
+> shapes and cost no extra pass when one node reads them; `mask_qualifier` keys on hue,
+> saturation and luma (the selection half of `MIXER QUALIFIER`); `mask_combine` takes the union,
+> intersection or difference of two masks. A mask read by more than one node gets a pass of its
+> own. Parameters are in `../features/node-graph.md` §5.0.
+>
 > **A node MASK has its own space, and it is not the same question.** `mask_ellipse` carries a
 > `space` port: `frame` (the default) is the raster, `source` is the layer's own 0..1 space, so
 > the mask moves with the picture under `MIXER FILL`, `MIXER FILL`'s scale, and `MIXER ROTATION`.

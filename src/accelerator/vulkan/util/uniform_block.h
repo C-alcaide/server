@@ -294,7 +294,32 @@ struct alignas(16) uniform_block
     // Not spare space for a future field: a field here would have to be added in both places
     // and the pad shrunk in both, which is the same work as appending.
     float    gn_uv_pad[3]  = {0.f, 0.f, 0.f};                               // 980
-    // Total: 992 bytes (62 x 16)
+    // ── THE MASK FAMILIES ───────────────────────────────────────────────────────
+    //
+    // `gn_mask_kind` is WHICH SHAPE a FUSED mask is, as a class index, -1 for none. `gn_op` is
+    // the CONSUMER's class, so without this a consumer evaluating a fused mask cannot tell an
+    // ellipse from a rectangle -- and it rendered every one of them as an ellipse until
+    // `grade-graph`'s rect arm measured a rectangle and an ellipse of identical geometry coming
+    // back byte-identical.
+    int32_t  gn_mask_kind  = -1;                                            // 992
+    float    gn_mask_angle = 0.f;                                           // 996  gradient
+    int32_t  gn_combine_op = 0;                                             // 1000 0/1/2
+    // `mask_qualifier`, hue and width in DEGREES as the registry declares them.
+    float    gn_q_hue        = 0.f;                                         // 1004
+    float    gn_q_hue_width  = 60.f;                                        // 1008
+    float    gn_q_sat_low    = 0.1f;                                        // 1012
+    float    gn_q_sat_high   = 1.f;                                         // 1016
+    float    gn_q_luma_low   = 0.f;                                         // 1020
+    float    gn_q_luma_high  = 1.f;                                         // 1024
+    float    gn_q_softness   = 0.1f;                                        // 1028
+    // Padding to a multiple of 16. Declared in the shader too, so the two agree explicitly
+    // rather than by a rule the next reader has to remember.
+    // SIX floats, not three: the fields above end at 1032 and the block must stay a multiple
+    // of 16, so the pad is 24 bytes. Counted rather than guessed -- 1032 + 12 is 1044, which is
+    // not a multiple of 16, and the 2026-08-21 measurement in the comment above is what that
+    // costs: no readback at all, no error, and a battery reporting 0/4.
+    float    gn_fam_pad[6]   = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};              // 1032
+    // Total: 1056 bytes (66 x 16)
 };
 
 // ── THE SHADER'S DECLARATION ORDER IS PART OF THIS LAYOUT ───────────────────
@@ -328,7 +353,7 @@ struct alignas(16) uniform_block
 // The three anchors are deliberate rather than exhaustive: the FIRST field pins the start, and
 // the last two pin everything after the large projection/ICVFX block -- which is where fields
 // have actually been added. A drift anywhere before them moves at least one.
-static_assert(sizeof(uniform_block) == 992,
+static_assert(sizeof(uniform_block) == 1056,
               "uniform_block must stay a multiple of 16 and match ParamsBlock in "
               "fragment_shader.frag -- see the measurement in the comment above");
 static_assert(offsetof(uniform_block, color_space_index) == 0,
@@ -339,6 +364,10 @@ static_assert(offsetof(uniform_block, ycbcr_full_range) == 876,
 static_assert(offsetof(uniform_block, chroma_cosited) == 880,
               "uniform_block: a field was inserted above chroma_cosited without updating "
               "the shader's ParamsBlock");
+static_assert(offsetof(uniform_block, gn_mask_kind) == 992,
+              "uniform_block: a field was inserted above gn_mask_kind, so the shader is reading "
+              "the mask families' parameters from the wrong offsets -- which renders a mask of "
+              "the wrong SHAPE with no error anywhere");
 static_assert(offsetof(uniform_block, gn_uv_inv) == 944,
               "uniform_block: a field was inserted above gn_uv_inv, so the shader is reading "
               "36 bytes of something else as the source-space mask matrix -- which puts a node "

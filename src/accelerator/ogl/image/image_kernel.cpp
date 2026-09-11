@@ -1437,7 +1437,15 @@ struct image_kernel::impl
             //   * a consumer with a FUSED mask: the mask node's `mask_values`, inline.
             //   * a consumer with a MATERIALISED mask: neither -- it samples plane[2], and
             //     `gn_has_mask_tex` is what says so.
-            const bool  is_mask_gen = params.node.op == core::graph::op_mask_ellipse;
+            // EVERY MASK GENERATOR, not just the ellipse. All five read their own `values`
+            // when the pass IS the generator; the three analytic ones share the ellipse's
+            // parameter layout, which is what lets one uniform upload serve all of them.
+            const auto  gop         = params.node.op;
+            const bool  is_mask_gen = gop == core::graph::op_mask_ellipse ||
+                                     gop == core::graph::op_mask_rect ||
+                                     gop == core::graph::op_mask_gradient ||
+                                     gop == core::graph::op_mask_qualifier ||
+                                     gop == core::graph::op_mask_combine;
             const auto* mp          = is_mask_gen ? params.node.values : params.node.mask_values;
 
             const bool gn_uv_source = params.node_uv_valid && mp != nullptr && mp[7] != 0.0;
@@ -1445,14 +1453,73 @@ struct image_kernel::impl
             shader_->set_matrix3("gn_uv_inv", params.node_uv_inv.data());
             // BOTH WAYS on every node pass: a bool uniform persists in the program, and a
             // stale `true` would make an unmasked node sample the previous node's mask.
+            // ── THE OTHER MASK FAMILIES' OWN PARAMETERS ─────────────────────────────
+            //
+            // Set unconditionally on every node pass, in both states, for the reason every
+            // other node uniform is: they persist in the program between draws, and a stale
+            // qualifier band would make the NEXT node's mask key a colour nobody asked for.
+            //
+            // The three ANALYTIC shapes need nothing here -- they read `gn_center`/`gn_radius`/
+            // `gn_feather`/`gn_invert` below, which is the shared layout -- except the
+            // gradient's angle, which the ellipse has no equivalent of.
+            //
+            // Offsets are PORT ORDER, the same order `compile()` lays the slots out in, and
+            // `node_registry_self_test` is what stops that order drifting. `mask_gradient`:
+            // bypass, center.0, center.1, radius.0, radius.1, feather, invert, space, angle.
+            // `nv`/`nvc` rather than `v`: an enclosing scope in this function already has a
+            // `v`, and C4456/C2374 is an ERROR in this build.
+            const auto* nv  = params.node.values;
+            const auto  nvc = params.node.values_count;
+            const auto  vat = [&](std::size_t i, double def) {
+                return nv && i < nvc ? nv[i] : def;
+            };
+            shader_->set("gn_mask_angle",
+                         static_cast<float>(gop == core::graph::op_mask_gradient ? vat(8, 0.0) : 0.0));
+
+            // `mask_qualifier`: bypass, hue, hue_width, sat_low, sat_high, luma_low, luma_high,
+            // softness, invert.
+            const bool is_qual = gop == core::graph::op_mask_qualifier;
+            shader_->set("gn_q_hue",        static_cast<float>(is_qual ? vat(1, 0.0) : 0.0));
+            shader_->set("gn_q_hue_width",  static_cast<float>(is_qual ? vat(2, 60.0) : 60.0));
+            shader_->set("gn_q_sat_low",    static_cast<float>(is_qual ? vat(3, 0.1) : 0.1));
+            shader_->set("gn_q_sat_high",   static_cast<float>(is_qual ? vat(4, 1.0) : 1.0));
+            shader_->set("gn_q_luma_low",   static_cast<float>(is_qual ? vat(5, 0.0) : 0.0));
+            shader_->set("gn_q_luma_high",  static_cast<float>(is_qual ? vat(6, 1.0) : 1.0));
+            shader_->set("gn_q_softness",   static_cast<float>(is_qual ? vat(7, 0.1) : 0.1));
+
+            // `mask_combine`: bypass, op, invert.
+            shader_->set("gn_combine_op",
+                         gop == core::graph::op_mask_combine ? static_cast<int>(vat(1, 0.0)) : 0);
+
+            // WHICH SHAPE A FUSED MASK IS. -1 when there is none, and set BOTH WAYS like
+            // every other node uniform: a stale kind would make an unmasked node's neighbour
+            // evaluate the wrong shape.
+            shader_->set("gn_mask_kind", static_cast<int>(params.node.mask_op));
             shader_->set("gn_has_mask_tex", params.node.has_mask_texture);
-            shader_->set("gn_has_mask", mp != nullptr);
-            if (mp) {
+            // `gn_has_mask` IS FALSE FOR THE TWO TEXTURE-READING GENERATORS, and that is not
+            // an oversight: the shader gates the three ANALYTIC shapes on it, and a qualifier
+            // or a combine has no analytic geometry to gate. Their own `invert` lives at a
+            // different slot, which is why it is uploaded separately below.
+            const bool analytic_gen = gop == core::graph::op_mask_ellipse ||
+                                      gop == core::graph::op_mask_rect ||
+                                      gop == core::graph::op_mask_gradient;
+            shader_->set("gn_has_mask", mp != nullptr && (!is_mask_gen || analytic_gen));
+            if (mp && (!is_mask_gen || analytic_gen)) {
                 const auto* m = mp;
                 shader_->set("gn_center", static_cast<float>(m[1]), static_cast<float>(m[2]));
                 shader_->set("gn_radius", static_cast<float>(m[3]), static_cast<float>(m[4]));
                 shader_->set("gn_feather", static_cast<float>(m[5]));
                 shader_->set("gn_invert", m[6] != 0.0);
+            } else if (is_qual) {
+                shader_->set("gn_center", 0.5f, 0.5f);
+                shader_->set("gn_radius", 8.0f, 8.0f);
+                shader_->set("gn_feather", 1e-4f);
+                shader_->set("gn_invert", vat(8, 0.0) != 0.0); // qualifier's `invert`
+            } else if (gop == core::graph::op_mask_combine) {
+                shader_->set("gn_center", 0.5f, 0.5f);
+                shader_->set("gn_radius", 8.0f, 8.0f);
+                shader_->set("gn_feather", 1e-4f);
+                shader_->set("gn_invert", vat(2, 0.0) != 0.0); // combine's `invert`
             } else {
                 // NO MASK MEANS EVERYWHERE, so the shader must not read a stale window. Set to
                 // a radius that covers any raster with the feather off -- and the shader also

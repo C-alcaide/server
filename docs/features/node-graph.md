@@ -576,6 +576,51 @@ a key rather than sliding through half of it. A bypassed node aliases its primar
 draw; a bypassed *mask generator* emits its port's disconnected default — 1.0, "everywhere" — so
 bypassing a mask means "no mask" rather than "mask nothing".
 
+### 5.0 The mask families, and what each one's parameters mean
+
+| class | inputs | parameters beyond `bypass` | fusable? |
+| :--- | :--- | :--- | :--- |
+| `mask_ellipse` | — | `center`, `radius`, `feather`, `invert`, `space` | yes |
+| `mask_rect` | — | the same five; `radius` is the **half-extent**, so the rect spans twice it | yes |
+| `mask_gradient` | — | the same five plus `angle`; `radius.0` is the **run** and `radius.1` is unused | yes |
+| `mask_qualifier` | `in` (image) | `hue`, `hue_width` (**degrees**), `sat_low/high`, `luma_low/high`, `softness`, `invert` | **no** |
+| `mask_combine` | `a`, `b` (masks) | `op` ∈ {`union`, `intersect`, `subtract`}, `invert` | **no** |
+
+**The three analytic generators share one parameter layout**, and that is a decision rather than
+a coincidence: each kernel uploads one set of mask uniforms and each shader evaluates one shape
+per class, so a new analytic generator costs a shader case and no new plumbing.
+
+**`intersect` and `subtract` are multiplicative** — `a·b` and `a·(1−b)` — not `min`. `min` would
+hand back the *harder* of two feathered edges, so intersecting two soft shapes would produce one
+soft edge and one hard one. `union` is `max` because adding saturates where they overlap.
+
+**Fusability has three conditions, not one.** A fused mask is evaluated by its *consumer* from
+the consumer's own uniforms, so a mask is fusable only if it is **analytic** (no inputs to read
+— which rules out `qualifier` and `combine` at any fan-out), has **one consumer**, and that
+consumer is **not itself a mask node** (a `mask_combine` is a pass that *samples* its inputs,
+not a draw that evaluates mask uniforms). `graph_plan_self_test` asserts all three, and the
+third one it asserted against *me*: the first version of the rule fused an ellipse feeding a
+combine, and the boot aborted naming it.
+
+### 5.0.1 A fused mask needs to say WHICH SHAPE it is
+
+`gn_mask_kind` carries the fused mask's class into the consumer, because `gn_op` there is the
+**consumer's** class. Without it a consumer has no way to tell an ellipse from a rectangle, and
+**it rendered every fused mask as an ellipse** — correct as a materialised pass, wrong the moment
+the same mask had a single consumer, which is the common case.
+
+Measured by `grade-graph`: a rectangle and an ellipse with identical `center` and `radius` came
+back **byte-identical**. They must not be — a square of half-extent *r* contains the disc of
+radius *r*, and the corner region is in one and not the other, which is the sample point the arm
+uses. After the fix the rect reads fully graded there (`224, 142, 82`) and the ellipse reads
+exactly ungraded (`140, 89, 51`).
+
+**And a second gap the same arms found:** a mask generator *with* inputs was being handed the
+head texture as its source, because the evaluator used "produces a mask" to mean "has no image
+input". `mask_combine` and `mask_qualifier` break that — so a combine read the layer's red
+channel as its `a` operand. Two of its three operators then passed *for the wrong reason*, which
+is exactly why the check asserts a triple over three regions rather than one region.
+
 ### 5.1 Ports: no new type system
 
 A port is a **`param_snapshot` plus three enums**, and that is the entire type story. The value half
@@ -716,7 +761,7 @@ Each of these is sequenced rather than open, and the order is riskiest-first:
 | ~~**the seam**~~ | **DONE** — see §3.3 |
 | ~~`stage: working`~~ | **DONE** — the head/tail split; see §2.1. The CDL parity in §2 is green on both mixers |
 | ~~source-space masks~~ | **DONE** — see §2.2 |
-| the mask families | `rect`, `gradient`, `qualifier`, `combine`, with materialised masks |
+| ~~the mask families~~ | **DONE** — see §5.0 |
 | the catalogue | `/v1/catalog/node`, `suggest`, `connections/preview`, `ports/{p}/live` |
 | batches and previews | `{"op":"graph"}`, one history entry per gesture, and a per-node preview PNG |
 
@@ -740,6 +785,7 @@ rather than by the `MIXER` tween.
 | the no-graph fast path | `conformance`, `grading` | **100/100 at 1 LSB**, **48/48** |
 | which colour space a node pass runs in | `grade-graph` | **16/16 both mixers** — `working` agrees with `MIXER CDL` at **0.00 LSB** in both configs, and the same graph declared `display` still reads 42.00 LSB away, which is what makes the zero attributable |
 | what a node computes | `grade-window` | 1 LSB both mixers. **Its oracle asserts the DISPLAY placement** — *inside == measured outside x exposure*, which is only true of an already-encoded value — so it drives a pass-through config, where the two placements are provably indistinguishable and its figures did not move when the split landed. That is also why it cannot see a placement at all, and why `grade-graph` owns the question |
+| the four mask FAMILIES — rect, gradient, qualifier, combine | `grade-graph` | **8 checks, both mixers.** Each arm is built so a wrong answer is a *different* picture: the rect against an ellipse of identical geometry at the corner, the gradient's two ends against each other, the qualifier on the source's hue *and* its complement, and `combine`'s three operators over three regions where they give three different triples |
 | a mask read by TWO consumers (the materialised path) | `grade-graph` | **3 checks, both mixers** — and the sample that matters is OUTSIDE the mask, because a dropped mask reads identically to a correct one from inside |
 | which space a MASK's numbers are in | `grade-graph` | **4 checks, both mixers** — the two interpretations are disjoint by construction, so each failure mode fails a different check |
 | the source-uv matrix against `transform_coords` | `node_uv_self_test` | at boot, **fatal** — five placements, and the row/column convention is the thing it exists to pin |

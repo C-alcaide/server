@@ -1,6 +1,31 @@
 CasparVP — Unreleased
 ==========================================
 
+### Four more mask classes — `mask_rect`, `mask_gradient`, `mask_qualifier`, `mask_combine`
+
+`mask_ellipse` was the only mask a node graph had. Four more, all usable on any grading node's
+`mask` port and on each other:
+
+* **`mask_rect`** — a soft-edged rectangle. `radius` is the HALF-extent, so it spans twice that,
+  and the feather is a fraction of it so the edge is the same proportion on both axes.
+* **`mask_gradient`** — a linear ramp at `angle` (RADIANS, like every angle in the registry),
+  with `radius.0` as the run. `feather` eases the ramp's two ENDS, so 0 is a hard linear ramp.
+* **`mask_qualifier`** — keys on hue, saturation and luma: the selection half of
+  `MIXER QUALIFIER`, as a mask other nodes can share. Takes an image input.
+* **`mask_combine`** — `union`, `intersect` or `subtract` over two masks. Intersect and subtract
+  are MULTIPLICATIVE (`a*b`, `a*(1-b)`) rather than `min`, so two feathered masks keep both
+  feathers; `min` hands back the harder of the two edges.
+
+`grade-graph` gates all four on both mixers, with each arm built so a wrong answer is a
+*different* picture rather than a nearby one.
+
+**And it fixed a defect in the mask path that was already shipping:** a FUSED mask — one with a
+single consumer, which is the common case — was always evaluated as an **ellipse**. The consumer
+evaluates a fused mask from its own uniforms and had no way to learn which mask class it was
+handed. Measured: a rectangle and an ellipse of identical `center`/`radius` rendered
+byte-identically. So **a graph using `mask_rect` or `mask_gradient` on a single consumer renders
+differently now** — correctly — and `mask_ellipse` is unchanged.
+
 ### Fixed: a node mask read by more than one node was silently DROPPED
 
 **Behaviour change, and it is a defect fix.** A mask generator feeding two or more nodes cannot

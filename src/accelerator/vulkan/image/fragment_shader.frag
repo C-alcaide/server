@@ -147,6 +147,19 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     // APPENDED here because it is appended there; the two orders are one contract.
     float gn_uv_inv[9];
     float gn_uv_pad[3];
+    // The mask families. APPENDED here because they are appended in util/uniform_block.h, and
+    // the two orders are ONE CONTRACT -- a mismatch is silent and reads as a maths bug.
+    int   gn_mask_kind;
+    float gn_mask_angle;
+    int   gn_combine_op;
+    float gn_q_hue;
+    float gn_q_hue_width;
+    float gn_q_sat_low;
+    float gn_q_sat_high;
+    float gn_q_luma_low;
+    float gn_q_luma_high;
+    float gn_q_softness;
+    float gn_fam_pad[6];
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;
@@ -216,6 +229,12 @@ const uint F2_NODE_MASK_TEX=1u<<10;
 #define GN_MASK_ELLIPSE  4
 #define GN_MIX           5
 #define GN_OVER          6
+// Appended: these are INDICES into `node_classes()`. See registry.h for why they are not filed
+// beside GN_MASK_ELLIPSE.
+#define GN_MASK_RECT      7
+#define GN_MASK_GRADIENT  8
+#define GN_MASK_QUALIFIER 9
+#define GN_MASK_COMBINE   10
 bool flag2(uint f) { return (flags2 & f) != 0u; }
 
 const float PI = 3.14159265359;
@@ -620,6 +639,78 @@ vec4 shape_fill(vec2 uv){if(shape_fill_type==0)return shape_color1;float t;if(sh
 // (1..4 / 5..8); see accelerator/ocio/ocio_config.h.
 //__CASPAR_OCIO_DECLARATIONS__
 
+
+// ── THE MASK FAMILIES ───────────────────────────────────────────────────────────
+//
+// Mirrors of ogl/image/shader.frag, where the account of each choice lives: the separable
+// product for the rect's corner (max() gives a mitred one), `feather` easing the gradient's
+// ENDS so the slider stays monotonic, and the multiplicative intersect/subtract so two
+// feathered masks keep both feathers.
+
+// FRAME uv -> the space the mask's numbers are in, shared by every analytic shape.
+vec2 gn_mask_uv(vec2 uv)
+{
+    if(!flag2(F2_NODE_UV_SOURCE))
+        return uv;
+    vec3 h=vec3(gn_uv_inv[0]*uv.x+gn_uv_inv[1]*uv.y+gn_uv_inv[2],
+                gn_uv_inv[3]*uv.x+gn_uv_inv[4]*uv.y+gn_uv_inv[5],
+                gn_uv_inv[6]*uv.x+gn_uv_inv[7]*uv.y+gn_uv_inv[8]);
+    return abs(h.z)>1e-6?h.xy/h.z:uv;
+}
+
+float gn_mask_ellipse_at(vec2 uv)
+{
+    vec2 d=(uv-vec2(gn_center_x,gn_center_y))/max(vec2(gn_radius_x,gn_radius_y),vec2(1e-6));
+    float f=max(gn_feather,1e-4);
+    float m=1.0-smoothstep(1.0-f,1.0+f,length(d));
+    return flag2(F2_GRADE_NODE_INVERT)?1.0-m:m;
+}
+
+float gn_mask_rect_at(vec2 uv)
+{
+    vec2 r=max(vec2(gn_radius_x,gn_radius_y),vec2(1e-6));
+    vec2 d=abs(uv-vec2(gn_center_x,gn_center_y))/r;
+    float f=max(gn_feather,1e-4);
+    float m=(1.0-smoothstep(1.0-f,1.0+f,d.x))*(1.0-smoothstep(1.0-f,1.0+f,d.y));
+    return flag2(F2_GRADE_NODE_INVERT)?1.0-m:m;
+}
+
+float gn_mask_gradient_at(vec2 uv)
+{
+    vec2 dir=vec2(cos(gn_mask_angle),sin(gn_mask_angle));
+    float run=max(gn_radius_x,1e-6);
+    float t=clamp(dot(uv-vec2(gn_center_x,gn_center_y),dir)/(2.0*run)+0.5,0.0,1.0);
+    float f=clamp(gn_feather,0.0,1.0);
+    float m=mix(t,smoothstep(0.0,1.0,t),f);
+    return flag2(F2_GRADE_NODE_INVERT)?1.0-m:m;
+}
+
+// NO `.bgr` HERE, and that is the channel-order trap read the other way: this shader grades in
+// RGB so `rgb2hsv` already receives RGB. The OpenGL copy swizzles because it carries BGR, and
+// an unswizzled qualifier THERE keys the opposite hue.
+float gn_mask_qualifier_at(vec3 rgb)
+{
+    vec3 hsv=rgb2hsv(clamp(rgb,0.0,1.0));
+    float f=max(gn_q_softness,1e-4);
+    // HUE IS CIRCULAR: 350 and 10 degrees are 20 apart, not 340.
+    float dh=abs(hsv.x*360.0-gn_q_hue);
+    dh=min(dh,360.0-dh);
+    float hw=max(gn_q_hue_width*0.5,1e-4);
+    float mh=1.0-smoothstep(hw*(1.0-f),hw*(1.0+f),dh);
+    float ms=smoothstep(gn_q_sat_low-f,gn_q_sat_low+f,hsv.y)*
+             (1.0-smoothstep(gn_q_sat_high-f,gn_q_sat_high+f,hsv.y));
+    float ml=smoothstep(gn_q_luma_low-f,gn_q_luma_low+f,hsv.z)*
+             (1.0-smoothstep(gn_q_luma_high-f,gn_q_luma_high+f,hsv.z));
+    float m=mh*ms*ml;
+    return flag2(F2_GRADE_NODE_INVERT)?1.0-m:m;
+}
+
+float gn_mask_combine_at(float a,float b)
+{
+    float m=gn_combine_op==1?a*b:(gn_combine_op==2?a*(1.0-b):max(a,b));
+    return flag2(F2_GRADE_NODE_INVERT)?1.0-m:m;
+}
+
 void main(){
     vec2 buv=TexCoord.st/TexCoord.q;vec4 col;
     // Destination curve compensation composes with the source projection:
@@ -650,21 +741,26 @@ void main(){
         // Mirror of ogl/image/shader.frag. Its own uniforms carry its geometry -- the kernel
         // uploads a mask node's parameters into the same slots a FUSED mask's go into, so both
         // forms compute the same number from the same code and cannot drift.
-        if(gn_op==GN_MASK_ELLIPSE){
+        if(gn_op==GN_MASK_ELLIPSE||gn_op==GN_MASK_RECT||gn_op==GN_MASK_GRADIENT||
+           gn_op==GN_MASK_QUALIFIER||gn_op==GN_MASK_COMBINE){
+            vec2 muv=gn_mask_uv(buv);
             float mm=1.0;
-            if(gn_has_mask!=0){
-                vec2 muv=buv;
-                if(flag2(F2_NODE_UV_SOURCE)){
-                    vec3 h=vec3(gn_uv_inv[0]*buv.x+gn_uv_inv[1]*buv.y+gn_uv_inv[2],
-                                gn_uv_inv[3]*buv.x+gn_uv_inv[4]*buv.y+gn_uv_inv[5],
-                                gn_uv_inv[6]*buv.x+gn_uv_inv[7]*buv.y+gn_uv_inv[8]);
-                    if(abs(h.z)>1e-6)muv=h.xy/h.z;
-                }
-                vec2 d=(muv-vec2(gn_center_x,gn_center_y))/max(vec2(gn_radius_x,gn_radius_y),vec2(1e-6));
-                float f=max(gn_feather,1e-4);
-                mm=1.0-smoothstep(1.0-f,1.0+f,length(d));
-                if(flag2(F2_GRADE_NODE_INVERT))mm=1.0-mm;
-            }
+            if(gn_op==GN_MASK_ELLIPSE)
+                mm=gn_has_mask!=0?gn_mask_ellipse_at(muv):1.0;
+            else if(gn_op==GN_MASK_RECT)
+                mm=gn_has_mask!=0?gn_mask_rect_at(muv):1.0;
+            else if(gn_op==GN_MASK_GRADIENT)
+                mm=gn_has_mask!=0?gn_mask_gradient_at(muv):1.0;
+            else if(gn_op==GN_MASK_QUALIFIER)
+                // Its IMAGE input, in plane 0 -- the pixel it is keying. `get_rgba_color` is
+                // the named reader for plane 0 on this backend, and it applies the
+                // format swizzle, so the qualifier sees RGB whatever the attachment is.
+                mm=gn_mask_qualifier_at(get_rgba_color(buv).rgb);
+            else
+                // TWO MASKS in the operand slots: `a` -> plane 0, `b` -> plane 1, each a scalar
+                // written to all four channels.
+                mm=gn_mask_combine_at(texture(textures[PLANE0],buv).r,
+                                      gn_has_in1!=0?texture(textures[PLANE1],buv).r:0.0);
             fragColor=vec4(mm,mm,mm,mm);
             return;
         }
@@ -675,6 +771,9 @@ void main(){
         if(flag2(F2_NODE_MASK_TEX)){
             m=texture(textures[PLANE2],buv).r;
         }else if(gn_has_mask!=0){
+            // DISPATCH ON THE FUSED MASK'S CLASS, not on this node's -- `gn_op` here is the
+            // CONSUMER's. Without it every fused mask is an ellipse, which is what `grade-graph`
+            // measured: a rectangle and an ellipse of identical geometry came back identical.
             // ── WHICH SPACE THE MASK'S NUMBERS ARE IN ───────────────────────────
             // `frame` is this raster; `source` follows the layer's own geometry, so the mask
             // moves with the picture under `MIXER FILL`. The rows multiply a column vector,
@@ -691,10 +790,9 @@ void main(){
                             gn_uv_inv[6]*buv.x+gn_uv_inv[7]*buv.y+gn_uv_inv[8]);
                 if(abs(h.z)>1e-6)muv=h.xy/h.z;
             }
-            vec2 d=(muv-vec2(gn_center_x,gn_center_y))/max(vec2(gn_radius_x,gn_radius_y),vec2(1e-6));
-            float f=max(gn_feather,1e-4);
-            m=1.0-smoothstep(1.0-f,1.0+f,length(d));
-            if(flag2(F2_GRADE_NODE_INVERT))m=1.0-m;
+            m=gn_mask_kind==GN_MASK_RECT?gn_mask_rect_at(muv)
+             :gn_mask_kind==GN_MASK_GRADIENT?gn_mask_gradient_at(muv)
+             :gn_mask_ellipse_at(muv);
         }
 
         vec3 graded=col.rgb;

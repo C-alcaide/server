@@ -799,8 +799,12 @@ class image_renderer
                     std::shared_ptr<texture> mask_texture;
                     if (st.mask >= 0) {
                         const auto& mst = plan->steps[st.mask];
-                        if (mst.fused_mask && mst.values_count)
+                        if (mst.fused_mask && mst.values_count) {
                             nd.mask_values = values.data() + mst.values_offset;
+                            // WHICH SHAPE, because the consumer evaluates it and `nd.op` is the
+                            // consumer's own class. Without this every fused mask is an ellipse.
+                            nd.mask_op = mst.cls;
+                        }
                         else if (alias[st.mask] >= 0 && outputs[alias[st.mask]]) {
                             mask_texture        = outputs[alias[st.mask]];
                             nd.has_mask_texture = true;
@@ -820,7 +824,14 @@ class image_renderer
                     // a source it never samples -- the pass computes its value from its own
                     // uniforms. Passed rather than left null because `apply_node` returns early
                     // on a null source, which is the right guard for every other class.
-                    const auto& src0 = st.produces_mask ? head_texture : outputs[alias[st.in0]];
+                    // `in0 < 0` RATHER THAN `produces_mask`, and the difference is two classes:
+                    // `mask_combine` reads two masks and `mask_qualifier` reads the pixel it is
+                    // keying, so both have a real `in0`. Substituting the head texture for every
+                    // mask pass fed the PICTURE in as `a` -- a combine then read the layer's red
+                    // channel as a mask, and two of its three operators passed for the wrong
+                    // reason. Only a generator with NO input needs a source it will not sample.
+                    const auto& src0 =
+                        st.in0 < 0 ? head_texture : outputs[alias[st.in0]];
                     apply_node(src0,
                                nd.has_in1 ? outputs[alias[st.in1]] : src0,
                                dst, format_desc, nd, node_uv_inv, node_uv_valid, mask_texture);

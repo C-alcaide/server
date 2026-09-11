@@ -288,6 +288,130 @@ std::vector<node_class> build_classes()
         cs.push_back(std::move(c));
     }
 
+
+    // ---- the rest of the mask families --------------------------------------------------
+    //
+    // APPENDED after `over` rather than filed beside `mask_ellipse`, because the op constants
+    // are indices into this table and inserting here would renumber `mix` and `over` -- which
+    // two kernels and two shaders hard-code. See the note in registry.h.
+    //
+    // All three GENERATORS share `mask_ellipse`'s parameter layout up to `invert`, and that is
+    // deliberate rather than convenient: the kernels upload one set of mask uniforms and the
+    // shaders evaluate one shape per `gn_op`, so a new generator costs a shader case and no new
+    // plumbing. The layout is `bypass, center.0, center.1, radius.0, radius.1, feather, invert,
+    // space` -- `radius` reads as the half-extent for a rect and as the gradient's run.
+    {
+        node_class c;
+        c.id          = "mask_rect";
+        c.label       = "Rectangle Mask";
+        c.group       = "mask";
+        c.description = "a soft-edged rectangle. 1 inside, 0 outside, feathered on both axes";
+        c.preview     = true;
+        c.produces_image = false;
+        c.ports.push_back(value_in("center", 0.5, 0.0, 1.0, "",
+                                   "centre, in the space `space` names", 2));
+        c.ports.push_back(value_in("radius", 0.25, 0.0, 1.0, "",
+                                   "HALF-extent on each axis, so the rect spans 2x this", 2));
+        c.ports.push_back(value_in("feather", 0.2, 0.0, 1.0, "",
+                                   "edge softness as a FRACTION of the half-extent, so it is "
+                                   "the same proportion on both axes"));
+        c.ports.push_back(bool_in("invert", false, "1 selects everything outside the rect"));
+        c.ports.push_back(enum_in("space", "frame,source", 0,
+                                  "`frame` is the raster; `source` follows the layer's own "
+                                  "geometry, so the mask moves with the picture",
+                                  port_flow::attribute));
+        c.ports.push_back(mask_port("out", port_direction::output));
+        cs.push_back(std::move(c));
+    }
+    {
+        node_class c;
+        c.id          = "mask_gradient";
+        c.label       = "Gradient Mask";
+        c.group       = "mask";
+        c.description = "a linear ramp from 0 to 1 across `radius`, at `angle`";
+        c.preview     = true;
+        c.produces_image = false;
+        c.ports.push_back(value_in("center", 0.5, 0.0, 1.0, "",
+                                   "where the ramp reaches 0.5, in the space `space` names", 2));
+        // `radius.0` IS THE RUN and `radius.1` is unused, so the layout stays identical to the
+        // other generators. Stated because a reader will otherwise wonder which axis applies:
+        // the ramp is one-dimensional and `angle` is what orients it.
+        c.ports.push_back(value_in("radius", 0.25, 0.0, 1.0, "",
+                                   "the RUN: half the 0-to-1 distance. Only the first component "
+                                   "is read; the second keeps the layout shared with the other "
+                                   "generators", 2));
+        c.ports.push_back(value_in("feather", 0.2, 0.0, 1.0, "",
+                                   "eases the two ends of the ramp. 0 is a hard linear ramp"));
+        c.ports.push_back(bool_in("invert", false, "1 runs the ramp the other way"));
+        c.ports.push_back(enum_in("space", "frame,source", 0,
+                                  "`frame` is the raster; `source` follows the layer's own "
+                                  "geometry",
+                                  port_flow::attribute));
+        c.ports.push_back(value_in("angle", 0.0, -6.2831853071795865, 6.2831853071795865, "rad",
+                                   "0 runs the ramp along +x. RADIANS, like every other angle in "
+                                   "the registry -- the address space writes registry units and "
+                                   "the degrees-to-radians conversion the old keyframe path did "
+                                   "is exactly what the address grammar removed"));
+        c.ports.push_back(mask_port("out", port_direction::output));
+        cs.push_back(std::move(c));
+    }
+    {
+        node_class c;
+        c.id          = "mask_qualifier";
+        c.label       = "Qualifier Mask";
+        c.group       = "mask";
+        c.description = "keys on hue, saturation and luma -- the selection half of "
+                        "`MIXER QUALIFIER`, as a mask other nodes can share";
+        c.preview     = true;
+        // TAKES AN IMAGE, which makes it the only mask generator that is not analytic: it reads
+        // the pixel it is keying. So it is never fusable into a consumer's uniforms -- a fused
+        // mask is evaluated from uniforms alone -- and `compile()` materialises it because its
+        // `in` edge gives it a fan-in the analytic generators do not have.
+        c.produces_image = false;
+        c.ports.push_back(image_port("in", port_direction::input, /*required*/ true));
+        c.ports.push_back(value_in("hue", 0.0, 0.0, 360.0, "deg",
+                                   "centre of the keyed hue band"));
+        c.ports.push_back(value_in("hue_width", 60.0, 0.0, 360.0, "deg",
+                                   "full width of the band, so +/- half this from `hue`"));
+        c.ports.push_back(value_in("sat_low", 0.1, 0.0, 1.0, "",
+                                   "saturation below this is not keyed"));
+        c.ports.push_back(value_in("sat_high", 1.0, 0.0, 1.0, "",
+                                   "saturation above this is not keyed"));
+        c.ports.push_back(value_in("luma_low", 0.0, 0.0, 1.0, "",
+                                   "luma below this is not keyed"));
+        c.ports.push_back(value_in("luma_high", 1.0, 0.0, 1.0, "",
+                                   "luma above this is not keyed"));
+        c.ports.push_back(value_in("softness", 0.1, 0.0, 1.0, "",
+                                   "eases every one of the three bands' edges"));
+        c.ports.push_back(bool_in("invert", false, "1 selects everything NOT keyed"));
+        c.ports.push_back(mask_port("out", port_direction::output));
+        cs.push_back(std::move(c));
+    }
+    {
+        node_class c;
+        c.id          = "mask_combine";
+        c.label       = "Combine Masks";
+        c.group       = "mask";
+        c.description = "union, intersect or subtract two masks";
+        c.preview     = true;
+        c.produces_image = false;
+        // TWO MASK INPUTS, so this class can NEVER be fused whatever its fan-out: a fused mask
+        // is one a consumer evaluates from its own uniforms, and this one has to read two
+        // textures. `graph_plan_self_test` asserts that, because "fused" here would mean
+        // silently ignoring both inputs -- the same shape as the defect commit 8a fixed.
+        c.ports.push_back(mask_port("a", port_direction::input, /*required*/ true));
+        c.ports.push_back(mask_port("b", port_direction::input, /*required*/ true));
+        c.ports.push_back(enum_in("op", "union,intersect,subtract", 0,
+                                  "`union` is max(a, b), `intersect` is a*b, `subtract` is "
+                                  "a*(1-b). Multiplicative rather than min/max for intersect "
+                                  "and subtract so a FEATHERED edge stays feathered -- min "
+                                  "would give the harder of the two edges",
+                                  port_flow::attribute));
+        c.ports.push_back(bool_in("invert", false, "1 inverts the result, after `op`"));
+        c.ports.push_back(mask_port("out", port_direction::output));
+        cs.push_back(std::move(c));
+    }
+
     // ---- the implicit `bypass`, added HERE so no class author can forget it -------------
     //
     // A bypassed node aliases its primary input and costs no draw, so a graph with a bypassed
@@ -621,7 +745,10 @@ void node_registry_self_test()
         const std::pair<std::int32_t, const char*> ops[] = {
             {op_input, "input"},   {op_output, "output"},           {op_exposure, "exposure"},
             {op_cdl, "cdl"},       {op_mask_ellipse, "mask_ellipse"}, {op_mix, "mix"},
-            {op_over, "over"},
+            {op_over, "over"},     {op_mask_rect, "mask_rect"},
+            {op_mask_gradient, "mask_gradient"},
+            {op_mask_qualifier, "mask_qualifier"},
+            {op_mask_combine, "mask_combine"},
         };
         for (const auto& o : ops) {
             if (static_cast<std::size_t>(o.first) >= classes.size())

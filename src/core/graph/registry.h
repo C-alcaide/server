@@ -195,6 +195,18 @@ enum : std::int32_t
     op_mask_ellipse = 4,
     op_mix          = 5,
     op_over         = 6,
+    // APPENDED, and the order here is now index order rather than group order.
+    //
+    // The table used to read roots, grade, mask, combine -- which is how a reader wants it --
+    // and these four belong in the middle of that. They are at the END because these constants
+    // are INDICES into `node_classes()`: inserting `mask_rect` after `mask_ellipse` would
+    // renumber `mix` and `over`, both of which are hard-coded in two kernels and two shaders,
+    // and nothing about that renumbering would fail to compile. `node_registry_self_test`
+    // asserts every constant against the table for exactly that reason.
+    op_mask_rect      = 7,
+    op_mask_gradient  = 8,
+    op_mask_qualifier = 9,
+    op_mask_combine   = 10,
 };
 
 /// The table. Built once, on first call, and never mutated.

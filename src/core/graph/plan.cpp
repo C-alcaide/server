@@ -19,6 +19,7 @@
 #include <common/log.h>
 
 #include <algorithm>
+#include <set>
 #include <map>
 
 namespace caspar { namespace core { namespace graph {
@@ -65,9 +66,23 @@ std::shared_ptr<const node_plan> compile(const graph_document&           doc,
     };
     std::map<std::string, incoming> feeds; // "node.port" -> where it comes from
     std::map<std::string, int>      fan_out_count;
+
+    // WHICH NODES FEED A MASK NODE, which is the third condition on fusability and the one the
+    // self-test caught me missing. A fused mask is evaluated by its CONSUMER from the
+    // consumer's own uniforms -- so the consumer has to be a draw that does that. A
+    // `mask_combine` is not: it is a pass that SAMPLES its inputs. So an ellipse feeding a
+    // combine has one consumer and still cannot be fused, and `fan_out_count <= 1` alone says
+    // the opposite.
+    std::set<std::string> feeds_a_mask;
     for (const auto& e : doc.edges) {
         feeds[e.to_node + "." + e.to_port] = incoming{e.from_node, e.from_port, e.muted};
         ++fan_out_count[e.from_node];
+        const auto to = node_of.find(e.to_node);
+        if (to != node_of.end()) {
+            const auto* tc = find_node_class(to->second->cls);
+            if (tc && tc->group == "mask")
+                feeds_a_mask.insert(e.from_node);
+        }
     }
 
     // ---- one step per node, in evaluation order ----------------------------------------
@@ -94,7 +109,19 @@ std::shared_ptr<const node_plan> compile(const graph_document&           doc,
         // draw rather than two. With more than one consumer it would have to be materialised,
         // and that is the commit that adds `mask_combine`.
         if (c->group == "mask") {
-            st.fused_mask = fan_out_count[id] <= 1;
+            // FUSABLE ONLY IF ANALYTIC, and fan-out is the second condition rather than the
+            // only one. A fused mask is evaluated by its CONSUMER from the consumer's own
+            // uniforms, so a mask that has to READ something -- `mask_qualifier` keys the
+            // pixel, `mask_combine` reads two masks -- cannot be fused at any fan-out. Fusing
+            // one would silently ignore its inputs, which is the same shape as the defect
+            // commit 8a fixed: a plan saying something the evaluator cannot honour.
+            const bool analytic =
+                std::none_of(c->ports.begin(), c->ports.end(), [](const port_desc& p) {
+                    return p.direction == port_direction::input &&
+                           (p.domain == port_domain::image || p.domain == port_domain::mask);
+                });
+            st.fused_mask =
+                analytic && fan_out_count[id] <= 1 && feeds_a_mask.find(id) == feeds_a_mask.end();
             // ...and if it is NOT fused it must be MATERIALISED. The two are exhaustive for a
             // mask, which `graph_plan_self_test` asserts -- because "neither" is exactly the
             // state that shipped: nothing implemented the texture path, so a fanned-out mask
@@ -137,12 +164,25 @@ std::shared_ptr<const node_plan> compile(const graph_document&           doc,
         // WHICH PORT IS THE PRIMARY INPUT depends on the class, and it is read off the ports
         // rather than hard-coded: the first required image input. That is what a bypassed node
         // aliases, so getting it wrong makes bypass show the wrong picture.
+        // WHAT A MASK INPUT MEANS DEPENDS ON WHETHER THIS NODE IS ITSELF A MASK.
+        //
+        // For a grade or a combine, the `mask` port is a MODIFIER -- what to multiply by -- and
+        // it belongs in `st.mask`, the slot the evaluator reads for a fused or materialised
+        // mask. For `mask_combine` the mask ports ARE THE OPERANDS: it has two of them, and
+        // `st.mask` is one slot, so routing them there would silently drop `b`.
+        //
+        // So a mask node's mask inputs take the operand slots `in0`/`in1`, which is also how
+        // the evaluator binds them -- `in0` -> plane 0, `in1` -> plane 1 -- and means a combine
+        // needs no new plumbing at all.
+        const bool is_mask_node = c->group == "mask";
         for (const auto& p : c->ports) {
             if (p.direction != port_direction::input)
                 continue;
-            if (p.domain == port_domain::image && st.in0 == -1)
+            const bool operand = p.domain == port_domain::image ||
+                                 (is_mask_node && p.domain == port_domain::mask);
+            if (operand && st.in0 == -1)
                 st.in0 = resolve(p.param.name.c_str());
-            else if (p.domain == port_domain::image && st.in1 == -1)
+            else if (operand && st.in1 == -1)
                 st.in1 = resolve(p.param.name.c_str());
             else if (p.domain == port_domain::mask && st.mask == -1)
                 st.mask = resolve(p.param.name.c_str());
@@ -411,6 +451,52 @@ void graph_plan_self_test()
         for (const auto& s2 : p->steps)
             if (s2.fused_mask && s2.produces_mask)
                 fail("step '" + s2.id + "' claims to be both fused and materialised");
+    }
+
+    // ---- a mask that has to READ something can never be fused ---------------------------
+    //
+    // `mask_qualifier` keys the pixel and `mask_combine` reads two masks, so neither can be
+    // evaluated from a consumer's uniforms at ANY fan-out. Asserted at ONE consumer, which is
+    // the case fan-out alone would have fused -- the condition that actually discriminates.
+    {
+        graph_document d;
+        d.name  = "combine";
+        d.nodes = {node("i", "input"),  node("k1", "mask_ellipse"), node("k2", "mask_ellipse"),
+                   node("cm", "mask_combine"), node("e", "exposure"), node("o", "output")};
+        d.edges = {edge("e1", "i", "out", "e", "in"),
+                   edge("e2", "k1", "out", "cm", "a"),
+                   edge("e3", "k2", "out", "cm", "b"),
+                   edge("e4", "cm", "out", "e", "mask"),
+                   edge("e5", "e", "out", "o", "in")};
+        const auto p2 = build(d);
+        if (!p2)
+            fail("a document combining two masks did not compile");
+
+        const auto cm = std::find_if(p2->steps.begin(), p2->steps.end(),
+                                     [](const node_step& s) { return s.id == "cm"; });
+        if (cm->fused_mask)
+            fail("`mask_combine` was FUSED with one consumer -- it reads two mask textures, so "
+                 "fusing it means evaluating it from uniforms alone and silently ignoring both "
+                 "of its inputs");
+        if (!cm->produces_mask)
+            fail("`mask_combine` must be MATERIALISED: it is a mask and it is not fusable");
+
+        // ITS OPERANDS MUST BE IN in0/in1, not in `mask`. There is one `mask` slot and a
+        // combine has two inputs, so routing them as modifiers drops `b` with no error.
+        if (cm->in0 < 0 || cm->in1 < 0)
+            fail("`mask_combine`'s two mask inputs must land in in0/in1 -- one of them is "
+                 "unresolved, which renders as a combine of one mask");
+        if (cm->in0 == cm->in1)
+            fail("`mask_combine`'s two inputs resolved to the SAME step");
+
+        // The two ellipses feed only the combine, so they are fused into IT -- no. They feed a
+        // node that cannot evaluate them inline, so they must be materialised as well: three
+        // mask passes plus the exposure.
+        const auto k1 = std::find_if(p2->steps.begin(), p2->steps.end(),
+                                     [](const node_step& s) { return s.id == "k1"; });
+        if (k1->fused_mask)
+            fail("an ellipse feeding a `mask_combine` cannot be fused: its consumer is not a "
+                 "draw that evaluates mask uniforms, it is a pass that SAMPLES its inputs");
     }
 
     CASPAR_LOG(info) << L"[graph-plan] self-test: all checks passed";

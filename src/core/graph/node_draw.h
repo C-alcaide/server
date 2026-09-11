@@ -57,6 +57,17 @@ struct node_draw
     /// to when `mask_combine` arrives.)
     bool has_mask_texture = false;
 
+    /// WHICH MASK CLASS the fused mask is, as an index into `node_classes()`, or -1 when there
+    /// is no fused mask.
+    ///
+    /// A fused mask is evaluated by its CONSUMER from the consumer's own uniforms, and `op`
+    /// above is the CONSUMER's class -- so without this the consumer has no way to know whether
+    /// it was handed an ellipse, a rectangle or a gradient. It rendered every one of them as an
+    /// ellipse: correct as a materialised pass, wrong the moment the same mask had one
+    /// consumer, which is the common case. Measured by `grade-graph`'s rect arm, where a
+    /// rectangle and an ellipse of identical `center`/`radius` came back byte-identical.
+    std::int32_t mask_op = -1;
+
     explicit operator bool() const { return op >= 0; }
 };
 

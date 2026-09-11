@@ -1617,10 +1617,59 @@ struct image_kernel::impl
             // account. A mask GENERATOR pass reads its own `values`; a consumer with a FUSED
             // mask reads the mask node's `mask_values`; a consumer with a MATERIALISED one
             // reads neither and samples PLANE2.
-            const bool  is_mask_gen = nd.op == core::graph::op_mask_ellipse;
+            // EVERY MASK GENERATOR, not just the ellipse -- see the OpenGL kernel.
+            const auto  gop         = nd.op;
+            const bool  is_mask_gen = gop == core::graph::op_mask_ellipse ||
+                                     gop == core::graph::op_mask_rect ||
+                                     gop == core::graph::op_mask_gradient ||
+                                     gop == core::graph::op_mask_qualifier ||
+                                     gop == core::graph::op_mask_combine;
             const auto* mp          = is_mask_gen ? nd.values : nd.mask_values;
 
-            uniforms.gn_has_mask = mp ? 1 : 0;
+            // ── THE FAMILIES' OWN PARAMETERS ────────────────────────────────────────
+            //
+            // A fresh uniform_block per draw, so unlike the OpenGL kernel there is nothing to
+            // clear on the false branch -- but the OFFSETS are the contract, and the
+            // `offsetof` assert on `gn_mask_kind` is what fails the build if one drifts.
+            //
+            // Offsets are PORT ORDER. `mask_gradient`: bypass, center.0, center.1, radius.0,
+            // radius.1, feather, invert, space, angle. `mask_qualifier`: bypass, hue,
+            // hue_width, sat_low, sat_high, luma_low, luma_high, softness, invert.
+            // `mask_combine`: bypass, op, invert.
+            const auto* nv  = nd.values;
+            const auto  nvc = nd.values_count;
+            const auto  vat = [&](std::size_t i, double def) {
+                return nv && i < nvc ? nv[i] : def;
+            };
+
+            // WHICH SHAPE a FUSED mask is, for the consumer that evaluates it.
+            uniforms.gn_mask_kind = nd.mask_op;
+
+            if (gop == core::graph::op_mask_gradient)
+                uniforms.gn_mask_angle = static_cast<float>(vat(8, 0.0));
+            if (gop == core::graph::op_mask_combine)
+                uniforms.gn_combine_op = static_cast<int32_t>(vat(1, 0.0));
+            if (gop == core::graph::op_mask_qualifier) {
+                uniforms.gn_q_hue       = static_cast<float>(vat(1, 0.0));
+                uniforms.gn_q_hue_width = static_cast<float>(vat(2, 60.0));
+                uniforms.gn_q_sat_low   = static_cast<float>(vat(3, 0.1));
+                uniforms.gn_q_sat_high  = static_cast<float>(vat(4, 1.0));
+                uniforms.gn_q_luma_low  = static_cast<float>(vat(5, 0.0));
+                uniforms.gn_q_luma_high = static_cast<float>(vat(6, 1.0));
+                uniforms.gn_q_softness  = static_cast<float>(vat(7, 0.1));
+            }
+
+            // `gn_has_mask` IS FALSE FOR THE TWO TEXTURE-READING GENERATORS: the shader gates
+            // the three ANALYTIC shapes on it, and a qualifier or a combine has no analytic
+            // geometry to gate. Their own `invert` sits at a different slot.
+            const bool analytic_gen = gop == core::graph::op_mask_ellipse ||
+                                      gop == core::graph::op_mask_rect ||
+                                      gop == core::graph::op_mask_gradient;
+            uniforms.gn_has_mask = (mp && (!is_mask_gen || analytic_gen)) ? 1 : 0;
+            if (gop == core::graph::op_mask_qualifier && vat(8, 0.0) != 0.0)
+                uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::grade_node_invert);
+            if (gop == core::graph::op_mask_combine && vat(2, 0.0) != 0.0)
+                uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::grade_node_invert);
             if (nd.has_mask_texture)
                 uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::node_mask_tex);
             // ── WHICH SPACE THE MASK'S NUMBERS ARE IN ───────────────────────────────
@@ -1637,7 +1686,7 @@ struct image_kernel::impl
                 uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::node_uv_source);
             for (int i = 0; i < 9; ++i)
                 uniforms.gn_uv_inv[i] = params.node_uv_inv[i];
-            if (mp) {
+            if (mp && (!is_mask_gen || analytic_gen)) {
                 const auto* m          = mp;
                 uniforms.gn_center_x   = static_cast<float>(m[1]);
                 uniforms.gn_center_y   = static_cast<float>(m[2]);

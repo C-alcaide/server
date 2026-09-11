@@ -204,6 +204,12 @@ uniform sampler2D blend_mask_tex;  // RGB intensity map, sampled at output scree
 #define GN_MASK_ELLIPSE  4
 #define GN_MIX           5
 #define GN_OVER          6
+// Appended, because these are INDICES into `node_classes()` -- see registry.h for why they are
+// not filed beside GN_MASK_ELLIPSE.
+#define GN_MASK_RECT      7
+#define GN_MASK_GRADIENT  8
+#define GN_MASK_QUALIFIER 9
+#define GN_MASK_COMBINE   10
 uniform int   gn_op;
 // The SECOND source, for `mix` and `over`. Bound to the same texture as the first when
 // nothing is connected, so an unconnected `mix.b` returns `a` rather than sampling
@@ -223,10 +229,16 @@ uniform bool  gn_has_mask;
 // the same texture. A scalar, so it is written to all four channels and read from `.r` --
 // no channel-order question on either backend.
 uniform bool  gn_has_mask_tex;
+// WHICH SHAPE a FUSED mask is -- an index into the class table, -1 for none. `gn_op` is this
+// node's OWN class, so without this a consumer evaluating a fused mask has no way to tell an
+// ellipse from a rectangle and rendered every one of them as an ellipse.
+uniform int   gn_mask_kind;
 
 // Prototypes: `grade_node_mask_value` picks between the texture and the analytic form, and the
 // analytic one is defined below it.
 float grade_node_mask(vec2 uv);
+float grade_node_mask_rect(vec2 uv);
+float grade_node_mask_gradient(vec2 uv);
 vec2  grade_node_mask_uv(vec2 uv);
 uniform vec2  gn_center;    // in the space `space` names, 0..1
 uniform vec2  gn_radius;
@@ -237,6 +249,25 @@ uniform bool  gn_invert;
 // takes a frame uv to the ITEM's own uv, so a mask follows the picture when the layer is moved,
 // scaled or rotated. Both set on every node pass, in both states -- a stale `true` here would
 // mask through the previous layer's geometry.
+// `mask_gradient`'s orientation, in RADIANS. Its own uniform rather than reusing an existing
+// angle: `blur_angle` and `shape_gradient_angle` are set from `image_transform` on a LAYER draw
+// and a node pass leaves them at their defaults, so borrowing one would work until somebody
+// combined a node graph with a blur.
+uniform float gn_mask_angle;
+
+// `mask_qualifier`'s eight parameters. Hue and its width in DEGREES, as the registry declares
+// them and as `MIXER QUALIFIER` takes them.
+uniform float gn_q_hue;
+uniform float gn_q_hue_width;
+uniform float gn_q_sat_low;
+uniform float gn_q_sat_high;
+uniform float gn_q_luma_low;
+uniform float gn_q_luma_high;
+uniform float gn_q_softness;
+
+// `mask_combine`'s operator: 0 union, 1 intersect, 2 subtract.
+uniform int   gn_combine_op;
+
 uniform bool  gn_uv_source;
 uniform mat3  gn_uv_inv;
 uniform float gn_exposure;
@@ -1511,7 +1542,93 @@ float grade_node_mask_value(vec2 uv)
 {
     if (gn_has_mask_tex)
         return texture(plane[2], uv).r;
-    return gn_has_mask ? grade_node_mask(grade_node_mask_uv(uv)) : 1.0;
+    if (!gn_has_mask)
+        return 1.0;
+    // DISPATCH ON THE FUSED MASK'S CLASS, not on this node's. The three analytic shapes share
+    // one parameter layout, so this is the only thing that distinguishes them here.
+    vec2 muv = grade_node_mask_uv(uv);
+    if (gn_mask_kind == GN_MASK_RECT)
+        return grade_node_mask_rect(muv);
+    if (gn_mask_kind == GN_MASK_GRADIENT)
+        return grade_node_mask_gradient(muv);
+    return grade_node_mask(muv);
+}
+
+// A SOFT-EDGED RECTANGLE. The feather is a FRACTION of the half-extent, like the ellipse's, so
+// the edge is the same proportion on both axes rather than the same distance -- which is what
+// keeps it isotropic on a non-square raster.
+float grade_node_mask_rect(vec2 uv)
+{
+    vec2  r = max(gn_radius, vec2(1e-6));
+    vec2  d = abs(uv - gn_center) / r;
+    float f = max(gn_feather, 1e-4);
+    // The SEPARABLE product rather than max(d.x, d.y): the corner then eases on both axes at
+    // once, which is what a feathered rectangle looks like. `max` gives a mitred corner.
+    float mx = 1.0 - smoothstep(1.0 - f, 1.0 + f, d.x);
+    float my = 1.0 - smoothstep(1.0 - f, 1.0 + f, d.y);
+    float m  = mx * my;
+    return gn_invert ? 1.0 - m : m;
+}
+
+// A LINEAR RAMP, 0 to 1 across 2 x `radius.0`, oriented by `gn_mask_angle`.
+//
+// `radius.0` is the RUN and `radius.1` is unused -- the layout is shared with the other
+// generators so one uniform upload serves all three, and the registry says so on the port.
+float grade_node_mask_gradient(vec2 uv)
+{
+    vec2  dir = vec2(cos(gn_mask_angle), sin(gn_mask_angle));
+    float run = max(gn_radius.x, 1e-6);
+    // Projected distance along `dir`, remapped so `center` is 0.5 and +/- run is 0/1.
+    float t = dot(uv - gn_center, dir) / (2.0 * run) + 0.5;
+    float f = clamp(gn_feather, 0.0, 1.0);
+    // FEATHER EASES THE ENDS rather than the middle: at 0 this is a hard linear ramp, and at 1
+    // it is a full smoothstep. Mixing between the two keeps `feather` monotonic, which a
+    // client dragging the slider needs.
+    float m = mix(clamp(t, 0.0, 1.0), smoothstep(0.0, 1.0, clamp(t, 0.0, 1.0)), f);
+    return gn_invert ? 1.0 - m : m;
+}
+
+// KEYS ON HUE, SATURATION AND LUMA -- the selection half of `MIXER QUALIFIER`.
+//
+// `.bgr` ON THE SAMPLE, because this shader carries the pixel in BGR and `rgb2hsv` reads
+// specific channels: without it the hue wheel is mirrored and a qualifier keyed on orange
+// selects teal. The same trap `apply_hue_shift` records two hundred lines below, and the one
+// this class is most likely to be got wrong in -- which is why the battery keys an ASYMMETRIC
+// colour rather than a grey.
+float grade_node_mask_qualifier(vec3 rgb)
+{
+    vec3  hsv = rgb2hsv(clamp(rgb.bgr, 0.0, 1.0));
+    float f   = max(gn_q_softness, 1e-4);
+
+    // HUE IS CIRCULAR, so the distance has to wrap: 350 deg and 10 deg are 20 apart, not 340.
+    float dh = abs(hsv.x * 360.0 - gn_q_hue);
+    dh       = min(dh, 360.0 - dh);
+    float hw = max(gn_q_hue_width * 0.5, 1e-4);
+    float mh = 1.0 - smoothstep(hw * (1.0 - f), hw * (1.0 + f), dh);
+
+    // Saturation and luma are BANDS with two soft edges each, so a band of zero width keys
+    // nothing rather than everything.
+    float ms = smoothstep(gn_q_sat_low - f, gn_q_sat_low + f, hsv.y) *
+               (1.0 - smoothstep(gn_q_sat_high - f, gn_q_sat_high + f, hsv.y));
+    float ml = smoothstep(gn_q_luma_low - f, gn_q_luma_low + f, hsv.z) *
+               (1.0 - smoothstep(gn_q_luma_high - f, gn_q_luma_high + f, hsv.z));
+
+    float m = mh * ms * ml;
+    return gn_invert ? 1.0 - m : m;
+}
+
+// UNION, INTERSECT, SUBTRACT -- and two of the three are multiplicative on purpose.
+//
+// `min(a, b)` and `min(a, 1-b)` would give the HARDER of the two edges, so intersecting two
+// feathered masks would produce a mask with one feathered edge and one hard one. The products
+// keep both feathers, which is what an operator dragging two soft shapes together expects.
+// `union` is `max` because the additive alternative saturates where they overlap.
+float grade_node_mask_combine(float a, float b)
+{
+    float m = gn_combine_op == 1 ? a * b
+            : gn_combine_op == 2 ? a * (1.0 - b)
+                                 : max(a, b);
+    return gn_invert ? 1.0 - m : m;
 }
 
 float grade_node_mask(vec2 uv)
@@ -1957,8 +2074,27 @@ void main()
         // forms compute the same number from the same code and cannot drift. Written to all
         // four channels because a mask is a scalar and this shader carries BGR: an all-equal
         // write is the one thing invariant under the channel-order trap.
-        if (gn_op == GN_MASK_ELLIPSE) {
-            float mm = gn_has_mask ? grade_node_mask(grade_node_mask_uv(base_uv)) : 1.0;
+        if (gn_op == GN_MASK_ELLIPSE || gn_op == GN_MASK_RECT || gn_op == GN_MASK_GRADIENT ||
+            gn_op == GN_MASK_QUALIFIER || gn_op == GN_MASK_COMBINE) {
+            // The THREE ANALYTIC shapes read the shared geometry through the source-space
+            // remap; the other two read textures and have no geometry of their own.
+            vec2  muv = grade_node_mask_uv(base_uv);
+            float mm  = 1.0;
+            if (gn_op == GN_MASK_ELLIPSE)
+                mm = gn_has_mask ? grade_node_mask(muv) : 1.0;
+            else if (gn_op == GN_MASK_RECT)
+                mm = gn_has_mask ? grade_node_mask_rect(muv) : 1.0;
+            else if (gn_op == GN_MASK_GRADIENT)
+                mm = gn_has_mask ? grade_node_mask_gradient(muv) : 1.0;
+            else if (gn_op == GN_MASK_QUALIFIER)
+                // Its IMAGE input, in plane 0 -- the pixel it is keying. `.bgra` for the same
+                // reason every other read of plane 0 has it.
+                mm = grade_node_mask_qualifier(texture(plane[0], base_uv).bgra.rgb);
+            else
+                // TWO MASKS, in the operand slots: `a` -> plane 0, `b` -> plane 1. A mask is a
+                // scalar written to all four channels, so `.r` is the whole value.
+                mm = grade_node_mask_combine(texture(plane[0], base_uv).r,
+                                             gn_has_in1 ? texture(plane[1], base_uv).r : 0.0);
             fragColor = vec4(mm, mm, mm, mm);
             return;
         }
