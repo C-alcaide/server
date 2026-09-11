@@ -271,8 +271,13 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     // two graphs cannot be composed without resampling one set of windows onto the other's
     // space. Must be mirrored in the Vulkan copy of this function or the backends diverge in
     // a way no single-backend test can see.
-    if (other.grade_nodes) {
-        self.grade_nodes = other.grade_nodes;
+    if (other.node_plan) {
+        // BOTH MEMBERS TOGETHER, always. The values are indexed by offsets THIS plan carries,
+        // so taking one without the other is an out-of-range read on the frame path -- and a
+        // field missing from this list is silently dropped with the command still answering 202,
+        // which is what `apply_transform_colour_values`' whole header warns about.
+        self.node_plan   = other.node_plan;
+        self.node_values = other.node_values;
     }
 
     // 3D LUT

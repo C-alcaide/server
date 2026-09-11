@@ -1273,7 +1273,41 @@ MIXER 1-10 QUALIFIER 210 30 0.2 1.0 0.3 1.0 0.1 0.2 0.3 0.0
 
 ---
 
-## MIXER GRADE_NODE — windowed grading nodes (prototype)
+## Node graphs — `GRAPH ATTACH`, and what replaced `MIXER GRADE_NODE`
+
+> **`MIXER GRADE_NODE` WAS REMOVED 2026-09-11.** It answers `unknown command` now. What replaced
+> it is a node GRAPH: a document you `PUT` over the control API and attach to a layer, whose
+> parameters are ordinary addresses. Operator syntax is in
+> [`OPERATIONS_GUIDE.md`](OPERATIONS_GUIDE.md) §`GRAPH`; the model and the measurements are in
+> [`../features/node-graph.md`](../features/node-graph.md).
+>
+> **Why it was replaced rather than extended**, in one line each: `NODE 3` meant "whatever is
+> third", so deleting a node renumbered every reference to the ones after it; there was no
+> topology at all, so a `mix` of two graded versions of one picture was inexpressible; and it
+> graded the display-encoded pixel, measured **42 LSB** from `MIXER CDL` (below).
+>
+> **The migration for a show that used it:**
+>
+> ```
+> PUT /v1/graph/look   {"stage":"display", "nodes":[
+>                         {"id":"in","class":"input"},
+>                         {"id":"k","class":"mask_ellipse","params":{"center":[0.5,0.5],
+>                                                                    "radius":[0.25,0.18],
+>                                                                    "feather":0.4}},
+>                         {"id":"e","class":"exposure","params":{"gain":1.0}},
+>                         {"id":"out","class":"output"}],
+>                       "edges":[{"from":"in.out","to":"e.in"},
+>                                {"from":"k.out","to":"e.mask"},
+>                                {"from":"e.out","to":"out.in"}]}
+> GRAPH 1-1 ATTACH look
+> MIXER 1-1 FIELD node/e/gain 2.0        # and this is now a timeline key and a BIND target too
+> ```
+>
+> `"stage":"display"` reproduces the prototype's placement exactly. Leave it out and the graph
+> runs in **working space**, which is where the design puts it — the 42 LSB below is the
+> difference, and it is a choice now rather than an accident.
+
+### The prototype, as it was (historical)
 
 **Undocumented until 2026-08-27**, and the only fork grading command that was in no document at
 all — while `../plans/GRADING_NODE_GRAPH_STUDY.md` still described it as unimplemented. It ships,

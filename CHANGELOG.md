@@ -1,6 +1,52 @@
 CasparVP — Unreleased
 ==========================================
 
+### `MIXER GRADE_NODE` is removed, and a node graph renders in its place
+
+**Behaviour change, and it removes a command.** `MIXER GRADE_NODE` answers `unknown command`. A
+node graph does what it did and more: `PUT /v1/graph/{name}`, then `GRAPH <ch>-<layer> ATTACH`.
+`COLOR_GRADING.md` carries the migration, and `"stage": "display"` reproduces the prototype's
+placement exactly.
+
+**The picture is reproduced to the same numbers.** `grade-window` was migrated to the graph and
+reports figures identical to the prototype's, on both mixers: inside **0.50 LSB**, leak **0.00**,
+separation 77.0, still-frame move 76.7, restore 0.00, two-node chain **0.75**, invert 0.00/77.0,
+composite under a `screen` blend **0.00**, per-node CDL **0.38**, saturation-0 neutrality **0.00**.
+`conformance` is **100/100 at 1 LSB** and `grading` **48/48** — the no-graph fast path is byte-for-byte
+the path it was.
+
+**And a bug that was shipping is fixed.** `image_transform::tween` assigned `lut3d`, `hue_curves`
+and `blend_mask` to the destination and **never the graph**, so for the whole duration of any
+in-flight `MIXER <field> <v> <duration>` on a graphed layer the look **vanished** and snapped back
+at the end. It survived because `grade-window` never tweens anything, so nothing in the harness
+could see it; `grade-graph` now measures the graph surviving a mid-fade at **94.5 LSB** from the
+ungraded colour.
+
+**What the graph adds over the prototype**, each of which the array could not express:
+
+* **identity.** Node ids are the client's, so deleting a node does not renumber references to the
+  others — which is what makes a parameter address, a timeline key, a binding and an undo entry
+  all survive an edit.
+* **topology.** `mix` and `over` take two images. Fan-out is a pointer copy, so two consumers of
+  one output cost one draw.
+* **bypass and mute as VALUES.** A bypassed node is **byte-identical** to no node at all, and a
+  timeline can step either — the compiled plan is the same object, so nothing reallocates.
+* **a mask is its own node.** One `mask_ellipse` can feed two grades; the prototype needed the
+  geometry declared twice. With one consumer the mask is *fused* into its consumer's uniforms and
+  costs no pass.
+* **and every node parameter is an address**, so `MIXER FIELD node/n1/gain`, a timeline key, a
+  `BIND` target and a `HOLD` path are the same string.
+
+**The UBO did not grow**, which is worth stating because a layout change there is silent and
+total: sixteen bytes of existing padding became `gn_op`, `gn_mix`, `gn_has_in1` and `gn_has_mask`,
+so `static_assert(sizeof == 944)` and both `offsetof` anchors stand unchanged and nothing above
+them moved.
+
+**Still `stage: display` only.** The design puts node passes in **working space** — scene-linear,
+before tone-map and the OETF, where `MIXER CDL` runs — and that is the next change. The gap is
+measured at **32–42 LSB** depending on the configuration, identically on both mixers, and
+`grade-graph`'s last check is written inverted so the move cannot land silently.
+
 ### A node graph is a document you can attach to a layer — and its parameters are ordinary addresses
 
 **New, and it changes no picture yet.** `PUT /v1/graph/{name}` stores a typed DAG of image, mask

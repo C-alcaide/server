@@ -128,7 +128,7 @@ bool guard_holds(guard_t g, const IT& o)
         case guard_t::lut3d_present: return static_cast<bool>(o.lut3d);
         case guard_t::hue_curves_present: return static_cast<bool>(o.hue_curves);
         case guard_t::blend_mask_present: return static_cast<bool>(o.blend_mask);
-        case guard_t::grade_nodes_present: return static_cast<bool>(o.grade_nodes);
+        case guard_t::graph_present: return static_cast<bool>(o.node_plan);
         case guard_t::split_active:
             return std::any_of(o.split_shadow_color.begin(), o.split_shadow_color.end(), is_set) ||
                    std::any_of(o.split_highlight_color.begin(), o.split_highlight_color.end(), is_set);
@@ -600,7 +600,11 @@ const std::vector<field_desc>& all()
         FL("lut3d_strength",   lut3d_strength,    1.0f, lim::lut3d_strength, refuse, innermost_wins, lut3d_present, nullptr, "", "lut3d_strength", continuous),
         BLOB("hue_curves",     hue_curves,        hue_curves_present),
         BLOB("blend_mask",     blend_mask,        blend_mask_present),
-        BLOB("grade_nodes",    grade_nodes,       grade_nodes_present),
+        // `graph`, renamed from `grade_nodes` with the prototype. KEPT as a BLOB row rather
+        // than removed: it is the cheap PRESENCE flag the composition guard reads, and the one
+        // thing a client can ask about a layer's graph without walking `mixer/node/`. The node
+        // PARAMETERS are their own leaves, published by the stage from the attached document.
+        BLOB("graph",          node_plan,         graph_present),
     };
     // clang-format on
 
@@ -953,8 +957,12 @@ void compose_colour(image_transform& self, const image_transform& other)
         self.hue_curves = other.hue_curves;
     if (other.blend_mask)
         self.blend_mask = other.blend_mask;
-    if (other.grade_nodes)
-        self.grade_nodes = other.grade_nodes;
+    if (other.node_plan) {
+        // Both together -- see the accelerator allowlists for why taking one is a frame-path
+        // out-of-range read rather than a missing look.
+        self.node_plan   = other.node_plan;
+        self.node_values = other.node_values;
+    }
 }
 
 void apply_enables(image_transform& tf, const field_desc& field)

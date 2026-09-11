@@ -134,6 +134,13 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     float gn_cdl_off_r;   float gn_cdl_off_g;   float gn_cdl_off_b;
     float gn_cdl_pow_r;   float gn_cdl_pow_g;   float gn_cdl_pow_b;
     float gn_cdl_sat;
+    // ── Which node class, and the two fan-in flags ──────────────────────────
+    // Taken out of uniform_block.h's trailing padding, so nothing above moved and the
+    // asserts there did not have to change.
+    int   gn_op;
+    float gn_mix;
+    int   gn_has_in1;
+    int   gn_has_mask;
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;
@@ -175,8 +182,22 @@ const uint F2_OUTPUT_BGRA=1u<<0;
 const uint F2_ICVFX=1u<<1;
 const uint F2_BLEND_MASK=1u<<2;
 // Must equal shader_flags2::grade_node_only / ::grade_node_invert in util/uniform_block.h.
-const uint F2_GRADE_NODE=1u<<6;
+// Bit 6 WAS F2_GRADE_NODE and is gone: `gn_op >= 0` says the same thing and cannot
+// disagree with itself. Left as a hole rather than reused -- renumbering a flag whose
+// only pin is a comment in uniform_block.h is the silent-mismatch class that file warns
+// about at length.
 const uint F2_GRADE_NODE_INVERT=1u<<7;
+
+// WHICH NODE CLASS. An index into `node_classes()`, and `node_registry_self_test` asserts
+// every one of these against that table: a reordering compiles perfectly and would make an
+// exposure run the CDL's code.
+#define GN_INPUT         0
+#define GN_OUTPUT        1
+#define GN_EXPOSURE      2
+#define GN_CDL           3
+#define GN_MASK_ELLIPSE  4
+#define GN_MIX           5
+#define GN_OVER          6
 bool flag2(uint f) { return (flags2 & f) != 0u; }
 
 const float PI = 3.14159265359;
@@ -588,23 +609,49 @@ void main(){
     // No swizzle on the exposure: it is a uniform scale over all three channels, so
     // it is correct in either channel order. A per-channel operation added here would
     // need `.bgr` on the OpenGL side and none on this one -- the channel-order trap.
-    if(flag2(F2_GRADE_NODE)){
-        vec2 d=(buv-vec2(gn_center_x,gn_center_y))/max(vec2(gn_radius_x,gn_radius_y),vec2(1e-6));
-        float f=max(gn_feather,1e-4);
-        float m=1.0-smoothstep(1.0-f,1.0+f,length(d));
-        if(flag2(F2_GRADE_NODE_INVERT))m=1.0-m;
-        vec3 graded=col.rgb*gn_exposure;
-        // The per-channel operation the comment above warned about. NO SWIZZLE: this mixer
-        // grades in RGB, so the operands go in as they arrive. The OpenGL copy applies `.bgr`
-        // to all three. Getting this backwards on either side exchanges red and blue, and a
-        // neutral CDL is invariant under that -- which is why the battery uses asymmetric
-        // slope, offset and power.
-        if(gn_has_cdl!=0)
-            graded=apply_cdl(graded,
+    if(gn_op>=0){
+        // NO MASK MEANS EVERYWHERE, and `gn_has_mask` is what says so rather than the
+        // geometry. A radius large enough to cover the raster would work today and stop
+        // working the moment somebody changed a default.
+        float m=1.0;
+        if(gn_has_mask!=0){
+            vec2 d=(buv-vec2(gn_center_x,gn_center_y))/max(vec2(gn_radius_x,gn_radius_y),vec2(1e-6));
+            float f=max(gn_feather,1e-4);
+            m=1.0-smoothstep(1.0-f,1.0+f,length(d));
+            if(flag2(F2_GRADE_NODE_INVERT))m=1.0-m;
+        }
+
+        vec3 graded=col.rgb;
+        if(gn_op==GN_EXPOSURE){
+            graded=col.rgb*gn_exposure;
+            m*=gn_mix;
+        }else if(gn_op==GN_MIX){
+            // `b` IS `a` WHEN NOTHING IS CONNECTED -- the kernel binds the same texture
+            // twice -- so an unmixed branch leaves the picture alone instead of mixing
+            // toward black. A muted edge blacking a layer during a show is the one failure
+            // nobody forgives, and this is where that promise is kept. `gn_mix` is this
+            // class's own amount, so the mask must not multiply it a second time.
+            vec4 b=gn_has_in1!=0?texture(textures[PLANE1],buv):col;
+            graded=mix(col.rgb,b.rgb,gn_mix);
+        }else if(gn_op==GN_OVER){
+            // Premultiplied source-over: a + (1-a.alpha) * b.
+            vec4 b=gn_has_in1!=0?texture(textures[PLANE1],buv):vec4(0.0);
+            graded=col.rgb+(1.0-col.a)*b.rgb;
+        }else if(gn_op==GN_CDL){
+            // NO SWIZZLE: this mixer grades in RGB, so the operands go in as they arrive.
+            // The OpenGL copy applies `.bgr` to all three. Getting this backwards on either
+            // side exchanges red and blue, and a neutral CDL is invariant under that --
+            // which is why the battery uses asymmetric slope, offset and power.
+            graded=apply_cdl(col.rgb,
                              vec3(gn_cdl_slope_r,gn_cdl_slope_g,gn_cdl_slope_b),
                              vec3(gn_cdl_off_r,gn_cdl_off_g,gn_cdl_off_b),
                              vec3(gn_cdl_pow_r,gn_cdl_pow_g,gn_cdl_pow_b),
                              gn_cdl_sat);
+            m*=gn_mix;
+        }
+        // Anything else -- a root, or a mask generator that somehow reached a draw -- is
+        // the identity, which is the safe answer: a class the shader does not know renders
+        // the input unchanged rather than black.
         col.rgb=mix(col.rgb,graded,m);
         fragColor=flag2(F2_OUTPUT_BGRA)?col.bgra:col;
         return;

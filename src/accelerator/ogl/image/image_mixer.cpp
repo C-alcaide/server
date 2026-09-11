@@ -22,6 +22,9 @@
 #include "image_mixer.h"
 
 #include "image_kernel.h"
+
+#include <core/graph/plan.h>
+#include <core/graph/registry.h>
 #include "previz_renderer.h"
 
 #include <core/stage/stage_fields.h>
@@ -587,22 +590,60 @@ class image_renderer
             // If there is a mix, this is the end so draw it and reset
             draw(target_texture, std::move(local_mix_texture), format_desc, core::blend_mode::normal);
 
-            // Copied out BEFORE draw_params is moved from, and the enabled-node count
-            // decided here rather than inside the branch: `graph` is a reference into
-            // draw_params and reading it after the move is undefined.
-            std::shared_ptr<const core::grade_graph> graph = draw_params.transforms.image_transform.grade_nodes;
-            int                                     enabled_nodes = 0;
-            if (graph) {
-                for (const auto& n : graph->nodes)
-                    if (n.enable)
-                        ++enabled_nodes;
+            // Copied out BEFORE draw_params is moved from: both members live in it and reading
+            // them afterwards is undefined. The prototype's comment said the same about
+            // `grade_nodes` and it is still the trap.
+            std::shared_ptr<const core::graph::node_plan> plan =
+                draw_params.transforms.image_transform.node_plan;
+            const auto values = draw_params.transforms.image_transform.node_values;
+
+            // WHICH STEPS ARE LIVE, decided here and not in the compiler, because `bypass` and
+            // `mute` are VALUES: the plan is identical whether a node is bypassed or not, which
+            // is exactly what lets a timeline step one without reallocating a graph mid-show.
+            //
+            // One linear walk. A bypassed step ALIASES its primary input -- no draw, no
+            // attachment -- so a graph with a bypassed node renders byte-identically to the
+            // graph without it, which `grade-graph` gates rather than assumes. A step whose
+            // primary input is dead is itself dead, and "dead" resolves to the INPUT rather
+            // than to black: a path with no live route renders the layer unchanged, because a
+            // muted edge blacking a layer during a show is the one failure nobody forgives.
+            std::vector<int> alias;
+            int              live_passes = 0;
+            if (plan && !plan->steps.empty()) {
+                alias.resize(plan->steps.size(), -1);
+                for (std::size_t i = 0; i < plan->steps.size(); ++i) {
+                    const auto& st = plan->steps[i];
+                    // `bypass` is the class's FIRST value port by construction -- the registry
+                    // inserts it at the front of every class -- so its slot is the step's own
+                    // offset. That coupling is why the registry adds it rather than each class.
+                    const bool bypassed = st.values_count > 0 &&
+                                          st.values_offset < values.size() &&
+                                          values[st.values_offset] != 0.0;
+                    const int primary = st.in0 >= 0 ? alias[st.in0] : -1;
+
+                    if (!st.produces_image) {
+                        // `input` is step 0 and IS the head pass's output; `output` is the tail
+                        // and takes whatever reaches it; a fused mask draws nothing at all.
+                        alias[i] = st.in0 < 0 ? static_cast<int>(i) : primary;
+                        continue;
+                    }
+                    if (bypassed || primary < 0) {
+                        alias[i] = primary < 0 ? 0 : primary;
+                        continue;
+                    }
+                    alias[i] = static_cast<int>(i);
+                    ++live_passes;
+                }
             }
 
             // The no-graph fast path is the ordinary one and must stay byte-identical:
             // same target, same keys, one draw, no attachment. Anything else regresses
             // every layer in every production to buy a feature almost none of them use.
-            std::shared_ptr<texture> node_texture;
-            if (enabled_nodes > 0) {
+            //
+            // `live_passes == 0` covers no graph, an empty graph AND a graph with everything
+            // bypassed -- one path for all three, gated byte-identically.
+            std::shared_ptr<texture> head_texture;
+            if (live_passes > 0) {
                 // With a graph the item renders into a private attachment so the node
                 // chain has something of its own to work on, and the result is then
                 // composited normally.
@@ -628,9 +669,9 @@ class image_renderer
                 // Guarded by `grade-window`'s composite check: a two-layer scene under a
                 // `screen` blend, sampled outside the window where the node does nothing, with
                 // and without a graph. 0.00 LSB on both mixers.
-                node_texture = ogl_->create_texture(
+                head_texture = ogl_->create_texture(
                     target_texture->width(), target_texture->height(), 4, depth_, true, render_format_);
-                draw_params.background = node_texture;
+                draw_params.background = head_texture;
             } else {
                 draw_params.background = target_texture;
             }
@@ -639,36 +680,82 @@ class image_renderer
 
             kernel_.draw(std::move(draw_params));
 
-            if (enabled_nodes > 0) {
-                // Ping-pong. Two attachments cover any node count because each node reads
-                // only its immediate predecessor; both come from the device pool, so this
-                // is pool hits rather than allocations.
-                auto src = node_texture;
-                for (const auto& n : graph->nodes) {
-                    if (!n.enable)
+            if (live_passes > 0) {
+                // ONE TEXTURE PER STEP, and an ALIAS is a `shared_ptr` copy rather than a draw
+                // -- which is what makes fan-out free: two consumers of one output hold the
+                // same texture. The prototype could not express that at all, because a
+                // ping-pong pair only ever holds the immediate predecessor.
+                std::vector<std::shared_ptr<texture>> outputs(plan->steps.size());
+                outputs[0] = head_texture;
+
+                for (std::size_t i = 0; i < plan->steps.size(); ++i) {
+                    const auto& st = plan->steps[i];
+                    if (alias[i] != static_cast<int>(i)) {
+                        // Bypassed, dead, or a root: it IS its alias, and no draw happens.
+                        if (alias[i] >= 0)
+                            outputs[i] = outputs[alias[i]];
                         continue;
+                    }
+                    if (!st.produces_image)
+                        continue;
+
+                    core::graph::node_draw nd;
+                    nd.op           = st.cls;
+                    nd.values       = st.values_count ? values.data() + st.values_offset : nullptr;
+                    nd.values_count = st.values_count;
+                    nd.has_in1 = st.in1 >= 0 && alias[st.in1] >= 0 && outputs[alias[st.in1]];
+                    if (st.mask >= 0) {
+                        const auto& mst = plan->steps[st.mask];
+                        if (mst.fused_mask && mst.values_count)
+                            nd.mask_values = values.data() + mst.values_offset;
+                        else if (alias[st.mask] >= 0 && outputs[alias[st.mask]])
+                            nd.has_mask_texture = true;
+                    }
+
                     auto dst = ogl_->create_texture(
                         target_texture->width(), target_texture->height(), 4, depth_, true, render_format_);
-                    apply_grade_node(src, dst, format_desc, n);
-                    src = dst;
+                    apply_node(outputs[alias[st.in0]],
+                               nd.has_in1 ? outputs[alias[st.in1]] : outputs[alias[st.in0]],
+                               dst, format_desc, nd);
+                    outputs[i] = dst;
+
+                    // LAST USE: every attachment nothing reads any more goes back to the pool.
+                    // Computed at compile time because searching forwards per step per frame is
+                    // the cost this avoids -- and releasing one step early is a garbage read
+                    // that presents as a maths bug in a node nobody edited.
+                    for (std::size_t j = 0; j < i; ++j)
+                        if (plan->steps[j].last_use == static_cast<std::int32_t>(i))
+                            outputs[j].reset();
                 }
-                draw(target_texture, std::move(src), format_desc, core::blend_mode::normal);
+
+                // What reaches the `output` step is what the layer draws.
+                const auto& out_step = plan->steps.back();
+                auto        final_tex = out_step.in0 >= 0 && alias[out_step.in0] >= 0
+                                            ? outputs[alias[out_step.in0]]
+                                            : head_texture;
+                draw(target_texture, std::move(final_tex), format_desc, core::blend_mode::normal);
             }
         }
     }
 
-    /// One grading node's full-screen pass.
+    /// One node's full-screen pass.
     ///
     /// Modelled on `apply_calibration_lut` below, which is the precedent rather than a
-    /// coincidence: source in `textures`, destination in `background`, `pix_desc` tagged
-    /// with the target's colour space and `auto_color_convert` off, so neither conversion
-    /// half runs and the pixel is passed through untouched except by the node.
-    void apply_grade_node(std::shared_ptr<texture>&      source_texture,
-                          std::shared_ptr<texture>&      target_texture,
-                          const core::video_format_desc& format_desc,
-                          const core::grade_node&        node)
+    /// coincidence: sources in `textures`, destination in `background`, `pix_desc` tagged with
+    /// the target's colour space and `auto_color_convert` off, so neither conversion half runs
+    /// and the pixel passes through untouched except by the node.
+    ///
+    /// TWO SOURCES, because `mix` and `over` need them. A class with one input gets the same
+    /// texture twice rather than a null second slot -- the shader reads `textures[1]` only when
+    /// `has_in1` says so, and binding nothing would make an unconnected `mix.b` sample garbage
+    /// instead of returning `a`.
+    void apply_node(const std::shared_ptr<texture>& source_a,
+                    const std::shared_ptr<texture>& source_b,
+                    std::shared_ptr<texture>&       target_texture,
+                    const core::video_format_desc&  format_desc,
+                    const core::graph::node_draw&   nd)
     {
-        if (!source_texture)
+        if (!source_a)
             return;
 
         draw_params draw_params;
@@ -676,19 +763,19 @@ class image_renderer
         draw_params.target_height   = format_desc.square_height;
         draw_params.pix_desc.format = core::pixel_format::bgra;
         draw_params.pix_desc.planes = {core::pixel_format_desc::plane(
-            source_texture->width(), source_texture->height(), 4, source_texture->depth())};
+            source_a->width(), source_a->height(), 4, source_a->depth())};
         draw_params.pix_desc.color_space    = target_color_space;
         draw_params.pix_desc.color_transfer = target_color_transfer;
         draw_params.target_color_space      = target_color_space;
         draw_params.target_color_transfer   = target_color_transfer;
         draw_params.auto_color_convert      = false;
         draw_params.auto_tone_map           = 0;
-        draw_params.textures                = {spl::make_shared_ptr(source_texture)};
+        draw_params.textures                = {spl::make_shared_ptr(source_a),
+                                               spl::make_shared_ptr(nd.has_in1 ? source_b : source_a)};
         draw_params.blend_mode              = core::blend_mode::normal;
         draw_params.background              = target_texture;
         draw_params.geometry                = core::frame_geometry::get_default();
-        draw_params.grade_node_only         = true;
-        draw_params.grade_node              = node;
+        draw_params.node                    = nd;
 
         kernel_.draw(std::move(draw_params));
     }

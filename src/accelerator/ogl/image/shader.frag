@@ -183,20 +183,43 @@ uniform sampler2D hue_curve_tex;  // 256x1 RGBA32F: R=HvH, G=HvS, B=HvL, A=SvS
 uniform bool      blend_mask_enable;
 uniform sampler2D blend_mask_tex;  // RGB intensity map, sampled at output screen UV
 
-// ---- Grading node pass ------------------------------------------------------
-// When grade_node_only is set this draw is ONE node's full-screen pass over the
-// layer's already-composited attachment: sample, evaluate the window, apply the
-// node's operation inside it, write out. Nothing else in this shader runs.
-uniform bool  grade_node_only;
-uniform vec2  gn_center;    // frame space, 0..1
-uniform vec2  gn_radius;    // frame space, 0..1
+// ---- Node pass --------------------------------------------------------------
+// When `gn_op >= 0` this draw is ONE node's full-screen pass over the layer's
+// already-composited attachment: sample, evaluate the mask, apply the node's
+// operation inside it, write out. Nothing else in this shader runs.
+//
+// `gn_op` IS the flag -- there is no separate boolean that could disagree with it.
+// It is an index into `node_classes()`, and `node_registry_self_test` asserts the
+// numbers below against that table: a reordering of the table compiles perfectly
+// and would make an exposure run the CDL's code, so that assertion is the only
+// thing between a reorder and a wrong picture.
+#define GN_NONE         -1
+#define GN_INPUT         0
+#define GN_OUTPUT        1
+#define GN_EXPOSURE      2
+#define GN_CDL           3
+#define GN_MASK_ELLIPSE  4
+#define GN_MIX           5
+#define GN_OVER          6
+uniform int   gn_op;
+// The SECOND source, for `mix` and `over`. Bound to the same texture as the first when
+// nothing is connected, so an unconnected `mix.b` returns `a` rather than sampling
+// garbage -- and `gn_has_in1` is what the shader gates on rather than comparing samplers.
+uniform bool  gn_has_in1;
+uniform float gn_mix;       // how much of this node's result is used, times its mask
+// THE FUSED MASK, evaluated inline. A mask with one consumer costs no pass at all,
+// which is what makes a windowed grade one draw rather than two. `gn_has_mask` gates
+// it rather than the geometry doing so: relying on a radius meaning "no mask" is the
+// kind of coincidence that breaks when somebody changes a default.
+uniform bool  gn_has_mask;
+uniform vec2  gn_center;    // in the space `space` names, 0..1
+uniform vec2  gn_radius;
 uniform float gn_feather;   // fraction of radius, isotropic
 uniform bool  gn_invert;
 uniform float gn_exposure;
 // Per-node ASC CDL. RGB ON UPLOAD, swizzled to `.bgr` at the call site like every other
 // per-channel vec3 in this shader -- see the ICVFX account below for what happens when one
-// is missed. `gn_has_cdl` gates it because an identity CDL still costs three pow()s.
-uniform bool  gn_has_cdl;
+// is missed.
 uniform vec3  gn_cdl_slope;
 uniform vec3  gn_cdl_offset;
 uniform vec3  gn_cdl_power;
@@ -1864,19 +1887,47 @@ void main()
     //
     // Everything below this point already ran during the layer pass that produced
     // this attachment. Falling through would apply the whole chain a second time.
-    if (grade_node_only) {
-        float m = grade_node_mask(base_uv);
-        // Uniform scale, so this is correct whatever order the channels are in --
-        // see the note on grade_node::exposure.
-        vec3 graded = col.rgb * gn_exposure;
-        // ...and here is the per-channel operation that note warned about. `.bgr` on all
-        // three vec3s, because this shader carries the pixel in BGR and an RGB-ordered
-        // slope applied straight exchanges red and blue. Vulkan's copy must NOT swizzle.
-        // Saturation is scalar and needs no swizzle; `working_luma` inside apply_cdl is
-        // already correct for this shader's channel order.
-        if (gn_has_cdl)
-            graded = apply_cdl(graded, gn_cdl_slope.bgr, gn_cdl_offset.bgr, gn_cdl_power.bgr,
+    if (gn_op >= 0) {
+        // NO MASK MEANS EVERYWHERE, and `gn_has_mask` is what says so rather than the
+        // geometry. A radius large enough to cover the raster would work today and stop
+        // working the moment somebody changed a default.
+        float m = gn_has_mask ? grade_node_mask(base_uv) : 1.0;
+        // ...times the node's own `mix`, so a node can be dialled back without a `mix`
+        // node behind it. One multiply, and it is why every grading class carries the port.
+        m *= gn_mix;
+
+        vec3 graded = col.rgb;
+        if (gn_op == GN_EXPOSURE) {
+            // Uniform scale, so this is correct whatever order the channels are in.
+            graded = col.rgb * gn_exposure;
+        } else if (gn_op == GN_CDL) {
+            // THE PER-CHANNEL OPERATION, and the trap. `.bgr` on all three vec3s, because
+            // this shader carries the pixel in BGR and an RGB-ordered slope applied straight
+            // exchanges red and blue. Vulkan's copy must NOT swizzle. Saturation is scalar
+            // and needs none; `working_luma` inside apply_cdl is already correct for this
+            // shader's channel order.
+            graded = apply_cdl(col.rgb, gn_cdl_slope.bgr, gn_cdl_offset.bgr, gn_cdl_power.bgr,
                                gn_cdl_saturation);
+        } else if (gn_op == GN_MIX) {
+            // `b` IS `a` WHEN NOTHING IS CONNECTED, which the kernel arranges by binding the
+            // same texture twice -- so an unmixed branch leaves the picture alone instead of
+            // mixing toward black. A muted edge blacking a layer during a show is the one
+            // failure nobody forgives, and this is where that promise is kept.
+            vec4 b = gn_has_in1 ? texture(plane[1], base_uv).bgra : col;
+            graded = mix(col.rgb, b.rgb, gn_mix);
+            // `gn_mix` IS the amount for this class, so the mask must not multiply it a
+            // second time. Reset to the mask alone.
+            m = gn_has_mask ? grade_node_mask(base_uv) : 1.0;
+        } else if (gn_op == GN_OVER) {
+            // Premultiplied source-over: a + (1-a.alpha) * b.
+            vec4 b = gn_has_in1 ? texture(plane[1], base_uv).bgra : vec4(0.0);
+            graded = col.rgb + (1.0 - col.a) * b.rgb;
+            m      = gn_has_mask ? grade_node_mask(base_uv) : 1.0;
+        }
+        // Anything else -- the roots, a mask generator that somehow reached a draw -- is the
+        // identity, which is the safe answer: a class the shader does not know renders the
+        // input unchanged rather than black. `node_registry_self_test` is what stops a real
+        // class ever landing here, by asserting every op index against the table.
         col.rgb = mix(col.rgb, graded, m);
         fragColor = col.bgra;
         return;

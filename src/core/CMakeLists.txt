@@ -66,6 +66,7 @@ set(SOURCES
 
 		graph/graph_store.cpp
 		graph/model.cpp
+		graph/plan.cpp
 		graph/registry.cpp
 		graph/validate.cpp
 		timeline/curve.cpp
@@ -130,6 +131,8 @@ set(HEADERS
 
 		graph/graph_store.h
 		graph/model.h
+		graph/node_draw.h
+		graph/plan.h
 		graph/registry.h
 		graph/validate.h
 		timeline/curve.h

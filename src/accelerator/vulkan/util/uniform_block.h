@@ -265,9 +265,22 @@ struct alignas(16) uniform_block
     float    gn_cdl_pow_g   = 1.0f;         // 916
     float    gn_cdl_pow_b   = 1.0f;         // 920
     float    gn_cdl_sat     = 1.0f;         // 924
-    // PAD TO A 16-BYTE MULTIPLE -- see the account above. 928 is not a multiple of 16; 944 is.
-    int32_t  _pad_to_16[4] = {0, 0, 0, 0};  // 928..943
-    // Total: 944 bytes (59 x 16)
+    // ── WHICH NODE CLASS THIS PASS IS ───────────────────────────────────────────
+    //
+    // Three fields taken out of the padding below, so the block's SIZE and every
+    // offset above are unchanged -- which is why the asserts at the bottom did not
+    // move and why this change could not have shifted a neighbouring field.
+    //
+    // `gn_op` is an index into `node_classes()` and -1 means "not a node pass", so it
+    // IS the flag: `F2_GRADE_NODE` is gone and there is no boolean that could disagree
+    // with it. `node_registry_self_test` asserts every index against the table, because
+    // a reordering of that table compiles perfectly and would make an exposure run the
+    // CDL's code.
+    int32_t  gn_op         = -1;            // 928
+    float    gn_mix        = 1.0f;          // 932  this node's contribution, times its mask
+    int32_t  gn_has_in1    = 0;             // 936  a SECOND image is bound (mix, over)
+    int32_t  gn_has_mask   = 0;             // 940  a fused mask's parameters are present
+    // Total: 944 bytes (59 x 16) -- unchanged, which is the point of using the padding
 };
 
 // ── THE SHADER'S DECLARATION ORDER IS PART OF THIS LAYOUT ───────────────────
@@ -376,11 +389,12 @@ enum class shader_flags2 : uint32_t
     // non-linear transform is configured. Must equal F2_STRAIGHT_ALPHA_GRADING in
     // image/fragment_shader.frag.
     straight_alpha_grading = 1u << 5,
-    // This draw IS one grading node's full-screen pass: evaluate the window, apply the
-    // node's operation, write out, and run nothing else. Must equal F2_GRADE_NODE in
-    // image/fragment_shader.frag.
-    grade_node_only = 1u << 6,
-    // Window inverted (grade outside the ellipse rather than inside). Must equal
+    // Bit 6 WAS `grade_node_only`, and it is gone: `gn_op >= 0` says the same thing and
+    // cannot disagree with itself. Left as a hole rather than reused, because every bit
+    // here has a matching F2_* in the shader and renumbering them is the silent-mismatch
+    // class this file's own header warns about at length.
+    //
+    // Mask inverted (grade outside the ellipse rather than inside). Must equal
     // F2_GRADE_NODE_INVERT.
     grade_node_invert = 1u << 7,
 };

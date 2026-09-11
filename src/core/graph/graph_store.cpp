@@ -27,6 +27,13 @@ std::shared_ptr<stored_graph> graph_store::build(graph_document doc)
     auto entry      = std::make_shared<stored_graph>();
     entry->document = std::move(doc);
     entry->faults   = validate(entry->document, entry->order);
+    // COMPILED HERE, on the caller's thread, and only when it can run. A null plan is what
+    // `ok() == false` MEANS on the frame path: the stage keeps whatever plan it had and
+    // publishes `graph_stale`, which is how an operator editing on air keeps the grade that is
+    // rendering.
+    entry->plan = compile(entry->document, entry->order, entry->faults);
+    if (entry->plan)
+        entry->values = values_of(entry->document, *entry->plan);
     return entry;
 }
 
@@ -191,6 +198,16 @@ graph_store::patch_params(const std::string&                             name,
     // document's own `revision` field keeps the value it had, for the same reason -- a client
     // comparing revisions is asking "has the structure changed".
     entry->document.revision = old->document.revision;
+    // AND THE PLAN POINTER IS CARRIED OVER, not the newly compiled one -- which is the whole
+    // attribute/signal split made concrete. A value change does not alter the topology, so the
+    // plan is the SAME OBJECT, and `image_transform::operator==` compares it by pointer: reusing
+    // it is what lets a timeline ramp a node parameter without the still-frame fingerprint
+    // moving by allocation on every tick. `build` compiled one; it is dropped on the floor,
+    // which costs a graph-sized allocation per write and is the price of one code path for both.
+    if (old->plan && entry->plan) {
+        entry->plan   = old->plan;
+        entry->values = values_of(entry->document, *entry->plan);
+    }
     remember(it->second, label, "patch", /*coalesce*/ true);
     it->second.current = entry;
     ++values_revision_;

@@ -177,6 +177,26 @@ struct node_class
     bool produces_image = false;
 };
 
+/// THE CLASS INDICES THE KERNELS AND THE SHADERS SWITCH ON.
+///
+/// `node_step::cls` is an index into `node_classes()`, and it reaches the shader as `gn_op`. So
+/// the same number is read in four places -- the table, two kernels and two shaders -- and a
+/// reordering of `build_classes()` would silently make an `exposure` run the CDL's code.
+///
+/// Named here, and `node_registry_self_test` asserts every one of them against the table. That
+/// assertion is the only thing standing between a reorder and a wrong picture, because nothing
+/// about the reorder itself would fail to compile.
+enum : std::int32_t
+{
+    op_input        = 0,
+    op_output       = 1,
+    op_exposure     = 2,
+    op_cdl          = 3,
+    op_mask_ellipse = 4,
+    op_mix          = 5,
+    op_over         = 6,
+};
+
 /// The table. Built once, on first call, and never mutated.
 const std::vector<node_class>& node_classes();
 

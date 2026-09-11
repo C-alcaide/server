@@ -168,7 +168,9 @@ enum class guard_t : uint8_t
     lut3d_present,
     hue_curves_present,
     blend_mask_present,
-    grade_nodes_present,
+    /// A node graph is attached AND compiles. Renamed from `grade_nodes_present` with the
+    /// prototype it named, 2026-09-11.
+    graph_present,
     split_active,       // any split-tone colour component non-zero
     sharpen_radius_set, // != 1.0
     grain_size_set,     // != 1.0

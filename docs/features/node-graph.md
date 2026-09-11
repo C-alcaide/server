@@ -1,11 +1,10 @@
 # The node graph — a typed DAG per layer, owned as a document, addressed like every other parameter
 
-> **State:** **in progress.** The DOCUMENT ships — stored, validated, read back, undone, deleted —
-> and **nothing is evaluated yet**: there is no attachment verb and no frame path, so an attached
-> graph does not exist and a stored one renders nothing. That is deliberate sequencing rather than a
-> gap; §8 lists what arrives when and §9 says exactly what is measured today. It replaces the
-> `MIXER GRADE_NODE` prototype, whose largest defect is measured here: a node grades the
-> **display-encoded** pixel, **42 LSB** away from `MIXER CDL` (§2).
+> **State:** **in progress, and it renders now.** A graph is stored, validated, attached to a
+> layer, driven through the whole ownership stack, and **evaluated on the frame path on both
+> mixers** — `stage: display` only. The `MIXER GRADE_NODE` prototype it replaces is **deleted**.
+> What is still owed is the `working` stage (§2), fp16 intermediates, the remaining mask families
+> and the catalogue; §8 lists the order and §9 says exactly what is measured.
 > **Commands:** `GRAPH <ch>-<layer> ATTACH <name> | DETACH` and `GRAPH <ch>-<layer>` to query,
 > plus `MIXER FIELD node/<id>/<param>` — and `HOLD`/`RELEASE`/`BIND`/`UNBIND` need no new command,
 > because a node parameter is an address. There is deliberately **no `GRAPH LOAD`**: a document is
@@ -18,21 +17,18 @@
 > `graph_store`), with the JSON codec in `src/protocol/http/api_graph.cpp`, the routes in
 > `src/protocol/http/http_server.cpp` and the store injected into every stage by
 > `src/shell/server.cpp` for the structure fingerprint
-> **Replaces:** the `MIXER GRADE_NODE` prototype — `grade_window`/`grade_node`/`grade_graph` in
-> `src/core/frame/frame_transform.h`, `mixer_grade_command`, and the `grade_nodes` blob row. Not
-> yet removed: the prototype still ships and is still the only thing that renders.
-> **Coverage:** `api-graph` — **34/34 both mixers** (the document, its faults, its evaluation
-> order, its history); **`graph-stack` — 29/29 both mixers** (a node parameter through the whole
-> ownership stack: a timeline keys it, a binding outranks the timeline, `HOLD` outranks both,
-> every rank releases losslessly, a write during a ramp is remembered and lands, and
-> `MIXER FIELD` agrees with `PUT`); `grade-graph` — **8/8 both mixers** (which colour space a node
-> pass runs in, the gap measured at 42.00 LSB); three boot self-tests —
-> `node_registry_self_test`, `graph_validate_self_test`, `graph_store_self_test`, plus
-> `target_self_test`'s node rows. **No picture check exists**, because nothing evaluates a graph
-> yet — so the `MIXER EXPOSURE` class (a parameter that stores, publishes and reports its owner
-> correctly and renders nothing) is the one failure none of these can catch. `grade-window` covers
-> the prototype's picture and §2 records why its own oracle has to change when the placement
-> moves.
+> **Replaces:** the `MIXER GRADE_NODE` prototype, **removed 2026-09-11** —
+> `grade_window`/`grade_node`/`grade_graph`, `mixer_grade_command` (162 lines), `apply_grade_node`
+> on both mixers, and `F2_GRADE_NODE`. The `grade_nodes` blob row is **renamed** to `graph` rather
+> than removed: it is the cheap presence flag the composition guard reads.
+> **Coverage:** `api-graph` **34/34** (the document, its faults, order, history); `graph-stack`
+> **29/29** (a node parameter through the whole ownership stack); `grade-graph` **10/10** (which
+> space a node pass runs in, the 32–42 LSB gap, a bypassed node byte-identical to no graph, and
+> the graph surviving an in-flight `MIXER` tween); **`grade-window` — migrated to the graph and
+> reproducing the prototype's figures exactly** (§9); `conformance` **100/100 at 1 LSB** and
+> `grading` **48/48** (the no-graph fast path is untouched) — all on **both mixers**. Four boot
+> self-tests: `node_registry_self_test`, `graph_validate_self_test`, `graph_plan_self_test`,
+> `graph_store_self_test`, plus `target_self_test`'s node rows.
 
 ---
 
@@ -178,6 +174,92 @@ document claimed by a layer that no longer has anything on it.
 **There is no `GRAPH LOAD`.** A document is JSON and arrives over the control API — the timeline's
 precedent, and the same reasoning: `protocol_http` is a sibling of the AMCP implementation, not a
 layer below it, so putting a JSON parser in the AMCP tokeniser would be a second codec.
+
+## 3.3 How it renders — two objects, because there are two flow types
+
+`image_transform` carries **two** members where the prototype carried one, and the split is not
+an optimisation: the single pointer is *incorrect* for anything that animates.
+
+| member | what it is | compared |
+| :--- | :--- | :--- |
+| `node_plan` | topology, classes, order, `last_use`, the pass count | **by pointer** |
+| `node_values` | every node parameter, every `bypass`, every edge's `mute`, flat | **by value** |
+
+`image_transform::operator==` is what the still-frame cache compares. A single pointer holding
+the values would be reallocated whenever a value changed — so a timeline ramping `exposure` at
+50 Hz would allocate a graph fifty times a second, and the fingerprint would move on every tick
+**by allocation rather than by value**, making a paused unchanging graph look different every
+frame and defeating the cache it exists to feed.
+
+**The registry declares which is which.** A port's `flow` is `signal` (in the array) or
+`attribute` (in the plan). Declaring a signal as an attribute costs a reallocation per tick;
+declaring an attribute as a signal makes a change silently not take effect. Neither fails to
+compile, so the declaration *is* the contract.
+
+### 3.3.1 The evaluator
+
+One linear walk per layer, in both mixers:
+
+```
+plan and values are copied out BEFORE draw_params is moved from -- they live in it
+alias[]      one pass: a bypassed or dead step aliases its primary input
+live_passes  == 0 -> the EXISTING single draw, byte-identical. No graph, an empty
+             graph and an all-bypassed graph are all this path.
+head pass    the layer's own draw, into a pooled attachment
+per step     aliased -> a shared_ptr copy, no draw (which is what makes fan-out free)
+             otherwise -> acquire an attachment, apply_node(in0, in1, mask, values)
+             then release every attachment whose last_use is this step
+tail         what reaches `output` is what the layer draws
+```
+
+**`bypass` and `mute` are values, not topology**, which is what lets a timeline step them: the
+plan is identical either way. A bypassed node aliases its primary input, so **a graph with a
+bypassed node is byte-identical to the graph without it** — gated, not claimed.
+
+**And a dead path resolves to the INPUT, never to black.** A muted edge blacking a layer during a
+show is the one failure nobody would forgive, so an unconnected image input aliases the primary,
+a mask defaults to 1.0, and `mix.b` returns `a`.
+
+**A mask with one consumer is FUSED** — its parameters ride along in the consumer's uniforms and
+the shader evaluates the ellipse inline, so a windowed grade is *one* draw rather than two. With
+two consumers it is materialised, which `grade-window`'s chain check now exercises: the prototype
+needed the geometry declared twice and this declares it once.
+
+### 3.3.2 The shader, and what the UBO change cost
+
+`gn_op` is an index into `node_classes()`, and **it is the flag**: -1 means "not a node pass", so
+`F2_GRADE_NODE` is gone and there is no boolean that can disagree with it. The same number is read
+by the table, two kernels and two shaders — so `node_registry_self_test` asserts every index
+against the table, because a reordering of `build_classes()` compiles perfectly and would make an
+`exposure` run the CDL's code.
+
+**The UBO did not grow.** Sixteen bytes of existing padding at offset 928 became `gn_op`,
+`gn_mix`, `gn_has_in1` and `gn_has_mask`, so `static_assert(sizeof == 944)` and both `offsetof`
+anchors stand unchanged and no field above them moved. The design's generic `gn_p[16]` /
+`gn_mask_p[8]` arrays are deferred: they would append 96 bytes to carry, through an index, values
+that every class in this commit already has a named field for. They earn their size when the mask
+families arrive.
+
+### 3.3.3 Two defects this commit fixed, one of them shipping
+
+**`image_transform::tween` never assigned the graph.** `lut3d`, `hue_curves` and `blend_mask` are
+all assigned to the destination on the lines around it; `grade_nodes` was not. So for the whole
+duration of any in-flight `MIXER <field> <v> <duration>` on a graphed layer, the tweened transform
+carried a **null graph**: the look vanished for the length of the fade and snapped back at the end.
+
+It shipped because **`grade-window` never tweens anything** — nothing in the harness could see it.
+`grade-graph` now holds a mid-tween check: `MIXER OPACITY 0.5 50 linear` with the graph attached,
+measured **94.5 LSB** away from the ungraded colour at the same opacity.
+
+**And `DETACH` left the plan on the layer** — this commit's own defect, found by `grade-graph` on
+its first migrated run. The per-tick pass iterates the attachment map, so erasing the attachment
+meant nothing ever cleared `node_plan` from the transform: **the graph kept rendering after
+`DETACH`, indefinitely.**
+
+`graph-stack` could not see it. Its detach check reads the *published leaf*, which comes from the
+attachment map and correctly went away — so the value stream said the graph was gone while the
+picture still had it. That is the `MIXER EXPOSURE` class, and it is the first time in this work
+that the **picture** check caught what the **value** check could not.
 
 ## 4. The document
 
@@ -393,7 +475,7 @@ Each of these is sequenced rather than open, and the order is riskiest-first:
 | next | what it adds |
 | :--- | :--- |
 | ~~the address grammar~~ | **DONE** — see §3.1 and §3.2 |
-| **the seam** | `image_transform::{node_plan, node_values}` replacing `grade_nodes`, the evaluator at `stage: display`, `mixer_grade_command` deleted, `grade-window` migrated |
+| ~~**the seam**~~ | **DONE** — see §3.3 |
 | Vulkan fan-out | `renderpass::commit()` barriering any earlier attachment, not only the previous one |
 | fp16 intermediates | working-space values exceed 1.0, so unorm intermediates clip |
 | `stage: working` | the head/tail split, and the CDL parity in §2 turns green |
@@ -415,6 +497,8 @@ rather than by the `MIXER` tween.
 | :--- | :--- | :--- |
 | the document, its faults, its order, its history | `api-graph` | **34/34 both mixers** |
 | a node parameter through the whole OWNERSHIP STACK | `graph-stack` | **29/29 both mixers** |
+| what a node COMPUTES, and its window | `grade-window`, **migrated to the graph** | inside **0.50** LSB, leak **0.00**, separation 77.0, move 76.7, restore 0.00, chain **0.75**, invert 0.00/77.0, composite **0.00**, CDL **0.38**, desat **0.00** — identical to the prototype's figures, on both mixers |
+| the no-graph fast path | `conformance`, `grading` | **100/100 at 1 LSB**, **48/48** |
 | which colour space a node pass runs in | `grade-graph` | **8/8 both mixers**, the gap measured at 42.00 LSB |
 | what a node computes (the prototype) | `grade-window` | 1 LSB both mixers — **and its oracle asserts the current placement**, so its figures move when §8's working-space commit lands |
 | the class table against its own rules | `node_registry_self_test` | at boot |

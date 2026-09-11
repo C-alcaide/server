@@ -52,6 +52,7 @@
 #include <core/mixer/audio/audio_analysis.h>
 #include <core/address/target.h>
 #include <core/graph/graph_store.h>
+#include <core/graph/plan.h>
 #include <core/graph/registry.h>
 #include <core/graph/validate.h>
 #include <core/timeline/curve.h>
@@ -237,6 +238,7 @@ struct server::impl
         // discovered on air.
         core::graph::node_registry_self_test();
         core::graph::graph_validate_self_test();
+        core::graph::graph_plan_self_test();
         core::graph::graph_store_self_test();
         accelerator::ogl::run_compose_self_test();
 #ifdef ENABLE_VULKAN

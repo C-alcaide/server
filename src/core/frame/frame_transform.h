@@ -35,6 +35,11 @@
 
 namespace caspar { namespace core {
 
+namespace graph {
+struct node_plan;
+}
+
+
 // ---- 3D LUT data (parsed from .cube files) ---------------------------------
 struct lut3d_data final
 {
@@ -60,68 +65,30 @@ struct blend_mask_data final
     std::vector<float> data;  // width*height*3 RGB float values (0..1)
 };
 
-// ---- Grading node graph -----------------------------------------------------
+// ---- The node graph -------------------------------------------------------
 //
-// PROTOTYPE SLICE. One window shape (ellipse), one operation (exposure), which is
-// deliberately the narrowest thing that exercises the machinery end to end:
+// THE PROTOTYPE THAT WAS HERE IS GONE, replaced 2026-09-11 by `core/graph`. It was
+// `grade_window` + `grade_node` + `grade_graph`: a 16-slot array of one fixed record --
+// an ellipse window, an exposure, an optional CDL -- with no edges, no ports and no
+// types, addressed by INDEX.
 //
-//   * a variable-length per-layer structure flowing through a transform system built
-//     for fixed scalar fields (composition, equality, the still-frame fingerprint);
-//   * the node PASS -- a full-screen draw per node, ping-ponged between pooled
-//     attachments, routed by `draw_params::grade_node_only`.
+// Three things it taught, kept here because two of them are still live constraints:
 //
-// Design study, including the shapes and operators this does NOT implement:
-// docs/plans/GRADING_NODE_GRAPH_STUDY.md.
+//   INDEX ADDRESSING HAS NO IDENTITY. Delete node 3 and every reference to node 4 means
+//   something else, so a parameter address, a timeline key, a binding and an undo entry
+//   all name the wrong thing after one edit. Node ids are the client's now, and required.
 //
-// ⚠ The window is in FRAME space, not the layer's source UV. A node pass draws a
-// full-screen attachment with `frame_geometry::get_default()`, so its UV spans the
-// frame; by the time a node runs, the layer has already been placed. An image-locked
-// window needs the layer's geometry transform carried into the pass, which this slice
-// does not do. The study's §3.4 assumed source UV was the cheap default and it is not.
-struct grade_window final
-{
-    std::array<double, 2> center = {0.5, 0.5};   // frame space, 0..1
-    std::array<double, 2> radius = {0.25, 0.25}; // frame space, 0..1
-
-    // Isotropic, as a fraction of the ellipse radius. Deliberately NOT the
-    // output-NDC feather `icvfx_feather` uses: that one is anisotropic on a
-    // non-square raster, which is right for a frustum edge and wrong for a
-    // grading window. See the study §3.2.
-    double feather = 0.2;
-    bool   invert  = false;
-};
-
-struct grade_node final
-{
-    bool         enable   = true;
-    grade_window window;
-
-    // Uniform scale across all three channels, so this operation is
-    // channel-order agnostic -- which is why it is the one chosen first. If the
-    // two backends disagree on this slice, it is the mask and not the swizzle.
-    // Any per-channel operation added later inherits the channel-order trap.
-    double exposure = 1.0;
-
-    // ASC CDL, per node. THE PER-CHANNEL OPERATION THE COMMENT ABOVE WARNED ABOUT,
-    // added 2026-08-27 -- so it carries the channel-order trap in full: the OpenGL
-    // shader holds the pixel in BGR and needs `.bgr` at the call site, Vulkan grades
-    // in RGB and must not swizzle. `apply_cdl` is the existing function both already
-    // use for the primary CDL; only the operands are new.
-    //
-    // Identity by default, and `has_cdl` decides whether the shader runs it at all --
-    // an identity CDL still costs a pow() per pixel, and almost every node will not
-    // want one.
-    bool   has_cdl    = false;
-    double cdl_slope[3]  = {1.0, 1.0, 1.0};
-    double cdl_offset[3] = {0.0, 0.0, 0.0};
-    double cdl_power[3]  = {1.0, 1.0, 1.0};
-    double cdl_saturation = 1.0;
-};
-
-struct grade_graph final
-{
-    std::vector<grade_node> nodes;
-};
+//   POINTER IDENTITY IS THE FINGERPRINT, and copy-on-write is therefore load-bearing
+//   rather than tidy: composition and `operator==` both use it, so a graph mutated in
+//   place compares equal to itself and the still-frame cache replays the previous frame.
+//   `node_plan` keeps that property; `node_values` is what changes instead.
+//
+//   AND ITS PASSES RAN IN THE WRONG COLOUR SPACE. The early-out sat at the END of
+//   `main()`, after `do_output_convert`, so a node graded the DISPLAY-ENCODED pixel --
+//   measured at 42.00 LSB from `MIXER CDL`, identically on both mixers. `graph_stage`
+//   makes that a choice rather than an accident.
+//
+// See `core/graph/model.h`, `plan.h` and `docs/features/node-graph.md`.
 
 struct chroma
 {
@@ -588,15 +555,44 @@ struct image_transform final
     // Per-pixel projection blend mask (loaded from a PNG, sampled in output space)
     std::shared_ptr<const blend_mask_data> blend_mask;  // nullptr = disabled
 
-    // Windowed grading node chain. nullptr or no enabled nodes = disabled, and the
-    // layer then renders through exactly the path it did before this existed --
-    // no extra attachment, no extra draw, no extra uniform upload. That fast path
-    // is structural rather than incidental: almost every layer has no graph.
+    // ── THE NODE GRAPH: TWO MEMBERS, BECAUSE THERE ARE TWO FLOW TYPES ──────────────
     //
-    // Innermost wins on composition, like `lut3d` and `blend_mask`, and for the same
-    // reason: two graphs cannot be merged without deciding whose windows apply in
-    // whose space.
-    std::shared_ptr<const grade_graph> grade_nodes;  // nullptr = disabled
+    // This replaced a single `shared_ptr<const grade_graph>` on 2026-09-11, and the split is
+    // not an optimisation -- the single pointer is INCORRECT for anything that animates.
+    //
+    // `node_plan` is the ATTRIBUTE half: topology, classes, order, `last_use`, the pass count.
+    // Compared by POINTER IDENTITY, exactly as `grade_nodes` was, because `operator==` below is
+    // what the still-frame cache compares and a pointer is one word rather than a deep compare
+    // of a graph. Reallocated only when the document's STRUCTURE changes.
+    //
+    // `node_values` is the SIGNAL half: every node parameter, every `bypass`, every edge's
+    // `mute`, flat, indexed by offsets the plan carries. Compared BY VALUE.
+    //
+    // WHY THE SINGLE POINTER WAS WRONG. A timeline ramping one node parameter at 50 Hz would
+    // reallocate the plan fifty times a second -- and worse, the fingerprint would then move on
+    // every tick by ALLOCATION rather than by value, so a paused, unchanging graph would look
+    // different every frame and defeat the cache this comparison exists to feed.
+    //
+    // Both nullptr/empty = disabled, and the layer renders through exactly the path it did
+    // before any of this existed: no extra attachment, no extra draw, no extra uniform upload.
+    // That fast path is structural rather than incidental -- almost every layer has no graph --
+    // and `grade-graph`'s null arm gates it byte-identically.
+    //
+    // Innermost wins on composition, like `lut3d` and `blend_mask` and for the same reason: two
+    // graphs cannot be merged without deciding whose masks apply in whose space. The VALUES
+    // travel with the plan they belong to, because an offset table is meaningless against
+    // another plan's array.
+    /// FORWARD-DECLARED rather than included, and that is a build constraint rather than a
+    /// preference: `graph/plan.h` pulls in `registry.h` -> `producer_params.h` ->
+    /// `transform_fields.h` -> this file. A cycle, and it presents as `grade_range` being
+    /// undeclared three headers away, which is not a message anybody would read as "you added
+    /// an include". A pointer needs only a declaration.
+    std::shared_ptr<const graph::node_plan> node_plan;
+
+    /// This IS `graph::node_values`, spelled out because an alias cannot be forward-declared.
+    /// The two must stay the same type; `plan.h` is where the alias is defined and the
+    /// accelerators include it.
+    std::vector<double> node_values;
 
     // Per-channel RGB levels and tone curves
     core::rgb_levels  per_channel_levels;

@@ -21,6 +21,9 @@
 
 #include "image_kernel.h"
 
+#include <core/graph/plan.h>
+#include <core/graph/registry.h>
+
 #include "../util/device.h"
 #include "../util/gpu_wait.h"
 #include "../util/glsl_compiler.h"
@@ -1557,35 +1560,78 @@ struct image_kernel::impl
             }
         }
 
-        // ── Grading node pass ─────────────────────────────────────────
-        // `uniforms` is a fresh uniform_block per draw, so there is nothing to clear on
-        // the false branch -- unlike the OpenGL kernel, where a bool uniform persists
-        // in the program until the next draw overwrites it and therefore has to be set
-        // both ways.
-        if (params.grade_node_only) {
-            const auto& n = params.grade_node;
-            uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::grade_node_only);
-            if (n.window.invert)
-                uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::grade_node_invert);
-            uniforms.gn_center_x = static_cast<float>(n.window.center[0]);
-            uniforms.gn_center_y = static_cast<float>(n.window.center[1]);
-            uniforms.gn_radius_x = static_cast<float>(n.window.radius[0]);
-            uniforms.gn_radius_y = static_cast<float>(n.window.radius[1]);
-            uniforms.gn_feather  = static_cast<float>(n.window.feather);
-            uniforms.gn_exposure = static_cast<float>(n.exposure);
-            // RGB, unswizzled, because this mixer grades in RGB. The OpenGL kernel uploads the
-            // same values and its shader applies `.bgr`; the asymmetry is the trap.
-            uniforms.gn_has_cdl     = n.has_cdl ? 1 : 0;
-            uniforms.gn_cdl_slope_r = static_cast<float>(n.cdl_slope[0]);
-            uniforms.gn_cdl_slope_g = static_cast<float>(n.cdl_slope[1]);
-            uniforms.gn_cdl_slope_b = static_cast<float>(n.cdl_slope[2]);
-            uniforms.gn_cdl_off_r   = static_cast<float>(n.cdl_offset[0]);
-            uniforms.gn_cdl_off_g   = static_cast<float>(n.cdl_offset[1]);
-            uniforms.gn_cdl_off_b   = static_cast<float>(n.cdl_offset[2]);
-            uniforms.gn_cdl_pow_r   = static_cast<float>(n.cdl_power[0]);
-            uniforms.gn_cdl_pow_g   = static_cast<float>(n.cdl_power[1]);
-            uniforms.gn_cdl_pow_b   = static_cast<float>(n.cdl_power[2]);
-            uniforms.gn_cdl_sat     = static_cast<float>(n.cdl_saturation);
+        // ── The node pass ─────────────────────────────────────────────
+        //
+        // `uniforms` is a fresh uniform_block per draw, so there is nothing to clear on the
+        // false branch -- unlike the OpenGL kernel, where a uniform persists in the program
+        // until the next draw overwrites it and therefore has to be set both ways.
+        //
+        // `gn_op` defaults to -1 in the struct, which IS "not a node pass": there is no
+        // separate flag that could disagree with it, and `F2_GRADE_NODE` is gone.
+        if (params.node) {
+            const auto& nd = params.node;
+            uniforms.gn_op      = nd.op;
+            uniforms.gn_has_in1 = nd.has_in1 ? 1 : 0;
+
+            // THE VALUES COME OUT OF THE PLAN'S FLAT ARRAY IN PORT ORDER, which is the
+            // contract `plan.cpp` establishes: it walks each class's ports in declaration
+            // order, so index 0 is `bypass`, 1 is the first real parameter, and so on. A class
+            // that reordered its ports would shift every index here, which is why the registry's
+            // port list is the single source and this reads positions off it.
+            const auto at = [&](std::uint32_t i, double dflt) {
+                return nd.values && i < nd.values_count ? static_cast<float>(nd.values[i])
+                                                        : static_cast<float>(dflt);
+            };
+
+            switch (nd.op) {
+                case core::graph::op_exposure:
+                    uniforms.gn_exposure = at(1, 1.0);
+                    uniforms.gn_mix      = at(2, 1.0);
+                    break;
+                case core::graph::op_cdl:
+                    // RGB, UNSWIZZLED, because this mixer grades in RGB. The OpenGL kernel
+                    // uploads the same values and its shader applies `.bgr`; the asymmetry is
+                    // the trap, and a neutral CDL is invariant under getting it wrong.
+                    uniforms.gn_cdl_slope_r = at(1, 1.0);
+                    uniforms.gn_cdl_slope_g = at(2, 1.0);
+                    uniforms.gn_cdl_slope_b = at(3, 1.0);
+                    uniforms.gn_cdl_off_r   = at(4, 0.0);
+                    uniforms.gn_cdl_off_g   = at(5, 0.0);
+                    uniforms.gn_cdl_off_b   = at(6, 0.0);
+                    uniforms.gn_cdl_pow_r   = at(7, 1.0);
+                    uniforms.gn_cdl_pow_g   = at(8, 1.0);
+                    uniforms.gn_cdl_pow_b   = at(9, 1.0);
+                    uniforms.gn_cdl_sat     = at(10, 1.0);
+                    uniforms.gn_mix         = at(11, 1.0);
+                    break;
+                case core::graph::op_mix:
+                    uniforms.gn_mix = at(1, 0.5);
+                    break;
+                default:
+                    // `over` and the roots take no parameters, and the struct's own default of
+                    // 1.0 is already right for `gn_mix` -- stated rather than relied on,
+                    // because a fresh block per draw is the only reason it is safe here and
+                    // that is not true of the OpenGL side.
+                    uniforms.gn_mix = 1.0f;
+                    break;
+            }
+
+            // THE FUSED MASK, inline. A mask with one consumer costs no pass: its parameters
+            // ride along here and the shader evaluates the ellipse itself, which is what makes
+            // a windowed grade one draw rather than two.
+            //
+            //   mask_ellipse  bypass, center[2], radius[2], feather, invert, space
+            uniforms.gn_has_mask = nd.mask_values ? 1 : 0;
+            if (nd.mask_values) {
+                const auto* m          = nd.mask_values;
+                uniforms.gn_center_x   = static_cast<float>(m[1]);
+                uniforms.gn_center_y   = static_cast<float>(m[2]);
+                uniforms.gn_radius_x   = static_cast<float>(m[3]);
+                uniforms.gn_radius_y   = static_cast<float>(m[4]);
+                uniforms.gn_feather    = static_cast<float>(m[5]);
+                if (m[6] != 0.0)
+                    uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::grade_node_invert);
+            }
         }
 
         // ── ICVFX inner/outer frustum ─────────────────────────────────

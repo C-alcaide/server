@@ -4529,169 +4529,27 @@ std::future<std::wstring> mixer_qualifier_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
-// MIXER GRADE_NODE — windowed grading node chain (PROTOTYPE)
+// `MIXER GRADE_NODE` WAS HERE, and it is gone -- 2026-09-11, with the prototype it drove.
 //
-// NAMED `GRADE_NODE` AND NOT `GRADE`. It was `MIXER GRADE` until 2026-08-27, sitting in the
-// same namespace as MIXER LIFT / GAIN / MIDTONE / CDL / WHITEBALANCE -- so it read as "the
-// grading command" when it is one specific, prototype-stage feature among twenty-odd grading
-// operators. Renamed while it is still a prototype and its only consumer is one battery;
-// the underscore matches the fork's own convention (CDL_FILE, PROJECTION_BLEND_MASK,
-// ZOOM_LUT) and the C++ vocabulary underneath it (grade_node, grade_nodes, apply_grade_node).
-// No alias is kept: an alias would preserve exactly the ambiguity the rename removes.
+// 162 lines: a 16-slot array of one fixed record (ellipse window, exposure, optional CDL),
+// addressed by INDEX, with copy-on-write reasoning spelled out at length because pointer
+// identity is the still-frame fingerprint. That reasoning survives in `plan.h`; the command
+// does not, and three things it taught are worth keeping here rather than in a diff:
 //
-// One window shape (soft-edged ellipse in FRAME space) and one operation (exposure).
-// The narrowest surface that exercises the node PASS and the variable-length data model
-// end to end; design study in docs/plans/GRADING_NODE_GRAPH_STUDY.md.
+//   INDEX ADDRESSING HAS NO IDENTITY. `NODE 3` means whatever is third, so deleting a node
+//   silently renumbers every reference to the ones after it. A graph document has client ids.
 //
-//   MIXER <ch>-<layer> GRADE_NODE NODE <n> <cx> <cy> <rx> <ry> <feather> <exposure> [<invert>]
-//   MIXER <ch>-<layer> GRADE_NODE CLEAR    — drop the whole chain
-//   MIXER <ch>-<layer> GRADE_NODE          — query
+//   ITS TWO SUB-FORMS WERE RIGHT AND ARE KEPT IN SPIRIT. Setting the window did not disturb a
+//   CDL already on that node, because nineteen positional numbers is a command nobody can
+//   check. `MIXER FIELD node/<id>/<param>` addresses one parameter at a time instead.
 //
-// No DURATION/TWEEN. Tweening would have to address node[n].window.field, which the
-// tween system cannot express -- named as an open question in the study rather than
-// quietly half-built here.
-std::future<std::wstring> mixer_grade_command(command_context& ctx)
-{
-    if (ctx.parameters.empty()) {
-        auto transform2 = get_current_transform(ctx).share();
-        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
-            auto graph = transform2.get().image_transform.grade_nodes;
-            if (!graph || graph->nodes.empty())
-                return L"201 MIXER OK\r\nDISABLED\r\n";
-            auto         f = [](double v) { return std::to_wstring(v); };
-            std::wstring out = L"201 MIXER OK\r\n";
-            for (size_t i = 0; i < graph->nodes.size(); ++i) {
-                const auto& n = graph->nodes[i];
-                out += std::to_wstring(i) + L" " + (n.enable ? L"1" : L"0") + L" " +
-                       f(n.window.center[0]) + L" " + f(n.window.center[1]) + L" " +
-                       f(n.window.radius[0]) + L" " + f(n.window.radius[1]) + L" " +
-                       f(n.window.feather) + L" " + f(n.exposure) + L" " +
-                       (n.window.invert ? L"1" : L"0") + L"\r\n";
-            }
-            return out;
-        });
-    }
-
-    if (boost::iequals(ctx.parameters.at(0), L"CLEAR")) {
-        transforms_applier transforms(ctx);
-        transforms.add(stage::transform_tuple_t(
-            ctx.layer_index(),
-            [](frame_transform t) {
-                t.image_transform.grade_nodes = nullptr;
-                return t;
-            },
-            0,
-            L"linear"));
-        transforms.apply();
-        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
-    }
-
-    if (!boost::iequals(ctx.parameters.at(0), L"NODE"))
-        CASPAR_THROW_EXCEPTION(user_error() << msg_info(
-                                   "MIXER GRADE_NODE NODE <n> cx cy rx ry feather exposure [invert] | CLEAR"));
-
-    if (ctx.parameters.size() < 2)
-        CASPAR_THROW_EXCEPTION(user_error() << msg_info("MIXER GRADE_NODE NODE <n> ..."));
-    const int index = std::stoi(ctx.parameters.at(1));
-    if (index < 0 || index > 15)
-        CASPAR_THROW_EXCEPTION(user_error() << msg_info("MIXER GRADE_NODE node index must be 0-15"));
-
-    // NODE <n> CDL <slope x3> <offset x3> <power x3> <sat> -- the per-node ASC CDL.
-    //
-    // An ADDRESSED sub-form rather than more positional parameters, following the study's
-    // section 6: a node already takes seven numbers for its window, and bolting ten more on the
-    // end produces a command nobody can read or check. The window form below is unchanged, so
-    // `NODE <n> <cx> ...` still sets geometry and exposure and leaves any CDL alone.
-    //
-    // ASC CDL because it is a published standard with an existing implementation in both
-    // shaders (`apply_cdl`), not a shape invented here -- only the operands are new.
-    if (ctx.parameters.size() > 2 && boost::iequals(ctx.parameters.at(2), L"CDL")) {
-        grade_require(ctx, 13,
-                      L"MIXER GRADE_NODE NODE <n> CDL <sR sG sB> <oR oG oB> <pR pG pB> <sat>");
-        double sl[3], of[3], pw[3];
-        for (int i = 0; i < 3; ++i) {
-            sl[i] = grade_param(ctx.parameters.at(3 + i), core::grade_limits::cdl_slope, L"slope");
-            of[i] = grade_param(ctx.parameters.at(6 + i), core::grade_limits::cdl_offset, L"offset");
-            pw[i] = grade_param(ctx.parameters.at(9 + i), core::grade_limits::cdl_power, L"power");
-        }
-        const double sat = grade_param(ctx.parameters.at(12), core::grade_limits::cdl_saturation, L"saturation");
-
-        transforms_applier cdl_transforms(ctx);
-        cdl_transforms.add(stage::transform_tuple_t(
-            ctx.layer_index(),
-            [=](frame_transform transform) -> frame_transform {
-                // Copy-on-write for the same reason as the window form below -- see there.
-                auto next = std::make_shared<core::grade_graph>();
-                if (transform.image_transform.grade_nodes)
-                    next->nodes = transform.image_transform.grade_nodes->nodes;
-                if (next->nodes.size() <= static_cast<size_t>(index))
-                    next->nodes.resize(static_cast<size_t>(index) + 1);
-
-                auto& n  = next->nodes[static_cast<size_t>(index)];
-                n.enable = true;
-                n.has_cdl = true;
-                for (int i = 0; i < 3; ++i) {
-                    n.cdl_slope[i]  = sl[i];
-                    n.cdl_offset[i] = of[i];
-                    n.cdl_power[i]  = pw[i];
-                }
-                n.cdl_saturation = sat;
-
-                transform.image_transform.grade_nodes = next;
-                return transform;
-            },
-            0,
-            L"linear"));
-        cdl_transforms.apply();
-        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
-    }
-
-    grade_require(ctx, 8, L"MIXER GRADE_NODE NODE <n> cx cy rx ry feather exposure [invert]");
-
-    const double cx      = grade_param(ctx.parameters.at(2), core::grade_limits::unit, L"centre x");
-    const double cy      = grade_param(ctx.parameters.at(3), core::grade_limits::unit, L"centre y");
-    const double rx      = grade_param(ctx.parameters.at(4), core::grade_limits::unit, L"radius x");
-    const double ry      = grade_param(ctx.parameters.at(5), core::grade_limits::unit, L"radius y");
-    const double feather = grade_param(ctx.parameters.at(6), core::grade_limits::unit, L"feather");
-    const double expos   = grade_param(ctx.parameters.at(7), core::grade_limits::exposure, L"exposure");
-    const bool   invert  = ctx.parameters.size() > 8 && ctx.parameters.at(8) != L"0";
-
-    transforms_applier transforms(ctx);
-    transforms.add(stage::transform_tuple_t(
-        ctx.layer_index(),
-        [=](frame_transform transform) -> frame_transform {
-            // Copy-on-write, and it is load-bearing rather than tidy: composition
-            // (apply_transform_colour_values) and equality (image_transform::operator==,
-            // which is what the still-frame cache compares) both use POINTER identity. A
-            // graph mutated in place would compare equal to itself and the cache would
-            // replay the previous frame -- the exact defect the fingerprint exists to
-            // prevent. Every mutation therefore allocates.
-            auto next = std::make_shared<core::grade_graph>();
-            if (transform.image_transform.grade_nodes)
-                next->nodes = transform.image_transform.grade_nodes->nodes;
-            if (next->nodes.size() <= static_cast<size_t>(index))
-                next->nodes.resize(static_cast<size_t>(index) + 1);
-
-            // Geometry and exposure only. A CDL already set on this node by the sub-form
-            // above SURVIVES -- the two address different halves of the node, and making
-            // the window form reset the CDL would mean every window nudge silently threw a
-            // grade away.
-            auto& n            = next->nodes[static_cast<size_t>(index)];
-            n.enable           = true;
-            n.window.center    = {cx, cy};
-            n.window.radius    = {rx, ry};
-            n.window.feather   = feather;
-            n.window.invert    = invert;
-            n.exposure         = expos;
-
-            transform.image_transform.grade_nodes = next;
-            return transform;
-        },
-        0,
-        L"linear"));
-    transforms.apply();
-    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
-}
+//   AND IT GRADED THE DISPLAY-ENCODED PIXEL, measured at 42.00 LSB from `MIXER CDL` on both
+//   mixers. That was never a decision -- the early-out simply sat at the end of `main()`.
+//   `graph_stage` makes it a choice.
+//
+// Replaced by: `PUT /v1/graph/{name}` for the document, `GRAPH <ch>-<layer> ATTACH` to put it
+// on a layer, and `MIXER FIELD node/<id>/<param>` for its parameters -- which is also a
+// timeline key, a binding target and a `HOLD` path, because a node parameter is an address.
 
 // MIXER RGBLEVELS — per-channel independent levels
 // Query:  MIXER 1-1 RGBLEVELS
@@ -6991,7 +6849,6 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER SHARPEN",      mixer_sharpen_command,      0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER GRAIN",        mixer_grain_command,        0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER QUALIFIER",    mixer_qualifier_command,    0);
-    repo->register_channel_command(L"Mixer Commands", L"MIXER GRADE_NODE",   mixer_grade_command,        0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER RGBLEVELS",    mixer_rgblevels_command,    0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER CURVES",       mixer_curves_command,       0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER VOLUME",      mixer_volume_command,       0);

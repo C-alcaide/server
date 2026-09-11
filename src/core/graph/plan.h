@@ -1,0 +1,151 @@
+/*
+ * Copyright (c) 2026 CasparCG Contributors
+ *
+ * This file is part of CasparCG (www.casparcg.com).
+ *
+ * CasparCG is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ */
+
+#pragma once
+
+// THE COMPILED FORM: what the frame path sees, and the split that makes it affordable.
+//
+// TWO OBJECTS REACH `image_transform`, because they have two different FLOW types, and getting
+// this wrong is the most expensive mistake available in the whole design:
+//
+//   `node_plan`   the ATTRIBUTE half -- topology, classes, order, `last_use`, the pass count.
+//                 Held by `shared_ptr<const>`, compared by POINTER IDENTITY, and reallocated
+//                 ONLY when the document's structure changes. That is exactly what
+//                 `grade_nodes` already did and the reason it worked: `image_transform`'s
+//                 `operator==` is what the still-frame cache compares, and a pointer is one
+//                 word rather than a deep compare of a graph.
+//
+//   `node_values` the SIGNAL half -- every node parameter, every `bypass`, every edge's `mute`,
+//                 as a FLAT `vector<double>` with offsets the plan carries. Compared BY VALUE.
+//                 A timeline ramping `exposure` writes one double per tick into an array that
+//                 already exists.
+//
+// WHY NOT ONE OBJECT. The obvious design is a compiled pointer holding the values, reallocated
+// whenever a value changes. A timeline ramping one parameter at 50 Hz would then allocate a
+// graph fifty times a second -- and worse, the still-frame fingerprint would move on every tick
+// by ALLOCATION rather than by value, so a paused, unchanging graph would look different every
+// frame and defeat the cache it exists to feed. The split is not an optimisation; the single
+// object is incorrect.
+//
+// AND THE SPLIT IS ONLY SAFE BECAUSE THE REGISTRY DECLARES WHICH IS WHICH. A port's
+// `port_flow` says whether its value is a `signal` (in the array) or an `attribute` (in the
+// plan). Declaring a signal as an attribute costs a reallocation per tick; declaring an
+// attribute as a signal makes a change silently not take effect. `node_registry_self_test`
+// cannot catch either, because both are legal C++ -- the declaration is the contract.
+
+#include "model.h"
+#include "registry.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace caspar { namespace core { namespace graph {
+
+/// Every node parameter, flat. Indexed by the offsets in `node_plan::value_index`.
+///
+/// `double` rather than `float` because that is what the overlays, the registry and the
+/// control API all carry, and converting at the boundary is where a rounding difference
+/// between the published value and the rendered one would hide.
+using node_values = std::vector<double>;
+
+/// ONE STEP of the compiled graph: consume up to three textures, produce one.
+///
+/// Indices are into the evaluator's own `outputs` array, which is parallel to `steps`. -1 means
+/// "not connected", and what that CONTRIBUTES is the port's `disconnected_default` rather than
+/// transparent black -- see `registry.h`, and note that a muted edge takes the same path.
+struct node_step
+{
+    /// Which class, as an index into `node_classes()`. An index rather than a string because
+    /// this is read per draw: the evaluator switches on it and the shader takes it as `gn_op`.
+    std::int32_t cls = -1;
+
+    /// The node's id, for `value_index` lookups and for a preview request naming it. Not read
+    /// on the frame path.
+    std::string id;
+
+    /// Inputs, as step indices. `in0` is the PRIMARY input -- what a bypassed node aliases.
+    std::int32_t in0 = -1;
+    std::int32_t in1 = -1;
+    std::int32_t mask = -1;
+
+    /// Does this step draw into an attachment of its own? False for `input` (it IS the head
+    /// pass's output), for `output` (it is the tail), and for a mask that is FUSED into its
+    /// consumer's uniforms rather than materialised.
+    bool produces_image = false;
+
+    /// An analytic mask with exactly ONE consumer needs no attachment: its parameters go into
+    /// the consumer's own uniforms and the shader evaluates it inline. That is what the
+    /// prototype's `grade_node_mask` already does, and it is why a windowed grade costs one
+    /// pass rather than two.
+    bool fused_mask = false;
+
+    /// THE LAST STEP THAT READS THIS ONE's OUTPUT. After it, the attachment goes back to the
+    /// pool. Computed at compile time because the evaluator must not search forwards per step
+    /// per frame -- and because an attachment released too early is a garbage read that looks
+    /// like a maths bug.
+    std::int32_t last_use = -1;
+
+    /// Where this step's parameters begin in `node_values`.
+    std::uint32_t values_offset = 0;
+
+    /// How many doubles it owns, so a writer can range-check without the registry.
+    std::uint32_t values_count = 0;
+};
+
+/// The compiled graph. Immutable, shared, and compared by pointer.
+struct node_plan
+{
+    graph_stage stage = graph_stage::working;
+
+    /// Topologically ordered. `steps.front()` is the `input` and `steps.back()` the `output`,
+    /// which the compiler guarantees so the evaluator needs no search for either.
+    std::vector<node_step> steps;
+
+    /// How many steps actually draw. **Zero takes the existing single-draw fast path**, which
+    /// is what keeps a graph with everything bypassed byte-identical to no graph at all.
+    std::int32_t image_passes = 0;
+
+    /// Reported to the client, not acted on: a legal-but-lossy join the author should see.
+    std::vector<coercion> coercions;
+
+    /// Which document revision this was compiled from, for `graph_revision` publication.
+    std::int64_t document_revision = 0;
+
+    /// `node/<id>/<param>` -> index into `node_values`. The one map between an ADDRESS and the
+    /// flat array, so `resolve_drivers` writes a node parameter with one lookup and no parsing.
+    std::unordered_map<std::string, std::uint32_t> value_index;
+
+    /// How many doubles `node_values` must hold for this plan.
+    std::uint32_t values_size = 0;
+};
+
+/// Compile a validated document. Null if it has `error` faults.
+///
+/// ALLOCATES, and the pointer it returns IS the fingerprint -- so this runs at PUT and at
+/// ATTACH and never in the tick.
+std::shared_ptr<const node_plan> compile(const graph_document& doc,
+                                         const std::vector<std::string>& order,
+                                         const std::vector<graph_fault>& faults);
+
+/// The document's parameter values, flattened in the plan's own layout.
+///
+/// Separate from `compile` because the two have different lifetimes: the plan is rebuilt when
+/// the structure changes and this is rebuilt whenever a value does, which for a slider drag is
+/// fifty times a second.
+node_values values_of(const graph_document& doc, const node_plan& plan);
+
+/// Aborts the boot on a disagreement between the compiler and its own rules.
+void graph_plan_self_test();
+
+}}} // namespace caspar::core::graph

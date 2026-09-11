@@ -125,6 +125,13 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     /// per layer per tick. Kept in step because every attach and detach touches both, under
     /// `binding_lock_`.
     std::map<int, std::string>                graph_attach_;
+    /// Which stored entry each layer's tween was last built from.
+    ///
+    /// A POINTER COMPARISON, which is what makes the per-tick check free: the store publishes
+    /// an immutable entry per name, so "has this document changed" is one pointer test rather
+    /// than a revision compare or a deep walk. Same reason `image_transform::operator==`
+    /// compares the plan by pointer.
+    std::map<int, std::shared_ptr<const graph::stored_graph>> graph_seen_;
 
     /// How a previz screen or camera property is written. Injected by the shell; see stage.h.
     stage::stage_field_writer stage_field_writer_;
@@ -527,6 +534,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 last_frame_number_ = frame_number;
                 timeline_state_    = monitor::state{};
                 evaluate_timelines(frame_number, timeline_state_);
+                apply_graphs();
                 resolve_drivers();
                 // The two LIVE registries, which are not part of the frame transform: a
                 // producer's own parameters and the previz stage. Same overlays, same rank, a
@@ -1698,6 +1706,60 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     /// `tweened_transform::patch`, and move up to their own overlay in commit 9 -- until then a
     /// binding and a timeline on the SAME field would fight, which nothing does yet and which
     /// the plan's own sequence puts at commit 9.
+    /// PUT THE ATTACHED DOCUMENT'S PLAN AND VALUES ONTO THE LAYER'S TWEEN.
+    ///
+    /// Once per tick, before `resolve_drivers`, and this is how a `PUT /v1/graph` from another
+    /// client reaches air without the API ever touching the stage: the store publishes a new
+    /// immutable entry, this notices the pointer changed, and the next frame carries it.
+    ///
+    /// THROUGH `patch`, not by assignment, and that is load-bearing rather than tidy. `patch`
+    /// edits `source_` and `dest_` together, so an in-flight `MIXER OPACITY 0.5 50 linear`
+    /// keeps running while the graph lands. Assigning the tween's destination would collapse
+    /// that fade to its endpoint -- the defect `tweened_transform::patch` was added to fix, and
+    /// the reason it exists at all.
+    ///
+    /// A DOCUMENT THAT DOES NOT COMPILE LEAVES THE LAST GOOD PLAN IN PLACE and publishes
+    /// `graph_stale`. That is the on-air rule: an operator who mistypes a port name must not
+    /// lose the grade that is rendering.
+    void apply_graphs()
+    {
+        if (!graphs_ || graph_attach_.empty())
+            return;
+
+        for (const auto& kv : graph_attach_) {
+            const auto layer = kv.first;
+            const auto entry = graphs_->get(kv.second);
+            if (!entry) {
+                // The document was erased under us. The attachment mirror is stale; the store
+                // already dropped the claim, so drop the plan too rather than rendering a look
+                // whose definition is gone.
+                if (graph_seen_.erase(layer) > 0) {
+                    tweens_[layer].patch([](frame_transform& t) {
+                        t.image_transform.node_plan.reset();
+                        t.image_transform.node_values.clear();
+                    });
+                }
+                continue;
+            }
+
+            const auto seen = graph_seen_.find(layer);
+            if (seen != graph_seen_.end() && seen->second == entry)
+                continue; // unchanged -- one pointer test, which is the whole cost per tick
+
+            graph_seen_[layer] = entry;
+            if (!entry->plan)
+                continue; // does not compile: keep the last good plan, publish `graph_stale`
+
+            tweens_[layer].patch([&](frame_transform& t) {
+                t.image_transform.node_plan   = entry->plan;
+                // The VALUES travel with the plan they belong to, always: the offsets are
+                // meaningless against another plan's array, so taking one without the other is
+                // an out-of-range read on the frame path.
+                t.image_transform.node_values = entry->values;
+            });
+        }
+    }
+
     void resolve_drivers()
     {
         resolved_.clear();
@@ -1717,6 +1779,32 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
             const auto write = [&t](const std::string& path, const monitor::vector_t& value) {
                 const auto target = address::parse(path);
+
+                // A NODE PARAMETER, written straight into the flat array -- no allocation, one
+                // map lookup, and the plan's `value_index` is what makes it one lookup rather
+                // than a parse. This is the arm that makes a timeline ramping a node parameter
+                // cost the same as ramping `opacity`.
+                //
+                // BEFORE the `!target.meta` early-out, because a node target has no descriptor
+                // by design: it is a live registry resolved against the attached document.
+                if (target.kind == address::target_kind::node) {
+                    const auto& plan = t.image_transform.node_plan;
+                    if (!plan)
+                        return; // nothing attached, or it does not compile
+                    const auto it = plan->value_index.find(
+                        target.component == 0 ? target.path
+                                              : "node/" + target.object + "/" + target.field);
+                    if (it == plan->value_index.end())
+                        return; // a stale key: the document was re-PUT since this resolved
+                    const auto base = it->second + target.component;
+                    if (base >= t.image_transform.node_values.size())
+                        return;
+                    double d = 0;
+                    if (value.size() == 1 && as_number(value[0], d))
+                        t.image_transform.node_values[base] = d;
+                    return;
+                }
+
                 if (!target.meta)
                     return; // a producer parameter or a stage field: they have their own writers
                 if (target.kind == address::target_kind::image) {
@@ -2287,13 +2375,34 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     /// task behind the frame rather than running now.
     bool detach_graph_here(int layer)
     {
-        std::lock_guard<std::mutex> lock(binding_lock_);
-        const auto                  it = graph_attach_.find(layer);
-        if (it == graph_attach_.end())
-            return false;
-        if (graphs_)
-            graphs_->release(it->second);
-        graph_attach_.erase(it);
+        {
+            std::lock_guard<std::mutex> lock(binding_lock_);
+            const auto                  it = graph_attach_.find(layer);
+            if (it == graph_attach_.end())
+                return false;
+            if (graphs_)
+                graphs_->release(it->second);
+            graph_attach_.erase(it);
+        }
+
+        // AND THE PLAN COMES OFF THE TWEEN, which is the half that actually takes the look off
+        // air -- and the half the first version of this function forgot.
+        //
+        // FOUND BY `grade-graph` ON ITS FIRST MIGRATED RUN, and it is worth recording exactly
+        // how, because the shape generalises. `apply_graphs` iterates `graph_attach_`, so once
+        // the attachment is erased the loop never visits this layer again and NOTHING clears
+        // `node_plan` from its transform: the graph kept rendering after `DETACH`, forever.
+        //
+        // `graph-stack` could not see it. Its detach check reads the PUBLISHED leaf, which
+        // comes from `graph_attach_` and correctly went away -- so the value stream said the
+        // graph was gone while the picture still had it. That is the `MIXER EXPOSURE` class
+        // exactly, and this is the first time in this plan that the PICTURE check caught what
+        // the value check could not.
+        graph_seen_.erase(layer);
+        tweens_[layer].patch([](frame_transform& t) {
+            t.image_transform.node_plan.reset();
+            t.image_transform.node_values.clear();
+        });
         return true;
     }
 

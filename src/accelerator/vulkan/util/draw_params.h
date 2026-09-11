@@ -23,6 +23,7 @@
 
 #include "transforms.h"
 #include <common/memory.h>
+#include <core/graph/node_draw.h>
 #include <core/frame/frame_transform.h>
 #include <core/frame/geometry.h>
 #include <core/frame/pixel_format.h>
@@ -116,8 +117,22 @@ struct draw_params final
     /// node pass reads its predecessor instead. `apply_output_convert` and
     /// `apply_calibration_lut` already work this way, which is why this fits without a new
     /// pass structure.
-    bool             grade_node_only = false;
-    core::grade_node grade_node{};
+    /// This draw IS one node's pass.
+    ///
+    /// Deliberately the same shape as `output_convert_only` above, which is the precedent this
+    /// follows rather than invents: a full-screen draw through the ordinary kernel with the
+    /// source in `textures` and the destination in `background`, tagged so that the
+    /// colour-conversion halves do not run.
+    ///
+    /// It routes the shader past everything the layer pass already did -- both conversion
+    /// halves, the whole primary grading chain, alpha handling, keying, blending, chroma, grain
+    /// and the projection blend mask -- and runs this node's mask and operation only.
+    /// Double-applying any of those is the failure mode this exists to prevent.
+    ///
+    /// ONE FIELD, not a flag plus a struct: `node.op >= 0` IS the flag, so the two cannot
+    /// disagree. The prototype carried `bool grade_node_only` beside a `core::grade_node`, and
+    /// a state where one said yes and the other was default was expressible.
+    core::graph::node_draw node{};
 };
 
 }}} // namespace caspar::accelerator::vulkan

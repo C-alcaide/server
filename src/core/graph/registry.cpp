@@ -611,6 +611,34 @@ void node_registry_self_test()
     if (!find_node_class("input") || !find_node_class("output"))
         fail("the two root classes must exist");
 
+    // ---- THE OP INDICES AGAINST THE TABLE -------------------------------------------
+    //
+    // `node_step::cls` is an index into this table and it reaches the shader as `gn_op`, so the
+    // same number is read by the table, two kernels and two shaders. A reordering of
+    // `build_classes()` compiles perfectly and makes an `exposure` run the CDL's code. This is
+    // the only thing that would catch it.
+    {
+        const std::pair<std::int32_t, const char*> ops[] = {
+            {op_input, "input"},   {op_output, "output"},           {op_exposure, "exposure"},
+            {op_cdl, "cdl"},       {op_mask_ellipse, "mask_ellipse"}, {op_mix, "mix"},
+            {op_over, "over"},
+        };
+        for (const auto& o : ops) {
+            if (static_cast<std::size_t>(o.first) >= classes.size())
+                fail(std::string("op index for '") + o.second + "' is past the end of the table");
+            if (classes[o.first].id != o.second)
+                fail(std::string("op index ") + std::to_string(o.first) + " is '" +
+                     classes[o.first].id + "' and the shaders expect '" + o.second +
+                     "' -- `build_classes()` was reordered, and every gn_op in both shaders is "
+                     "now wrong");
+        }
+        if (classes.size() != sizeof(ops) / sizeof(ops[0]))
+            fail("the table has " + std::to_string(classes.size()) +
+                 " classes and the op enum names " + std::to_string(sizeof(ops) / sizeof(ops[0])) +
+                 " -- a class was added without an op constant, so the shaders cannot switch on "
+                 "it and it would render as whatever the default case does");
+    }
+
     // ---- the coercion table's own rules ----------------------------------------------
     const auto* expo = find_node_class("exposure");
     const auto* mixc = find_node_class("mix");

@@ -191,6 +191,23 @@ image_transform image_transform::tween(double                 time,
                                                          static_cast<double>(dest.lut3d_strength), duration, tween));
     result.hue_curves     = dest.hue_curves;  // snap to destination
 
+    // THE NODE GRAPH, SNAPPED TO THE DESTINATION -- and this line is a BUG FIX, not an
+    // addition. `grade_nodes` was never assigned here, while `lut3d`, `hue_curves` and
+    // `blend_mask` beside it all were. So for the whole duration of any in-flight
+    // `MIXER <field> <v> <duration>` on a graphed layer, the tweened transform carried a NULL
+    // graph: the look vanished for the length of the fade and snapped back at the end.
+    //
+    // It shipped because `grade-window` never tweens anything. Nothing could see it, which is
+    // why `grade-graph` now holds a mid-tween check: `MIXER OPACITY 0.5 50 linear` while a
+    // graph is attached, sampled inside and outside its mask.
+    //
+    // SNAP rather than interpolate, for the same reason as the LUT and the blend mask: there is
+    // no meaningful halfway between two topologies. The VALUES snap with the plan they belong
+    // to, because an offset table is meaningless against another plan's array -- assigning one
+    // without the other is an out-of-range read on the frame path.
+    result.node_plan      = dest.node_plan;
+    result.node_values    = dest.node_values;
+
     // Per-pixel projection blend mask — snap to destination (can't interpolate image data)
     result.blend_mask     = dest.blend_mask;
 
@@ -432,7 +449,13 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                // frame on air while the query reads back the new one. `item_fingerprint`
                // stores a whole image_transform and compares it with this operator, so this
                // line is the entire fingerprint wiring.
-               lhs.grade_nodes.get() == rhs.grade_nodes.get() &&
+               // THE PLAN BY POINTER, THE VALUES BY VALUE, and that asymmetry is the whole
+               // reason there are two members. A deep compare of the plan would cost a graph
+               // walk per layer per frame; comparing the VALUES by pointer would make a
+               // timeline ramp invisible to the still-frame cache, so a paused graph would
+               // never update and a ramping one would update on allocation instead of on
+               // change. See `plan.h`.
+               lhs.node_plan.get() == rhs.node_plan.get() && lhs.node_values == rhs.node_values &&
                eq(lhs.sharpen_amount, rhs.sharpen_amount) &&
                eq(lhs.sharpen_radius, rhs.sharpen_radius) &&
                eq(lhs.grain_intensity, rhs.grain_intensity) &&

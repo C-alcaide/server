@@ -42,6 +42,7 @@
 // PERSISTENCE IS THE CLIENT'S, as for timelines. This holds what is loaded.
 
 #include "model.h"
+#include "plan.h"
 #include "validate.h"
 
 #include <chrono>
@@ -57,16 +58,23 @@
 namespace caspar { namespace core { namespace graph {
 
 /// One stored document plus everything derived from it. Immutable once published.
-///
-/// The compiled `node_plan` is NOT here yet: nothing evaluates a graph until the frame path
-/// lands, and holding a pointer to a plan nobody consults would be a field that looks load-bearing
-/// and is not.
 struct stored_graph
 {
     graph_document           document;
     std::vector<graph_fault> faults;
     /// Node ids in evaluation order. Empty exactly when `ok()` is false.
     std::vector<std::string> order;
+
+    /// THE COMPILED PLAN, and null exactly when `ok()` is false.
+    ///
+    /// Built HERE, at PUT, and never in the tick: the pointer IS the still-frame fingerprint, so
+    /// allocating one per frame would make a paused unchanging graph look different every frame
+    /// and defeat the cache it feeds. See `plan.h` for the attribute/signal split this rests on.
+    std::shared_ptr<const node_plan> plan;
+
+    /// The document's parameter values in the plan's flat layout. Rebuilt on every `put` and
+    /// every `patch_params` -- which is the cheap half, and the reason the two are separate.
+    node_values values;
 
     /// Can this graph run? No `error` faults. A `coercion` fault does not stop it -- that is the
     /// entire point of the severity split.

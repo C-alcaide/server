@@ -20,6 +20,9 @@
  */
 #include "image_kernel.h"
 
+#include <core/graph/plan.h>
+#include <core/graph/registry.h>
+
 #include "image_shader.h"
 
 #include "../util/device.h"
@@ -1352,33 +1355,89 @@ struct image_kernel::impl
         }
 
         // ---- Grading node pass ------------------------------------------------
-        // Set unconditionally, both ways. A bool uniform left over from the previous
-        // draw is how a node pass would leak into an ordinary layer -- the same class
-        // of defect as `ycbcr_code_scale` being written to whichever program was bound
-        // last. Every draw states which kind it is.
-        shader_->set("grade_node_only", params.grade_node_only);
-        if (params.grade_node_only) {
-            const auto& n = params.grade_node;
-            shader_->set("gn_center", n.window.center[0], n.window.center[1]);
-            shader_->set("gn_radius", n.window.radius[0], n.window.radius[1]);
-            shader_->set("gn_feather", static_cast<float>(n.window.feather));
-            shader_->set("gn_invert", n.window.invert);
-            shader_->set("gn_exposure", static_cast<float>(n.exposure));
-            // RGB ON UPLOAD. The shader applies `.bgr` at the call site, like every other
-            // per-channel vec3 here -- see `split_*_color`, which is reversed on upload
-            // instead. Doing BOTH is a double exchange that looks correct on greys and
-            // mirrors every colour; doing NEITHER is the ICVFX defect of 2026-08-26.
-            shader_->set("gn_has_cdl", n.has_cdl);
-            shader_->set("gn_cdl_slope",
-                         static_cast<float>(n.cdl_slope[0]), static_cast<float>(n.cdl_slope[1]),
-                         static_cast<float>(n.cdl_slope[2]));
-            shader_->set("gn_cdl_offset",
-                         static_cast<float>(n.cdl_offset[0]), static_cast<float>(n.cdl_offset[1]),
-                         static_cast<float>(n.cdl_offset[2]));
-            shader_->set("gn_cdl_power",
-                         static_cast<float>(n.cdl_power[0]), static_cast<float>(n.cdl_power[1]),
-                         static_cast<float>(n.cdl_power[2]));
-            shader_->set("gn_cdl_saturation", static_cast<float>(n.cdl_saturation));
+        // ── THE NODE PASS ──────────────────────────────────────────────────────────────
+        //
+        // Set unconditionally, both ways. A uniform left over from the previous draw is how a
+        // node pass would leak into an ordinary layer -- the same class of defect as
+        // `ycbcr_code_scale` being written to whichever program was bound last. Every draw
+        // states which kind it is.
+        //
+        // `gn_op` IS the flag: -1 means "not a node pass", so there is no second boolean that
+        // could disagree with it. The prototype carried `grade_node_only` beside a struct and a
+        // state where one said yes and the other was default was expressible.
+        shader_->set("gn_op", params.node.op);
+        if (params.node) {
+            // THE VALUES COME OUT OF THE PLAN'S FLAT ARRAY IN PORT ORDER, which is the contract
+            // `plan.cpp` establishes when it assigns offsets: it walks the class's ports in
+            // declaration order, so index 0 is `bypass`, 1 is the first real parameter, and so
+            // on. A class that reordered its ports would shift every index here -- which is why
+            // the registry's port list is the single source and this reads positions off it
+            // rather than carrying its own table.
+            const auto* v = params.node.values;
+            const auto  n = params.node.values_count;
+            const auto  at = [&](std::uint32_t i, double dflt) {
+                return v && i < n ? static_cast<float>(v[i]) : static_cast<float>(dflt);
+            };
+
+            // Slot 0 is `bypass` for every class -- handled in the evaluator by aliasing, so a
+            // bypassed node never reaches here at all.
+            //
+            // The layout per class, from `registry.cpp`'s port order:
+            //   exposure  bypass, gain, mix
+            //   cdl       bypass, slope[3], offset[3], power[3], saturation, mix
+            //   mix       bypass, amount
+            //   over      bypass
+            switch (params.node.op) {
+                case core::graph::op_exposure:
+                    shader_->set("gn_exposure", at(1, 1.0));
+                    shader_->set("gn_mix", at(2, 1.0));
+                    break;
+                case core::graph::op_cdl:
+                    // RGB ON UPLOAD. The shader applies `.bgr` at the call site, like every
+                    // other per-channel vec3 here -- see `split_*_color`, which is reversed on
+                    // upload instead. Doing BOTH is a double exchange that looks correct on
+                    // greys and mirrors every colour; doing NEITHER is the ICVFX defect of
+                    // 2026-08-26.
+                    shader_->set("gn_cdl_slope", at(1, 1.0), at(2, 1.0), at(3, 1.0));
+                    shader_->set("gn_cdl_offset", at(4, 0.0), at(5, 0.0), at(6, 0.0));
+                    shader_->set("gn_cdl_power", at(7, 1.0), at(8, 1.0), at(9, 1.0));
+                    shader_->set("gn_cdl_saturation", at(10, 1.0));
+                    shader_->set("gn_mix", at(11, 1.0));
+                    break;
+                case core::graph::op_mix:
+                    shader_->set("gn_mix", at(1, 0.5));
+                    break;
+                default:
+                    // `over` and the roots take no parameters. `gn_mix` still has to be SET,
+                    // not left over: a stale 0.0 from a previous pass would make this draw a
+                    // no-op and a stale 1.0 would make an `over` opaque.
+                    shader_->set("gn_mix", 1.0f);
+                    break;
+            }
+            shader_->set("gn_has_in1", params.node.has_in1);
+
+            // THE FUSED MASK, inline. A mask with one consumer costs no pass: its parameters
+            // ride along in `mask_values` and the shader evaluates the ellipse itself, which is
+            // what makes a windowed grade one draw rather than two.
+            //
+            //   mask_ellipse  bypass, center[2], radius[2], feather, invert, space
+            shader_->set("gn_has_mask", params.node.mask_values != nullptr);
+            if (params.node.mask_values) {
+                const auto* m = params.node.mask_values;
+                shader_->set("gn_center", static_cast<float>(m[1]), static_cast<float>(m[2]));
+                shader_->set("gn_radius", static_cast<float>(m[3]), static_cast<float>(m[4]));
+                shader_->set("gn_feather", static_cast<float>(m[5]));
+                shader_->set("gn_invert", m[6] != 0.0);
+            } else {
+                // NO MASK MEANS EVERYWHERE, so the shader must not read a stale window. Set to
+                // a radius that covers any raster with the feather off -- and the shader also
+                // gates on `gn_has_mask`, because relying on geometry alone to mean "no mask"
+                // is the kind of coincidence that breaks when somebody changes a default.
+                shader_->set("gn_center", 0.5f, 0.5f);
+                shader_->set("gn_radius", 8.0f, 8.0f);
+                shader_->set("gn_feather", 1e-4f);
+                shader_->set("gn_invert", false);
+            }
         }
 
         // Sharpening
