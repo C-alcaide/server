@@ -240,7 +240,47 @@ anchors stand unchanged and no field above them moved. The design's generic `gn_
 that every class in this commit already has a named field for. They earn their size when the mask
 families arrive.
 
-### 3.3.3 Two defects this commit fixed, one of them shipping
+### 3.3.3 Fan-out, pool reuse, and what the plan predicted wrongly
+
+**Fan-out is a `shared_ptr` copy**, so two consumers of one output cost one draw. That is the
+thing the prototype's ping-pong pair could not express at all, and it is the whole reason `mix`
+and `over` exist.
+
+**The plan predicted this would break on Vulkan. It does not, and the reason is worth recording
+because it was predicted wrongly twice.**
+
+The plan's flag said `renderpass::commit()` tracks a single `previous_attachment`, so a DAG
+reading an earlier one would read a stale layout. Reading the source suggested a different
+hazard instead: `last_use` returns an attachment to the device pool the instant its `shared_ptr`
+dies, the pool's deleter pushes it back immediately, and `renderpass::draw()` only *queues* —
+`commit()` issues the passes and barriers afterwards — so two logical outputs aliasing one image
+within a frame looked expressible.
+
+**Both are false, measured.** A **6-step chain** — chosen specifically to force mid-frame reuse
+— is exact at **0.67 LSB**. `renderpass::draw()` stores `params.background` in its layer list, so
+an attachment the evaluator releases is *still held by the renderpass* until `commit()`: the pool
+never hands back a live image.
+
+A consequence worth knowing: **`last_use` release saves nothing on Vulkan.** The pool-pressure
+benefit lands on OpenGL only, where the draw is issued immediately. The code is kept identical on
+both sides because the release is correct on both and a divergence would be one more thing no
+single-backend test could see.
+
+**What actually broke was a channel order.** `mix` read its second image *without* the `.bgra`
+swizzle that `get_rgba_color` applies to plane 0, so red and blue were exchanged on `b`:
+**30.5 LSB, Vulkan only**, because OpenGL's copy of that line already swizzled. Exactly the trap
+both shaders' comments warn about — and it was visible only because the fixture's two branches
+differ by a **factor of four** and its source has three distinct channels. A neutral source, or
+branches an octave apart, would have shown noise.
+
+> **And the same run produced a fixture error, which is the other half of the lesson.** With the
+> `a` branch at gain 2.0 the red channel reached 1.1 and **clipped in the 8-bit intermediate**, so
+> the check failed on OpenGL by exactly the clip. OpenGL was right and the expectation was wrong
+> — a fabricated defect, caught only by working out where the residual came from. Gains are 1.6
+> and 0.4 now. The clip is itself the argument for fp16 intermediates (§8): working-space values
+> legitimately exceed 1.0, and this fixture will use that headroom once they land.
+
+### 3.3.4 Two defects the seam fixed, one of them shipping
 
 **`image_transform::tween` never assigned the graph.** `lut3d`, `hue_curves` and `blend_mask` are
 all assigned to the destination on the lines around it; `grade_nodes` was not. So for the whole
@@ -476,7 +516,6 @@ Each of these is sequenced rather than open, and the order is riskiest-first:
 | :--- | :--- |
 | ~~the address grammar~~ | **DONE** — see §3.1 and §3.2 |
 | ~~**the seam**~~ | **DONE** — see §3.3 |
-| Vulkan fan-out | `renderpass::commit()` barriering any earlier attachment, not only the previous one |
 | fp16 intermediates | working-space values exceed 1.0, so unorm intermediates clip |
 | `stage: working` | the head/tail split, and the CDL parity in §2 turns green |
 | the mask families | `rect`, `gradient`, `qualifier`, `combine`, with materialised masks |
@@ -497,6 +536,7 @@ rather than by the `MIXER` tween.
 | :--- | :--- | :--- |
 | the document, its faults, its order, its history | `api-graph` | **34/34 both mixers** |
 | a node parameter through the whole OWNERSHIP STACK | `graph-stack` | **29/29 both mixers** |
+| FAN-OUT (one output, two consumers) and POOL REUSE (a 6-step chain) | `grade-graph` | diamond **0.70 LSB**, chain **0.67 LSB**, both mixers |
 | what a node COMPUTES, and its window | `grade-window`, **migrated to the graph** | inside **0.50** LSB, leak **0.00**, separation 77.0, move 76.7, restore 0.00, chain **0.75**, invert 0.00/77.0, composite **0.00**, CDL **0.38**, desat **0.00** — identical to the prototype's figures, on both mixers |
 | the no-graph fast path | `conformance`, `grading` | **100/100 at 1 LSB**, **48/48** |
 | which colour space a node pass runs in | `grade-graph` | **8/8 both mixers**, the gap measured at 42.00 LSB |

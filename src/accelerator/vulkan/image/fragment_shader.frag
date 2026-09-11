@@ -512,6 +512,20 @@ vec4 get_rgba_color(vec2 uv);
 vec4 sample_wrap(vec2 s){if(flag(F_360))s.x=fract(s.x);return get_rgba_color(s);}
 vec3 apply_sharpen(vec2 uv,vec3 cc,float am,float rd){vec2 ts=1.0/target_size*rd;return cc+(cc-(sample_wrap(uv+vec2(0,-ts.y)).rgb+sample_wrap(uv+vec2(0,ts.y)).rgb+sample_wrap(uv+vec2(ts.x,0)).rgb+sample_wrap(uv+vec2(-ts.x,0)).rgb)*0.25)*am;}
 
+/// THE NODE PASS'S SECOND IMAGE, swizzled exactly as plane 0 is.
+///
+/// A node pass binds two textures of the SAME format, so `pixel_format` describes both -- and
+/// the swizzle below has to match `get_rgba_color`'s or the two images reach the operation in
+/// different channel orders. That is the channel-order trap in its purest form: `mix(a, b)` with
+/// `b` exchanged looks plausible on greys and wrong on everything else.
+vec4 sample_plane1(vec2 uv){
+    switch(pixel_format){
+    case 0: return vec4(texture(textures[PLANE1],uv).rrr*precision_factor[0],1.0);
+    case 1: return texture(textures[PLANE1],uv).bgra*precision_factor[0];
+    default: return texture(textures[PLANE1],uv).rgba*precision_factor[0];
+    }
+}
+
 vec4 get_rgba_color(vec2 uv){
     switch(pixel_format){
     case 0: return vec4(texture(textures[PLANE0],uv).rrr*precision_factor[0],1.0);
@@ -631,11 +645,19 @@ void main(){
             // toward black. A muted edge blacking a layer during a show is the one failure
             // nobody forgives, and this is where that promise is kept. `gn_mix` is this
             // class's own amount, so the mask must not multiply it a second time.
-            vec4 b=gn_has_in1!=0?texture(textures[PLANE1],buv):col;
+            // SWIZZLED THE SAME WAY plane 0 is, and this line is a bug fix. `get_rgba_color`
+            // applies `.bgra` for the packed 8-bit format (case 1), and the node pass's second
+            // image has the SAME format -- `apply_node` tags `pix_desc` from the source's own
+            // depth -- so reading it raw EXCHANGES RED AND BLUE. Caught by `grade-graph`'s
+            // diamond arm at 30.5 LSB, on Vulkan only: OpenGL's copy of this line already
+            // swizzled. The fixture's two branches differ by a factor of four and its source has
+            // three distinct channels, which is what made a channel exchange show up as a wrong
+            // number rather than as noise.
+            vec4 b=gn_has_in1!=0?sample_plane1(buv):col;
             graded=mix(col.rgb,b.rgb,gn_mix);
         }else if(gn_op==GN_OVER){
             // Premultiplied source-over: a + (1-a.alpha) * b.
-            vec4 b=gn_has_in1!=0?texture(textures[PLANE1],buv):vec4(0.0);
+            vec4 b=gn_has_in1!=0?sample_plane1(buv):vec4(0.0);
             graded=col.rgb+(1.0-col.a)*b.rgb;
         }else if(gn_op==GN_CDL){
             // NO SWIZZLE: this mixer grades in RGB, so the operands go in as they arrive.
