@@ -751,6 +751,45 @@ computed against something that no longer exists.
 refusing would leave them holding a document they cannot get rid of without first remembering where
 it was attached. A policy call, flagged as one.
 
+### 7.1 The catalogue — what a client needs before it can build anything
+
+```
+GET /v1/catalog/node                       every class, with its ports
+GET /v1/catalog/node/{cls}                 one class
+GET /v1/catalog/node/{cls}/default         a node object ready to PUT
+GET /v1/catalog/node/{cls}/suggest?port=p  what may legally feed `cls.p`
+GET /v1/graph/connections/preview?from=a.b&to=c.d   may these two join?
+```
+
+**It is answered from the registry, not from an injected list**, which is why it lives in
+`api_graph.cpp` rather than beside `ofx` and `isf`. Those catalogue what is *installed* and
+depend on the shell having wired the modules; the node classes are compiled in, so a build
+either has all eleven or is not this server. The route is matched **before** the general
+`/v1/catalog/` one, which would otherwise claim `node` and answer `unknown_path`.
+
+**`coerce()` is consulted, never reimplemented**, and that is the whole reason a client would
+trust any of this. `suggest` walks every output port in the registry through `coerce()`; `preview`
+calls it on one named pair; the validator calls it on every edge of a PUT. A second table in any
+of them would drift, and **the drift presents as an editor offering a connection the PUT then
+refuses** — which looks like a broken client and a correct server.
+
+So `api-graph` asserts the three *agree*, over every input port of every class rather than a
+sample: **65 (class, port) pairs, 0 disagreements.** A legal-but-lossy join is offered as lossy
+and previews as `legal: true, exact: false` with the note — an image into a mask port answers
+*"reduced to the WORKING-SPACE luma, so three components become one"*. Refusing it would make a
+useful graph unbuildable; doing it silently would hide the reduction in a picture.
+
+**What `default` claims, and what it does not.** Every parameter at its declared value — so a
+client adding a `mask_gradient` does not have to know what a sensible `feather` is. It claims
+**nothing about topology**: a node dropped into a bare document has its required inputs unwired,
+and the resulting `graph_invalid` is the validator being right. The check therefore tolerates
+faults about *connections* and refuses faults about *values*, which is the distinction a default
+is actually making. (The first version of that check asserted the PUT succeeded outright and
+failed all nine classes — the check was wrong, not the server.)
+
+`default` deliberately omits `id`: ids are the client's stable handles, and inventing one here
+would either collide or teach a client to accept ours and then wonder why it changed.
+
 ## 8. What is not here yet
 
 Each of these is sequenced rather than open, and the order is riskiest-first:
@@ -762,7 +801,7 @@ Each of these is sequenced rather than open, and the order is riskiest-first:
 | ~~`stage: working`~~ | **DONE** — the head/tail split; see §2.1. The CDL parity in §2 is green on both mixers |
 | ~~source-space masks~~ | **DONE** — see §2.2 |
 | ~~the mask families~~ | **DONE** — see §5.0 |
-| the catalogue | `/v1/catalog/node`, `suggest`, `connections/preview`, `ports/{p}/live` |
+| ~~the catalogue~~ | **DONE** for `/v1/catalog/node`, `default`, `suggest` and `connections/preview` — see §7.1. **`ports/{p}/live` is NOT done**: a node parameter's live value is already readable at `/v1/value/channel/N/stage/layer/M/mixer/node/<id>/<param>`, which is the address the ownership stack publishes, so a second spelling under the catalogue would be a second way to ask one question. Recorded as a deliberate omission rather than an oversight |
 | batches and previews | `{"op":"graph"}`, one history entry per gesture, and a per-node preview PNG |
 
 And these are **not v1 at all**, each with its hook: effect and source node families (a texture
@@ -789,6 +828,7 @@ rather than by the `MIXER` tween.
 | a mask read by TWO consumers (the materialised path) | `grade-graph` | **3 checks, both mixers** — and the sample that matters is OUTSIDE the mask, because a dropped mask reads identically to a correct one from inside |
 | which space a MASK's numbers are in | `grade-graph` | **4 checks, both mixers** — the two interpretations are disjoint by construction, so each failure mode fails a different check |
 | the source-uv matrix against `transform_coords` | `node_uv_self_test` | at boot, **fatal** — five placements, and the row/column convention is the thing it exists to pin |
+| the CATALOGUE, and that `suggest`/`preview`/PUT agree | `api-graph` | **6 checks, both mixers** — 65 (class, port) pairs walked, 0 disagreements. The agreement is the claim; any one endpoint answering is not |
 | the class table against its own rules | `node_registry_self_test` | at boot |
 | the validator, one minimal document per failure mode | `graph_validate_self_test` | at boot |
 | the store's two counters, coalescing, attachment | `graph_store_self_test` | at boot |

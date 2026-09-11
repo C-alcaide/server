@@ -486,8 +486,42 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         // client re-walks whenever `structure_revision` moves.
         if (path == "/v1/catalog")
             return catalog(context_, "");
+
+        // THE NODE CATALOGUE IS MATCHED BEFORE THE GENERAL ONE, because `catalog()` answers
+        // `unknown_path` for anything that is not `ofx` or `isf` and would otherwise claim
+        // `node` first. It is a different KIND of catalogue: `ofx`/`isf` list what is INSTALLED
+        // and depend on the shell having wired the modules, while the node classes are compiled
+        // in -- so it is answered from the registry, in api_graph.cpp beside the documents it
+        // describes.
+        if (path == "/v1/catalog/node")
+            return node_catalog(context_, "");
+        if (starts_with(path, "/v1/catalog/node/")) {
+            const auto rest = path.substr(std::string("/v1/catalog/node/").size());
+            // `<cls>`, `<cls>/default` or `<cls>/suggest`. Split on the FIRST slash, so a class
+            // id containing one would be rejected by the registry lookup rather than silently
+            // truncated -- no class id has one, and this is the line that would have to change.
+            const auto slash = rest.find('/');
+            if (slash == std::string::npos)
+                return node_catalog(context_, rest);
+            const auto cls  = rest.substr(0, slash);
+            const auto verb = rest.substr(slash + 1);
+            if (verb == "default")
+                return node_default(context_, cls);
+            if (verb == "suggest")
+                return node_suggest(context_, cls, query);
+            return api_reply::fail(api_code::unknown_path,
+                                   "no such node catalogue verb: " + verb +
+                                       ". Known: default, suggest");
+        }
+
         if (starts_with(path, "/v1/catalog/"))
             return catalog(context_, path.substr(std::string("/v1/catalog/").size()));
+
+        // MAY THESE TWO PORTS JOIN? Under `/v1/graph/` because it is a question about a
+        // document being edited rather than about the catalogue, and matched before the
+        // `/v1/graph/{name}` route below so a graph could not be named `connections`.
+        if (path == "/v1/graph/connections/preview")
+            return connection_preview(context_, query);
 
         if (path == "/v1/tree")
             return api_reply::ok_with(build_tree(*hub_, config_, context_));

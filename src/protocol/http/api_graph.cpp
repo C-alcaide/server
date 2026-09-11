@@ -399,6 +399,297 @@ json::object attachment_to_json(const core::graph::graph_store& st, const std::s
 
 } // namespace
 
+
+// ---------------------------------------------------------------------------------------
+// The node CATALOGUE
+// ---------------------------------------------------------------------------------------
+//
+// What a client needs before it can build a graph at all: which classes exist, what ports each
+// has, what may join what, and what a new node should look like. Four endpoints, and the one
+// rule that matters across all of them is that `coerce()` is consulted rather than
+// reimplemented -- a second table here would drift from the validator's, and the drift would
+// present as an editor offering a connection the PUT refuses.
+
+namespace {
+
+json::object port_to_json(const gr::port_desc& p)
+{
+    json::object o;
+    o["name"]      = p.param.name;
+    o["direction"] = p.direction == gr::port_direction::input ? "input" : "output";
+    o["domain"]    = gr::domain_name(p.domain);
+    o["flow"]      = gr::flow_name(p.flow);
+    o["required"]  = p.required;
+    if (p.domain == gr::port_domain::image || p.domain == gr::port_domain::mask)
+        o["space"] = gr::space_name(p.space);
+
+    // THE VALUE METADATA, for a value port only -- an image port has no range and a client
+    // should not have to ignore a `min` of 0 on one.
+    if (p.domain == gr::port_domain::value) {
+        // `type_name` and `vector_to_json` from json_state.h, which is where every other
+        // surface's parameter metadata comes from -- so a node port describes itself in the
+        // same vocabulary as a producer parameter and a mixer field.
+        o["type"]  = type_name(p.param.type);
+        o["arity"] = static_cast<std::int64_t>(p.param.arity);
+        // OPTIONAL, and omitted rather than defaulted: `min` is `std::optional<double>`, and a
+        // client cannot tell "no minimum" from "a minimum of 0" if the key is always present.
+        if (p.param.min)
+            o["min"] = *p.param.min;
+        if (p.param.max)
+            o["max"] = *p.param.max;
+        if (!p.param.unit.empty())
+            o["unit"] = p.param.unit;
+        // `values` is the comma-separated enum list the registry declares, SPLIT here so a
+        // client gets an array rather than a string to parse.
+        if (!p.param.values.empty()) {
+            json::array vals;
+            std::size_t pos = 0;
+            while (pos <= p.param.values.size()) {
+                auto comma = p.param.values.find(',', pos);
+                if (comma == std::string::npos)
+                    comma = p.param.values.size();
+                vals.push_back(json::string(p.param.values.substr(pos, comma - pos)));
+                pos = comma + 1;
+            }
+            o["values"] = std::move(vals);
+        }
+        o["default"] = vector_to_json(p.param.default_value);
+    }
+    if (!p.param.description.empty())
+        o["description"] = p.param.description;
+    return o;
+}
+
+json::object class_to_json(const gr::node_class& c)
+{
+    json::object o;
+    o["class"]       = c.id;
+    o["label"]       = c.label;
+    o["group"]       = c.group;
+    o["description"] = c.description;
+    // WHAT IT COSTS, because a client laying out a graph against the 16-pass cap needs to know
+    // which nodes count. A fused mask costs nothing; a materialised one costs a pass, and
+    // whether it is fused depends on the DOCUMENT rather than the class -- so this says what
+    // the class is, and the document's own faults say what the plan came to.
+    o["produces_image"] = c.produces_image;
+    o["preview"]        = c.preview;
+
+    json::array ports;
+    for (const auto& p : c.ports)
+        ports.push_back(port_to_json(p));
+    o["ports"] = std::move(ports);
+    return o;
+}
+
+std::string query_value(const std::string& query, const std::string& key)
+{
+    // A flat scan rather than a parser: these are two-parameter queries and the HTTP layer
+    // hands the raw string over. `from=a.b&to=c.d` and nothing more elaborate.
+    const auto needle = key + "=";
+    std::size_t pos   = 0;
+    while (pos < query.size()) {
+        auto amp = query.find('&', pos);
+        if (amp == std::string::npos)
+            amp = query.size();
+        const auto part = query.substr(pos, amp - pos);
+        if (part.rfind(needle, 0) == 0)
+            return part.substr(needle.size());
+        pos = amp + 1;
+    }
+    return {};
+}
+
+/// `cls.port` -> the port, or nullptr. The same spelling an edge uses, so a client pastes what
+/// it already has rather than splitting it.
+const gr::port_desc* find_port(const std::string& spec, std::string& why)
+{
+    const auto dot = spec.find('.');
+    if (dot == std::string::npos || dot == 0 || dot + 1 >= spec.size()) {
+        why = "expected <class>.<port>, got '" + spec + "'";
+        return nullptr;
+    }
+    const auto  cls = spec.substr(0, dot);
+    const auto  prt = spec.substr(dot + 1);
+    const auto* c   = gr::find_node_class(cls);
+    if (!c) {
+        why = "no such class: " + cls;
+        return nullptr;
+    }
+    for (const auto& p : c->ports)
+        if (p.param.name == prt)
+            return &p;
+    why = "class '" + cls + "' has no port '" + prt + "'";
+    return nullptr;
+}
+
+std::string known_classes()
+{
+    std::string out;
+    for (const auto& c : gr::node_classes()) {
+        if (!out.empty())
+            out += ", ";
+        out += c.id;
+    }
+    return out;
+}
+
+} // namespace
+
+api_reply node_catalog(const api_context&, const std::string& cls)
+{
+    const auto& all = gr::node_classes();
+
+    if (!cls.empty()) {
+        const auto* c = gr::find_node_class(cls);
+        if (!c)
+            return api_reply::fail(api_code::unknown_path,
+                                   "no such node class: " + cls + ". Known: " + known_classes());
+        return api_reply::ok_with(class_to_json(*c));
+    }
+
+    json::array entries;
+    for (const auto& c : all)
+        entries.push_back(class_to_json(c));
+
+    json::object result;
+    // The COUNT beside the array, for the same reason the ofx/isf catalogue carries one.
+    result["count"]   = static_cast<std::int64_t>(entries.size());
+    result["entries"] = std::move(entries);
+    return api_reply::ok_with(std::move(result));
+}
+
+api_reply node_default(const api_context&, const std::string& cls)
+{
+    const auto* c = gr::find_node_class(cls);
+    if (!c)
+        return api_reply::fail(api_code::unknown_path,
+                               "no such node class: " + cls + ". Known: " + known_classes());
+
+    json::object params;
+    for (const auto& p : c->ports) {
+        if (p.direction != gr::port_direction::input || p.domain != gr::port_domain::value)
+            continue;
+        // `bypass` IS INCLUDED, because it is a parameter like any other and a client round-
+        // tripping this object should get the same document back. The store accepts it either
+        // as a parameter or as the top-level convenience spelling.
+        params[p.param.name] = vector_to_json(p.param.default_value);
+    }
+
+    json::object node;
+    // NO `id`: the client owns ids -- they are its stable handles, and inventing one here would
+    // either collide or teach a client to accept ours and then wonder why it changed.
+    node["class"]  = c->id;
+    node["params"] = std::move(params);
+
+    json::object result;
+    result["node"] = std::move(node);
+    // WHICH PORTS IT MUST CONNECT, so a client can tell "add this node" from "add this node and
+    // wire it" without inspecting the port list again.
+    json::array required;
+    for (const auto& p : c->ports)
+        if (p.direction == gr::port_direction::input && p.required)
+            required.push_back(json::string(p.param.name));
+    result["required_inputs"] = std::move(required);
+    return api_reply::ok_with(std::move(result));
+}
+
+api_reply connection_preview(const api_context&, const std::string& query)
+{
+    const auto from_spec = query_value(query, "from");
+    const auto to_spec   = query_value(query, "to");
+    if (from_spec.empty() || to_spec.empty())
+        return api_reply::fail(api_code::bad_request,
+                               "connections/preview takes from=<class>.<port> and "
+                               "to=<class>.<port>");
+
+    std::string why;
+    const auto* from = find_port(from_spec, why);
+    if (!from)
+        return api_reply::fail(api_code::bad_request, "from: " + why);
+    const auto* to = find_port(to_spec, why);
+    if (!to)
+        return api_reply::fail(api_code::bad_request, "to: " + why);
+
+    if (from->direction != gr::port_direction::output)
+        return api_reply::fail(api_code::bad_request,
+                               "from: '" + from_spec + "' is an input port");
+    if (to->direction != gr::port_direction::input)
+        return api_reply::fail(api_code::bad_request, "to: '" + to_spec + "' is an output port");
+
+    // THE ONE TABLE. `coerce()` is what the validator calls on every edge and what the
+    // compiler's fault list comes from, so this endpoint cannot disagree with a PUT -- which is
+    // the whole reason a client would trust it.
+    const auto c = gr::coerce(*from, *to);
+
+    json::object result;
+    result["from"]  = from_spec;
+    result["to"]    = to_spec;
+    result["legal"] = c.legal;
+    result["exact"] = c.legal && c.note.empty();
+    if (!c.note.empty())
+        result["note"] = c.note;
+    return api_reply::ok_with(std::move(result));
+}
+
+api_reply node_suggest(const api_context&, const std::string& cls, const std::string& query)
+{
+    const auto* c = gr::find_node_class(cls);
+    if (!c)
+        return api_reply::fail(api_code::unknown_path,
+                               "no such node class: " + cls + ". Known: " + known_classes());
+
+    const auto port_name = query_value(query, "port");
+    if (port_name.empty())
+        return api_reply::fail(api_code::bad_request,
+                               "suggest takes port=<name>. Ports on '" + cls + "': " +
+                                   [&] {
+                                       std::string n;
+                                       for (const auto& p : c->ports) {
+                                           if (p.direction != gr::port_direction::input)
+                                               continue;
+                                           if (!n.empty())
+                                               n += ", ";
+                                           n += p.param.name;
+                                       }
+                                       return n;
+                                   }());
+
+    const gr::port_desc* to = nullptr;
+    for (const auto& p : c->ports)
+        if (p.param.name == port_name && p.direction == gr::port_direction::input)
+            to = &p;
+    if (!to)
+        return api_reply::fail(api_code::bad_request,
+                               "class '" + cls + "' has no INPUT port '" + port_name + "'");
+
+    // EVERY OUTPUT THAT `coerce()` ACCEPTS, exact ones first and the lossy ones named as lossy.
+    // Ordered so a client's default pick is the exact one without it having to sort.
+    json::array exact, lossy;
+    for (const auto& other : gr::node_classes()) {
+        for (const auto& p : other.ports) {
+            if (p.direction != gr::port_direction::output)
+                continue;
+            const auto co = gr::coerce(p, *to);
+            if (!co.legal)
+                continue;
+            json::object o;
+            o["from"] = other.id + "." + p.param.name;
+            if (co.note.empty())
+                exact.push_back(std::move(o));
+            else {
+                o["note"] = co.note;
+                lossy.push_back(std::move(o));
+            }
+        }
+    }
+
+    json::object result;
+    result["to"]    = cls + "." + port_name;
+    result["exact"] = std::move(exact);
+    result["lossy"] = std::move(lossy);
+    return api_reply::ok_with(std::move(result));
+}
+
 api_reply list_graphs(const api_context& ctx)
 {
     if (!ctx.graphs)

@@ -681,7 +681,28 @@ GET /v1/catalog        ->  { "ofx": {"count": 167, "entries": [...]},
                              "isf": {"count": 327, "entries": [...]} }
 GET /v1/catalog/isf    ->  just that section
 GET /v1/catalog/nope   ->  unknown_path
+
+GET /v1/catalog/node   ->  the NODE GRAPH's class registry -- a different KIND of
+                           catalogue, matched before the general route above
+GET /v1/catalog/node/mask_rect          one class, with its ports
+GET /v1/catalog/node/mask_rect/default  a node object ready to PUT
+GET /v1/catalog/node/exposure/suggest?port=mask   what may feed it
+GET /v1/graph/connections/preview?from=cdl.out&to=exposure.in
 ```
+
+**`node` is a different kind of catalogue from `ofx` and `isf`**, and the difference is worth
+knowing before you cache either. Those two list what is **installed**, so they depend on the
+shell having wired the modules and are empty in a build without them. The node classes are
+**compiled in**: a build either has all of them or is not this server, so that section is the
+same everywhere and safe to cache against the binary's version rather than against
+`structure_revision`.
+
+`suggest` and `connections/preview` both answer from the **same** coercion table the validator
+applies to a PUT, so a connection either endpoint offers is one a PUT accepts. `api-graph`
+asserts that over every input port of every class — 65 pairs, 0 disagreements — because the
+failure mode if they ever diverged is an editor offering a join the server then refuses, which
+reads as a broken client. Details in
+[`node-graph.md`](node-graph.md) §7.1.
 
 ```json
 { "id": "net.sf.openfx.TransformPlugin", "label": "Transform", "group": "Transform",

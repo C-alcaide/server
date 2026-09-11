@@ -502,6 +502,22 @@ std::string docs_page(const http_config& cfg)
         {"GET", "/v1/tree", "The whole address space"},
         {"GET", "/v1/catalog", "What can be PLAYed: installed OFX plug-ins and ISF shaders"},
         {"GET", "/v1/catalog/{kind}", "The same, narrowed to ofx or isf"},
+        // THE NODE GRAPH, and every one of these was missing until 2026-09-11 -- the whole
+        // family had shipped over eight commits and this API described none of it. The tree
+        // gained a `graph` source and the OpenAPI did not, which is the same class of
+        // discrepancy as the `kf`/`keyframe_names` one the timeline audit found: a surface a
+        // client is told to discover from `openapi.json` and cannot.
+        {"GET", "/v1/catalog/node", "Every node graph CLASS with its ports -- compiled in, not installed"},
+        {"GET", "/v1/catalog/node/{cls}", "One class"},
+        {"GET", "/v1/catalog/node/{cls}/default", "A node object ready to PUT, every port at its default"},
+        {"GET", "/v1/catalog/node/{cls}/suggest", "?port=<name>: what may legally feed it, exact and lossy"},
+        {"GET", "/v1/graph/connections/preview", "?from=<cls>.<port>&to=<cls>.<port>: may these join?"},
+        {"GET", "/v1/graph", "The node graph documents that are stored"},
+        {"PUT", "/v1/graph/{name}", "Store a document; a broken one is STORED and answers graph_invalid"},
+        {"GET", "/v1/graph/{name}", "The document as stored, with faults, order, attachment and undo flags"},
+        {"DELETE", "/v1/graph/{name}", "Remove it"},
+        {"GET", "/v1/graph/{name}/history", "The undo stack: labels, depth, can_undo, can_redo"},
+        {"POST", "/v1/graph/{name}/{verb}", "undo redo attach detach; the resulting document comes back"},
         {"GET", "/v1/tree/{path}", "A sub-tree"},
         {"GET", "/v1/value/{path}", "One value; an unpublished mixer or stage field reads as its default"},
         {"PUT", "/v1/value/{path}", "Write one value; op set|toggle|add|cas, with duration and tween"},

@@ -48,6 +48,39 @@
 namespace caspar { namespace protocol { namespace http {
 
 /// `GET /v1/graph` -- every loaded document, with its revision, counts, faults and attachment.
+/// `GET /v1/catalog/node` -- every node class the server can render, with its ports.
+///
+/// ANSWERED FROM THE REGISTRY, not from an injected list, which is why it lives here rather
+/// than in `api_catalog.cpp`: `ofx` and `isf` catalogue what is INSTALLED and so depend on
+/// whether the shell wired the modules, while the node classes are compiled in. A build either
+/// has all of them or is not this server.
+///
+/// `cls` empty lists everything; otherwise one class, and an unknown one is `unknown_path`
+/// naming what does exist -- a client typing `mask_rectangle` should be told the name, not
+/// handed an empty object.
+api_reply node_catalog(const api_context& ctx, const std::string& cls);
+
+/// `GET /v1/catalog/node/{cls}/default` -- a node object ready to PUT.
+///
+/// Every port at its declared default, so a client adding a node does not have to know which
+/// parameters are required or what a sensible `feather` is. `api-graph` asserts that the result
+/// PUTs with no fault, which is the only claim worth making about a default.
+api_reply node_default(const api_context& ctx, const std::string& cls);
+
+/// `GET /v1/catalog/node/{cls}/suggest?port=<name>` -- what can legally feed that port.
+///
+/// Every (class, port) pair whose output `coerce()` accepts. THE SAME `coerce()` the validator
+/// and the compiler call: a second table here would drift, and the drift would present as an
+/// editor offering a connection the PUT then refuses. `api-graph` asserts the three agree.
+api_reply node_suggest(const api_context& ctx, const std::string& cls, const std::string& query);
+
+/// `GET /v1/graph/connections/preview?from=<cls>.<port>&to=<cls>.<port>` -- may these join?
+///
+/// Answers `legal`, `exact`, and a `note` when the join is legal but lossy -- an image into a
+/// mask port is a luma reduction, which a client should be able to see BEFORE it is in the
+/// document. Again `coerce()` and nothing else.
+api_reply connection_preview(const api_context& ctx, const std::string& query);
+
 api_reply list_graphs(const api_context& ctx);
 
 /// `PUT /v1/graph/{name}` -- store a document.
