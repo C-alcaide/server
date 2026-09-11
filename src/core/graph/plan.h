@@ -134,7 +134,15 @@ struct node_plan
     /// Reported to the client, not acted on: a legal-but-lossy join the author should see.
     std::vector<coercion> coercions;
 
-    /// Which document revision this was compiled from, for `graph_revision` publication.
+    /// Which document this was compiled from, and which revision of it.
+    ///
+    /// THE NAME IS HERE SO THE EVALUATOR KNOWS WHAT IT IS DRAWING. The mixer sees a tree of
+    /// layers and items and has no stage layer index at all -- so a request addressed to "node
+    /// `e` of graph `look`" can only be matched inside the frame if the plan carries the name.
+    /// Addressing a preview by DOCUMENT rather than by layer is also the better interface, for
+    /// the reason `detach` takes no layer: a client knows the look's name, and making it also
+    /// remember where the look is attached only gives it something to get wrong.
+    std::string  document_name;
     std::int64_t document_revision = 0;
 
     /// `node/<id>/<param>` -> index into `node_values`. The one map between an ADDRESS and the

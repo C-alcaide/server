@@ -1,6 +1,21 @@
 CasparVP — Unreleased
 ==========================================
 
+### A per-node PREVIEW — `GET /v1/graph/{name}/preview?node=<id>`
+
+One node's output, as a PNG, after the output half. The second endpoint in this API that is not
+an envelope: wrapping PNG bytes in JSON would make them unusable in the one client they exist
+for. A refusal is still an envelope.
+
+Measured on both mixers with a two-node chain at different gains: the FIRST node's preview is its
+own output at **0.40 LSB**, which is what a capture-the-layer implementation would fail, and the
+last node's matches the captured layer at **0.00**.
+
+**A preview needs the channel to be ticking**, and a channel with no consumer never does — the
+same constraint `PREVIZ MAP` already carries. The refusal says so.
+
+With this the node graph is **feature-complete** against its plan.
+
 ### The node graph is complete bar previews — what it costs, measured
 
 Closing out the feature. `GRAPH` and `/v1/graph` now carry eleven node classes, render in the

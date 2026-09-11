@@ -93,6 +93,22 @@ struct api_context
     /// and `core` only. The shell links every module and can bridge it in a dozen lines.
     std::function<std::vector<catalog_entry>()> catalog;
 
+    /// ONE NODE'S OUTPUT, as PNG bytes. Empty on any refusal, with the reason in `out_reason`.
+    ///
+    /// INJECTED RATHER THAN CALLED DIRECTLY, and for two reasons at once. Reaching the mixer
+    /// needs `video_channel`, which this layer does not have; and ENCODING needs FFmpeg, which
+    /// `protocol_http` does not link and should not gain -- the same argument that keeps
+    /// `boost::json` out of `core`. The shell links everything, so it arms the mixer, waits for
+    /// the frame and encodes, and this layer only ever sees bytes.
+    ///
+    /// Addressed by GRAPH NAME rather than by channel and layer, because that is what the mixer
+    /// can match against: it sees a tree of layers and items and carries no stage layer index.
+    /// It is also the better interface, for the reason `detach` takes no layer.
+    std::function<std::vector<std::uint8_t>(const std::string& graph,
+                                            const std::string& node,
+                                            std::string&       out_reason)>
+        node_preview;
+
     /// The stage for a 1-based channel index, or nullptr if there is no such channel.
     std::function<std::shared_ptr<core::stage_base>(int)> stage;
 

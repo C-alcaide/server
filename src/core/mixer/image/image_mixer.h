@@ -101,6 +101,36 @@ struct render_output
     std::vector<std::pair<ocio_view_key, render_result>> views;
 };
 
+/// ONE NODE'S OUTPUT, read back to the host.
+///
+/// `data` is 8-bit BGRA at `width` x `height`, which is the layout every readback in this server
+/// already produces -- the same `array<const uint8_t>` a consumer receives. Empty when the
+/// request could not be served, and the CALLER is told why rather than left to guess: an empty
+/// buffer with a `reason` is the difference between "that node is not in the graph" and "the
+/// frame did not arrive in time", which a client can act on differently.
+struct node_preview_image
+{
+    int         width  = 0;
+    int         height = 0;
+    std::string reason; ///< empty on success
+
+    /// THE READBACK, STILL PENDING -- and it has to be, which cost a deadlock to learn.
+    ///
+    /// The obvious shape is for this struct to carry the bytes, with the mixer calling `.get()`
+    /// on the readback before fulfilling its promise. That SELF-DEADLOCKS: the serve site runs
+    /// ON THE RENDER THREAD, inside the evaluator, and the readback is completed by that same
+    /// thread -- so waiting for it there waits for work only the waiter can do. Measured as a
+    /// preview that timed out after two seconds while the trace showed the request had been
+    /// matched and served, which pointed at everything except the thread it was on.
+    ///
+    /// So the future is handed OUT. The shell resolves it on the API executor, where blocking
+    /// is correct: that thread has nothing else to do until the preview arrives, and the render
+    /// thread is never asked to wait on itself.
+    std::shared_future<array<const std::uint8_t>> pending;
+
+    bool ok() const { return width > 0 && height > 0 && reason.empty() && pending.valid(); }
+};
+
 class image_mixer
     : public frame_visitor
     , public frame_factory
@@ -117,6 +147,44 @@ class image_mixer
     void pop() override                                     = 0;
 
     virtual void update_aspect_ratio(double aspect_ratio) = 0;
+
+    /// ARM A PREVIEW of one node's output, fulfilled on a later frame.
+    ///
+    /// ADDRESSED BY DOCUMENT NAME, not by layer, and that is forced as well as preferable: the
+    /// mixer sees a tree of layers and items and carries no stage layer index at all, so the
+    /// only thing it can match a request against is `node_plan::document_name`. It is also the
+    /// better interface, for the reason `detach` takes no layer -- a client knows the look's
+    /// name, and making it also remember where the look is attached gives it something to get
+    /// wrong.
+    ///
+    /// A VIRTUAL ON THE BASE, so the control API reaches it through
+    /// `mixer().get_image_mixer()` with no `dynamic_cast` and no dependency on either backend.
+    /// `previz` is reached by a cast precisely because it is not on this interface, and the
+    /// asymmetry is worth noticing: a cast works until somebody adds a third backend.
+    ///
+    /// ARMED RATHER THAN SYNCHRONOUS, because the attachment it wants does not exist yet. A
+    /// node's output lives for the span of one `draw()` and is returned to the pool the moment
+    /// nothing reads it, so the only place it can be copied is inside the frame that produces
+    /// it. The request is recorded, the next frame that draws that layer's graph serves it, and
+    /// the future is fulfilled from the render thread.
+    ///
+    /// WHAT IT RETURNS IS AFTER THE OUTPUT HALF, not the raw working-space attachment. A node's
+    /// intermediate is scene-linear in the working gamut, and handing a client that as a PNG
+    /// would show them a picture nothing will ever look like. The preview runs the same tail the
+    /// layer's own draw runs, so what a client sees is what that node contributes to the
+    /// finished frame.
+    ///
+    /// The default is a refusal, so a backend that has not implemented it says so rather than
+    /// hanging: an unimplemented preview must not look like a slow one.
+    virtual std::future<node_preview_image> arm_node_preview(const std::string& /*graph_name*/,
+                                                             const std::string& /*node_id*/)
+    {
+        node_preview_image out;
+        out.reason = "this mixer does not implement node previews";
+        std::promise<node_preview_image> p;
+        p.set_value(std::move(out));
+        return p.get_future();
+    }
 
     /// What this backend wants published under `channel/{n}/mixer/`, every tick.
     ///

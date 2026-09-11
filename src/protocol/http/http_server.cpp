@@ -85,6 +85,30 @@ bool starts_with(const std::string& s, const char* p)
     return s.size() >= pp.size() && s.compare(0, pp.size(), pp) == 0;
 }
 
+bool ends_with(const std::string& s, const char* p)
+{
+    const std::string suffix(p);
+    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+/// One value out of a raw query string. A flat scan rather than a parser: the two endpoints that
+/// take a query take one or two parameters each.
+std::string query_param(const std::string& query, const char* key)
+{
+    const std::string needle = std::string(key) + "=";
+    std::size_t       pos    = 0;
+    while (pos < query.size()) {
+        auto amp = query.find('&', pos);
+        if (amp == std::string::npos)
+            amp = query.size();
+        const auto part = query.substr(pos, amp - pos);
+        if (part.rfind(needle, 0) == 0)
+            return part.substr(needle.size());
+        pos = amp + 1;
+    }
+    return {};
+}
+
 } // namespace
 
 /// One live `/v1/events` connection.
@@ -671,9 +695,76 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
 
         // Off the io_context thread from here. Nothing below touches the socket until the
         // reply is posted back onto its strand.
-        // `/v1/docs` is the one endpoint that is not an envelope: it is a page for a person,
-        // and wrapping HTML in `{"status":...,"result":"<!doctype html>..."}` would make it
-        // unreadable in the one client it exists for -- a browser.
+        // ── A NODE PREVIEW IS A PNG, so it is answered off the envelope path ──────────
+        //
+        // The second endpoint in this API that is not an envelope, and for the reason `/v1/docs`
+        // is not: wrapping PNG bytes in `{"status":..., "result":"<binary>"}` would make them
+        // unusable in the one client they exist for -- an editor putting the image in an `<img>`.
+        // A REFUSAL is still an envelope, because that a client does have to read.
+        //
+        // ON THE API EXECUTOR, unlike `/v1/docs` below, and that is not symmetry for its own
+        // sake: this arms the mixer and WAITS for the next frame to draw that graph. Doing it on
+        // the io_context thread would stall every other connection for a frame period.
+        // `connections/preview` IS EXCLUDED BY NAME, and it has to be: it is
+        // `/v1/graph/connections/preview`, which matches `starts_with("/v1/graph/")` and
+        // `ends_with("/preview")` exactly as a node preview does. Adding this route without the
+        // exclusion swallowed it, and every one of `api-graph`'s 65 suggest/preview agreement
+        // pairs failed with "a preview needs ?node=<id>" -- a whole endpoint captured by a
+        // sibling, caught on the next sweep rather than by reading.
+        //
+        // `connections` is therefore a reserved first segment under `/v1/graph/`. A graph
+        // actually named `connections` would be unreachable here; it is not refused at PUT
+        // because that would be a rule invented for one route's convenience, and the collision
+        // is stated instead.
+        if (starts_with(target.path, "/v1/graph/") && ends_with(target.path, "/preview") &&
+            target.path != "/v1/graph/connections/preview" &&
+            (method == bhttp::verb::get || method == bhttp::verb::head)) {
+            const auto rest  = target.path.substr(std::string("/v1/graph/").size());
+            const auto gname = rest.substr(0, rest.find('/'));
+            const auto node  = query_param(target.query, "node");
+            api_executor_.begin_invoke([self, stream, buffer, gname, node, method, keep, ver,
+                                        authorization, path = target.path]() {
+                api_reply                 refusal;
+                std::vector<std::uint8_t> png;
+                if (!self->auth_.check(authorization))
+                    refusal = api_reply::fail(api_code::unauthorized, "authentication required");
+                else if (!self->context_.node_preview)
+                    refusal = api_reply::fail(api_code::internal,
+                                              "node previews are not wired into this build");
+                else if (node.empty())
+                    refusal = api_reply::fail(api_code::field_missing, "a preview needs ?node=<id>");
+                else {
+                    std::string reason;
+                    png = self->context_.node_preview(gname, node, reason);
+                    if (png.empty())
+                        refusal = api_reply::fail(api_code::bad_request,
+                                                  reason.empty() ? "the preview produced nothing"
+                                                                 : reason);
+                }
+
+                if (!png.empty()) {
+                    std::string body(reinterpret_cast<const char*>(png.data()), png.size());
+                    asio::post(stream->get_executor(),
+                               [self, stream, buffer, body = std::move(body), method, keep, ver]() mutable {
+                                   self->write(stream, buffer, bhttp::status::ok, std::move(body),
+                                               method, keep, ver, "image/png");
+                               });
+                    return;
+                }
+                const auto status = http_status_for(refusal, path);
+                auto       body   = json::serialize(json::value(envelope(refusal, self->server_name_)));
+                asio::post(stream->get_executor(),
+                           [self, stream, buffer, status, body = std::move(body), method, keep, ver]() mutable {
+                               self->write(stream, buffer, status, std::move(body), method, keep, ver);
+                           });
+            });
+            return;
+        }
+
+        // `/v1/docs` is the OTHER endpoint that is not an envelope -- it was the only one until
+        // the node preview above -- and for the same reason: it is a page for a person, and
+        // wrapping HTML in `{"status":...,"result":"<!doctype html>..."}` would make it
+        // unreadable in the one client it exists for, a browser.
         if (target.path == "/v1/docs" && (method == bhttp::verb::get || method == bhttp::verb::head)) {
             const bool ok = auth_.check(authorization);
             auto       body =

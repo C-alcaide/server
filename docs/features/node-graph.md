@@ -910,6 +910,65 @@ is nowhere near the count where publication starts costing frames, and a graph i
 of what gets it there. **Publication is sparse** — a parameter at its default is omitted — which
 is why a five-node look costs 14 leaves rather than one per port.
 
+### 7.4 A per-node preview
+
+```
+GET /v1/graph/{name}/preview?node=<id>   ->  image/png
+```
+
+**The only endpoint in this API besides `/v1/docs` that is not an envelope**, and for the same
+reason: wrapping PNG bytes in `{"status":…,"result":"<binary>"}` would make them unusable in the
+one client they exist for — an editor putting the image in an `<img>`. A *refusal* is still an
+envelope, because that a client does have to read.
+
+**Addressed by document name, not by channel and layer.** The mixer sees a tree of layers and
+items and carries no stage layer index at all, so `node_plan::document_name` is the only thing a
+request can be matched against — and it is the better interface anyway, for the reason `detach`
+takes no layer.
+
+**What comes back is that node's output after the OUTPUT HALF**, not the raw attachment. A
+node's intermediate is scene-linear in the working gamut; handing that over would show a picture
+nothing will ever look like. The preview runs the same tail the layer's own draw runs, so a
+client sees what the node contributes to the finished frame — measured at **0.40 LSB** for the
+first node of a two-node chain, and the last node's preview matches the captured layer at
+**0.00**.
+
+**Four things about the mechanism that each cost a measurement:**
+
+* **It is ARMED, not synchronous.** The attachment it wants does not exist yet: a node's output
+  lives for the span of one `draw()` and returns to the pool the moment nothing reads it. So the
+  request is recorded and the next frame that draws that graph serves it.
+* **Served INSIDE the evaluator's loop**, right after the step's output is recorded. The first
+  version served after the loop — which is after every `last_use` release, so only the *last*
+  node still had an output and every earlier one answered "bypassed or unreachable". The fixture
+  caught it because the check that discriminates is the **first** node's.
+* **The readback future is handed OUT, not resolved in the mixer.** Resolving it there
+  self-deadlocks: the serve site runs on the render thread and the readback is completed by that
+  same thread, so waiting there waits for work only the waiter can do. It presented as a
+  two-second timeout while a trace showed the request had been matched and served.
+* **Arming drops the still-frame cache.** A static graph on a static source is exactly the cached
+  case, so without this the evaluator never runs and the preview can only be served on a frame
+  that was going to be composited anyway.
+
+**A preview needs the channel to be TICKING**, and a channel with no consumer never does — the
+same constraint `previz.md` §4 records for `PREVIZ MAP`. The refusal says so ("is the channel
+running?"), which is the message to expect if a preview times out on an idle channel.
+
+**`connections` is a RESERVED first segment under `/v1/graph/`,** because this route and
+`/v1/graph/connections/preview` (§7.3) have the same shape — both start `/v1/graph/` and end
+`/preview` — and the node route was added without excluding it. It swallowed the connection
+preview whole: every one of `api-graph`'s 65 suggest-agrees-with-preview pairs came back
+`field_missing`, and the endpoint answered "a preview needs `?node=<id>`" to a request that had
+named a `from` and a `to`. **Nothing read the code and found it**; the sweep that runs `api-graph`
+against an unrelated commit did, going 46/46 to 43/46 on both mixers. A graph actually named
+`connections` is therefore unreachable here, which is stated rather than refused at PUT — a rule
+invented for one route's convenience is worse than a documented collision.
+
+**Where the pieces live, and why they are split that way:** the readback is the mixer's, but PNG
+encoding is FFmpeg, which lives in `modules/image` — and `protocol_http` neither links FFmpeg nor
+should. So the **shell** arms the mixer, resolves the readback and encodes, and the API layer
+only ever sees bytes. The same injection the timeline uses to reach the producer registry.
+
 ## 8. What is not here yet
 
 Each of these is sequenced rather than open, and the order is riskiest-first:
@@ -924,7 +983,7 @@ Each of these is sequenced rather than open, and the order is riskiest-first:
 | ~~the catalogue~~ | **DONE** for `/v1/catalog/node`, `default`, `suggest` and `connections/preview` — see §7.1. **`ports/{p}/live` is NOT done**: a node parameter's live value is already readable at `/v1/value/channel/N/stage/layer/M/mixer/node/<id>/<param>`, which is the address the ownership stack publishes, so a second spelling under the catalogue would be a second way to ask one question. Recorded as a deliberate omission rather than an oversight |
 | ~~batches~~ | **DONE** — `{"op": "graph"}`, a node write, and one history entry per gesture; see §7.2 |
 | ~~the cost arms~~ | **DONE** — `grade-graph-cost` (§7.3) and a `publication-cost` graph arm (§7.3.1) |
-| **a per-node preview PNG** | **THE ONE FEATURE ITEM LEFT, and it is larger than it sounds.** It needs three things this server does not have: a readback of a node's INTERMEDIATE attachment on both mixers (neither exposes one — the IMAGE consumer reads the finished frame, which is a different thing); a PNG **encoder** reachable from `protocol_http`, which cannot link one today (the IMAGE consumer encodes through FFmpeg, in `modules/image`, and `protocol_http` has no FFmpeg dependency and should not gain one — the injected-factory pattern the timeline uses for producers is the shape that fits); and a **binary** response path, since every reply this API makes is JSON. Sized here rather than left as "previews" because the one-word version reads like an afternoon |
+| ~~a per-node preview PNG~~ | **DONE** — see §7.4. All three things it needed were built: an armed readback of a node's intermediate on both mixers, a PNG encoder in `modules/image` called from the shell, and a non-envelope response |
 
 And these are **not v1 at all**, each with its hook: effect and source node families (a texture
 hand-off between GL contexts or Vulkan devices is a *device* feature, not a graph one — the `image`
@@ -951,6 +1010,7 @@ rather than by the `MIXER` tween.
 | which space a MASK's numbers are in | `grade-graph` | **4 checks, both mixers** — the two interpretations are disjoint by construction, so each failure mode fails a different check |
 | the source-uv matrix against `transform_coords` | `node_uv_self_test` | at boot, **fatal** — five placements, and the row/column convention is the thing it exists to pin |
 | a graph VERB and a node WRITE inside a batch, and label coalescing | `api-graph` | **6 checks, both mixers** — including that three writes under one label are ONE undo, which is the claim a client's slider depends on |
+| a per-node PREVIEW, and that it is THAT node's output | `grade-graph` | **4 checks, both mixers** — the first node of a two-node chain at **0.40 LSB** against its own expected value, which is what a capture-the-layer implementation fails; the last node's at **0.00** against the captured layer |
 | what a realistic look costs the PUBLICATION | `publication-cost` | a graph arm: **+14 leaves**, taking a fully dressed channel to 92 against the 596 that cost frames. Both mixers |
 | what sixteen passes COST, and that they ran at all | `grade-graph-cost` | **5/5 both mixers** — 0 late at the cap on four 2160p50 channels, with a picture control at **0.42 LSB** because 0 late is also what a graph that never drew reports |
 | the CATALOGUE, and that `suggest`/`preview`/PUT agree | `api-graph` | **6 checks, both mixers** — 65 (class, port) pairs walked, 0 disagreements. The agreement is the claim; any one endpoint answering is not |

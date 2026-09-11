@@ -45,6 +45,9 @@
 #include <core/video_channel.h>
 
 #include <accelerator/compose_self_test.h>
+
+// The PNG encoder for node previews. In `modules/image` because that is where FFmpeg is.
+#include <modules/image/util/image_png.h>
 #include <core/stage/stage_fields.h>
 #include <accelerator/ogl/image/image_mixer.h>
 #include <accelerator/ogl/image/previz_renderer.h>
@@ -1030,6 +1033,65 @@ struct server::impl
                     return channels->at(static_cast<std::size_t>(index - 1)).raw_channel->stage();
                 };
                 api_ctx.channel_count = [channels] { return static_cast<int>(channels->size()); };
+
+                // ── ONE NODE'S OUTPUT, AS A PNG ────────────────────────────────────────────
+                //
+                // WIRED HERE BECAUSE THIS IS THE ONLY LAYER THAT CAN. Two dependencies meet in
+                // this one function and neither belongs in `protocol_http`: reaching the mixer
+                // needs `video_channel`, and encoding a PNG needs FFmpeg. The shell links
+                // everything, so it does both and hands the API finished bytes -- the same
+                // injection the timeline uses to reach the producer registry without `core`
+                // depending on it.
+                //
+                // EVERY CHANNEL IS ASKED, in order, and the first that has the graph answers.
+                // A graph document is server-wide and the store knows where it is attached, but
+                // `api_context` has no store-to-channel bridge and adding one to answer a
+                // preview would be a second way to learn something the mixer already knows: the
+                // mixer that HAS the graph is the one whose evaluator will see the request.
+                // Channels that do not have it refuse immediately -- no frame is waited for --
+                // so the cost of asking is a few comparisons.
+                api_ctx.node_preview = [channels](const std::string& graph,
+                                                  const std::string& node,
+                                                  std::string&       reason) -> std::vector<std::uint8_t> {
+                    for (auto& ch : *channels) {
+                        // NO NULL CHECK: `get_image_mixer` returns `spl::shared_ptr`, which
+                        // cannot be null by construction. A defensive `if (!img)` does not
+                        // compile, which is the type doing its job.
+                        auto fut = ch.raw_channel->mixer().get_image_mixer()->arm_node_preview(graph, node);
+                        // BOUNDED, and generously: the request is served by the next frame that
+                        // draws that graph, so one frame period is the expectation and a second
+                        // is slack for a channel that is paused or starved. Waiting forever
+                        // would hang an API executor thread on a graph that is attached nowhere.
+                        if (fut.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+                            reason = "the preview did not arrive within two seconds -- is the "
+                                     "channel running?";
+                            continue;
+                        }
+                        auto result = fut.get();
+                        if (!result.ok()) {
+                            // KEPT AND KEPT LOOKING. A channel that does not have this graph
+                            // answers with a reason, and reporting the LAST one is what makes a
+                            // typo say "no node 'x' in the attached graph" rather than whatever
+                            // channel 4 thought.
+                            if (!result.reason.empty())
+                                reason = result.reason;
+                            continue;
+                        }
+                        // RESOLVED HERE, on the API executor, which is the whole point of the
+                        // mixer handing the future out rather than waiting on it: this thread
+                        // has nothing else to do until the preview arrives, and the render
+                        // thread is never asked to wait on itself.
+                        const auto bytes = result.pending.get();
+                        auto       png   = caspar::image::encode_png_bgra8(bytes.data(),
+                                                                     result.width, result.height);
+                        if (png.empty())
+                            reason = "the preview could not be encoded";
+                        return png;
+                    }
+                    if (reason.empty())
+                        reason = "no channel is rendering a graph named '" + graph + "'";
+                    return {};
+                };
                 api_ctx.timelines     = timelines_;
                 api_ctx.graphs        = graphs_;
 

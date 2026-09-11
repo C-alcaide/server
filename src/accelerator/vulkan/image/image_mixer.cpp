@@ -173,6 +173,76 @@ struct render_fingerprint
 
 class image_renderer
 {
+  public:
+    // ── A PENDING NODE PREVIEW ──────────────────────────────────────────────────────
+    //
+    // IN THE RENDERER, because this is where it is SERVED: a node's attachment is alive only
+    // inside the evaluator's loop, between the draw that writes it and the `last_use` release
+    // that returns it to the pool. `impl` forwards the arming call here rather than holding the
+    // state -- the first version put it on `impl` and compiled nowhere, because the serve site
+    // could not see it. The promise belongs next to the only code that can keep it.
+    //
+    // AT MOST ONE AT A TIME, and that is a decision rather than a simplification. A preview is a
+    // client hovering over a node in an editor: there is one cursor, the answer arrives in a
+    // frame or two, and a queue would mostly hold requests nobody is waiting for any more. A
+    // second request REPLACES the first and the first is ANSWERED -- a promise destroyed without
+    // a value makes its future throw `broken_promise`, which reaches a client as an internal
+    // error for something that is not an error at all.
+    //
+    // Its own mutex: written from the API executor, read from the render thread.
+    struct pending_preview
+    {
+        //: BY DOCUMENT NAME, not by layer. The mixer sees a tree of layers and items and carries
+        //: no stage layer index at all, so `node_plan::document_name` is the only thing a
+        //: request can be matched against -- and addressing by document is the better interface
+        //: anyway, for the reason `detach` takes no layer: a client knows the look's name.
+        std::string                            graph_name;
+        std::string                            node_id;
+        std::promise<core::node_preview_image> promise;
+    };
+    std::mutex                       preview_lock_;
+    std::unique_ptr<pending_preview> preview_;
+
+    //: A preview that has been DRAWN this frame and not yet copied back. Resolved after the
+    //: frame's single `commit()`, because a mid-frame commit corrupts the command stream --
+    //: see the serve site. Render-thread only, so no lock.
+    std::unique_ptr<pending_preview> deferred_preview_;
+    std::shared_ptr<texture>         deferred_preview_target_;
+    core::node_preview_image         deferred_preview_image_;
+
+    std::future<core::node_preview_image> arm_node_preview(const std::string& graph_name,
+                                                           const std::string& node_id)
+    {
+        auto req        = std::make_unique<pending_preview>();
+        req->graph_name = graph_name;
+        req->node_id    = node_id;
+        auto fut        = req->promise.get_future();
+
+        std::lock_guard<std::mutex> lock(preview_lock_);
+        if (preview_) {
+            core::node_preview_image superseded;
+            superseded.reason = "superseded by a later preview request";
+            preview_->promise.set_value(std::move(superseded));
+        }
+        preview_ = std::move(req);
+
+        // AND THE STILL-FRAME CACHE HAS TO BE DROPPED, or the preview can only ever be served
+        // on a frame that was going to be composited anyway.
+        //
+        // MEASURED, and it is the whole reason this line exists: a static colour under a static
+        // graph is exactly the cached case, so the evaluator never ran, the request was never
+        // seen, and every preview timed out at two seconds while the channel was demonstrably
+        // running and the graph demonstrably attached. The symptom -- "is the channel running?"
+        // -- pointed at everything except the cache.
+        //
+        // Dropping the fingerprint rather than the texture: the next tick then composites once,
+        // serves the request, and re-caches. One extra composition per preview, for something a
+        // human asked for.
+        prev_fingerprint_ = {};
+        return fut;
+    }
+
+  private:
     spl::shared_ptr<device> vulkan_;
     image_kernel            kernel_;
     const size_t            max_frame_size_;
@@ -398,6 +468,22 @@ class image_renderer
                     view_targets.push_back(finish(composite, v.display, v.view));
 
                 pass->commit();
+
+                // ── A DEFERRED NODE PREVIEW, now that the pass has been issued ──────────
+                //
+                // The copy could not happen inside the evaluator: `renderpass::draw` only
+                // queues, and committing mid-frame to make the target readable corrupts the
+                // stream the rest of the frame is still being written into. Here the pass is
+                // issued and the attachment is readable, which is the same point every other
+                // readback on this backend uses.
+                if (deferred_preview_) {
+                    deferred_preview_image_.pending =
+                        vulkan_->copy_async(deferred_preview_target_).share();
+                    deferred_preview_->promise.set_value(std::move(deferred_preview_image_));
+                    deferred_preview_.reset();
+                    deferred_preview_target_.reset();
+                    deferred_preview_image_ = {};
+                }
 
                 // One fence and one semaphore for the whole pass, shared by every view's
                 // wrapper: all the draws above are in the same command buffer, so waiting
@@ -792,6 +878,41 @@ class image_renderer
                 std::vector<std::shared_ptr<texture>> outputs(plan->steps.size());
                 outputs[0] = head_texture;
 
+                // WHICH STEP THE PENDING PREVIEW WANTS, resolved once before the loop.
+                //
+                // Taken here rather than inside the loop so the request is claimed exactly once
+                // whatever the graph looks like, and so a request naming a node this graph does
+                // not have is answered immediately rather than after a whole frame of drawing.
+                std::unique_ptr<pending_preview> preview_req;
+                std::int32_t                     preview_want = -1;
+                {
+                    std::lock_guard<std::mutex> lock(preview_lock_);
+                    if (preview_ && preview_->graph_name == plan->document_name)
+                        preview_req = std::move(preview_);
+                }
+                if (preview_req) {
+                    for (std::size_t k = 0; k < plan->steps.size(); ++k)
+                        if (plan->steps[k].id == preview_req->node_id)
+                            preview_want = static_cast<std::int32_t>(k);
+                    if (preview_want < 0) {
+                        core::node_preview_image img;
+                        img.reason = "no node '" + preview_req->node_id + "' in the attached graph";
+                        preview_req->promise.set_value(std::move(img));
+                        preview_req.reset();
+                    } else if (alias[preview_want] != preview_want) {
+                        // BYPASSED OR DEAD: it aliases something else and has no output of its
+                        // own. Saying so beats previewing what it aliases -- a client asking
+                        // what this node produces should be told it produces nothing right now.
+                        core::node_preview_image img;
+                        img.reason = "node '" + preview_req->node_id +
+                                     "' is bypassed or unreachable, so it has no output this frame";
+                        preview_req->promise.set_value(std::move(img));
+                        preview_req.reset();
+                        preview_want = -1;
+                    }
+                }
+
+
                 for (std::size_t i = 0; i < plan->steps.size(); ++i) {
                     const auto& st = plan->steps[i];
                     if (alias[i] != static_cast<int>(i)) {
@@ -844,6 +965,51 @@ class image_renderer
                                dst, format_desc, pass, nd, node_uv_inv, node_uv_valid,
                                mask_texture);
                     outputs[i] = dst;
+
+                    // ── SERVE A PENDING PREVIEW, IF THIS IS THE STEP ───────────────
+                    //
+                    // INSIDE THE LOOP, and the first version was not: it sat after the loop,
+                    // which is after every `last_use` release, so only the LAST node still had
+                    // an output and every earlier one answered "bypassed or unreachable". The
+                    // window is exactly here -- between this step's draw and the release below.
+                    //
+                    // Through the same output half the TAIL applies, so a client sees what this
+                    // node contributes to the finished frame rather than a scene-linear
+                    // intermediate no display will ever show.
+                    if (preview_want >= 0 && static_cast<std::int32_t>(i) == preview_want &&
+                        preview_req) {
+                        core::node_preview_image img;
+                        // DRAWN NOW, COPIED AFTER THE FRAME COMMITS -- and the first version
+                        // called `pass->commit()` right here, which is what a mid-frame commit
+                        // costs on this backend: the renderpass is still ACCUMULATING layers,
+                        // so committing it and then continuing to draw into it corrupts the
+                        // command stream. It presented as `vk::Queue::submit: ErrorDeviceLost`,
+                        // 241 of them in one run -- and a standalone run had passed, which is
+                        // the kind of luck that ships.
+                        //
+                        // So the target is recorded and the copy happens after the frame's own
+                        // single `commit()`, which is where every other readback on this
+                        // backend already waits.
+                        auto pdst = pass->create_attachment();
+                        apply_graph_tail(outputs[i], pdst, format_desc, pass, item_params_for_tail);
+                        img.width  = pdst->width();
+                        img.height = pdst->height();
+                        // A SURVIVOR FROM A FAILED FRAME IS ANSWERED, not overwritten. The
+                        // resolution below is unconditional on the normal path, so this can only
+                        // hold something if a previous frame threw between the draw and the
+                        // commit -- and overwriting it would destroy a promise with no value,
+                        // which reaches the client as `broken_promise`: an internal error for
+                        // something that is merely a frame that did not finish.
+                        if (deferred_preview_) {
+                            core::node_preview_image lost;
+                            lost.reason = "the frame that drew this preview did not complete";
+                            deferred_preview_->promise.set_value(std::move(lost));
+                        }
+                        deferred_preview_target_ = pdst;
+                        deferred_preview_        = std::move(preview_req);
+                        deferred_preview_image_  = img;
+                    }
+
 
                     for (std::size_t j = 0; j < i; ++j)
                         if (plan->steps[j].last_use == static_cast<std::int32_t>(i))
@@ -1192,6 +1358,13 @@ struct image_mixer::impl
     }
 
     void update_aspect_ratio(double aspect_ratio) { aspect_ratio_ = aspect_ratio; }
+
+    /// Forwarded to the RENDERER, which is where the request can actually be served.
+    std::future<core::node_preview_image> arm_node_preview(const std::string& graph_name,
+                                                           const std::string& node_id)
+    {
+        return renderer_.arm_node_preview(graph_name, node_id);
+    }
 
     void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_ref_white, bool gamut_compress, bool straight_alpha, bool ws_composite)
     {
@@ -1717,6 +1890,12 @@ void image_mixer::push(const core::frame_transform& transform) { impl_->push(tra
 void image_mixer::visit(const core::const_frame& frame) { impl_->visit(frame); }
 void image_mixer::pop() { impl_->pop(); }
 void image_mixer::update_aspect_ratio(double aspect_ratio) { impl_->update_aspect_ratio(aspect_ratio); }
+
+std::future<core::node_preview_image> image_mixer::arm_node_preview(const std::string& graph_name,
+                                                                    const std::string& node_id)
+{
+    return impl_->arm_node_preview(graph_name, node_id);
+}
 std::future<core::render_output> image_mixer::render(const core::video_format_desc& format_desc)
 {
     return impl_->render(format_desc);

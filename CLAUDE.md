@@ -378,6 +378,27 @@ cmake --build d:\Github\CasparVP\build --target casparcg
   as a reproducible `0xC0000409` abort in the Vulkan mixer that bisected cleanly to an
   innocent commit. **Touch every source before building whenever a header changed**;
   `BUILDING_WORKFLOW.md` has the one-liner and the full account.
+- **A NEW VIRTUAL on a widely-included base class is the worst case of this, and the symptom
+  points nowhere near the build.** Measured 2026-09-11: `arm_node_preview` was added to
+  `core::image_mixer`, which every translation unit that draws a frame includes. Ninja recorded no
+  dependency, so the TUs that were not also edited kept the OLD vtable layout — and a virtual call
+  through a stale index lands on the wrong function.
+
+  It presented as **four `grade-graph` mask checks failing on Vulkan with the masks grading the
+  WHOLE IMAGE** — an ellipse grading at the corner, a qualifier grading its complement, and
+  `mask_combine`'s intersect and subtract both returning union's answer. Nothing in the mask code
+  had been touched for two commits. It reproduced across runs, which is what made it look like a
+  real regression rather than a flake, and the obvious suspect was the six-line change in the same
+  file. **The mask code was never wrong**: after touching every source and deleting the PCH pair,
+  the same tree measured **35/35 on both mixers**.
+
+  Two things to take from it. **A reproducible failure is not evidence of a code defect** — a
+  stale object file reproduces perfectly. And the direction of the error is not knowable in
+  advance: the run BEFORE this one also read 35/35 from an inconsistent binary, so the trap
+  fabricates passes exactly as readily as failures. **When you add or remove a virtual, do the
+  full sweep before measuring anything**, and treat every number taken since that header changed
+  as unreliable rather than salvageable.
+
 - **And touching every source is not enough if the header is in a precompiled header.**
   The `.pch` files carry the same untracked dependency, so every translation unit
   recompiles and every one of them reads the *old* declaration. It shows up as a compile

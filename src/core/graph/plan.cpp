@@ -46,6 +46,7 @@ std::shared_ptr<const node_plan> compile(const graph_document&           doc,
 
     auto plan               = std::make_shared<node_plan>();
     plan->stage             = doc.stage;
+    plan->document_name     = doc.name;
     plan->document_revision = doc.revision;
 
     // ---- index the document ------------------------------------------------------------
