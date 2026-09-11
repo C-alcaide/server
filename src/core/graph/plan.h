@@ -90,6 +90,21 @@ struct node_step
     /// pass rather than two.
     bool fused_mask = false;
 
+    /// This step is a mask generator that must be MATERIALISED -- drawn into its own
+    /// attachment for its consumers to sample, because more than one of them reads it.
+    ///
+    /// Distinct from `produces_image`, which means "produces a full colour image and costs an
+    /// image pass". A materialised mask costs a pass too, but it produces a MASK: its
+    /// consumers bind it as a texture and multiply by it rather than treating it as a picture.
+    /// Kept as its own flag rather than derived in the evaluator from `fused_mask` plus the
+    /// class group, because the evaluator would then need the registry to decide what to draw.
+    ///
+    /// EXACTLY `group == "mask" && !fused_mask`. The invariant is asserted in
+    /// `graph_plan_self_test`: a mask is fused or materialised and never neither, which is what
+    /// it WAS -- `has_mask_texture` was declared in `node_draw.h` and read by nothing, so a
+    /// mask with two consumers was silently dropped and both of them graded the whole image.
+    bool produces_mask = false;
+
     /// THE LAST STEP THAT READS THIS ONE's OUTPUT. After it, the attachment goes back to the
     /// pool. Computed at compile time because the evaluator must not search forwards per step
     /// per frame -- and because an attachment released too early is a garbage read that looks

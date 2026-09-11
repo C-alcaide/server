@@ -93,8 +93,14 @@ std::shared_ptr<const node_plan> compile(const graph_document&           doc,
         // uniforms and the mask costs no pass at all -- which is what makes a windowed grade one
         // draw rather than two. With more than one consumer it would have to be materialised,
         // and that is the commit that adds `mask_combine`.
-        if (c->group == "mask")
+        if (c->group == "mask") {
             st.fused_mask = fan_out_count[id] <= 1;
+            // ...and if it is NOT fused it must be MATERIALISED. The two are exhaustive for a
+            // mask, which `graph_plan_self_test` asserts -- because "neither" is exactly the
+            // state that shipped: nothing implemented the texture path, so a fanned-out mask
+            // became no mask and its consumers graded everywhere.
+            st.produces_mask = !st.fused_mask;
+        }
 
         // Every value input gets a slot, in PORT ORDER, so the shader's uniform upload can walk
         // the class's ports and the offsets agree by construction rather than by a second table.
@@ -159,8 +165,11 @@ std::shared_ptr<const node_plan> compile(const graph_document&           doc,
         }
     }
 
+    // A MATERIALISED MASK COSTS A PASS TOO, and the cap has to see it -- otherwise a document
+    // of sixteen image nodes plus fanned-out masks passes validation and then asks the frame
+    // path for more draws than the cap promised.
     for (const auto& st : plan->steps)
-        if (st.produces_image)
+        if (st.produces_image || st.produces_mask)
             ++plan->image_passes;
 
     for (const auto& f : faults)
@@ -385,6 +394,23 @@ void graph_plan_self_test()
             fail("a mask read by TWO consumers cannot be fused: it would be evaluated twice "
                  "from two different uniform sets, and the two would drift the moment either "
                  "consumer's own parameters differed");
+
+        // AND IT MUST THEREFORE BE MATERIALISED. This half is the one that was missing, and it
+        // was missing in the worst possible way: the plan said "not fused" correctly, and
+        // NOTHING said what to do instead, so the evaluator dropped the mask and both
+        // consumers graded the whole image. `grade-graph` measures the picture; this asserts
+        // the plan can never again say "not fused" without also saying "materialised".
+        if (!tk->produces_mask)
+            fail("a mask that is not FUSED must be MATERIALISED -- the two are exhaustive. "
+                 "Neither is what shipped, and it renders as no mask at all");
+        if (tp->image_passes != 3)
+            fail("two masked exposures sharing one mask is " + std::to_string(tp->image_passes) +
+                 " passes; it must be 3 -- two exposures plus the materialised mask, which the "
+                 "16-pass cap has to count");
+
+        for (const auto& s2 : p->steps)
+            if (s2.fused_mask && s2.produces_mask)
+                fail("step '" + s2.id + "' claims to be both fused and materialised");
     }
 
     CASPAR_LOG(info) << L"[graph-plan] self-test: all checks passed";

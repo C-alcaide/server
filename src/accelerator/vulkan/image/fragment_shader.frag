@@ -200,6 +200,11 @@ const uint F2_GRAPH_HEAD=1u<<8;
 // `mask_ellipse`'s `space` port, ANDed with whether the placement was invertible. Must equal
 // shader_flags2::node_uv_source in util/uniform_block.h.
 const uint F2_NODE_UV_SOURCE=1u<<9;
+// This node's mask is MATERIALISED: its own pass wrote it and every consumer samples the same
+// texture, because a mask with two consumers cannot be fused. A scalar, written to all four
+// channels and read from `.r`, so there is no channel-order question on either backend. Must
+// equal shader_flags2::node_mask_tex in util/uniform_block.h.
+const uint F2_NODE_MASK_TEX=1u<<10;
 
 // WHICH NODE CLASS. An index into `node_classes()`, and `node_registry_self_test` asserts
 // every one of these against that table: a reordering compiles perfectly and would make an
@@ -640,8 +645,36 @@ void main(){
         // NO MASK MEANS EVERYWHERE, and `gn_has_mask` is what says so rather than the
         // geometry. A radius large enough to cover the raster would work today and stop
         // working the moment somebody changed a default.
+        // ── A MATERIALISED MASK PASS WRITES THE MASK, not a picture ─────────────
+        //
+        // Mirror of ogl/image/shader.frag. Its own uniforms carry its geometry -- the kernel
+        // uploads a mask node's parameters into the same slots a FUSED mask's go into, so both
+        // forms compute the same number from the same code and cannot drift.
+        if(gn_op==GN_MASK_ELLIPSE){
+            float mm=1.0;
+            if(gn_has_mask!=0){
+                vec2 muv=buv;
+                if(flag2(F2_NODE_UV_SOURCE)){
+                    vec3 h=vec3(gn_uv_inv[0]*buv.x+gn_uv_inv[1]*buv.y+gn_uv_inv[2],
+                                gn_uv_inv[3]*buv.x+gn_uv_inv[4]*buv.y+gn_uv_inv[5],
+                                gn_uv_inv[6]*buv.x+gn_uv_inv[7]*buv.y+gn_uv_inv[8]);
+                    if(abs(h.z)>1e-6)muv=h.xy/h.z;
+                }
+                vec2 d=(muv-vec2(gn_center_x,gn_center_y))/max(vec2(gn_radius_x,gn_radius_y),vec2(1e-6));
+                float f=max(gn_feather,1e-4);
+                mm=1.0-smoothstep(1.0-f,1.0+f,length(d));
+                if(flag2(F2_GRADE_NODE_INVERT))mm=1.0-mm;
+            }
+            fragColor=vec4(mm,mm,mm,mm);
+            return;
+        }
+
         float m=1.0;
-        if(gn_has_mask!=0){
+        // A MATERIALISED mask is sampled; a FUSED one is evaluated below; neither means
+        // EVERYWHERE, and `gn_has_mask` is what says so rather than the geometry.
+        if(flag2(F2_NODE_MASK_TEX)){
+            m=texture(textures[PLANE2],buv).r;
+        }else if(gn_has_mask!=0){
             // ── WHICH SPACE THE MASK'S NUMBERS ARE IN ───────────────────────────
             // `frame` is this raster; `source` follows the layer's own geometry, so the mask
             // moves with the picture under `MIXER FILL`. The rows multiply a column vector,

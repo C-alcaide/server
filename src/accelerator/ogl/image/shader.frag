@@ -215,6 +215,19 @@ uniform float gn_mix;       // how much of this node's result is used, times its
 // it rather than the geometry doing so: relying on a radius meaning "no mask" is the
 // kind of coincidence that breaks when somebody changes a default.
 uniform bool  gn_has_mask;
+// A MATERIALISED MASK, sampled from plane[2] instead of evaluated inline.
+//
+// Set when this node's mask has more than one consumer: it cannot be fused (it would be
+// evaluated twice from two different uniform sets and the two would drift the moment either
+// consumer's parameters differed), so a pass of its own writes it and every consumer samples
+// the same texture. A scalar, so it is written to all four channels and read from `.r` --
+// no channel-order question on either backend.
+uniform bool  gn_has_mask_tex;
+
+// Prototypes: `grade_node_mask_value` picks between the texture and the analytic form, and the
+// analytic one is defined below it.
+float grade_node_mask(vec2 uv);
+vec2  grade_node_mask_uv(vec2 uv);
 uniform vec2  gn_center;    // in the space `space` names, 0..1
 uniform vec2  gn_radius;
 uniform float gn_feather;   // fraction of radius, isotropic
@@ -1487,6 +1500,20 @@ vec2 grade_node_mask_uv(vec2 uv)
     return abs(t.z) > 1e-6 ? t.xy / t.z : uv;
 }
 
+// THE MASK THIS NODE IS MULTIPLIED BY, from whichever of the three sources applies.
+//
+// One function rather than the expression repeated per class, because it was repeated three
+// times and a fourth source would have had to be added to all three. In order: a materialised
+// mask (its own pass, sampled), a fused one (inline from this node's uniforms), or none --
+// and NONE MEANS EVERYWHERE, which `gn_has_mask` says rather than the geometry, because a
+// radius that happens to cover the raster stops covering it when somebody changes a default.
+float grade_node_mask_value(vec2 uv)
+{
+    if (gn_has_mask_tex)
+        return texture(plane[2], uv).r;
+    return gn_has_mask ? grade_node_mask(grade_node_mask_uv(uv)) : 1.0;
+}
+
 float grade_node_mask(vec2 uv)
 {
     vec2  d = (uv - gn_center) / max(gn_radius, vec2(1e-6));
@@ -1918,10 +1945,23 @@ void main()
         // NO MASK MEANS EVERYWHERE, and `gn_has_mask` is what says so rather than the
         // geometry. A radius large enough to cover the raster would work today and stop
         // working the moment somebody changed a default.
-        float m = gn_has_mask ? grade_node_mask(grade_node_mask_uv(base_uv)) : 1.0;
+        float m = grade_node_mask_value(base_uv);
         // ...times the node's own `mix`, so a node can be dialled back without a `mix`
         // node behind it. One multiply, and it is why every grading class carries the port.
         m *= gn_mix;
+
+        // ── A MATERIALISED MASK PASS WRITES THE MASK, not a picture ─────────────
+        //
+        // Its own uniforms carry its geometry -- the kernel uploads a mask node's parameters
+        // into `gn_center`/`gn_radius`/... exactly as it uploads a FUSED mask's, so the two
+        // forms compute the same number from the same code and cannot drift. Written to all
+        // four channels because a mask is a scalar and this shader carries BGR: an all-equal
+        // write is the one thing invariant under the channel-order trap.
+        if (gn_op == GN_MASK_ELLIPSE) {
+            float mm = gn_has_mask ? grade_node_mask(grade_node_mask_uv(base_uv)) : 1.0;
+            fragColor = vec4(mm, mm, mm, mm);
+            return;
+        }
 
         vec3 graded = col.rgb;
         if (gn_op == GN_EXPOSURE) {
@@ -1944,12 +1984,12 @@ void main()
             graded = mix(col.rgb, b.rgb, gn_mix);
             // `gn_mix` IS the amount for this class, so the mask must not multiply it a
             // second time. Reset to the mask alone.
-            m = gn_has_mask ? grade_node_mask(grade_node_mask_uv(base_uv)) : 1.0;
+            m = grade_node_mask_value(base_uv);
         } else if (gn_op == GN_OVER) {
             // Premultiplied source-over: a + (1-a.alpha) * b.
             vec4 b = gn_has_in1 ? texture(plane[1], base_uv).bgra : vec4(0.0);
             graded = col.rgb + (1.0 - col.a) * b.rgb;
-            m      = gn_has_mask ? grade_node_mask(grade_node_mask_uv(base_uv)) : 1.0;
+            m      = grade_node_mask_value(base_uv);
         }
         // Anything else -- the roots, a mask generator that somehow reached a draw -- is the
         // identity, which is the safe answer: a class the shader does not know renders the

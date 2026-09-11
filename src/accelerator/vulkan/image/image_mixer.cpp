@@ -655,6 +655,14 @@ class image_renderer
                                           values[st.values_offset] != 0.0;
                     const int primary = st.in0 >= 0 ? alias[st.in0] : -1;
 
+                    // A MATERIALISED MASK IS A LIVE PASS -- see the OpenGL mixer for the full
+                    // account. It produces no image, so `produces_image` does not count it, but
+                    // it costs a draw and owns an attachment.
+                    if (st.produces_mask && !bypassed) {
+                        alias[i] = static_cast<int>(i);
+                        ++live_passes;
+                        continue;
+                    }
                     if (!st.produces_image) {
                         alias[i] = st.in0 < 0 ? static_cast<int>(i) : primary;
                         continue;
@@ -791,7 +799,7 @@ class image_renderer
                             outputs[i] = outputs[alias[i]];
                         continue;
                     }
-                    if (!st.produces_image)
+                    if (!st.produces_image && !st.produces_mask)
                         continue;
 
                     core::graph::node_draw nd;
@@ -799,18 +807,31 @@ class image_renderer
                     nd.values       = st.values_count ? values.data() + st.values_offset : nullptr;
                     nd.values_count = st.values_count;
                     nd.has_in1 = st.in1 >= 0 && alias[st.in1] >= 0 && outputs[alias[st.in1]];
+                    // THE THREE SHAPES A MASK CAN REACH A CONSUMER IN, the third of which was
+                    // declared in `node_draw.h` and read by nothing -- so a mask with two
+                    // consumers was neither inlined nor sampled and both consumers graded the
+                    // WHOLE image. `graph_plan_self_test` now asserts fused and materialised are
+                    // exhaustive.
+                    std::shared_ptr<texture> mask_texture;
                     if (st.mask >= 0) {
                         const auto& mst = plan->steps[st.mask];
                         if (mst.fused_mask && mst.values_count)
                             nd.mask_values = values.data() + mst.values_offset;
-                        else if (alias[st.mask] >= 0 && outputs[alias[st.mask]])
+                        else if (alias[st.mask] >= 0 && outputs[alias[st.mask]]) {
+                            mask_texture        = outputs[alias[st.mask]];
                             nd.has_mask_texture = true;
+                        }
                     }
 
                     auto dst = pass->create_attachment_as(common::render_format::fp16);
-                    apply_node(outputs[alias[st.in0]],
-                               nd.has_in1 ? outputs[alias[st.in1]] : outputs[alias[st.in0]],
-                               dst, format_desc, pass, nd, node_uv_inv, node_uv_valid);
+                    // A MASK GENERATOR HAS NO IMAGE INPUT, so it is handed the head texture as
+                    // a source it never samples: the pass computes its value from its own
+                    // uniforms, and `apply_node` returns early on a null source.
+                    const auto& src0 = st.produces_mask ? head_texture : outputs[alias[st.in0]];
+                    apply_node(src0,
+                               nd.has_in1 ? outputs[alias[st.in1]] : src0,
+                               dst, format_desc, pass, nd, node_uv_inv, node_uv_valid,
+                               mask_texture);
                     outputs[i] = dst;
 
                     for (std::size_t j = 0; j < i; ++j)
@@ -848,7 +869,8 @@ class image_renderer
                     spl::shared_ptr<renderpass>     pass,
                     const core::graph::node_draw&   nd,
                     const std::array<float, 9>&     node_uv_inv,
-                    bool                            node_uv_valid)
+                    bool                            node_uv_valid,
+                    const std::shared_ptr<texture>& mask_texture = nullptr)
     {
         if (!source_a)
             return;
@@ -870,8 +892,13 @@ class image_renderer
         draw_params.target_color_transfer   = target_color_transfer;
         draw_params.auto_color_convert      = false;
         draw_params.auto_tone_map           = 0;
+        // THIRD SLOT IS THE MASK: `in0` -> PLANE0, `in1` -> PLANE1, `mask` -> PLANE2, each
+        // sampled raw. Bound unconditionally so the slot never holds a previous draw's image;
+        // `shader_flags2::node_mask_tex` is what decides whether the shader reads it.
         draw_params.textures                = {spl::make_shared_ptr(source_a),
-                                               spl::make_shared_ptr(nd.has_in1 ? source_b : source_a)};
+                                               spl::make_shared_ptr(nd.has_in1 ? source_b : source_a),
+                                               spl::make_shared_ptr(mask_texture ? mask_texture
+                                                                                 : source_a)};
         draw_params.blend_mode              = core::blend_mode::normal;
         draw_params.background              = target_texture;
         draw_params.geometry                = core::frame_geometry::get_default();

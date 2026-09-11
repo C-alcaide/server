@@ -1427,13 +1427,28 @@ struct image_kernel::impl
             // masks in frame space rather than through a matrix that does not describe it.
             // Set in BOTH states on every node pass: a bool uniform persists in the program,
             // and a stale `true` would mask the next node through the previous layer's geometry.
-            const bool gn_uv_source = params.node_uv_valid && params.node.mask_values != nullptr &&
-                                      params.node.mask_values[7] != 0.0;
+            // WHERE THE MASK'S PARAMETERS COME FROM depends on which of the three shapes this
+            // draw is, and all three read the SAME layout -- `bypass, center.0, center.1,
+            // radius.0, radius.1, feather, invert, space` -- so there is one set of uniforms
+            // and one evaluation in the shader:
+            //
+            //   * a MASK GENERATOR pass: its own `values`. The pass computes the mask and
+            //     writes it, for its consumers to sample.
+            //   * a consumer with a FUSED mask: the mask node's `mask_values`, inline.
+            //   * a consumer with a MATERIALISED mask: neither -- it samples plane[2], and
+            //     `gn_has_mask_tex` is what says so.
+            const bool  is_mask_gen = params.node.op == core::graph::op_mask_ellipse;
+            const auto* mp          = is_mask_gen ? params.node.values : params.node.mask_values;
+
+            const bool gn_uv_source = params.node_uv_valid && mp != nullptr && mp[7] != 0.0;
             shader_->set("gn_uv_source", gn_uv_source);
             shader_->set_matrix3("gn_uv_inv", params.node_uv_inv.data());
-            shader_->set("gn_has_mask", params.node.mask_values != nullptr);
-            if (params.node.mask_values) {
-                const auto* m = params.node.mask_values;
+            // BOTH WAYS on every node pass: a bool uniform persists in the program, and a
+            // stale `true` would make an unmasked node sample the previous node's mask.
+            shader_->set("gn_has_mask_tex", params.node.has_mask_texture);
+            shader_->set("gn_has_mask", mp != nullptr);
+            if (mp) {
+                const auto* m = mp;
                 shader_->set("gn_center", static_cast<float>(m[1]), static_cast<float>(m[2]));
                 shader_->set("gn_radius", static_cast<float>(m[3]), static_cast<float>(m[4]));
                 shader_->set("gn_feather", static_cast<float>(m[5]));

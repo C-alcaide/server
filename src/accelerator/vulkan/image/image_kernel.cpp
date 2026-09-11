@@ -1612,7 +1612,17 @@ struct image_kernel::impl
             // a windowed grade one draw rather than two.
             //
             //   mask_ellipse  bypass, center[2], radius[2], feather, invert, space
-            uniforms.gn_has_mask = nd.mask_values ? 1 : 0;
+            // WHERE THE MASK'S PARAMETERS COME FROM depends on which of the three shapes this
+            // draw is, and all three read the SAME layout -- see the OpenGL kernel for the full
+            // account. A mask GENERATOR pass reads its own `values`; a consumer with a FUSED
+            // mask reads the mask node's `mask_values`; a consumer with a MATERIALISED one
+            // reads neither and samples PLANE2.
+            const bool  is_mask_gen = nd.op == core::graph::op_mask_ellipse;
+            const auto* mp          = is_mask_gen ? nd.values : nd.mask_values;
+
+            uniforms.gn_has_mask = mp ? 1 : 0;
+            if (nd.has_mask_texture)
+                uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::node_mask_tex);
             // ── WHICH SPACE THE MASK'S NUMBERS ARE IN ───────────────────────────────
             //
             // Mirror of the OpenGL kernel. `space` is `mask_ellipse`'s port 7 in the order
@@ -1623,12 +1633,12 @@ struct image_kernel::impl
             // ANDed with `node_uv_valid`, so a layer whose placement could not be inverted (a
             // corner pin, a zero scale) masks in FRAME space rather than through a matrix that
             // does not describe it.
-            if (params.node_uv_valid && nd.mask_values && nd.mask_values[7] != 0.0)
+            if (params.node_uv_valid && mp && mp[7] != 0.0)
                 uniforms.flags2 |= static_cast<uint32_t>(shader_flags2::node_uv_source);
             for (int i = 0; i < 9; ++i)
                 uniforms.gn_uv_inv[i] = params.node_uv_inv[i];
-            if (nd.mask_values) {
-                const auto* m          = nd.mask_values;
+            if (mp) {
+                const auto* m          = mp;
                 uniforms.gn_center_x   = static_cast<float>(m[1]);
                 uniforms.gn_center_y   = static_cast<float>(m[2]);
                 uniforms.gn_radius_x   = static_cast<float>(m[3]);

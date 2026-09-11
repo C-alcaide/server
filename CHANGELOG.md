@@ -1,6 +1,27 @@
 CasparVP — Unreleased
 ==========================================
 
+### Fixed: a node mask read by more than one node was silently DROPPED
+
+**Behaviour change, and it is a defect fix.** A mask generator feeding two or more nodes cannot
+be fused into their uniforms — it would be evaluated twice from two different uniform sets — so
+the compiler marks it for its own pass. That pass was never implemented:
+`node_draw::has_mask_texture` was declared and read by nothing, so the mask was neither inlined
+nor sampled and **every consumer graded the whole image instead of the masked region**.
+
+Measured at four radii outside the ellipse: **139.00 LSB** from the ungraded picture, where the
+correct answer is 0.00. Both mixers, identically. So **any graph whose mask feeds two nodes
+renders differently now** — correctly — and a graph whose masks each feed one node is unchanged,
+because that path was always fused and always worked.
+
+**It hid because of where the only existing fixture sampled.** `grade-window`'s CDL arm is the
+one place a mask fanned out, and it samples INSIDE the window — where a whole-frame grade and a
+masked grade are the same number. A dropped mask is only visible from outside.
+
+`grade-graph` now measures it from both sides, and compares a shared mask against two fused
+masks at identical geometry (**0.00 LSB**), so a materialised mask that is right about where and
+wrong about its value cannot pass either.
+
 ### A node mask can follow the picture — `mask_ellipse`'s `space` port does something now
 
 `mask_ellipse` has always declared `space` as `frame,source`, and only `frame` was implemented:

@@ -455,6 +455,50 @@ attachment map and correctly went away — so the value stream said the graph wa
 picture still had it. That is the `MIXER EXPOSURE` class, and it is the first time in this work
 that the **picture** check caught what the **value** check could not.
 
+### 3.3.6 A mask with two consumers is MATERIALISED — and it used to be dropped
+
+A mask generator with **one** consumer is **fused**: the consumer evaluates it inline from its
+own uniforms, so a windowed grade costs one draw and the mask costs none. With **two** it cannot
+be — it would be evaluated twice from two different uniform sets, and the two would drift the
+moment either consumer's own parameters differed — so `compile()` clears `fused_mask` and the
+mask gets a **pass of its own**, writing a texture that every consumer samples.
+
+The plan half of that has been right since the compiler landed, and `graph_plan_self_test`
+asserted it. **The evaluator half did not exist.** `node_draw::has_mask_texture` was declared
+and read by *nothing* — not either kernel, not either shader — so a fanned-out mask was neither
+inlined nor sampled: `gn_has_mask` came out false, and **both consumers graded the whole image**.
+
+Measured on the first fixture that looked: at four radii outside the ellipse, **139.00 LSB** from
+the ungraded picture where the answer is 0.00.
+
+**Why nothing saw it is the part worth keeping.** The only fixture that fanned a mask out was
+`grade-window`'s CDL arm, and it samples **inside** the window — where "graded through the mask"
+and "graded everywhere" are *the same number*. A whole-frame grade is only visible from outside.
+That file's own comment claimed its chain arm exercised the materialised path, and it was wrong
+twice over: that fixture builds one mask **per** window, so both are fused.
+
+Three things the fix is built from:
+
+* **`node_step::produces_mask`**, exactly `group == "mask" && !fused_mask`, and the self-test now
+  asserts fused and materialised are **exhaustive** — because "neither" is precisely the state
+  that shipped. It also asserts the pass count: two masked exposures sharing one mask is **3**
+  passes, so the 16-pass cap counts the mask.
+* **One mask-parameter source in each kernel.** A mask *generator* pass reads its own `values`; a
+  consumer with a *fused* mask reads the mask node's `mask_values`; a consumer with a
+  *materialised* one reads neither and samples the texture. All three use the same slot layout,
+  so there is one evaluation in the shader and the fused and materialised forms cannot drift —
+  which the battery checks directly, comparing a shared mask against two fused masks at
+  identical geometry (**0.00 LSB**).
+* **The mask goes in the third texture slot** — `in0` → plane 0, `in1` → plane 1, `mask` →
+  plane 2 — which is what the fan-in design meant by using the plane slots a single-plane source
+  leaves empty. Written to all four channels and read from `.r`, so a scalar mask is invariant
+  under the channel-order trap on both backends.
+
+**A deviation from the plan, stated:** the plan called for a **1-component** fp16 attachment and
+this uses the same 4-component fp16 the image intermediates use. The pools are keyed by format,
+so a second bucket would be a second allocation path for a quarter of the memory; it is a cost
+question rather than a correctness one, and `grade-graph-cost` is where it belongs.
+
 ## 4. The document
 
 ```jsonc
@@ -696,6 +740,7 @@ rather than by the `MIXER` tween.
 | the no-graph fast path | `conformance`, `grading` | **100/100 at 1 LSB**, **48/48** |
 | which colour space a node pass runs in | `grade-graph` | **16/16 both mixers** — `working` agrees with `MIXER CDL` at **0.00 LSB** in both configs, and the same graph declared `display` still reads 42.00 LSB away, which is what makes the zero attributable |
 | what a node computes | `grade-window` | 1 LSB both mixers. **Its oracle asserts the DISPLAY placement** — *inside == measured outside x exposure*, which is only true of an already-encoded value — so it drives a pass-through config, where the two placements are provably indistinguishable and its figures did not move when the split landed. That is also why it cannot see a placement at all, and why `grade-graph` owns the question |
+| a mask read by TWO consumers (the materialised path) | `grade-graph` | **3 checks, both mixers** — and the sample that matters is OUTSIDE the mask, because a dropped mask reads identically to a correct one from inside |
 | which space a MASK's numbers are in | `grade-graph` | **4 checks, both mixers** — the two interpretations are disjoint by construction, so each failure mode fails a different check |
 | the source-uv matrix against `transform_coords` | `node_uv_self_test` | at boot, **fatal** — five placements, and the row/column convention is the thing it exists to pin |
 | the class table against its own rules | `node_registry_self_test` | at boot |

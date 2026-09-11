@@ -422,6 +422,10 @@ enum class shader_flags2 : uint32_t
     // `mask_ellipse`'s `space` port resolved against whether the item's placement could
     // actually be inverted. Must equal F2_NODE_UV_SOURCE in image/fragment_shader.frag.
     node_uv_source = 1u << 9,
+    // This node's mask is MATERIALISED -- sampled from PLANE2 rather than evaluated inline,
+    // because more than one consumer reads it. Must equal F2_NODE_MASK_TEX in
+    // image/fragment_shader.frag.
+    node_mask_tex = 1u << 10,
 };
 
 }}} // namespace caspar::accelerator::vulkan
