@@ -104,9 +104,19 @@ struct api_context
     /// Addressed by GRAPH NAME rather than by channel and layer, because that is what the mixer
     /// can match against: it sees a tree of layers and items and carries no stage layer index.
     /// It is also the better interface, for the reason `detach` takes no layer.
-    std::function<std::vector<std::uint8_t>(const std::string& graph,
-                                            const std::string& node,
-                                            std::string&       out_reason)>
+    /// One entry per requested node, in the order asked. `png` empty means that one was
+    /// refused and `reason` says why -- a bad node id costs its own thumbnail, not the strip.
+    struct node_preview_result
+    {
+        std::string               node;
+        std::vector<std::uint8_t> png;
+        std::string               reason;
+    };
+
+    std::function<std::vector<node_preview_result>(const std::string&              graph,
+                                                   const std::vector<std::string>& nodes,
+                                                   int                             max_edge,
+                                                   std::string&                    out_reason)>
         node_preview;
 
     /// The stage for a 1-based channel index, or nullptr if there is no such channel.

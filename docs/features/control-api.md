@@ -701,7 +701,9 @@ GET /v1/catalog/node/mask_rect          one class, with its ports
 GET /v1/catalog/node/mask_rect/default  a node object ready to PUT
 GET /v1/catalog/node/exposure/suggest?port=mask   what may feed it
 GET /v1/graph/connections/preview?from=cdl.out&to=exposure.in
-GET /v1/graph/look/preview?node=e1       ->  image/png, NOT an envelope
+GET /v1/graph/look/preview?node=e1&max=512   ->  image/png, NOT an envelope
+                                            (`max` caps the longest edge; it is the
+                                             whole of a preview's cost)
 ```
 
 **`node` is a different kind of catalogue from `ofx` and `isf`**, and the difference is worth

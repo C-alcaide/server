@@ -108,6 +108,12 @@ struct render_output
 /// request could not be served, and the CALLER is told why rather than left to guess: an empty
 /// buffer with a `reason` is the difference between "that node is not in the graph" and "the
 /// frame did not arrive in time", which a client can act on differently.
+/// The longest edge a preview is capped to when a client does not say otherwise.
+///
+/// 512 is an editor thumbnail: big enough to judge a grade on, and a fortieth of a 4K frame to
+/// copy back. See `arm_node_preview` for why the DEFAULT is the cheap one.
+constexpr int default_preview_edge = 512;
+
 struct node_preview_image
 {
     int         width  = 0;
@@ -186,12 +192,42 @@ class image_mixer
     ///
     /// The default is a refusal, so a backend that has not implemented it says so rather than
     /// hanging: an unimplemented preview must not look like a slow one.
-    virtual std::future<node_preview_image> arm_node_preview(const std::string& /*graph_name*/,
-                                                             const std::string& /*node_id*/)
+    /// Arm a preview of one or more nodes of `graph_name`, served TOGETHER on the next frame
+    /// that draws it.
+    ///
+    /// A SET RATHER THAN ONE NODE, because the frame is the scarce thing. A node's attachment
+    /// exists only for the span of one `draw()`, so one request per node means one FRAME per
+    /// node -- and the client this exists for is an editor showing what every step of a chain
+    /// does, which wants all of them at once. Measured before this took a set: a 16-node strip
+    /// cost 1294 ms because it was sixteen separate frames, and asking in parallel did not help
+    /// at all, because the API executor owns a single thread and serialises them anyway.
+    ///
+    /// Answers come back IN THE ORDER ASKED, one per requested node, each with its own
+    /// `reason` -- so one bad node id refuses its own thumbnail rather than the whole strip.
+    ///
+    /// `max_edge` caps the LONGEST SIDE of each picture in pixels, and is THE WHOLE OF THE
+    /// COST. A preview is a readback and an encode, both priced in pixels: measured at 2160p50
+    /// a full-raster preview copies 33 MB and costs about one late frame on the Vulkan mixer
+    /// even at one request a second, while 512 costs 0.15% of frames at twenty-five a second.
+    /// Folding the copy into the frame's own command buffer -- removing a whole queue submit --
+    /// moved the number by less than run-to-run noise, which is what proved the volume was the
+    /// cost rather than the mechanism.
+    ///
+    /// **0 MEANS THE LAYER'S OWN RASTER**, and the DEFAULT IS A THUMBNAIL rather than the
+    /// raster. That is deliberate and was the other way round first: it defaulted to full
+    /// raster "so a client that does not ask keeps what it had", which protected nobody --
+    /// nothing consumes this API yet -- and left the common case paying the expensive path by
+    /// not thinking about it. The cheap answer is the one you get for free; the expensive one
+    /// is available by asking.
+    virtual std::future<std::vector<node_preview_image>>
+    arm_node_preview(const std::string&              /*graph_name*/,
+                     const std::vector<std::string>& node_ids,
+                     int                             /*max_edge*/ = default_preview_edge)
     {
-        node_preview_image out;
-        out.reason = "this mixer does not implement node previews";
-        std::promise<node_preview_image> p;
+        std::vector<node_preview_image> out(node_ids.size());
+        for (auto& o : out)
+            o.reason = "this mixer does not implement node previews";
+        std::promise<std::vector<node_preview_image>> p;
         p.set_value(std::move(out));
         return p.get_future();
     }

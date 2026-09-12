@@ -913,8 +913,13 @@ is why a five-node look costs 14 leaves rather than one per port.
 ### 7.4 A per-node preview
 
 ```
-GET /v1/graph/{name}/preview?node=<id>   ->  image/png
+GET /v1/graph/{name}/preview?node=<id>[&max=<pixels>]   ->  image/png
 ```
+
+**`max` caps the LONGEST EDGE and is the whole of the cost.** Absent means the layer's own
+raster, which is what a client got before the parameter existed -- a preview that silently
+shrank would be a worse default than a slow one. An editor drawing thumbnails should always
+send it; see the cost table below for what it buys.
 
 **The only endpoint in this API besides `/v1/docs` that is not an envelope**, and for the same
 reason: wrapping PNG bytes in `{"status":…,"result":"<binary>"}` would make them unusable in the
@@ -954,20 +959,39 @@ first node of a two-node chain, and the last node's preview matches the captured
 
 Measured by `node-preview-cost`, both mixers, four channels:
 
-| | 1080p50 | 2160p50 |
-| :--- | ---: | ---: |
-| one preview, end to end | **~33 ms** | **~81 ms** |
-| a 16-node strip, every node | **551 ms** | **1294 ms** |
-| sustained rate, one client | ~30/s | **12.6/s** |
-| PNG on the wire | ~10 KB | 37 KB |
+| | 1080p50 | 2160p50, full raster | 2160p50, `max=512` |
+| :--- | ---: | ---: | ---: |
+| one preview, end to end | ~17 ms | ~81 ms | **17-22 ms** |
+| a 16-node strip, one request | **247-277 ms** | 1294 ms (16 requests) | **1001-1042 ms** |
+| sustained rate, one client | ~30/s | 12.6/s | **25/s, not saturated** |
+| PNG on the wire | ~1 KB | 37 KB | **1 KB** |
+| late frames, Vulkan, at 25/s | 0 | 201/2004 (**10.03%**) | 0-1/2007 (**~0%**) |
 
-**THE COST IS PIXELS, NOT PREVIEWS.** The per-node figure tracks the raster almost exactly — a
-quarter of the pixels costs a bit under half the time — because what a preview spends is a
-full-raster readback and a PNG encode, not fixed overhead. Two consequences for a client:
-**a thumbnail would be the big win** (a 256-px preview is a fraction of the pixels, so a
-fraction of both terms), and **the per-node cost does not grow with chain depth** — 81 ms per
-node at sixteen nodes is the same 81 ms as at two, because a preview reads one step's
-attachment rather than re-running the chain.
+**AND THE 16-NODE STRIP AT 4K IS THE ONE NUMBER THAT DID NOT MOVE MUCH**, which is worth
+stating because the rest of this section would otherwise imply it did. A single 512-px preview
+at 2160p50 costs 17-22 ms, and sixteen of them in one request cost **63-65 ms each** -- the
+strip is still raster-dominated rather than readback-dominated, on BOTH backends, so neither
+the thumbnail nor the batching addresses whatever the remaining term is. Batching bought about
+19% at 4K (1294 -> 1042) and about half at HD (551 -> 247-277). **Unexplained and unprofiled**:
+the obvious candidates are the per-preview tail draw and the composite each request forces by
+dropping the still-frame cache, and no mutation has been run to separate them.
+
+**THE COST IS PIXELS, NOT PREVIEWS**, and that was established by measurement rather than
+assumed. The per-node figure tracks the raster; identical code costs nothing at 1080p50 and
+about a late frame per preview at 2160p50; and **removing a whole queue submit changed the
+number by less than the run-to-run noise** — the Vulkan readback used to issue its own command
+buffer and now rides the frame's, which is a better shape but was not the cost. What was left
+was the volume: 33 MB copied per preview at 4K against 0.8 MB at 512.
+
+So **`max` is the answer to the cost, on both backends**, and the per-node cost does not grow
+with chain depth — 81 ms per node at sixteen nodes is the same 81 ms as at two, because a
+preview reads one step's attachment rather than re-running the chain.
+
+Each backend downscales where it is cheapest: the OpenGL mixer gives the tail draw a smaller
+destination, so the full-screen sampler pass it already runs resamples on the way; the Vulkan
+mixer blits to a small image with a linear filter inside the frame's own command buffer, before
+the copy. **Both return the same extent for the same request**, which is a parity property
+rather than a coincidence -- a client must not have to ask which backend it is talking to.
 
 **ASKING IN PARALLEL BUYS NOTHING.** Eight requests at once took 642 ms against 653 ms for the
 same eight in sequence. `api_executor_` owns a single thread and serves each request to
@@ -979,16 +1003,20 @@ which argues from a hover model ("there is one cursor") — it is safe because t
 concurrency is one, and a client fetching a strip of `<img>` tags in parallel gets every
 picture rather than one picture and N-1 refusals.
 
-**The rate to build against is ~10/s at 4K**, which is inside the 12.6/s ceiling with margin.
-Above that a client is only adding queue depth: 25/s and 50/s both deliver the same 12.6/s.
+**The rate to build against is 25/s with `max=512`**, which the server sustains without
+saturating, or **~10/s at full 4K raster**, which is inside the 12.6/s ceiling with margin.
+Above a ceiling a client is only adding queue depth: at full raster 25/s and 50/s both deliver
+the same 12.6/s.
 
-**On OpenGL previews are free; on VULKAN each one costs about a late frame.** At 2160p50,
-polling at 5/s cost 4.79% of frames late and at 12.6/s cost 12.66%, against a control of
-**zero** — the identical graph with nobody asking. OpenGL read 0 at every rate on both rasters.
-The cause is the Vulkan readback: `copy_async` issues its own `submitSingleTimeCommands` and
-allocates a fresh full-raster staging buffer per call, on the same queue the frame is using.
-**Not fixed, and stated rather than left to be discovered** — a client polling a Vulkan channel
-at 4K should stay near 1/s, or the thumbnail above removes the question.
+**AT FULL RASTER ON VULKAN, A PREVIEW STILL COSTS ABOUT A LATE FRAME**, and that is the one
+thing here a client has to design around. At 2160p50, polling at 25/s costs 10.03% of frames
+late against a control of **zero** — the identical graph with nobody asking — where OpenGL
+reads 0 at every rate and both rasters. Copying 33 MB out of a 20 ms tick is simply visible,
+and the fix is not to copy it: the same rate with `max=512` costs **0.15%**.
+
+So the guidance is a rule rather than a caveat: **send `max` whenever a human is looking at a
+thumbnail**, which is every case previews exist for. Full raster remains available and remains
+honest about what it costs.
 
 **A preview needs the channel to be TICKING**, and a channel with no consumer never does — the
 same constraint `previz.md` §4 records for `PREVIZ MAP`. The refusal says so ("is the channel

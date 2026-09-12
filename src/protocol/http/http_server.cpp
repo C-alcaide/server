@@ -109,6 +109,37 @@ std::string query_param(const std::string& query, const char* key)
     return {};
 }
 
+/// Base64, for the one place this API carries binary inside JSON.
+///
+/// A SET of previews cannot be raw bytes -- several pictures need a container -- so each PNG
+/// rides in the envelope as text. A single preview is still raw `image/png`, because that is
+/// what an `<img>` points at.
+std::string base64_encode(const std::vector<std::uint8_t>& in)
+{
+    static constexpr char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string           out;
+    out.reserve(((in.size() + 2) / 3) * 4);
+    std::size_t i = 0;
+    for (; i + 2 < in.size(); i += 3) {
+        const std::uint32_t v = (in[i] << 16) | (in[i + 1] << 8) | in[i + 2];
+        out.push_back(tbl[(v >> 18) & 0x3F]);
+        out.push_back(tbl[(v >> 12) & 0x3F]);
+        out.push_back(tbl[(v >> 6) & 0x3F]);
+        out.push_back(tbl[v & 0x3F]);
+    }
+    if (i < in.size()) {
+        std::uint32_t v = in[i] << 16;
+        const bool    two = (i + 1) < in.size();
+        if (two)
+            v |= in[i + 1] << 8;
+        out.push_back(tbl[(v >> 18) & 0x3F]);
+        out.push_back(tbl[(v >> 12) & 0x3F]);
+        out.push_back(two ? tbl[(v >> 6) & 0x3F] : '=');
+        out.push_back('=');
+    }
+    return out;
+}
+
 } // namespace
 
 /// One live `/v1/events` connection.
@@ -721,33 +752,91 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
             (method == bhttp::verb::get || method == bhttp::verb::head)) {
             const auto rest  = target.path.substr(std::string("/v1/graph/").size());
             const auto gname = rest.substr(0, rest.find('/'));
-            const auto node  = query_param(target.query, "node");
-            api_executor_.begin_invoke([self, stream, buffer, gname, node, method, keep, ver,
+            // `?node=a,b,c` -- a SET, because the frame is the scarce thing: a node's
+            // attachment exists only for the span of one draw, so one request per node means
+            // one FRAME per node. A 16-node strip cost 1294 ms that way.
+            std::vector<std::string> nodes;
+            {
+                const auto raw = query_param(target.query, "node");
+                std::size_t pos = 0;
+                while (pos <= raw.size() && !raw.empty()) {
+                    auto comma = raw.find(',', pos);
+                    if (comma == std::string::npos)
+                        comma = raw.size();
+                    auto one = raw.substr(pos, comma - pos);
+                    if (!one.empty())
+                        nodes.push_back(std::move(one));
+                    if (comma == raw.size())
+                        break;
+                    pos = comma + 1;
+                }
+            }
+            // `?max=<pixels>` caps the LONGEST SIDE. Absent or unparseable means the layer's
+            // own raster, which is what every client got before this existed -- a preview that
+            // silently shrank would be a worse default than a slow one.
+            int max_edge = 0;
+            try {
+                const auto raw = query_param(target.query, "max");
+                if (!raw.empty())
+                    max_edge = std::max(0, std::stoi(raw));
+            } catch (const std::exception&) {
+                max_edge = 0;
+            }
+            api_executor_.begin_invoke([self, stream, buffer, gname, nodes, max_edge, method, keep, ver,
                                         authorization, path = target.path]() {
-                api_reply                 refusal;
-                std::vector<std::uint8_t> png;
+                api_reply                                           refusal;
+                std::vector<api_context::node_preview_result>        results;
                 if (!self->auth_.check(authorization))
                     refusal = api_reply::fail(api_code::unauthorized, "authentication required");
                 else if (!self->context_.node_preview)
                     refusal = api_reply::fail(api_code::internal,
                                               "node previews are not wired into this build");
-                else if (node.empty())
-                    refusal = api_reply::fail(api_code::field_missing, "a preview needs ?node=<id>");
+                else if (nodes.empty())
+                    refusal = api_reply::fail(api_code::field_missing,
+                                              "a preview needs ?node=<id> or ?node=<id>,<id>,...");
                 else {
                     std::string reason;
-                    png = self->context_.node_preview(gname, node, reason);
-                    if (png.empty())
+                    results = self->context_.node_preview(gname, nodes, max_edge, reason);
+                    if (results.empty())
                         refusal = api_reply::fail(api_code::bad_request,
                                                   reason.empty() ? "the preview produced nothing"
                                                                  : reason);
                 }
 
-                if (!png.empty()) {
+                // ONE NODE IS RAW PNG; A SET IS AN ENVELOPE, and the asymmetry is deliberate.
+                // A single preview is what an `<img src=...>` points at, and wrapping those
+                // bytes in JSON would make them unusable in the one client they exist for. A
+                // set cannot be raw -- several pictures need a container -- so it is the
+                // envelope every other route uses, with each PNG base64 in `previews[]`.
+                if (results.size() == 1 && !results[0].png.empty()) {
+                    auto& png = results[0].png;
                     std::string body(reinterpret_cast<const char*>(png.data()), png.size());
                     asio::post(stream->get_executor(),
                                [self, stream, buffer, body = std::move(body), method, keep, ver]() mutable {
                                    self->write(stream, buffer, bhttp::status::ok, std::move(body),
                                                method, keep, ver, "image/png");
+                               });
+                    return;
+                }
+                if (!results.empty()) {
+                    json::array arr;
+                    for (const auto& r : results) {
+                        json::object o;
+                        o["node"] = json::string(r.node);
+                        if (!r.png.empty())
+                            o["png"] = json::string(base64_encode(r.png));
+                        if (!r.reason.empty())
+                            o["reason"] = json::string(r.reason);
+                        arr.push_back(std::move(o));
+                    }
+                    json::object result;
+                    result["previews"] = std::move(arr);
+                    auto body = json::serialize(
+                        json::value(envelope(api_reply::ok_with(std::move(result)), self->server_name_)));
+                    asio::post(stream->get_executor(),
+                               [self, stream, buffer, body = std::move(body), method, keep, ver]() mutable {
+                                   self->write(stream, buffer, bhttp::status::ok, std::move(body),
+                                               method, keep, ver);
                                });
                     return;
                 }

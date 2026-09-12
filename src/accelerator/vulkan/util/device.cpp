@@ -1924,6 +1924,176 @@ struct device::impl : public std::enable_shared_from_this<impl>
         });
     }
 
+    /// `copy_async`, but reading a DOWNSCALED copy of `source`.
+    ///
+    /// WHY THIS IS HERE AND NOT IN THE RENDERPASS. The first attempt recorded the blit and the
+    /// copy into the frame's own command buffer, to save the second queue submit. That submit
+    /// was measured NOT to be the cost -- removing it moved the late-frame count by less than
+    /// run-to-run noise -- and the attempt cost correctness: the results varied run to run
+    /// between right, uniformly dark and black, which is what undefined image contents look
+    /// like. The layouts of an attachment mid-pass are the renderpass's business and were not
+    /// safely knowable from there.
+    ///
+    /// Here they are knowable, because this owns its whole command buffer and `copy_async`
+    /// beside it has always assumed -- correctly, and measured -- that a caller's attachment
+    /// arrives in eColorAttachmentOptimal.
+    ///
+    /// WHAT IT BUYS is the only thing that mattered: the readback is priced in PIXELS. At
+    /// 2160p50 a full-raster preview copies 33 MB and costs about one late frame on this
+    /// backend even at one request a second; at 512 on the long edge it is a fortieth of that.
+    std::future<array<const uint8_t>>
+    copy_async_scaled(const std::shared_ptr<texture>& source, int dst_width, int dst_height)
+    {
+        if (!source || dst_width <= 0 || dst_height <= 0 ||
+            (dst_width == source->width() && dst_height == source->height()))
+            return copy_async(source);
+
+        if (source->compressed()) {
+            CASPAR_LOG(warning) << L"vulkan::device::copy_async_scaled: refusing a "
+                                   L"block-compressed texture";
+            return std::async(std::launch::deferred, [] { return array<const uint8_t>(); });
+        }
+
+        auto f = dispatch_async(
+            [this, source, dst_width, dst_height]() -> std::pair<std::shared_ptr<buffer>, uint64_t> {
+                // `thumb`, not `small`: the Windows SDK's rpcndr.h makes `small` a typedef for
+                // `char`.
+                auto thumb = create_attachment(dst_width,
+                                               dst_height,
+                                               source->depth(),
+                                               4,
+                                               common::render_format::unorm);
+                auto buf   = create_buffer(thumb->size(), false);
+
+                const auto range = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+
+                auto signal_value = submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+                    // The source, as `copy_async` does it.
+                    transitionImageLayout(source->id(),
+                                          vk::ImageLayout::eColorAttachmentOptimal,
+                                          vk::AccessFlagBits2::eColorAttachmentWrite,
+                                          vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                                          vk::ImageLayout::eTransferSrcOptimal,
+                                          vk::AccessFlagBits2::eTransferRead,
+                                          vk::PipelineStageFlagBits2::eTransfer,
+                                          cmd);
+
+                    // The destination is written in full, so its previous contents are
+                    // discarded -- eUndefined is the correct old layout for that, and claiming
+                    // any other is how a freshly pooled attachment comes back black.
+                    {
+                        vk::ImageMemoryBarrier2 toDst{};
+                        toDst.oldLayout           = vk::ImageLayout::eUndefined;
+                        toDst.newLayout           = vk::ImageLayout::eTransferDstOptimal;
+                        toDst.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+                        toDst.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+                        toDst.image               = thumb->id();
+                        toDst.subresourceRange    = range;
+                        toDst.srcStageMask        = vk::PipelineStageFlagBits2::eNone;
+                        toDst.srcAccessMask       = vk::AccessFlagBits2::eNone;
+                        toDst.dstStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+                        toDst.dstAccessMask       = vk::AccessFlagBits2::eTransferWrite;
+
+                        vk::DependencyInfo depInfo{};
+                        depInfo.setImageMemoryBarriers(toDst);
+                        cmd.pipelineBarrier2(depInfo);
+                    }
+
+                    vk::ImageBlit2 blit{};
+                    blit.srcSubresource = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
+                    blit.dstSubresource = blit.srcSubresource;
+                    blit.srcOffsets[0]  = vk::Offset3D{0, 0, 0};
+                    blit.srcOffsets[1] =
+                        vk::Offset3D{static_cast<int32_t>(source->width()), static_cast<int32_t>(source->height()), 1};
+                    blit.dstOffsets[0] = vk::Offset3D{0, 0, 0};
+                    blit.dstOffsets[1] = vk::Offset3D{dst_width, dst_height, 1};
+
+                    vk::BlitImageInfo2 blitInfo{};
+                    blitInfo.srcImage       = source->id();
+                    blitInfo.srcImageLayout = vk::ImageLayout::eTransferSrcOptimal;
+                    blitInfo.dstImage       = thumb->id();
+                    blitInfo.dstImageLayout = vk::ImageLayout::eTransferDstOptimal;
+                    blitInfo.filter         = vk::Filter::eLinear;
+                    blitInfo.setRegions(blit);
+                    cmd.blitImage2(blitInfo);
+
+                    // The thumbnail becomes the copy's source; the original goes back to the
+                    // layout its holder expects.
+                    {
+                        vk::ImageMemoryBarrier2 dstToSrc{};
+                        dstToSrc.oldLayout           = vk::ImageLayout::eTransferDstOptimal;
+                        dstToSrc.newLayout           = vk::ImageLayout::eTransferSrcOptimal;
+                        dstToSrc.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+                        dstToSrc.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+                        dstToSrc.image               = thumb->id();
+                        dstToSrc.subresourceRange    = range;
+                        dstToSrc.srcStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+                        dstToSrc.srcAccessMask       = vk::AccessFlagBits2::eTransferWrite;
+                        dstToSrc.dstStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+                        dstToSrc.dstAccessMask       = vk::AccessFlagBits2::eTransferRead;
+
+                        vk::DependencyInfo depInfo{};
+                        depInfo.setImageMemoryBarriers(dstToSrc);
+                        cmd.pipelineBarrier2(depInfo);
+                    }
+
+                    vk::BufferImageCopy2 region{};
+                    region.bufferOffset     = 0;
+                    region.imageSubresource = vk::ImageSubresourceLayers(vk::ImageAspectFlagBits::eColor, 0, 0, 1);
+                    region.imageOffset      = vk::Offset3D{0, 0, 0};
+                    region.imageExtent =
+                        vk::Extent3D{static_cast<uint32_t>(dst_width), static_cast<uint32_t>(dst_height), 1};
+
+                    vk::CopyImageToBufferInfo2 copyInfo{};
+                    copyInfo.dstBuffer      = buf->id();
+                    copyInfo.srcImage       = thumb->id();
+                    copyInfo.srcImageLayout = vk::ImageLayout::eTransferSrcOptimal;
+                    copyInfo.setRegions(region);
+                    cmd.copyImageToBuffer2(copyInfo);
+
+                    vk::BufferMemoryBarrier2 hostBarrier{};
+                    hostBarrier.srcStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+                    hostBarrier.srcAccessMask       = vk::AccessFlagBits2::eTransferWrite;
+                    hostBarrier.dstStageMask        = vk::PipelineStageFlagBits2::eHost;
+                    hostBarrier.dstAccessMask       = vk::AccessFlagBits2::eHostRead;
+                    hostBarrier.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+                    hostBarrier.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+                    hostBarrier.buffer              = buf->id();
+                    hostBarrier.offset              = 0;
+                    hostBarrier.size                = VK_WHOLE_SIZE;
+
+                    vk::DependencyInfo hostDepInfo{};
+                    hostDepInfo.setBufferMemoryBarriers(hostBarrier);
+                    cmd.pipelineBarrier2(hostDepInfo);
+
+                    // And the source back, so its holder and the pool see what they expect.
+                    transitionImageLayout(source->id(),
+                                          vk::ImageLayout::eTransferSrcOptimal,
+                                          vk::AccessFlagBits2::eTransferRead,
+                                          vk::PipelineStageFlagBits2::eTransfer,
+                                          vk::ImageLayout::eColorAttachmentOptimal,
+                                          vk::AccessFlagBits2::eMemoryRead,
+                                          vk::PipelineStageFlagBits2::eAllCommands,
+                                          cmd);
+                });
+
+                return {buf, signal_value};
+            },
+            dispatch_kind::readback);
+
+        return std::async(std::launch::deferred, [this, f = std::move(f)]() mutable {
+            auto [buf, signal_value] = f.get();
+            vk::SemaphoreWaitInfo waitInfo{};
+            waitInfo.setSemaphores(_semaphore);
+            waitInfo.setValues(signal_value);
+            wait_for_semaphores(_device, waitInfo, L"[Vulkan] scaled readback");
+            buf->invalidate();
+            auto ptr  = reinterpret_cast<uint8_t*>(buf->data());
+            auto size = buf->size();
+            return array<const uint8_t>(ptr, size, std::move(buf));
+        });
+    }
+
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<texture>& source)
     {
         // A block-compressed image cannot be read back this way. create_buffer below
@@ -2418,6 +2588,13 @@ std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<textu
 {
     return impl_->copy_async(source);
 }
+
+std::future<array<const uint8_t>>
+device::copy_async_scaled(const std::shared_ptr<texture>& source, int dst_width, int dst_height)
+{
+    return impl_->copy_async_scaled(source, dst_width, dst_height);
+}
+
 std::shared_ptr<texture> device::reduce_texture(const std::shared_ptr<texture>& source, int levels)
 {
     return impl_->reduce_texture(source, levels);

@@ -197,10 +197,34 @@ class image_renderer
         //: Unique for the life of the process, so "is this the request I saw last frame" is
         //: answerable without a pointer that the next allocation may reuse.
         std::uint64_t                          id = 0;
-        std::string                            graph_name;
-        std::string                            node_id;
-        std::promise<core::node_preview_image> promise;
+        std::string                                         graph_name;
+        //: IN THE ORDER ASKED, and answered in that order, so a client can zip the replies onto
+        //: its own list of nodes without matching on ids it already knows.
+        std::vector<std::string>                            node_ids;
+        //: Cap on the longest edge of each picture; 0 means the layer's raster.
+        int                                                 max_edge = 0;
+        std::promise<std::vector<core::node_preview_image>> promise;
     };
+
+    //: The size a preview should be read back at, given the layer's raster and the client's cap.
+    //:
+    //: THE CAP IS ON THE LONGEST EDGE and the aspect is kept, because a thumbnail that changed
+    //: shape would be useless for judging a grade. Never enlarges: asking for 4096 of a 1080p
+    //: layer gets 1080p, not an upscale nobody asked to pay for.
+    static void preview_extent(int src_w, int src_h, int max_edge, int& out_w, int& out_h)
+    {
+        out_w = src_w;
+        out_h = src_h;
+        if (max_edge <= 0 || src_w <= 0 || src_h <= 0)
+            return;
+        const int longest = std::max(src_w, src_h);
+        if (longest <= max_edge)
+            return;
+        const double k = static_cast<double>(max_edge) / static_cast<double>(longest);
+        out_w          = std::max(1, static_cast<int>(src_w * k + 0.5));
+        out_h          = std::max(1, static_cast<int>(src_h * k + 0.5));
+    }
+
     std::mutex                       preview_lock_;
     std::unique_ptr<pending_preview> preview_;
     //: A MONOTONIC ID, not a pointer, and the difference is a real defect rather than taste.
@@ -225,19 +249,21 @@ class image_renderer
     //: a mutex every frame to answer a question that is almost always "no".
     std::atomic<bool>                preview_drop_cache_{false};
 
-    std::future<core::node_preview_image> arm_node_preview(const std::string& graph_name,
-                                                           const std::string& node_id)
+    std::future<std::vector<core::node_preview_image>>
+    arm_node_preview(const std::string& graph_name, const std::vector<std::string>& node_ids, int max_edge)
     {
         auto req        = std::make_unique<pending_preview>();
         req->graph_name = graph_name;
-        req->node_id    = node_id;
+        req->node_ids   = node_ids;
+        req->max_edge   = max_edge;
         auto fut        = req->promise.get_future();
 
         std::lock_guard<std::mutex> lock(preview_lock_);
         req->id = preview_next_id_++;
         if (preview_) {
-            core::node_preview_image superseded;
-            superseded.reason = "superseded by a later preview request";
+            std::vector<core::node_preview_image> superseded(preview_->node_ids.size());
+            for (auto& o : superseded)
+                o.reason = "superseded by a later preview request";
             preview_->promise.set_value(std::move(superseded));
         }
         preview_ = std::move(req);
@@ -415,10 +441,11 @@ class image_renderer
         {
             std::lock_guard<std::mutex> lock(preview_lock_);
             if (preview_ && preview_->id == preview_seen_id_) {
-                core::node_preview_image img;
-                img.reason = "no layer on this channel is rendering a graph named '" +
-                             preview_->graph_name + "'";
-                preview_->promise.set_value(std::move(img));
+                std::vector<core::node_preview_image> out(preview_->node_ids.size());
+                for (auto& o : out)
+                    o.reason = "no layer on this channel is rendering a graph named '" +
+                               preview_->graph_name + "'";
+                preview_->promise.set_value(std::move(out));
                 preview_.reset();
             }
             preview_seen_id_ = preview_ ? preview_->id : 0;
@@ -927,41 +954,55 @@ class image_renderer
                 std::vector<std::shared_ptr<texture>> outputs(plan->steps.size());
                 outputs[0] = head_texture;
 
-                // WHICH STEP THE PENDING PREVIEW WANTS, resolved once before the loop.
+                // WHICH STEPS THE PENDING PREVIEW WANTS, resolved once before the loop.
                 //
-                // Taken here rather than inside the loop so the request is claimed exactly once
-                // whatever the graph looks like, and so a request naming a node this graph does
-                // not have is answered immediately rather than after a whole frame of drawing.
-                std::unique_ptr<pending_preview> preview_req;
-                std::int32_t                     preview_want = -1;
+                // ONE PASS OVER THE REQUEST, producing a slot per asked-for node with a reason
+                // already filled in for the ones this graph cannot answer. Claimed here so the
+                // request is taken exactly once whatever the graph looks like, and so a node
+                // this document does not have is refused immediately rather than after a whole
+                // frame of drawing.
+                //
+                // A BAD NODE ID REFUSES ITS OWN THUMBNAIL, NOT THE STRIP. An editor asking for
+                // sixteen previews while the operator deletes one node should get fifteen
+                // pictures and one reason.
+                std::unique_ptr<pending_preview>      preview_req;
+                std::vector<std::int32_t>             preview_want;
+                std::vector<core::node_preview_image> preview_out;
                 {
                     std::lock_guard<std::mutex> lock(preview_lock_);
                     if (preview_ && preview_->graph_name == plan->document_name)
                         preview_req = std::move(preview_);
                 }
                 if (preview_req) {
-                    for (std::size_t k = 0; k < plan->steps.size(); ++k)
-                        if (plan->steps[k].id == preview_req->node_id)
-                            preview_want = static_cast<std::int32_t>(k);
-                    if (preview_want < 0) {
-                        core::node_preview_image img;
-                        // FROM THE CHANNEL THAT HAS THE DOCUMENT, so the shell keeps this one
-                        // over three other channels' "not here".
-                        img.from_matching_graph = true;
-                        img.reason = "no node '" + preview_req->node_id + "' in the attached graph";
-                        preview_req->promise.set_value(std::move(img));
+                    preview_want.assign(preview_req->node_ids.size(), -1);
+                    preview_out.resize(preview_req->node_ids.size());
+                    for (std::size_t q = 0; q < preview_req->node_ids.size(); ++q) {
+                        const auto& id = preview_req->node_ids[q];
+                        // FROM THE CHANNEL THAT HAS THE DOCUMENT, so the shell keeps these
+                        // reasons over other channels' "not here".
+                        preview_out[q].from_matching_graph = true;
+                        std::int32_t found = -1;
+                        for (std::size_t k = 0; k < plan->steps.size(); ++k)
+                            if (plan->steps[k].id == id)
+                                found = static_cast<std::int32_t>(k);
+                        if (found < 0) {
+                            preview_out[q].reason = "no node '" + id + "' in the attached graph";
+                        } else if (alias[found] != found) {
+                            // BYPASSED OR DEAD: it aliases something else and has no output of
+                            // its own. Saying so beats previewing what it aliases.
+                            preview_out[q].reason = "node '" + id +
+                                                    "' is bypassed or unreachable, so it has no "
+                                                    "output this frame";
+                        } else {
+                            preview_want[q] = found;
+                        }
+                    }
+                    if (std::none_of(preview_want.begin(), preview_want.end(),
+                                     [](std::int32_t w) { return w >= 0; })) {
+                        // Nothing servable: answer now rather than hold the request for a frame
+                        // that cannot help it.
+                        preview_req->promise.set_value(std::move(preview_out));
                         preview_req.reset();
-                    } else if (alias[preview_want] != preview_want) {
-                        // BYPASSED OR DEAD: it aliases something else and has no output of its
-                        // own. Saying so beats previewing what it aliases -- a client asking
-                        // what this node produces should be told it produces nothing right now.
-                        core::node_preview_image img;
-                        img.from_matching_graph = true;
-                        img.reason = "node '" + preview_req->node_id +
-                                     "' is bypassed or unreachable, so it has no output this frame";
-                        preview_req->promise.set_value(std::move(img));
-                        preview_req.reset();
-                        preview_want = -1;
                     }
                 }
 
@@ -1028,30 +1069,38 @@ class image_renderer
                                dst, format_desc, nd, node_uv_inv, node_uv_valid, mask_texture);
                     outputs[i] = dst;
 
-                    // ── SERVE A PENDING PREVIEW, IF THIS IS THE STEP ───────────────
+                    // ── SERVE EVERY SLOT THAT WANTED THIS STEP ────────────────────
                     //
                     // INSIDE THE LOOP, and the first version was not: it sat after the loop,
                     // which is after every `last_use` release, so only the LAST node still had
                     // an output and every earlier one answered "bypassed or unreachable". The
                     // window is exactly here -- between this step's draw and the release below.
                     //
+                    // EVERY slot, because two thumbnails may name the same node, and the
+                    // promise is not fulfilled until the loop ends.
+                    //
                     // Through the same output half the TAIL applies, so a client sees what this
                     // node contributes to the finished frame rather than a scene-linear
-                    // intermediate no display will ever show.
-                    if (preview_want >= 0 && static_cast<std::int32_t>(i) == preview_want &&
-                        preview_req) {
-                        core::node_preview_image img;
-                        auto pdst = ogl_->create_texture(target_texture->width(),
-                                                        target_texture->height(),
-                                                        4, depth_, true, render_format_);
-                        apply_graph_tail(outputs[i], pdst, format_desc, item_params_for_tail);
-                        img.width   = pdst->width();
-                        img.height  = pdst->height();
-                        // HANDED OUT, NOT RESOLVED HERE: `.get()` on this thread waits for a
-                        // readback the render thread itself completes. See `node_preview_image`.
-                        img.pending = ogl_->copy_async(pdst).share();
-                        preview_req->promise.set_value(std::move(img));
-                        preview_req.reset();
+                    // intermediate no display will ever show -- and straight into the requested
+                    // THUMBNAIL SIZE, which costs nothing extra: the tail is already a
+                    // full-screen pass through a sampler, so a smaller destination resamples on
+                    // the way. What it saves is the readback, which is the whole cost.
+                    if (preview_req) {
+                        for (std::size_t q = 0; q < preview_want.size(); ++q) {
+                            if (preview_want[q] != static_cast<std::int32_t>(i))
+                                continue;
+                            int pw = 0, ph = 0;
+                            preview_extent(target_texture->width(), target_texture->height(),
+                                           preview_req->max_edge, pw, ph);
+                            auto pdst = ogl_->create_texture(pw, ph, 4, depth_, true, render_format_);
+                            apply_graph_tail(outputs[i], pdst, format_desc, item_params_for_tail);
+                            preview_out[q].width  = pdst->width();
+                            preview_out[q].height = pdst->height();
+                            // HANDED OUT, NOT RESOLVED HERE: `.get()` on this thread waits for a
+                            // readback the render thread itself completes. See
+                            // `node_preview_image`.
+                            preview_out[q].pending = ogl_->copy_async(pdst).share();
+                        }
                     }
 
 
@@ -1062,6 +1111,20 @@ class image_renderer
                     for (std::size_t j = 0; j < i; ++j)
                         if (plan->steps[j].last_use == static_cast<std::int32_t>(i))
                             outputs[j].reset();
+                }
+
+                // ── EVERY REQUESTED PREVIEW ANSWERED TOGETHER, ONCE THE LOOP IS DONE ──────
+                //
+                // AFTER THE LOOP because the promise carries the WHOLE set: the drawing has to
+                // happen inside, in each step's own window between its draw and its `last_use`
+                // release, but the answer cannot be sent until the last slot is filled.
+                //
+                // THIS IS THE WHOLE POINT OF TAKING A SET. One request per node meant one FRAME
+                // per node -- a 16-node strip was sixteen frames and 1294 ms -- and asking in
+                // parallel changed nothing, because the API executor owns a single thread.
+                if (preview_req) {
+                    preview_req->promise.set_value(std::move(preview_out));
+                    preview_req.reset();
                 }
 
                 // What reaches the `output` step is what the layer draws.
@@ -1405,10 +1468,10 @@ struct image_mixer::impl
     void update_aspect_ratio(double aspect_ratio) { aspect_ratio_ = aspect_ratio; }
 
     /// Forwarded to the RENDERER, which is where the request can actually be served.
-    std::future<core::node_preview_image> arm_node_preview(const std::string& graph_name,
-                                                           const std::string& node_id)
+    std::future<std::vector<core::node_preview_image>>
+    arm_node_preview(const std::string& graph_name, const std::vector<std::string>& node_ids, int max_edge)
     {
-        return renderer_.arm_node_preview(graph_name, node_id);
+        return renderer_.arm_node_preview(graph_name, node_ids, max_edge);
     }
 
     void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_ref_white, bool gamut_compress, bool straight_alpha, bool ws_composite)
@@ -1820,10 +1883,12 @@ void image_mixer::visit(const core::const_frame& frame) { impl_->visit(frame); }
 void image_mixer::pop() { impl_->pop(); }
 void image_mixer::update_aspect_ratio(double aspect_ratio) { impl_->update_aspect_ratio(aspect_ratio); }
 
-std::future<core::node_preview_image> image_mixer::arm_node_preview(const std::string& graph_name,
-                                                                    const std::string& node_id)
+std::future<std::vector<core::node_preview_image>>
+image_mixer::arm_node_preview(const std::string&              graph_name,
+                              const std::vector<std::string>& node_ids,
+                              int                             max_edge)
 {
-    return impl_->arm_node_preview(graph_name, node_id);
+    return impl_->arm_node_preview(graph_name, node_ids, max_edge);
 }
 std::future<core::render_output> image_mixer::render(const core::video_format_desc& format_desc)
 {

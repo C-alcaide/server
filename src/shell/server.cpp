@@ -1050,57 +1050,70 @@ struct server::impl
                 // mixer that HAS the graph is the one whose evaluator will see the request.
                 // Channels that do not have it refuse immediately -- no frame is waited for --
                 // so the cost of asking is a few comparisons.
-                api_ctx.node_preview = [channels](const std::string& graph,
-                                                  const std::string& node,
-                                                  std::string&       reason) -> std::vector<std::uint8_t> {
+                api_ctx.node_preview =
+                    [channels](const std::string&              graph,
+                               const std::vector<std::string>& nodes,
+                               int                             max_edge,
+                               std::string& reason) -> std::vector<http::api_context::node_preview_result> {
+                    std::vector<http::api_context::node_preview_result> out;
                     for (auto& ch : *channels) {
                         // NO NULL CHECK: `get_image_mixer` returns `spl::shared_ptr`, which
-                        // cannot be null by construction. A defensive `if (!img)` does not
-                        // compile, which is the type doing its job.
-                        auto fut = ch.raw_channel->mixer().get_image_mixer()->arm_node_preview(graph, node);
+                        // cannot be null by construction.
+                        auto fut = ch.raw_channel->mixer().get_image_mixer()->arm_node_preview(
+                            graph, nodes, max_edge);
                         // BOUNDED, and generously: the request is served by the next frame that
                         // draws that graph, so one frame period is the expectation and a second
-                        // is slack for a channel that is paused or starved. Waiting forever
-                        // would hang an API executor thread on a graph that is attached nowhere.
+                        // is slack for a channel that is paused or starved. A channel that is
+                        // not drawing this document refuses within a frame, so this timeout is
+                        // only ever reached by a channel that is genuinely stuck.
                         if (fut.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
                             reason = "the preview did not arrive within two seconds -- is the "
                                      "channel running?";
                             continue;
                         }
-                        auto result = fut.get();
-                        if (!result.ok()) {
-                            if (!result.reason.empty())
-                                reason = result.reason;
-                            // A MATCHING CHANNEL'S REFUSAL IS FINAL. A document is attached to
-                            // exactly one layer, so the channel that HAS it is the only one
-                            // whose answer means anything -- asking the rest can only replace
-                            // "no node 'e9' in the attached graph" with "not here", which is
-                            // the message the client cannot act on.
-                            //
-                            // This used to be a comment explaining that the LAST reason was
-                            // kept for exactly this purpose. That worked only while a channel
-                            // without the document stayed silent; once it refuses promptly --
-                            // which is what took a preview on channel 4 from 6 s to one frame
-                            // -- "last" became "whichever channel is last", and the specific
-                            // message was overwritten every time.
-                            if (result.from_matching_graph)
-                                break;
+                        auto images = fut.get();
+                        if (images.size() != nodes.size())
+                            continue;
+
+                        // A MATCHING CHANNEL'S ANSWER IS FINAL. A document is attached to
+                        // exactly one layer, so the channel that HAS it is the only one whose
+                        // answer means anything -- asking the rest can only replace "no node
+                        // 'e9' in the attached graph" with "not here", which is the message a
+                        // client cannot act on.
+                        const bool mine =
+                            std::any_of(images.begin(), images.end(), [](const auto& i) {
+                                return i.from_matching_graph;
+                            });
+                        if (!mine) {
+                            for (const auto& i : images)
+                                if (!i.reason.empty())
+                                    reason = i.reason;
                             continue;
                         }
-                        // RESOLVED HERE, on the API executor, which is the whole point of the
-                        // mixer handing the future out rather than waiting on it: this thread
-                        // has nothing else to do until the preview arrives, and the render
-                        // thread is never asked to wait on itself.
-                        const auto bytes = result.pending.get();
-                        auto       png   = caspar::image::encode_png_bgra8(bytes.data(),
-                                                                     result.width, result.height);
-                        if (png.empty())
-                            reason = "the preview could not be encoded";
-                        return png;
+
+                        out.resize(nodes.size());
+                        for (std::size_t n = 0; n < nodes.size(); ++n) {
+                            out[n].node = nodes[n];
+                            auto& img   = images[n];
+                            if (!img.ok()) {
+                                out[n].reason =
+                                    img.reason.empty() ? "the preview produced nothing" : img.reason;
+                                continue;
+                            }
+                            // RESOLVED HERE, on the API executor, which is the whole point of
+                            // the mixer handing the future out rather than waiting on it: this
+                            // thread has nothing else to do until the preview arrives, and the
+                            // render thread is never asked to wait on itself.
+                            const auto bytes = img.pending.get();
+                            out[n].png = caspar::image::encode_png_bgra8(bytes.data(), img.width, img.height);
+                            if (out[n].png.empty())
+                                out[n].reason = "the preview could not be encoded";
+                        }
+                        return out;
                     }
                     if (reason.empty())
                         reason = "no channel is rendering a graph named '" + graph + "'";
-                    return {};
+                    return out;
                 };
                 api_ctx.timelines     = timelines_;
                 api_ctx.graphs        = graphs_;

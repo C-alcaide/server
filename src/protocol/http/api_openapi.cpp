@@ -512,7 +512,9 @@ std::string docs_page(const http_config& cfg)
         {"GET", "/v1/catalog/node/{cls}/default", "A node object ready to PUT, every port at its default"},
         {"GET", "/v1/catalog/node/{cls}/suggest", "?port=<name>: what may legally feed it, exact and lossy"},
         {"GET", "/v1/graph/connections/preview", "?from=<cls>.<port>&to=<cls>.<port>: may these join?"},
-        {"GET", "/v1/graph/{name}/preview", "?node=<id>: that node's output as image/png -- NOT an envelope"},
+        {"GET", "/v1/graph/{name}/preview",
+         "?node=<id>[&max=<px>]: that node's output as image/png -- NOT an envelope. `max` caps "
+         "the longest edge and is the whole of the cost; omit it for the layer's raster"},
         {"GET", "/v1/graph", "The node graph documents that are stored"},
         {"PUT", "/v1/graph/{name}", "Store a document; a broken one is STORED and answers graph_invalid"},
         {"GET", "/v1/graph/{name}", "The document as stored, with faults, order, attachment and undo flags"},

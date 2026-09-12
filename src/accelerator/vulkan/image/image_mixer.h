@@ -69,8 +69,10 @@ class image_mixer final : public core::image_mixer
 
     /// Arm a preview of one node's output, served on a later frame from inside the evaluator.
     /// See `core/mixer/image/image_mixer.h` for why it is armed rather than synchronous.
-    std::future<core::node_preview_image> arm_node_preview(const std::string& graph_name,
-                                                           const std::string& node_id) override;
+    std::future<std::vector<core::node_preview_image>>
+    arm_node_preview(const std::string&              graph_name,
+                     const std::vector<std::string>& node_ids,
+                     int                             max_edge) override;
 
     // core::image_mixer
 

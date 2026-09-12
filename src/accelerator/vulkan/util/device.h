@@ -196,6 +196,15 @@ class device final
     copy_compressed_async(const array<const uint8_t>& source, int width, int height, vk::Format format);
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<class texture>& source);
 
+    /// `copy_async`, but reading a DOWNSCALED copy: a linear blit into a `dst_width` x
+    /// `dst_height` attachment, then the readback of that.
+    ///
+    /// The readback is priced in PIXELS and that is the whole of a preview's cost -- 33 MB for
+    /// a 4K frame against 0.8 MB at 512 on the long edge. Falls back to `copy_async` when the
+    /// size is unchanged or not given.
+    std::future<array<const uint8_t>>
+    copy_async_scaled(const std::shared_ptr<class texture>& source, int dst_width, int dst_height);
+
     /// Box-filtered downscale of `source` by `levels` successive exact halvings,
     /// returned as a new texture. Blocking; safe to call from a consumer thread.
     ///
