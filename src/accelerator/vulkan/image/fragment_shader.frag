@@ -166,7 +166,14 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     // float after it instead of failing to compile. See util/uniform_block.h.
     float gn_isf[32];
     int   gn_isf_count;
-    float gn_isf_pad[3];
+    // ISF's standard uniforms. The first three replace what was padding, so the block did not
+    // grow for them. See util/uniform_block.h.
+    float gn_isf_time;
+    float gn_isf_timedelta;
+    int   gn_isf_frame;
+    int   gn_isf_pass;
+    float gn_isf_rendersize[2];
+    float gn_isf_pad2;
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;

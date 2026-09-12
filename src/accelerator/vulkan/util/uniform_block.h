@@ -347,11 +347,34 @@ struct alignas(16) uniform_block
     // plausible picture and reports nothing.
     float    gn_isf[32]      = {};                                          // 1056
     int32_t  gn_isf_count    = 0;                                           // 1184
-    // To a multiple of 16 again: 1188 is not one, 1200 is. Counted, not guessed -- the same
-    // arithmetic `gn_fam_pad` records above, where getting it wrong cost a battery reporting
-    // 0/4 with no error anywhere.
-    float    gn_isf_pad[3]   = {0.f, 0.f, 0.f};                             // 1188
-    // Total: 1200 bytes (75 x 16)
+    // ── ISF'S STANDARD UNIFORMS ─────────────────────────────────────────────────
+    //
+    // The spec gives every shader these whether it declares anything or not, so they are NAMED
+    // fields rather than reserved slots in the array above: they are not the author's parameters
+    // and spending `gn_isf` entries on them would both confuse the generated `#define`s and eat
+    // the author's budget.
+    //
+    // THE FIRST THREE COST NOTHING: they land exactly where `gn_isf_pad[3]` was, so the block
+    // does not grow for them and no offset below moves. Replacing trailing PADDING with real
+    // fields is the one edit to this struct that is safe by construction -- unlike an insert,
+    // which reinterprets every float after it.
+    //
+    // `TIME` and `TIMEDELTA` come from the CHANNEL's frame counter, not a wall clock -- see
+    // `core::image_mixer::set_frame_number`. Two ISF nodes on a channel therefore agree, and a
+    // shader stays in step with the timeline.
+    float    gn_isf_time      = 0.f;                                        // 1188 ISF TIME
+    float    gn_isf_timedelta = 0.f;                                        // 1192 ISF TIMEDELTA
+    int32_t  gn_isf_frame     = 0;                                          // 1196 ISF FRAMEINDEX
+
+    // `PASSINDEX` is 0 until multi-pass lands, and is declared now because the generated shader
+    // references it unconditionally -- the ISF spec says every shader has one.
+    int32_t  gn_isf_pass      = 0;                                          // 1200 ISF PASSINDEX
+    // `RENDERSIZE` is the PASS's extent, which is not the channel raster once a multi-pass
+    // shader sizes a buffer with a WIDTH/HEIGHT expression. The IMG_PIXEL macro family divides
+    // by it, so a wrong value is a resampled picture rather than an error.
+    float    gn_isf_rendersize[2] = {0.f, 0.f};                             // 1204
+    float    gn_isf_pad2      = 0.f;                                        // 1212
+    // Total: 1216 bytes (76 x 16)
 };
 
 // ── THE SHADER'S DECLARATION ORDER IS PART OF THIS LAYOUT ───────────────────
@@ -385,7 +408,7 @@ struct alignas(16) uniform_block
 // The three anchors are deliberate rather than exhaustive: the FIRST field pins the start, and
 // the last two pin everything after the large projection/ICVFX block -- which is where fields
 // have actually been added. A drift anywhere before them moves at least one.
-static_assert(sizeof(uniform_block) == 1200,
+static_assert(sizeof(uniform_block) == 1216,
               "uniform_block must stay a multiple of 16 and match ParamsBlock in "
               "fragment_shader.frag -- see the measurement in the comment above");
 static_assert(offsetof(uniform_block, color_space_index) == 0,
@@ -410,6 +433,10 @@ static_assert(offsetof(uniform_block, gn_isf) == 1056,
               "wrong numbers and reports nothing");
 static_assert(offsetof(uniform_block, gn_isf_count) == 1184,
               "uniform_block: gn_isf_count moved; the shader reads it at a fixed offset");
+static_assert(offsetof(uniform_block, gn_isf_time) == 1188,
+              "uniform_block: ISF's standard uniforms moved. The generated shader addresses them "
+              "by explicit offset, so this is the one place the two sides can disagree without a "
+              "compile error on either");
 static_assert(offsetof(uniform_block, gn_uv_inv) == 944,
               "uniform_block: a field was inserted above gn_uv_inv, so the shader is reading "
               "36 bytes of something else as the source-space mask matrix -- which puts a node "
