@@ -12,6 +12,8 @@ set(SOURCES
 	isf_producer.h
 	isf_shader.cpp
 	isf_shader.h
+	isf_vulkan_glsl.cpp
+	isf_vulkan_glsl.h
 )
 
 casparcg_add_module_project(isf

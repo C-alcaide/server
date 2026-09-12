@@ -48,6 +48,7 @@
 
 // The PNG encoder for node previews. In `modules/image` because that is where FFmpeg is.
 #include <modules/isf/isf.h>
+#include <modules/isf/isf_vulkan_glsl.h>
 #include <modules/image/util/image_png.h>
 #include <core/stage/stage_fields.h>
 #include <accelerator/ogl/image/image_mixer.h>
@@ -1125,6 +1126,11 @@ struct server::impl
                 // publishes and drives nothing -- which is what it has been since the class
                 // landed.
                 core::graph::set_isf_node_renderer(&isf::render_node);
+                // The Vulkan GLSL generator answers for a backend that may not be the
+                // active one, so its contract is gated at BOOT rather than on first use:
+                // a generator that packs parameters onto the wrong slots would otherwise
+                // be discovered by a picture, on a Vulkan channel, in a show.
+                isf::isf_vulkan_self_test();
 
                 api_ctx.timelines     = timelines_;
                 api_ctx.graphs        = graphs_;
