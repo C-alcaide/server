@@ -23,6 +23,7 @@
 
 #include "image_kernel.h"
 
+#include <core/graph/isf_render.h>
 #include <core/graph/plan.h>
 #include <core/graph/registry.h>
 #include "previz_renderer.h"
@@ -1059,6 +1060,65 @@ class image_renderer
                                                     depth_,
                                                     true,
                                                     common::render_format::fp16);
+                    // ── A FOREIGN SHADER, DRAWN BY THE MODULE THAT OWNS IT ──────────────
+                    //
+                    // An ISF node is not a kernel pass: its GLSL comes from a file and is
+                    // compiled by `modules/isf`, which core cannot link. So the evaluator hands
+                    // over two GL texture ids and the node's named values, and the module draws
+                    // on THIS device and THIS context -- the same call the ISF producer already
+                    // makes in production.
+                    //
+                    // A FAILURE IS A PASS-THROUGH, NOT A BLACK FRAME. A shader that will not
+                    // compile, a path that no longer resolves, or a build with the ISF module
+                    // absent all land here mid-show, and the registry's rule for a dead branch
+                    // applies: render the layer UNCHANGED. Blacking a layer because a shader
+                    // file moved is the one failure nobody forgives.
+                    if (st.cls == core::graph::op_isf) {
+                        const auto& isf_render = core::graph::get_isf_node_renderer();
+                        const auto& src_isf    = st.in0 < 0 ? head_texture : outputs[alias[st.in0]];
+
+                        bool drew = false;
+                        if (isf_render && src_isf && st.string_index >= 0 &&
+                            static_cast<std::size_t>(st.string_index) < plan->strings.size()) {
+                            // `dst` -- THE ATTACHMENT THE ORDINARY PATH ALREADY TOOK FROM THE
+                            // POOL, above. Same raster, same fp16 format, and an ISF node is an
+                            // image pass like any other, so allocating a second one here would
+                            // cost a pool round trip per node per frame for nothing.
+                            auto& idst = dst;
+
+                            core::graph::isf_node_request req;
+                            req.path = plan->strings[st.string_index];
+                            // NAMES AND VALUES FROM THE SAME OFFSET. `value_names` is parallel
+                            // to the values array by construction and `graph_plan_self_test`
+                            // refuses to boot if it is not, which is what makes indexing one
+                            // with the other's offset safe here on the frame path.
+                            req.values = st.values_count ? values.data() + st.values_offset : nullptr;
+                            req.names  = st.values_count && plan->value_names.size() >= values.size()
+                                             ? plan->value_names.data() + st.values_offset
+                                             : nullptr;
+                            req.value_count = req.names ? st.values_count : 0;
+                            req.src_tex     = static_cast<unsigned int>(src_isf->id());
+                            req.dst_tex     = static_cast<unsigned int>(idst->id());
+                            req.width       = idst->width();
+                            req.height      = idst->height();
+
+                            // THE CHANNEL'S CLOCK, not a wall clock -- see
+                            // `core::image_mixer::set_frame_number`. `fps <= 0` before the
+                            // first tick gives TIME 0 rather than a division by zero.
+                            const auto fr  = channel_frame_.load(std::memory_order_relaxed);
+                            const auto fps = channel_fps_.load(std::memory_order_relaxed);
+                            req.time        = fps > 0.0 ? static_cast<double>(fr) / fps : 0.0;
+                            req.time_delta  = fps > 0.0 ? 1.0 / fps : 0.0;
+                            req.frame_index = static_cast<int>(fr);
+
+                            drew = isf_render(req);
+                            if (drew)
+                                outputs[i] = idst;
+                        }
+                        if (!drew)
+                            outputs[i] = src_isf;
+                    } else {
+
                     // A MASK GENERATOR HAS NO IMAGE INPUT, so it is handed the head texture as
                     // a source it never samples -- the pass computes its value from its own
                     // uniforms. Passed rather than left null because `apply_node` returns early
@@ -1075,6 +1135,7 @@ class image_renderer
                                nd.has_in1 ? outputs[alias[st.in1]] : src0,
                                dst, format_desc, nd, node_uv_inv, node_uv_valid, mask_texture);
                     outputs[i] = dst;
+                    } // end of the ordinary kernel pass; the preview and release below serve BOTH
 
                     // ── SERVE EVERY SLOT THAT WANTED THIS STEP ────────────────────
                     //

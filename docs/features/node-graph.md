@@ -563,8 +563,75 @@ know what it may build before it builds it.
 | `mask_combine` | mask | `mask a`, `mask b` | `mask` | `op`, `invert`, `bypass` |
 | `mix` | combine | `image a`, `image b?`, `mask?` | `image` | `amount`, `bypass` |
 | `over` | combine | `image a`, `image b?` | `image` | `bypass` |
+| `isf` | effect | `image`, `mask?` | `image` | `path`, `space` (`match`/`display`/`working`), `mix`, `bypass`, **plus whatever the shader declares** |
 
-**Eleven classes**, and §5.0 has the mask families' parameters in full.
+**Twelve classes**, and §5.0 has the mask families' parameters in full. `isf` is the odd one and
+§5.3 is why.
+
+### 5.3 `isf` — the first class whose ports come from a FILE
+
+Every other class in the table has the ports the registry gives it. An `isf` node's ports are its
+four static ones **plus one per input the shader file declares**, so two `isf` nodes in the same
+document can have different parameters and neither list is knowable from the class alone.
+
+That is the `dynamic_ports` mechanism: the class names a `ports_selector` (`path`), and an injected
+resolver reads the file and returns the rest. The resolver lives in `modules/isf` because `core`
+cannot link it — the same inversion the stage already uses for its producer factory.
+
+**A node with no `path` yet is not an error.** An editor drops the node and then picks a shader, so
+faulting in between would make the document invalid and stop the layer rendering mid-edit. With no
+shader chosen the node passes its input through. A *wrong* path is a different thing and faults on
+`path` — one fault naming the selector, not one per parameter that went missing with it.
+
+**`space` says which colour encoding the shader runs in**, and this matters more than it sounds. A
+`working`-stage node pass carries scene-linear fp16 in the working gamut, unbounded above 1.0; every
+ISF shader published anywhere was authored against a display-referred 0..1 buffer. A blur survives
+that difference — a threshold, a hue rotate, a `pow` or anything with a hand-tuned constant does
+not, and it will render, look plausible, and be wrong with nothing to report it.
+
+`match` is the default and needs no conversion by construction: the shader runs in whatever encoding
+the graph's `stage` already carries. `display` and `working` ask for a specific one, and a request
+that would need a conversion around the shader is **refused at PUT** — that conversion is not built.
+
+| graph `stage` | node `space` | what happens |
+| :--- | :--- | :--- |
+| either | `match` *(default)* | runs in the stage's own encoding. Always valid |
+| `display` | `display` | the pass **is** display-referred. Runs raw |
+| `working` | `working` | the author asked for scene-linear. Runs raw |
+| `display` | `working` | **refused at PUT** — needs a conversion pair that is not built |
+| `working` | `display` | **refused at PUT** — the same |
+
+The crossed pair is **refused rather than approximated**, and the refusal names the values that
+would work. Silently substituting the other `space` would render something the operator did not ask
+for, and running the shader on the wrong encoding is exactly the failure the port exists to prevent.
+
+> **The default was `display` first, and that was a defect.** It made the class's own catalogue
+> default un-PUT-able — `display` in a `working`-stage graph is one of the refused pairs, so a
+> client fetching `/v1/catalog/node/isf/default` and PUTting it got a fault. `api-graph` caught it
+> on the first run after the refusal landed, because it walks every class's default and asserts it
+> validates. **A class whose own default is refused is broken however good the reason**, and
+> `match` is what makes the default always satisfiable without giving up the refusal.
+
+**What a shader's uniforms get.** `TIME`, `TIMEDELTA` and `FRAMEINDEX` come from the **channel's own
+frame counter** — the one the timeline uses — so two `isf` nodes on a channel agree and a shader
+stays in step with everything else animating. The mixer learns it through
+`core::image_mixer::set_frame_number`, which is deliberately **not** on `image_transform`: that
+struct is compared field by field for the still-frame cache, and a value changing every frame would
+disable that cache on every channel.
+
+**Parameters reach the shader BY NAME, not by slot position.** The plan carries a `value_names`
+table parallel to its values array, and `graph_plan_self_test` refuses to boot if the two differ in
+length or disagree about which port a slot addresses. A positional mapping would agree today by
+construction and break silently the first time either side inserted a port — every parameter landing
+on the wrong input, with the shader still compiling and still rendering.
+
+**A shader that will not compile, or a path that stops resolving, renders the node's input
+UNCHANGED.** Never black. A shader file moving mid-show must not take a layer off air, which is the
+registry's rule for every dead branch.
+
+**OpenGL only, today.** The evaluator's ISF branch is on the OpenGL mixer; on Vulkan an `isf` node
+passes its input through. That is a real parity gap and `grade-graph` states it in every Vulkan run
+rather than skipping the checks — see §9.
 
 **The table carries exactly the classes the evaluator implements, and no more.** A class in the
 catalogue that a PUT accepts and the renderer ignores is the *202-and-no-picture* failure seen from
@@ -1044,6 +1111,19 @@ only ever sees bytes. The same injection the timeline uses to reach the producer
 
 ## 8. What is not here yet
 
+**An `isf` node does not draw on the Vulkan mixer.** The evaluator's ISF branch is OpenGL-only; on
+Vulkan the node passes its input through, so a document renders differently depending on which
+backend serves it. That is the one place in this feature where the two mixers disagree, and it is
+tracked rather than tolerated — `grade-graph` asserts the pass-through behaviour on every Vulkan run
+so the gap is visible rather than skipped.
+
+The route is already proven elsewhere in the tree and does not need a second shader implementation:
+the ISF **producer** renders on a self-contained GL context straight into a Vulkan image's memory
+(`accelerator/vulkan/util/gl_export_bridge.h`, `isf::shader::render_into_shared`), byte-exact on the
+reference GPU. Using it for the node keeps **one** ISF implementation across both backends, which
+makes parity structural rather than something to test for.
+
+
 Each of these is sequenced rather than open, and the order is riskiest-first:
 
 | next | what it adds |
@@ -1087,7 +1167,14 @@ rather than by the `MIXER` tween.
 | what a realistic look costs the PUBLICATION | `publication-cost` | a graph arm: **+14 leaves**, taking a fully dressed channel to 92 against the 596 that cost frames. Both mixers |
 | what sixteen passes COST, and that they ran at all | `grade-graph-cost` | **5/5 both mixers** — 0 late at the cap on four 2160p50 channels, with a picture control at **0.42 LSB** because 0 late is also what a graph that never drew reports |
 | the CATALOGUE, and that `suggest`/`preview`/PUT agree | `api-graph` | **6 checks, both mixers** — 65 (class, port) pairs walked, 0 disagreements. The agreement is the claim; any one endpoint answering is not |
+| an `isf` node DRAWS, and with the right parameters | `grade-graph` | **4 checks, OpenGL.** A generator fixture whose flat fill is arithmetic on its own declared parameters, gated at **1 LSB** against that model. It differs from the un-graphed layer, so a node that never drew cannot pass it |
+| an `isf` node reads its INPUT — binding, channel order, flip | `grade-graph` | **3 checks, OpenGL.** The generator above is BLIND to all three: it never samples `inputImage`, so it renders identically whether the input was bound right, upside down, channel-swapped, or not at all. A second FILTER fixture applies asymmetric per-channel gains, differing between the top and bottom halves. **It caught a real defect on its first run** — the pass swizzled red/blue on both ends, on the assumption that a node attachment holds BGRA like a producer's plane; it holds RGBA. Green was correct in both readings, so a grey fixture would have passed it silently |
+| that a flip and a channel exchange cannot CANCEL | `grade-graph` | the two gain sets are not channel permutations of each other. The first version of the fixture used red/blue mirrors, where both faults together produce the correct picture and two defects report as none. A companion check gates that the two halves are ≥ 8 LSB apart, so the flip check can fail at all |
+| that an unbuildable `space` is REFUSED | `grade-graph` | **both mixers.** The crossed `space`/`stage` pair is refused at PUT rather than approximated |
+| that a missing shader leaves the layer RENDERING | `grade-graph` | **both mixers.** Refused at PUT, or the input passed through — never black |
+| **that an `isf` node does NOT draw on Vulkan** | `grade-graph` | **stated, not skipped.** The Vulkan arm asserts the node passes its input through unchanged and says in its own reason line that the backend has no ISF branch yet. A skip is not a pass, and a check that quietly does not run on one backend is how a parity gap stops being visible. It becomes the three picture checks once the branch lands |
 | the class table against its own rules | `node_registry_self_test` | at boot |
+| the plan's value-NAME table against its values array | `graph_plan_self_test` | at boot, **fatal** — equal length, and every address agreeing with its slot's name. A foreign renderer indexes one by the other's offset, so a short table is an out-of-range read on the frame path and a shifted one puts every parameter on the wrong input, still compiling and still rendering |
 | the validator, one minimal document per failure mode | `graph_validate_self_test` | at boot |
 | the store's two counters, coalescing, attachment | `graph_store_self_test` | at boot |
 

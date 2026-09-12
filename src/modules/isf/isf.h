@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <core/graph/isf_render.h>
 #include <core/graph/registry.h>
 
 #include <core/module_dependencies.h>
@@ -28,5 +29,14 @@ void init(const core::module_dependencies& dependencies);
 /// the shader cannot be read or its header will not parse; the validator turns that into ONE
 /// fault naming `path`, rather than one per port that went missing with it.
 std::vector<core::graph::port_desc> resolve_node_ports(const std::string& selector, std::string& out_reason);
+
+/// Draw one `isf` node on the mixer's own GL context. Injected into core at boot via
+/// `core::graph::set_isf_node_renderer`, for the same reason `resolve_node_ports` is: the
+/// dependency runs module -> core and never the other way.
+///
+/// Returns false for anything that stops it drawing -- a shader that will not compile, a path
+/// that does not resolve, a bad texture. The evaluator renders the node's input UNCHANGED in
+/// that case rather than black.
+bool render_node(const core::graph::isf_node_request& req);
 
 }} // namespace caspar::isf

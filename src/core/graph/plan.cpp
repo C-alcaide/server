@@ -162,6 +162,16 @@ std::shared_ptr<const node_plan> compile(const graph_document&           doc,
             plan->value_index["node/" + id + "/" + port.param.name] = plan->values_size;
             plan->values_size += port.param.arity;
             st.values_count += port.param.arity;
+
+            // THE SAME NAME, FOR EVERY COMPONENT OF AN ARITY > 1 PORT. A foreign renderer wants
+            // the PORT, not the component -- an ISF `point2D` is one input taking two numbers --
+            // so the two slots of `center` are both named `center` and the reader takes
+            // `arity` of them from the first match. Numbering them `center.0`/`center.1` would
+            // make the module parse a name apart that core had just put together.
+            //
+            // HERE rather than in a second loop, so the name table and the offsets cannot drift:
+            // one append per slot, in the same statement that allocated it.
+            plan->value_names.insert(plan->value_names.end(), port.param.arity, port.param.name);
         }
 
         step_of[id] = static_cast<std::int32_t>(plan->steps.size());
@@ -366,6 +376,25 @@ void graph_plan_self_test()
                      " -- one of them is " + kv.first);
             seen[kv.second] = true;
         }
+        // THE NAME TABLE IS EXACTLY AS LONG AS THE VALUES ARRAY, asserted at BOOT because a
+        // reader indexes one with the other's offset. A short table is an out-of-range read on
+        // the frame path; a long one means a slot was named twice and every name after it is
+        // shifted -- which for a foreign renderer is every parameter on the wrong input, still
+        // compiling and still rendering. Neither is visible from a rendered picture.
+        if (p->value_names.size() != p->values_size)
+            fail("the plan names " + std::to_string(p->value_names.size()) + " value slots but "
+                 "owns " + std::to_string(p->values_size) +
+                 " -- a foreign renderer indexes one by the other, so they cannot differ");
+        for (const auto& kv : p->value_index) {
+            const auto slash = kv.first.rfind('/');
+            if (slash == std::string::npos || kv.second >= p->value_names.size())
+                continue;
+            if (p->value_names[kv.second] != kv.first.substr(slash + 1))
+                fail("slot " + std::to_string(kv.second) + " is addressed as " + kv.first +
+                     " and named `" + p->value_names[kv.second] +
+                     "` -- the address and the name must be the same port");
+        }
+
         if (p->value_index.find("node/e/gain") == p->value_index.end())
             fail("`node/e/gain` has no slot, so nothing could drive it");
         if (p->value_index.find("node/c/slope") == p->value_index.end())

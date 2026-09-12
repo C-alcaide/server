@@ -144,6 +144,23 @@ struct node_plan
     /// index into it safe to hold on the frame path.
     std::vector<std::string> strings;
 
+    /// The NAME of every value slot, parallel to the values array: `value_names[k]` names
+    /// `values[k]` for every k the plan owns.
+    ///
+    /// FOR A FOREIGN RENDERER, which is the only reader. An ISF shader's parameters are named
+    /// by the shader FILE, so the evaluator cannot hand them over as bare numbers -- the module
+    /// on the other side of the link boundary has to know which input each slot is. Matching by
+    /// POSITION would work today and break silently the first time either side inserted a port:
+    /// every parameter would land on the wrong input, the shader would still compile and still
+    /// render, and nothing would report it.
+    ///
+    /// Built at COMPILE time and never on the frame path -- a plan is immutable and compared by
+    /// pointer, so this is fixed for its whole life and costs one pointer to index.
+    ///
+    /// Empty for a plan compiled before any class needed it; a reader must range-check rather
+    /// than assume it is as long as the values array.
+    std::vector<std::string> value_names;
+
     graph_stage stage = graph_stage::working;
 
     /// Topologically ordered. `steps.front()` is the `input` and `steps.back()` the `output`,

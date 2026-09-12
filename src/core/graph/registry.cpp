@@ -14,6 +14,8 @@
 #include <map>
 #include "registry.h"
 
+#include "isf_render.h"
+
 #include <common/except.h>
 #include <common/log.h>
 
@@ -486,10 +488,30 @@ std::vector<node_class> build_classes()
         // fails SILENTLY, and because the population of shaders that exists today was written
         // for display-referred values. The same shape as `mask_ellipse`'s `space` and the
         // document's `stage`, so a client already reads this pattern.
-        c.ports.push_back(enum_in("space", "display,working", 0,
-                                  "`display` converts to display-referred before running the "
-                                  "shader and back after, which is what a published ISF shader "
-                                  "expects; `working` runs it on scene-linear values",
+        // ── AND `match` IS THE DEFAULT, WHICH THE FIRST VERSION GOT WRONG ───────────────
+        //
+        // The port started as `display,working` defaulting to `display`, on the reasoning that
+        // every published ISF shader was authored against display-referred values. That is true
+        // and it made the class default UN-PUT-ABLE: the two crossed combinations of `space`
+        // and the graph's `stage` need a colour conversion that is not built and are refused,
+        // and `display` in a `working`-stage graph is one of them. A client fetching
+        // `/v1/catalog/node/isf/default` and PUTting it got a fault.
+        //
+        // `api-graph` caught it on the first run after the refusal landed -- it walks every
+        // class's own default and asserts it validates, which is exactly the check for "the
+        // catalogue offers something the PUT refuses". A class whose default is refused is
+        // broken however good the reason.
+        //
+        // `match` needs no conversion by construction, so it is always valid: the shader runs in
+        // whatever encoding the pass already carries. For a `display`-stage graph -- the normal
+        // case, and what a published shader wants -- that IS display-referred, so the default
+        // still does the compatible thing without a special case.
+        c.ports.push_back(enum_in("space", "match,display,working", 0,
+                                  "`match` runs the shader in whatever encoding the graph's "
+                                  "`stage` already carries, which needs no conversion and is "
+                                  "always valid. `display` and `working` ask for a specific "
+                                  "encoding, and are refused when that would need a conversion "
+                                  "around the shader -- which is not implemented yet",
                                   port_flow::attribute));
 
         c.ports.push_back(mix_amount());
@@ -546,6 +568,21 @@ std::map<std::pair<std::string, std::string>, std::vector<port_desc>>& port_cach
 }
 
 } // namespace
+
+namespace {
+/// The ISF node renderer, injected at boot. A plain global for the same reason the port
+/// resolvers are: it is written once before any channel ticks and read from the render thread
+/// thereafter, so there is nothing to synchronise.
+isf_node_renderer& isf_renderer_slot()
+{
+    static isf_node_renderer r;
+    return r;
+}
+} // namespace
+
+void set_isf_node_renderer(isf_node_renderer r) { isf_renderer_slot() = std::move(r); }
+
+const isf_node_renderer& get_isf_node_renderer() { return isf_renderer_slot(); }
 
 void set_port_resolver(const std::string& class_id, port_resolver resolver)
 {

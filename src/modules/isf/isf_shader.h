@@ -185,6 +185,38 @@ class shader
     /// The result is top-down and BGRA-ordered: byte-for-byte what render_readback puts in a CPU
     /// frame, which is what keeps the two paths interchangeable. Ends with glFinish(), so the
     /// pixels are complete for Vulkan when this returns. Returns false on failure.
+    /// Render into `dst_gl_texture` on the CURRENTLY BOUND context, with no context switch.
+    ///
+    /// FOR A NODE ON THE OPENGL MIXER, where the mixer's own device is already current and
+    /// owns both textures: taking a `gl_context` there would mean rendering on a second context
+    /// that cannot see either of them. Otherwise identical to `render_into_shared` -- same
+    /// output pass, same top-down BGRA result.
+    ///
+    /// `finish`: whether to `glFinish()` before returning. TRUE for the Vulkan route, where
+    /// nothing else orders these writes against the mixer's read; FALSE on the OpenGL mixer,
+    /// where the next draw is on this same context and is ordered by the driver already -- a
+    /// full pipeline stall per node per frame, bought for nothing.
+    ///
+    /// ⚠ LEAVES GL STATE DISTURBED. The framebuffer binding, the viewport, the program and the
+    /// vertex array are restored; the BLEND ENABLE, the active texture unit and the bindings on
+    /// it are not. A caller that keeps cached state -- which the mixer's kernel does -- must
+    /// re-establish it afterwards rather than trust this.
+    bool render_into_current(int                               width,
+                             int                               height,
+                             double                            time,
+                             double                            time_delta,
+                             int                               frame_index,
+                             const std::vector<image_binding>& images,
+                             unsigned int                      dst_gl_texture,
+                             bool                              finish  = false,
+                             /// TRUE writes BGRA bytes, which is what a PRODUCER's frame must
+                             /// hold. FALSE writes RGBA, which is what a node-graph ATTACHMENT
+                             /// holds -- the kernel writes `col.bgra` into one from its internal
+                             /// BGR convention. The two destinations are opposite, and neither
+                             /// side of the boundary says so; the output program carries the
+                             /// measurement that established it.
+                             bool                              swap_rb = true);
+
     bool render_into_shared(gl_context&                       ctx,
                             int                               width,
                             int                               height,
@@ -257,6 +289,18 @@ std::vector<shader_info> discover_shaders();
 /// shader the same way an operator does. Returns empty and sets `out_error` when the file
 /// cannot be read or its header cannot be parsed -- an empty list is never a valid answer for a
 /// shader that exists, because a shader with no INPUTS still has its image input.
+/// Read a shader named the way a document names it: relative to the media folder, with `.fs`,
+/// `.glsl` and `.frag` probed when no extension is given, and anything resolving outside the
+/// media root refused.
+///
+/// SHARED BY THE PORT RESOLVER AND THE NODE RENDERER so a path cannot mean two different files
+/// to the two of them -- which would give a node its parameters from one shader and its picture
+/// from another. Returns false with `out_error` set.
+bool load_shader_source(const std::wstring& path,
+                        std::string&        out_source,
+                        std::wstring&       out_base_path,
+                        std::string&        out_error);
+
 std::vector<input> describe_inputs(const std::wstring& path, std::string& out_error);
 
 }} // namespace caspar::isf

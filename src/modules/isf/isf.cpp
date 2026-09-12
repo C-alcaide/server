@@ -14,7 +14,11 @@
 
 #include <common/log.h>
 
+#include <core/graph/isf_render.h>
 #include <core/producer/frame_producer_registry.h>
+
+#include <map>
+#include <memory>
 
 namespace caspar { namespace isf {
 
@@ -136,5 +140,132 @@ std::vector<core::graph::port_desc> resolve_node_ports(const std::string& select
         out.push_back(port_from_input(input{"_isf_no_inputs", "bool", {0.0}, {}, {}, "this shader declares no inputs", false}));
     return out;
 }
+
+namespace {
+
+/// Compiled shaders, kept between frames and keyed by PATH.
+///
+/// PER PATH, NOT PER NODE, and the limit of that is stated rather than discovered later.
+/// Compiling costs milliseconds and a node renders every frame, so something has to persist;
+/// what a cache entry holds is the compiled program and the pass framebuffers.
+///
+/// SAFE FOR EVERYTHING THIS COMMIT DRAWS, because parameter values are pushed immediately
+/// before each render and the render thread is one thread: two nodes on one shader take turns
+/// and neither sees the other's values.
+///
+/// NOT SAFE FOR PERSISTENT BUFFERS, which are the ISF spec's per-SHADER-INSTANCE state and
+/// survive between frames -- two nodes sharing this entry would accumulate into one buffer and
+/// each would see the other's history. Nothing declares one until the multi-pass work, and this
+/// cache becomes per node instance in the same commit that lands it.
+///
+/// The GL objects inside belong to the render thread's context, which is the only thread that
+/// reaches this map.
+std::map<std::string, std::unique_ptr<shader>>& node_shader_cache()
+{
+    static std::map<std::string, std::unique_ptr<shader>> c;
+    return c;
+}
+
+/// Draw one ISF node on the mixer's own GL context.
+bool render_isf_node(const core::graph::isf_node_request& req)
+{
+    if (req.path.empty() || req.src_tex == 0 || req.dst_tex == 0 || req.width <= 0 || req.height <= 0)
+        return false;
+
+    auto& cache = node_shader_cache();
+    auto  it    = cache.find(req.path);
+    if (it == cache.end()) {
+        std::string  source;
+        std::wstring base;
+        std::string  error;
+        if (!load_shader_source(u16(req.path), source, base, error)) {
+            // ONCE, NOT EVERY FRAME. A missing shader at 50 fps is 50 identical log lines a
+            // second, which buries everything else in the log -- and the node is already
+            // rendering its input unchanged, so the picture is not the thing in doubt. A null
+            // entry is the record that this path has been tried and failed.
+            CASPAR_LOG(warning) << L"[isf] node shader: " << u16(error)
+                                << L" -- the node passes its input through";
+            cache.emplace(req.path, nullptr);
+            return false;
+        }
+        try {
+            it = cache.emplace(req.path, std::make_unique<shader>(source, base)).first;
+        } catch (const std::exception& e) {
+            CASPAR_LOG(warning) << L"[isf] node shader '" << u16(req.path) << L"' would not compile: "
+                                << u16(e.what()) << L" -- the node passes its input through";
+            cache.emplace(req.path, nullptr);
+            return false;
+        }
+    }
+    if (!it->second)
+        return false;
+
+    auto& sh = *it->second;
+
+    // ── THE NODE'S VALUES ONTO THE SHADER'S INPUTS, BY NAME ─────────────────────────────────
+    //
+    // `names[k]` names `values[k]`, and an arity > 1 port repeats its name across its
+    // components -- so a run of equal names IS one input's value list. Walking runs rather than
+    // indexing by position is what makes this immune to either side inserting a port: a name
+    // that no longer exists is skipped by `set_value`, which is a parameter that does nothing
+    // rather than a parameter on the wrong input.
+    for (std::uint32_t k = 0; k < req.value_count;) {
+        std::uint32_t n = 1;
+        while (k + n < req.value_count && req.names[k + n] == req.names[k])
+            ++n;
+        // The class's OWN ports -- `bypass`, `mix`, `space` -- are the evaluator's to act on and
+        // are not shader inputs. `set_value` returns false for them, which is exactly right and
+        // is why this does not check.
+        sh.set_value(req.names[k], std::vector<double>(req.values + k, req.values + k + n));
+        k += n;
+    }
+
+    // fp16 attachments all the way down the node chain, so the final pass must not quantise to
+    // 8 bits on the way out -- which is what an ISF ramp measured before `set_output_depth`
+    // existed.
+    sh.set_output_depth(common::bit_depth::bit16);
+
+    image_binding in;
+    in.name   = "inputImage";
+    in.tex_id = req.src_tex;
+    in.width  = req.width;
+    in.height = req.height;
+    // THE MIXER'S CONVENTION -- and the colour half of it is the OPPOSITE of what it looks
+    // like, which cost a measurement to establish.
+    //
+    // `flip` is TRUE: the mixer's attachments are top-down and GL is bottom-up.
+    //
+    // `bgra` is FALSE, and reasoning said true. The OpenGL mixer carries the pixel in BGR order
+    // through the grading chain, so a bgra-labelled PRODUCER plane really does hold BGRA bytes
+    // -- but a node-graph ATTACHMENT is written by the kernel's head pass as `col.bgra`, from
+    // that already-BGR `col`, so the bytes in an attachment are RGBA. `apply_node` swizzles
+    // back on read, which is the other half of the same convention.
+    //
+    // Measured: with both this and the output swizzle wrongly on, the two exchanges did not
+    // cancel -- they compose into a picture where green is correct and red and blue are
+    // exchanged. That is why the fixtures are asymmetric; a grey one passes this silently.
+    in.flip = true;
+    in.bgra = false;
+
+    const bool ok = sh.render_into_current(req.width,
+                                           req.height,
+                                           req.time,
+                                           req.time_delta,
+                                           req.frame_index,
+                                           {in},
+                                           req.dst_tex,
+                                           /*finish*/ false,
+                                           // RGBA, because the destination is an ATTACHMENT and
+                                           // not a producer's frame. See `in.bgra` above.
+                                           /*swap_rb*/ false);
+    // MOMENTARY INPUTS FALL BACK TO 0 AFTER THE FRAME THAT SET THEM, which is what ISF `event`
+    // means. Without this an event set once stays set for the life of the shader.
+    sh.reset_events();
+    return ok;
+}
+
+} // namespace
+
+bool render_node(const core::graph::isf_node_request& req) { return render_isf_node(req); }
 
 }} // namespace caspar::isf

@@ -1092,7 +1092,8 @@ struct shader::impl
     /// because it has nothing to do with the shader being run: it only rearranges the final pass.
     GLuint out_program_ = 0;
     GLuint out_vao_     = 0;
-    GLint  out_src_loc_ = -1;
+    GLint  out_src_loc_  = -1;
+    GLint  out_swap_loc_ = -1;
 
     bool ensure_out_program()
     {
@@ -1107,17 +1108,41 @@ struct shader::impl
                                     "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
                                     "}\n";
 
-        // Two rearrangements, both of which the readback path also performs:
-        //   1 - uv.y  ISF renders bottom-up, the mixer is top-down.
-        //   .bgra     the mixer samples a bgra-labelled plane through a .bgra
-        //             swizzle, so the bytes in memory have to be BGRA. This is
-        //             the same order readback_bgra writes via GL_BGRA, which is
-        //             what makes the zero-copy and readback pictures identical.
+        // Two rearrangements:
+        //   1 - uv.y  ISF renders bottom-up, the mixer is top-down. ALWAYS.
+        //   .bgra     ONLY when the destination is a PRODUCER's frame -- see below.
+        //
+        // ── THE TWO DESTINATIONS HAVE OPPOSITE BYTE ORDERS ──────────────────────────
+        //
+        // A PRODUCER's frame is a bgra-labelled plane, which the mixer samples through its own
+        // `.bgra` swizzle, so the bytes in memory must be BGRA. That is the order
+        // `readback_bgra` writes via GL_BGRA, and matching it is what makes the zero-copy and
+        // readback pictures identical. `swap_rb` is TRUE for that.
+        //
+        // A NODE-GRAPH ATTACHMENT is the opposite, and nothing on either side says so. The
+        // kernel's head pass writes `col.bgra` where `col` is ALREADY in the OpenGL mixer's
+        // internal BGR convention, so the bytes that land in an attachment are RGBA -- and
+        // `apply_node` swizzles back when it reads one. `swap_rb` is FALSE for that.
+        //
+        // MEASURED, because reasoning had it the other way round and the code shipped wrong.
+        // Both `grade-graph` ISF fixtures agreed to the code value with `swap_rb` wrongly true:
+        // a generator emitting (0.10, 0.30, 0.40) rendered as [102, 76, 25] -- exactly reversed
+        // -- and the filter fixture rendered [35, 62, 46] where [126, 62, 13] was predicted,
+        // which is what a DOUBLE exchange (once on the input, once here) produces and nothing
+        // else does.
+        //
+        // GREEN WAS RIGHT IN BOTH, which is the only reason this was caught: a grey or neutral
+        // fixture is invariant under a red/blue exchange and passes this defect silently.
+        // CLAUDE.md's channel-order trap, met again from a new direction.
         static const char* fs_src = "#version 330 core\n"
                                     "in vec2 uv;\n"
                                     "uniform sampler2D src;\n"
                                     "out vec4 frag;\n"
-                                    "void main() { frag = texture(src, vec2(uv.x, 1.0 - uv.y)).bgra; }\n";
+                                    "uniform bool swap_rb;\n"
+                                    "void main() {\n"
+                                    "  vec4 c = texture(src, vec2(uv.x, 1.0 - uv.y));\n"
+                                    "  frag = swap_rb ? c.bgra : c;\n"
+                                    "}\n";
 
         std::string log;
         GLuint      vs = compile(GL_VERTEX_SHADER, vs_src, log);
@@ -1150,7 +1175,8 @@ struct shader::impl
         }
 
         out_program_ = prog;
-        out_src_loc_ = glGetUniformLocation(out_program_, "src");
+        out_src_loc_  = glGetUniformLocation(out_program_, "src");
+        out_swap_loc_ = glGetUniformLocation(out_program_, "swap_rb");
         glGenVertexArrays(1, &out_vao_);
         return true;
     }
@@ -1161,7 +1187,9 @@ struct shader::impl
                             double                            time_delta,
                             int                               frame_index,
                             const std::vector<image_binding>& images,
-                            GLuint                            dst_tex)
+                            GLuint                            dst_tex,
+                            bool                              finish  = true,
+                            bool                              swap_rb = true)
     {
         if (!ensure_out_program())
             return false;
@@ -1195,6 +1223,8 @@ struct shader::impl
                             (lw == width && lh == height) ? GL_NEAREST : GL_LINEAR);
             if (out_src_loc_ >= 0)
                 glUniform1i(out_src_loc_, 0);
+            if (out_swap_loc_ >= 0)
+                glUniform1i(out_swap_loc_, swap_rb ? 1 : 0);
             glDrawArrays(GL_TRIANGLES, 0, 3);
             glBindTexture(GL_TEXTURE_2D, 0);
             glBindVertexArray(0);
@@ -1214,7 +1244,12 @@ struct shader::impl
         // Nothing else orders these writes against the Vulkan mixer's read.
         // glFinish measured 0.053 ms against the ≈9.2 ms per layer per frame the
         // readback it replaces costs, so a semaphore is not what is expensive here.
-        glFinish();
+        //
+        // SKIPPED for a node on the OpenGL mixer: the reader is the next draw on THIS context,
+        // which the driver already orders. A full pipeline stall per node per frame would be
+        // paid for a guarantee that is free there.
+        if (finish)
+            glFinish();
         while (glGetError() != GL_NO_ERROR) {}
         return true;
     }
@@ -1384,6 +1419,23 @@ bool shader::render_readback(gl_context&                       ctx,
     return impl_->render_readback(width, height, time, time_delta, frame_index, images, dst, dst_stride);
 }
 
+bool shader::render_into_current(int                               width,
+                                 int                               height,
+                                 double                            time,
+                                 double                            time_delta,
+                                 int                               frame_index,
+                                 const std::vector<image_binding>& images,
+                                 unsigned int                      dst_gl_texture,
+                                 bool                              finish,
+                                 bool                              swap_rb)
+{
+    if (impl_->failed_ || width <= 0 || height <= 0 || dst_gl_texture == 0)
+        return false;
+    // NO `make_current`. The caller's context is the one that owns both textures.
+    return impl_->render_into_shared(width, height, time, time_delta, frame_index, images,
+                                     static_cast<GLuint>(dst_gl_texture), finish, swap_rb);
+}
+
 bool shader::render_into_shared(gl_context&                       ctx,
                                 int                               width,
                                 int                               height,
@@ -1420,15 +1472,27 @@ void read_num_array_free(const boost::property_tree::ptree& node, const char* ke
 
 } // namespace
 
-std::vector<input> describe_inputs(const std::wstring& path, std::string& out_error)
+bool load_shader_source(const std::wstring& path,
+                        std::string&       out_source,
+                        std::wstring&      out_base_path,
+                        std::string&       out_error)
 {
     out_error.clear();
+    out_source.clear();
+    out_base_path.clear();
 
     namespace fs = std::filesystem;
 
     // RESOLVED UNDER THE MEDIA FOLDER, and only under it. A document names a shader the way an
     // operator does, so the same token must work in both places -- and a graph must not be able
     // to read a file outside the media root by writing `..` in a parameter.
+    //
+    // ONE FUNCTION FOR BOTH READERS, and that is the point of it existing. `describe_inputs`
+    // decides a node's PORTS from this file and the node renderer decides its PICTURE from it;
+    // if the two resolved a path even slightly differently -- a different extension probe, a
+    // different root -- a node would take its parameters from one shader and render another,
+    // with every value landing on an input that is not there. Nothing about the result would
+    // look wrong enough to report.
     std::string source;
     try {
         const auto root = fs::path(u8(env::media_folder()));
@@ -1441,23 +1505,36 @@ std::vector<input> describe_inputs(const std::wstring& path, std::string& out_er
         const auto canon_root = fs::weakly_canonical(root).generic_string();
         if (file.generic_string().rfind(canon_root, 0) != 0) {
             out_error = "'" + u8(path) + "' is outside the media folder";
-            return {};
+            return false;
         }
         std::error_code ec;
         if (!fs::is_regular_file(file, ec)) {
             out_error = "no ISF shader '" + u8(path) + "' under the media folder";
-            return {};
+            return false;
         }
         std::ifstream f(file);
         if (!f) {
             out_error = "'" + u8(path) + "' could not be read";
-            return {};
+            return false;
         }
         source.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        // The DIRECTORY, which is what an IMPORTED relative path is resolved against.
+        out_base_path = u16(file.parent_path().generic_string());
     } catch (const std::exception& e) {
         out_error = std::string("'") + u8(path) + "' could not be read: " + e.what();
-        return {};
+        return false;
     }
+
+    out_source = std::move(source);
+    return true;
+}
+
+std::vector<input> describe_inputs(const std::wstring& path, std::string& out_error)
+{
+    std::string  source;
+    std::wstring base_path;
+    if (!load_shader_source(path, source, base_path, out_error))
+        return {};
 
     const auto json = extract_json(source);
     if (json.empty()) {

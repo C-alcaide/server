@@ -57,6 +57,7 @@
 #include <core/address/target.h>
 #include <core/graph/graph_store.h>
 #include <core/graph/plan.h>
+#include <core/graph/isf_render.h>
 #include <core/graph/registry.h>
 #include <core/graph/validate.h>
 #include <core/timeline/curve.h>
@@ -1120,6 +1121,10 @@ struct server::impl
                 // link `modules/isf` -- the same argument that keeps FFmpeg out of
                 // `protocol_http` and puts the producer factory on the stage from here.
                 core::graph::set_port_resolver("isf", &isf::resolve_node_ports);
+                // AND THE DRAW. The document half without this is a node that validates,
+                // publishes and drives nothing -- which is what it has been since the class
+                // landed.
+                core::graph::set_isf_node_renderer(&isf::render_node);
 
                 api_ctx.timelines     = timelines_;
                 api_ctx.graphs        = graphs_;
