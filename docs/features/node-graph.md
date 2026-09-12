@@ -1147,11 +1147,27 @@ backend serves it. That is the one place in this feature where the two mixers di
 tracked rather than tolerated — `grade-graph` asserts the pass-through behaviour on every Vulkan run
 so the gap is visible rather than skipped.
 
-The route is already proven elsewhere in the tree and does not need a second shader implementation:
-the ISF **producer** renders on a self-contained GL context straight into a Vulkan image's memory
-(`accelerator/vulkan/util/gl_export_bridge.h`, `isf::shader::render_into_shared`), byte-exact on the
-reference GPU. Using it for the node keeps **one** ISF implementation across both backends, which
-makes parity structural rather than something to test for.
+**And the obvious shortcut does not work, which is worth stating so it is not re-proposed.** The
+ISF *producer* already runs the full subset on the Vulkan mixer zero-copy, rendering on a
+self-contained GL context straight into a Vulkan image's memory (`gl_export_bridge`,
+`isf::shader::render_into_shared`). That works because a producer renders a whole frame **outside**
+the mixer's renderpass and hands over a finished texture.
+
+A node cannot: it sits **inside** a renderpass that accumulates every layer and commits once at the
+end of the frame, so its input attachment's contents do not exist yet — the commands that write it
+are queued and unsubmitted, and there is nothing for GL to import. Forcing them to exist means
+committing mid-accumulation, which is measured at **241 `ErrorDeviceLost` in one run** (see the
+comment beside the preview block in the Vulkan mixer).
+
+So a Vulkan ISF node needs the shader compiled to SPIR-V and drawn as an ordinary pipeline in the
+same renderpass as every other node pass. That is the work, and it is not small.
+
+*A second finding from the same investigation, recorded so it is not rediscovered:*
+`create_exportable_texture` and `gl_export_bridge` are **UNORM-only on both sides**, and
+`bit_depth` cannot express the difference because unorm16 and fp16 are both "16-bit". Anything that
+ever exports a node-graph attachment must add `eR16G16B16A16Sfloat` ↔ `GL_RGBA16F` to both tables
+and thread `render_format` into the `texture` object — otherwise it clamps a scene-linear,
+unbounded buffer and the symptom is silently lost highlights.
 
 
 Each of these is sequenced rather than open, and the order is riskiest-first:
