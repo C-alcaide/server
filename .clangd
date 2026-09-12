@@ -1,0 +1,56 @@
+# clangd configuration for CasparVP. STATIC -- there is nothing to generate.
+#
+# Read ONLY by clangd. Nothing in CMake or ninja looks at this file, verified by building
+# with it present: `casparcg.exe` did not relink. Excluded per-clone in .git/info/exclude,
+# the same convention graphify-out and the graphify hooks use, so it never dirties
+# `git status` for another session sharing this tree.
+#
+# WHAT IS DELIBERATELY NOT HERE: the MSVC and Windows SDK include paths. The first version
+# injected all nine read out of vcvars, on the theory that compile_commands.json carries only
+# six project -I paths and none of the system ones. That theory was wrong -- clang FINDS the
+# MSVC toolchain by itself on Windows, and the injected paths never reached the cc1 args.
+#
+# Nor is the toolset pinned. clang picks 14.51.36231 for its internal system includes while
+# the build uses 14.50.35717, and that divergence is known and measured. Pinning it made
+# things strictly worse: BOTH /vctoolsversion spellings abandon MSVC detection altogether and
+# fall back to Visual Studio 8/9/10 paths with -fms-compatibility-version=19.33, which put
+# seven false diagnostics into producer_params.cpp alone. /vctoolsversion needs /vctoolsdir
+# beside it. With auto-detection, 12 of 12 files sampled across core, accelerator, protocol
+# and modules report ZERO diagnostics, so the 14.50/14.51 STL difference costs nothing today.
+
+CompileFlags:
+  Add:
+    # NEUTRALISE /WX. The build compiles warnings-as-errors, and clang warns where MSVC does
+    # not; with clang's default limit of 19 that gives "too many errors emitted, stopping now"
+    # on the first heavily templated file. An editor must not treat a warning the real
+    # compiler never emitted as a fatal error.
+    #
+    # ADDED rather than Removed because a later -Wno-error wins over the earlier -Werror, and
+    # this needs no exact-match against a cl-style slash flag.
+    - -Wno-error
+
+  Remove:
+    # THE MSVC PRECOMPILED HEADER. /Yu and /Fp make the driver pass -include-pch pointing at a
+    # .pch built by cl.exe, which clang cannot read. The matching /FI<cmake_pch.hxx> is KEPT
+    # on purpose: it force-includes the same header as ordinary source, so clangd sees the
+    # identical declarations without the binary it cannot open.
+    - /Yu*
+    - /Fp*
+    # A PCH memory-budget flag with no clang-cl equivalent.
+    - /Zm*
+
+  CompilationDatabase: build
+
+Index:
+  # ON DEMAND ONLY. The background indexer would walk all 442 translation units at full thread
+  # count, and this box's cost batteries -- grade-graph-cost, timeline-cost, binding-cost,
+  # preview-cost -- gate on LATE FRAMES. An ambient indexer is exactly the unattributed CPU
+  # load that turns a cost measurement into a plausible wrong number.
+  #
+  # Measured with this setting: NO clangd process exists while no C++ file is open, and
+  # parsing one heavy translation unit (vulkan/util/device.cpp) peaks at 704 MB and 47.7 CPU
+  # seconds -- about one core of twelve, for the duration, and only when asked.
+  Background: Skip
+
+Diagnostics:
+  UnusedIncludes: None

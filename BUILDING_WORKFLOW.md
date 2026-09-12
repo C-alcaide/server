@@ -489,6 +489,63 @@ CUDA requires PATH to include the CUDA bin directory before vcvars (already hand
 
 ---
 
+## Optional: a language server (clangd) — and it changes nothing about the build
+
+**The build is untouched by any of this.** `.clangd` is read only by clangd; nothing in CMake
+or ninja looks at it, verified by building with it present and confirming `casparcg.exe` did
+not relink. The toolset, `vcvars_ver=14.50`, the `.bat` invocation and every flag are the same.
+
+`CMAKE_EXPORT_COMPILE_COMMANDS` is already `ON` in `src/CMakeLists.txt`, so
+`build/compile_commands.json` exists with all 442 entries. clangd reads it directly.
+
+**Install clangd standalone, not the LLVM package.** `winget install LLVM.LLVM` is 2.5 GB and
+its installer needs elevation — in a non-interactive shell the UAC prompt is declined and it
+fails as `0x800704c7`. `clangd-windows-<ver>.zip` from the `clangd/clangd` releases is 26 MB,
+needs no admin, and unpacks to a user directory; deleting that directory is the whole rollback.
+It ships one binary, `clangd.exe`, so putting it on PATH cannot shadow a build tool.
+
+`.clangd` is committed and carries its reasoning in comments. It is portable — no absolute
+paths, no version numbers — so it needs no per-machine step. `.cache/clangd/` is excluded
+per-clone in `.git/info/exclude`.
+
+### Four things that make clangd look broken here
+
+Each of these presents as "the config has no effect" or "the file is full of errors", and the
+real build is clean throughout:
+
+1. **A config clangd cannot parse FAILS OPEN.** It logs one line — `config error at
+   .clangd:N:C` — and then behaves exactly as if the file were absent, so a YAML mistake reads
+   as flags that do not work. Check that line before anything else.
+2. **`/Yu` and `/Fp` feed clang an MSVC-built `.pch` it cannot read**, and every type arriving
+   through the PCH then goes missing. Both are removed; the matching `/FI<cmake_pch.hxx>` is
+   deliberately kept, so the same declarations arrive as ordinary source.
+3. **`/WX` becomes `-Werror`**, and clang warns where MSVC does not. With clang's default limit
+   of 19 that gives *"too many errors emitted, stopping now"* on the first heavily templated
+   file. `-Wno-error` is **added** rather than `/WX` removed, because a later `-Wno-error` wins.
+4. **Do not pin the toolset.** clang finds the MSVC toolchain itself; injecting the nine
+   `-isystem` paths out of `vcvars` does nothing — they never reach the cc1 args. And
+   `/vctoolsversion` in **either** spelling abandons detection altogether and falls back to
+   Visual Studio 8/9/10 paths with `-fms-compatibility-version=19.33`, which is Pitfall #1 in
+   this file arriving through a different door. It needs `/vctoolsdir` beside it.
+
+**Known divergence, measured and accepted:** clang auto-detects MSVC **14.51.36231** for its
+internal system includes while the build uses **14.50.35717**. With auto-detection, 12 of 12
+files sampled across `core`, `accelerator`, `protocol` and `modules` report **zero
+diagnostics**, so the STL difference costs nothing today. Attempting to fix it is what item 4
+warns against.
+
+**Reading its output:** `clangd --check`'s own *"N errors"* headline counts tweak-failure log
+lines, not diagnostics — `vulkan/util/device.cpp` reports **83 errors with zero diagnostics**.
+Real ones look like `E[time] [rule_name] Line N:`; grepping for `error:` matches none of them
+and reports a false clean.
+
+**Cost:** `Index.Background: Skip` means no clangd process exists while no C++ file is open.
+Parsing one heavy translation unit peaks at **704 MB and 47.7 CPU-seconds** — about one core of
+twelve, only when asked. Worth not editing C++ while a cost battery runs, for the same reason
+`conformance` and `grading` need `--sequential`.
+
+---
+
 ## Pitfalls & Past Build Errors
 
 Whenever a new build error is encountered and fixed, it is documented here so it is not repeated.
