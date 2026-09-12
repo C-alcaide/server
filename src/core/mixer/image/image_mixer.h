@@ -192,6 +192,24 @@ class image_mixer
     ///
     /// The default is a refusal, so a backend that has not implemented it says so rather than
     /// hanging: an unimplemented preview must not look like a slow one.
+    /// The channel's frame number and its rate, set once per tick.
+    ///
+    /// FOR `TIME`, WHICH AN ISF SHADER ANIMATES FROM. The spec gives a shader `TIME`,
+    /// `TIMEDELTA` and `FRAMEINDEX`, and all three derive from the channel's own counter -- the
+    /// same one the timeline uses -- so two ISF nodes on a channel agree and a shader stays in
+    /// step with everything else that is animating.
+    ///
+    /// **NOT ON `image_transform`, and that is the point of this seam.** A transform is compared
+    /// field by field for the STILL-FRAME CACHE: a value that changes every frame would make
+    /// every fingerprint unique, disable the cache for every channel, and cost a full
+    /// composition per tick on layers that have not moved -- a serious regression to plumb one
+    /// uniform. `set_consumer_views` beside it exists for the same reason and says so.
+    ///
+    /// A SETTER RATHER THAN AN ARGUMENT because `operator()` is the mixer's interface to the
+    /// channel and every backend implements it; this is state the evaluator reads, not an input
+    /// to a composition.
+    virtual void set_frame_number(std::uint64_t /*frame*/, double /*fps*/) {}
+
     /// Arm a preview of one or more nodes of `graph_name`, served TOGETHER on the next frame
     /// that draws it.
     ///

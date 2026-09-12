@@ -68,6 +68,8 @@ class image_mixer final : public core::image_mixer
 
     /// Arm a preview of one node's output, served on a later frame from inside the evaluator.
     /// See `core/mixer/image/image_mixer.h` for why it is armed rather than synchronous.
+    void set_frame_number(std::uint64_t frame, double fps) override;
+
     std::future<std::vector<core::node_preview_image>>
     arm_node_preview(const std::string&              graph_name,
                      const std::vector<std::string>& node_ids,

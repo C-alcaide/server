@@ -468,6 +468,30 @@ std::vector<node_class> build_classes()
         }
         c.ports.push_back(image_port("in", port_direction::input, /*required*/ true));
         c.ports.push_back(mask_port("mask", port_direction::input));
+
+        // WHICH COLOUR SPACE THE SHADER RUNS IN, and `display` is the default deliberately.
+        //
+        // A node pass carries SCENE-LINEAR fp16 in the working gamut, unbounded above 1.0.
+        // Every ISF shader published anywhere -- Vidvox's collection, anything written for
+        // Resolume or VDMX -- was authored against a DISPLAY-REFERRED 0..1 buffer. A blur
+        // survives the difference; a threshold, a hue rotate, a `pow` or any hand-tuned
+        // constant does not, and the result renders, looks plausible and is wrong with nothing
+        // to report it.
+        //
+        // So `display` converts to display-referred, runs the shader, and converts back -- two
+        // extra conversions for a picture that matches what its author saw. `working` runs it
+        // raw and free, for a shader written for this server.
+        //
+        // THE DEFAULT IS THE COMPATIBLE ONE because the alternative default is the one that
+        // fails SILENTLY, and because the population of shaders that exists today was written
+        // for display-referred values. The same shape as `mask_ellipse`'s `space` and the
+        // document's `stage`, so a client already reads this pattern.
+        c.ports.push_back(enum_in("space", "display,working", 0,
+                                  "`display` converts to display-referred before running the "
+                                  "shader and back after, which is what a published ISF shader "
+                                  "expects; `working` runs it on scene-linear values",
+                                  port_flow::attribute));
+
         c.ports.push_back(mix_amount());
         c.ports.push_back(image_port("out", port_direction::output));
         cs.push_back(std::move(c));

@@ -341,6 +341,13 @@ struct video_channel::impl final
                     // consumer attaching changes nothing about the layers.
                     image_mixer_->set_consumer_views(output_.distinct_consumer_views());
 
+                    // THE CHANNEL'S OWN CLOCK, for an ISF node's `TIME`/`TIMEDELTA`/`FRAMEINDEX`.
+                    // Beside `set_consumer_views` and for the same reason it is here rather than
+                    // on the transform: both are per-tick state the mixer reads, and neither may
+                    // enter the still-frame cache's fingerprint -- a value that changes every
+                    // frame would disable that cache entirely.
+                    image_mixer_->set_frame_number(frame_counter_, stage_frames.format_desc.fps);
+
                     // Mix
                     caspar::timer      mix_timer;
                     mixer::output_frames mixed_frame =

@@ -227,6 +227,13 @@ class image_renderer
         out_h          = std::max(1, static_cast<int>(src_h * k + 0.5));
     }
 
+    //: The channel's frame number and rate, set once per tick by `video_channel`. An ISF node
+    //: derives `TIME`, `TIMEDELTA` and `FRAMEINDEX` from these. Plain members rather than part
+    //: of any transform, so they never reach the still-frame fingerprint -- see
+    //: `core::image_mixer::set_frame_number`.
+    std::atomic<std::uint64_t>       channel_frame_{0};
+    std::atomic<double>              channel_fps_{0.0};
+
     std::mutex                       preview_lock_;
     std::unique_ptr<pending_preview> preview_;
     //: A MONOTONIC ID, not a pointer, and the difference is a real defect rather than taste.
@@ -1505,6 +1512,12 @@ struct image_mixer::impl
     void update_aspect_ratio(double aspect_ratio) { aspect_ratio_ = aspect_ratio; }
 
     /// Forwarded to the RENDERER, which is where the request can actually be served.
+    void set_frame_number(std::uint64_t frame, double fps)
+    {
+        renderer_.channel_frame_.store(frame, std::memory_order_relaxed);
+        renderer_.channel_fps_.store(fps, std::memory_order_relaxed);
+    }
+
     std::future<std::vector<core::node_preview_image>>
     arm_node_preview(const std::string& graph_name, const std::vector<std::string>& node_ids, int max_edge)
     {
@@ -2035,6 +2048,8 @@ void image_mixer::push(const core::frame_transform& transform) { impl_->push(tra
 void image_mixer::visit(const core::const_frame& frame) { impl_->visit(frame); }
 void image_mixer::pop() { impl_->pop(); }
 void image_mixer::update_aspect_ratio(double aspect_ratio) { impl_->update_aspect_ratio(aspect_ratio); }
+
+void image_mixer::set_frame_number(std::uint64_t frame, double fps) { impl_->set_frame_number(frame, fps); }
 
 std::future<std::vector<core::node_preview_image>>
 image_mixer::arm_node_preview(const std::string&              graph_name,
