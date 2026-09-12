@@ -160,6 +160,13 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     float gn_q_luma_high;
     float gn_q_softness;
     float gn_fam_pad[6];
+    // An ISF node's own parameters, generic because an ISF shader declares its own inputs and
+    // there is no fixed field list to name. APPENDED, like everything above it, and for the same
+    // reason: this block is layout(scalar) and a field inserted higher up reinterprets every
+    // float after it instead of failing to compile. See util/uniform_block.h.
+    float gn_isf[32];
+    int   gn_isf_count;
+    float gn_isf_pad[3];
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;

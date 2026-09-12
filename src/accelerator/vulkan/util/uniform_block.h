@@ -319,7 +319,39 @@ struct alignas(16) uniform_block
     // not a multiple of 16, and the 2026-08-21 measurement in the comment above is what that
     // costs: no readback at all, no error, and a battery reporting 0/4.
     float    gn_fam_pad[6]   = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};              // 1032
-    // Total: 1056 bytes (66 x 16)
+
+    // ── AN ISF NODE'S OWN PARAMETERS, AS A GENERIC ARRAY ────────────────────────
+    //
+    // WHY AN ARRAY AND NOT NAMED FIELDS, which is what every other node class here gets.
+    // An ISF shader declares its OWN inputs -- the file says what they are -- so two `isf`
+    // nodes have different parameters and there is no fixed field list to write down. The
+    // named-field style above cannot express that at all.
+    //
+    // WHY IT HAS TO LIVE IN *THIS* BLOCK. On Vulkan an ISF node is a VARIANT PIPELINE: the
+    // author's GLSL is spliced into this shader and compiled to SPIR-V at runtime, exactly as
+    // an OCIO transform already is. Every variant shares this one descriptor set layout -- that
+    // is what makes the per-layer pipeline override legal, and `renderpass.cpp` says so where it
+    // switches between them -- so a variant CANNOT declare uniforms of its own. One block, one
+    // upload, every pipeline.
+    //
+    // The generated shader `#define`s the author's names onto these slots
+    // (`#define brightness gn_isf[3]`), so the shader BODY is untouched -- the same promise the
+    // OpenGL path makes by running the author's source directly.
+    //
+    // THIRTY-TWO IS A LIMIT, NOT A GUESS. The compiler already packs an `isf` node's parameters
+    // into consecutive value slots, so filling this is a straight copy of
+    // `values[values_offset .. +values_count]`. The cost is 128 bytes on every draw of every
+    // layer, ISF or not, which `grade-graph-cost` is expected to show as free and should be made
+    // to show rather than assumed. A shader declaring more components than this is REFUSED at
+    // PUT naming the limit -- never truncated, because a silently dropped parameter renders a
+    // plausible picture and reports nothing.
+    float    gn_isf[32]      = {};                                          // 1056
+    int32_t  gn_isf_count    = 0;                                           // 1184
+    // To a multiple of 16 again: 1188 is not one, 1200 is. Counted, not guessed -- the same
+    // arithmetic `gn_fam_pad` records above, where getting it wrong cost a battery reporting
+    // 0/4 with no error anywhere.
+    float    gn_isf_pad[3]   = {0.f, 0.f, 0.f};                             // 1188
+    // Total: 1200 bytes (75 x 16)
 };
 
 // ── THE SHADER'S DECLARATION ORDER IS PART OF THIS LAYOUT ───────────────────
@@ -353,7 +385,7 @@ struct alignas(16) uniform_block
 // The three anchors are deliberate rather than exhaustive: the FIRST field pins the start, and
 // the last two pin everything after the large projection/ICVFX block -- which is where fields
 // have actually been added. A drift anywhere before them moves at least one.
-static_assert(sizeof(uniform_block) == 1056,
+static_assert(sizeof(uniform_block) == 1200,
               "uniform_block must stay a multiple of 16 and match ParamsBlock in "
               "fragment_shader.frag -- see the measurement in the comment above");
 static_assert(offsetof(uniform_block, color_space_index) == 0,
@@ -368,6 +400,16 @@ static_assert(offsetof(uniform_block, gn_mask_kind) == 992,
               "uniform_block: a field was inserted above gn_mask_kind, so the shader is reading "
               "the mask families' parameters from the wrong offsets -- which renders a mask of "
               "the wrong SHAPE with no error anywhere");
+// APPENDED AT THE TAIL, and these pin that it stayed there. A field inserted ABOVE `gn_isf`
+// shifts the whole array, and `layout(scalar)` does not fail to compile on a mismatch -- it
+// reinterprets neighbouring floats, so every ISF parameter would take a value belonging to
+// something else and the shader would still render.
+static_assert(offsetof(uniform_block, gn_isf) == 1056,
+              "uniform_block: a field was inserted above gn_isf, so every ISF node reads its "
+              "parameters from the wrong offsets -- which renders a plausible picture with the "
+              "wrong numbers and reports nothing");
+static_assert(offsetof(uniform_block, gn_isf_count) == 1184,
+              "uniform_block: gn_isf_count moved; the shader reads it at a fixed offset");
 static_assert(offsetof(uniform_block, gn_uv_inv) == 944,
               "uniform_block: a field was inserted above gn_uv_inv, so the shader is reading "
               "36 bytes of something else as the source-space mask matrix -- which puts a node "
