@@ -485,6 +485,42 @@ disagreed about the struct's size. The A/B that "proved" the fault was pre-exist
 the same inconsistent objects every time. **When a fault survives removing the code that could
 cause it, suspect the build before the code.**
 
+## An INTERMITTENT check is worse than a red one, and it will be explained twice before it is read
+
+Measured 2026-09-12, and it had already cost two wrong diagnoses. The same four `grade-graph`
+mask checks failed about one run in four, and were attributed first to the stale-vtable build
+trap -- "fixed" by a full rebuild that changed nothing -- and then to a real data race in
+`arm_node_preview`, which WAS real and IS fixed but was not this. Both explanations were
+plausible, both "went away" on the next run, and neither was tested against the numbers.
+
+**The numbers identified it in one step.** The failing arm read its sample as `[140, 89, 51]`,
+the raw source, which is CORRECT for a point outside the mask. The "ungraded" REFERENCE read
+`[112, 71, 41]` -- darker than the source, because the previous arm's graph was still on air.
+`140 - 112 = 28`, and 28.00 LSB is what the checks were failing by. The arm under test was
+right and its reference was stale.
+
+**The cause was a missing settle on ONE side.** `attach` had a verified wait; `clean` did not,
+so the reference capture could carry the previous document. Fixing half a race lowers its rate
+and leaves it, which is the worst outcome: a rarer flake is investigated later and believed
+less.
+
+Three rules follow, and each was paid for here:
+
+* **Read the VALUES before believing a story about the mechanism.** A build trap and a heap race
+  both predict "wrong picture"; only the arithmetic says WHICH capture was wrong. Two
+  investigations went to plausible causes that the numbers would have excluded immediately.
+* **Settle every transition, not the obvious one.** An attach and a detach both land on a tick.
+  If a battery waits for one and not the other, the half that is unguarded becomes the flake.
+* **Verify, do not sleep.** The stage publishes `graph_revision` on a layer while a document is
+  attached, so the settle is "the tick carries what I wrote" and "the leaf is gone" -- plus one
+  frame, because the revision is published at the END of the tick that adopted it while the
+  frame leaving at that moment was composited from the state before. A duration is too short on
+  a loaded run, wasted on a fast one, and hides the problem again at a different frame rate.
+
+**And an intermittently red check trains the reader to re-run rather than to look.** That is the
+real cost: it is not a weaker signal than a red check, it is a signal that actively teaches the
+wrong reflex.
+
 ## A check whose expected value IS its failure mode cannot fail
 
 Measured 2026-09-11 on the node graph's fp16 intermediates. The check was `exposure 4.0` followed

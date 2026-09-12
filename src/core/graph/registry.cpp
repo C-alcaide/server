@@ -9,6 +9,9 @@
  * (at your option) any later version.
  */
 
+#include <utility>
+#include <mutex>
+#include <map>
 #include "registry.h"
 
 #include <common/except.h>
@@ -434,6 +437,101 @@ const std::vector<node_class>& node_classes()
 {
     static const std::vector<node_class> table = build_classes();
     return table;
+}
+
+namespace {
+
+/// The injected resolvers, and the cache of what they answered.
+///
+/// A MUTEX RATHER THAN A THREAD-LOCAL OR AN ATOMIC: registration happens once at boot on one
+/// thread, and lookup happens on the API executor (a PUT) and on the stage (a compile). Those
+/// are different threads, and the cache is written on first use rather than at registration, so
+/// the write is on the read path and needs guarding.
+std::mutex&                                        resolver_lock()
+{
+    static std::mutex m;
+    return m;
+}
+std::map<std::string, port_resolver>&              resolvers()
+{
+    static std::map<std::string, port_resolver> r;
+    return r;
+}
+std::map<std::pair<std::string, std::string>, std::vector<port_desc>>& port_cache()
+{
+    static std::map<std::pair<std::string, std::string>, std::vector<port_desc>> c;
+    return c;
+}
+
+} // namespace
+
+void set_port_resolver(const std::string& class_id, port_resolver resolver)
+{
+    std::lock_guard<std::mutex> lock(resolver_lock());
+    resolvers()[class_id] = std::move(resolver);
+}
+
+std::vector<port_desc> instance_ports(const node_class& cls, const std::string& selector, std::string& out_reason)
+{
+    if (!cls.dynamic_ports)
+        return cls.ports;
+
+    if (selector.empty()) {
+        out_reason = "'" + cls.id + "' needs '" + cls.ports_selector + "' before its ports are known";
+        return cls.ports;
+    }
+
+    const auto key = std::make_pair(cls.id, selector);
+    {
+        std::lock_guard<std::mutex> lock(resolver_lock());
+        const auto                  hit = port_cache().find(key);
+        if (hit != port_cache().end())
+            return hit->second;
+    }
+
+    port_resolver fn;
+    {
+        std::lock_guard<std::mutex> lock(resolver_lock());
+        const auto                  it = resolvers().find(cls.id);
+        if (it != resolvers().end())
+            fn = it->second;
+    }
+    if (!fn) {
+        // A dynamic class with nothing registered: the build has the class but not the module
+        // that reads its files. Say that, rather than reporting every port as missing.
+        out_reason = "'" + cls.id + "' is not wired into this build, so its ports cannot be read";
+        return cls.ports;
+    }
+
+    std::string reason;
+    auto        resolved = fn(selector, reason);
+    if (resolved.empty()) {
+        out_reason = reason.empty() ? ("'" + cls.ports_selector + "' could not be read") : reason;
+        return cls.ports;
+    }
+
+    // THE STATIC PART FIRST, then what the file declared. The order is the one a client sees in
+    // the catalogue, and a file cannot shadow a port the class guarantees: a shader declaring
+    // its own `path` input must not replace the one that selects it.
+    auto out = cls.ports;
+    for (auto& p : resolved) {
+        const auto exists = std::any_of(out.begin(), out.end(), [&](const port_desc& e) {
+            return e.param.name == p.param.name && e.direction == p.direction;
+        });
+        if (!exists)
+            out.push_back(std::move(p));
+    }
+
+    std::lock_guard<std::mutex> lock(resolver_lock());
+    port_cache()[key] = out;
+    return out;
+}
+
+const port_desc* find_port_in(const std::vector<port_desc>& ports, std::string_view name)
+{
+    const auto it =
+        std::find_if(ports.begin(), ports.end(), [&](const port_desc& p) { return p.param.name == name; });
+    return it == ports.end() ? nullptr : &*it;
 }
 
 const node_class* find_node_class(std::string_view id)

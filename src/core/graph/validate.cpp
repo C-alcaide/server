@@ -128,6 +128,11 @@ std::vector<graph_fault> validate(const graph_document& doc, std::vector<std::st
     // ---- nodes: ids, classes, ports, parameter values ---------------------------------
     std::map<std::string, const graph_node*>  by_id;
     std::map<std::string, const node_class*>  cls_of;
+    //: The RESOLVED port list per node, so the edge pass below sees the same ports the
+    //: parameter pass did. A dynamic class resolved twice could otherwise disagree with itself
+    //: -- a shader file replaced between the two passes would make an edge dangle against a
+    //: parameter that had just validated.
+    std::map<std::string, std::vector<port_desc>> ports_of;
     /// Nodes that exist and whose class does not. Their edges are left alone: the class fault is
     /// the one cause, and repeating it per edge would make one typo look like several problems.
     std::set<std::string>                     unclassified;
@@ -165,8 +170,23 @@ std::vector<graph_fault> validate(const graph_document& doc, std::vector<std::st
         }
         cls_of[n.id] = c;
 
+        // THE PORTS OF THIS INSTANCE. For every class but a dynamic one this is the class's own
+        // list; for a dynamic one it comes from the file its selector names.
+        //
+        // ONE FAULT FOR A BAD SELECTOR, NOT ONE PER PORT. A shader path that cannot be read
+        // makes every parameter on that node unknown and every edge to it dangle, and reporting
+        // all of them would have an editor highlight a dozen things for one typo -- the same
+        // mistake the unclassified-node case above exists to avoid. So the selector's own
+        // failure is reported once and the node is then checked against the static ports it
+        // still has.
+        std::string ports_reason;
+        auto        inst = instance_ports(*c, n.string_param(c->ports_selector), ports_reason);
+        if (!ports_reason.empty())
+            out.push_back(err(n.id, "", c->ports_selector, ports_reason));
+        ports_of[n.id] = inst;
+
         for (const auto& kv : n.params) {
-            const auto* p = find_port(*c, kv.first);
+            const auto* p = find_port_in(inst, kv.first);
             if (!p) {
                 out.push_back(err(n.id, "", kv.first,
                                   "class '" + n.cls + "' has no port '" + kv.first + "'"));
@@ -236,8 +256,10 @@ std::vector<graph_fault> validate(const graph_document& doc, std::vector<std::st
             out.push_back(err("", e.id, "", "no node '" + e.to_node + "' to take an edge to"));
             continue;
         }
-        const auto* fp = find_port(*fn->second, e.from_port);
-        const auto* tp = find_port(*tn->second, e.to_port);
+        // RESOLVED PORTS ON BOTH ENDS, so an edge to a shader's own input is checked against
+        // what that shader declares rather than against the class's static list.
+        const auto* fp = find_port_in(ports_of[e.from_node], e.from_port);
+        const auto* tp = find_port_in(ports_of[e.to_node], e.to_port);
         if (!fp) {
             out.push_back(err("", e.id, e.from_port,
                               "class '" + fn->second->id + "' has no port '" + e.from_port + "'"));

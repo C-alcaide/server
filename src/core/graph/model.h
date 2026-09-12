@@ -39,6 +39,7 @@
 // the client's artefact. Consistent with the study's answer for the timeline, and the reason is
 // the same: the server has no idea which of five clients' documents is the canonical one.
 
+#include <common/utf.h>
 #include <core/monitor/monitor.h>
 
 #include <cstdint>
@@ -93,6 +94,24 @@ struct graph_node
 
     /// Client presentation, stored as raw JSON text and never interpreted.
     std::string ui;
+
+    /// The value of `name` as a STRING, or empty if absent or not a string.
+    ///
+    /// Here rather than at each call site because a dynamic class's ports are resolved in four
+    /// places -- the validator, the compiler, the store's write path and the catalogue -- and
+    /// all four have to agree on what "the selector" is. `vector_t` is a variant, so "the client
+    /// sent a number for the shader path" has to be answerable without throwing.
+    std::string string_param(const std::string& name) const
+    {
+        const auto it = params.find(name);
+        if (it == params.end() || it->second.empty())
+            return {};
+        if (const auto* s = boost::get<std::string>(&it->second.front()))
+            return *s;
+        if (const auto* w = boost::get<std::wstring>(&it->second.front()))
+            return u8(*w);
+        return {};
+    }
 };
 
 /// One edge. `from` is always an output and `to` always an input; the validator enforces it

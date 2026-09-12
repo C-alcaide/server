@@ -61,6 +61,7 @@
 // each class's author, so no class can forget it. It is a `discrete` boolean, which makes it a
 // STEP target: a timeline switches a chain on at a key rather than sliding through it.
 
+#include <functional>
 #include <core/producer/producer_params.h>
 
 #include <cstdint>
@@ -175,7 +176,62 @@ struct node_class
     /// Does this class produce an IMAGE, and therefore cost a pass? Read off the ports, cached
     /// here because the compiler asks it per step.
     bool produces_image = false;
+
+    /// ARE THIS CLASS'S PORTS A PROPERTY OF THE INSTANCE RATHER THAN THE CLASS?
+    ///
+    /// Every class here declares a fixed port list, which is what lets the catalogue, the
+    /// validator and `suggest` all answer from the class alone. An ISF shader breaks that: the
+    /// shader FILE declares its own inputs, so two `isf` nodes pointing at different files have
+    /// different ports and neither list is knowable until the document names the file.
+    ///
+    /// When this is true, `ports` is the STATIC PART -- the ports every instance has whatever
+    /// the file says, such as the image input and the `path` that selects the file -- and
+    /// `instance_ports()` is what a reader must call instead of reading `ports` directly.
+    bool dynamic_ports = false;
+
+    /// Which parameter selects the instance's ports, for a dynamic class. Empty otherwise.
+    ///
+    /// Named rather than assumed so the resolver, the cache key and the error message all agree
+    /// on one thing: a node whose `path` is wrong should be told that `path` is wrong.
+    std::string ports_selector;
 };
+
+/// Resolve the ports of ONE node instance of a dynamic class.
+///
+/// INJECTED, because the answer lives outside `core`. An ISF shader's inputs come from parsing
+/// the file, which is `modules/isf`'s job, and `core` neither links it nor should -- the same
+/// argument that keeps Boost.JSON out of `core` and the producer factory injected into the
+/// stage. The shell registers one of these per dynamic class at boot.
+///
+/// `selector` is the value of `node_class::ports_selector` for this instance (an ISF path, say).
+/// On failure return an empty vector and set `out_reason`; the validator turns that into a fault
+/// naming the selector, so a client gets "no such shader" rather than "no such port" for every
+/// edge that touched it.
+using port_resolver = std::function<std::vector<port_desc>(const std::string& selector, std::string& out_reason)>;
+
+/// Register the resolver for a dynamic class. Called once per class at boot, from the shell.
+void set_port_resolver(const std::string& class_id, port_resolver resolver);
+
+/// The ports of one node instance: the class's own list for a static class, and the resolved
+/// list for a dynamic one.
+///
+/// CACHED BY (class, selector), because this is asked per node per validation and a validation
+/// happens on every PUT -- re-reading and re-parsing a shader file for each would put file I/O
+/// on the write path. The cache is append-only and never invalidated: a shader file that
+/// changes on disk needs the document re-PUT, which is the same contract `CALL ... ISF` has.
+///
+/// Returns the STATIC ports and sets `out_reason` when a dynamic class has no resolver
+/// registered or the resolver failed -- never an empty list, so a caller that ignores the reason
+/// still sees a coherent node rather than one with no ports at all.
+std::vector<port_desc> instance_ports(const node_class& cls,
+                                      const std::string& selector,
+                                      std::string&       out_reason);
+
+/// `find_port`, over a resolved instance list rather than a class.
+const port_desc* find_port_in(const std::vector<port_desc>& ports, std::string_view name);
+
+/// `find_port`, over a resolved instance list rather than a class.
+const port_desc* find_port_in(const std::vector<port_desc>& ports, std::string_view name);
 
 /// THE CLASS INDICES THE KERNELS AND THE SHADERS SWITCH ON.
 ///
