@@ -116,11 +116,34 @@ struct node_step
 
     /// How many doubles it owns, so a writer can range-check without the registry.
     std::uint32_t values_count = 0;
+
+    /// This step's STRING parameter, as an index into `node_plan::strings`, or -1 for none.
+    ///
+    /// WHY A TABLE AND NOT A `std::string` HERE. `node_step` is read per draw, per step, per
+    /// frame, and the whole point of the values array is that a step is a few integers next to
+    /// each other -- a `std::string` member would put an allocation and a pointer chase on the
+    /// frame path for something only one class has.
+    ///
+    /// ONE, NOT A RANGE, because the only string a class carries today selects it: an ISF
+    /// shader's `path`. When a second one appears this becomes an offset/count pair like the
+    /// values, and the shape is deliberately the same so that change is mechanical.
+    ///
+    /// NOT read by any evaluator yet. It exists so a renderer CAN reach a shader path, which
+    /// is the piece both the OpenGL and Vulkan ISF paths block on.
+    std::int32_t string_index = -1;
 };
 
 /// The compiled graph. Immutable, shared, and compared by pointer.
 struct node_plan
 {
+    /// Every string any step refers to, in compile order.
+    ///
+    /// HERE RATHER THAN ON THE STEP so a step stays trivially copyable and cheap to walk, and
+    /// so two steps naming the same shader share one entry. A plan is immutable and compared by
+    /// POINTER, so this table is fixed for the plan's whole life -- which is what makes an
+    /// index into it safe to hold on the frame path.
+    std::vector<std::string> strings;
+
     graph_stage stage = graph_stage::working;
 
     /// Topologically ordered. `steps.front()` is the `input` and `steps.back()` the `output`,

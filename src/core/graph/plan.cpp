@@ -130,11 +130,35 @@ std::shared_ptr<const node_plan> compile(const graph_document&           doc,
             st.produces_mask = !st.fused_mask;
         }
 
+        // THE INSTANCE'S PORTS, not the class's. For every class but a dynamic one these are the
+        // same list; for `isf` the shader file its `path` names declares the rest, and compiling
+        // from the class alone would give those parameters NO slots -- so they would validate,
+        // publish and be addressable, and then drive nothing. That is the "accepted everywhere
+        // and driven by nothing" shape `graph-stack` exists to catch.
+        std::string        ports_reason; // a bad selector is the validator's to report, not ours
+        const auto         inst_ports = instance_ports(*c, n->string_param(c->ports_selector), ports_reason);
+
         // Every value input gets a slot, in PORT ORDER, so the shader's uniform upload can walk
-        // the class's ports and the offsets agree by construction rather than by a second table.
-        for (const auto& port : c->ports) {
+        // the ports and the offsets agree by construction rather than by a second table.
+        for (const auto& port : inst_ports) {
             if (port.domain != port_domain::value || port.direction != port_direction::input)
                 continue;
+
+            // A STRING PARAMETER HAS NO NUMERIC SLOT. It goes in the plan's string table
+            // instead, because `node_values` is an array of doubles and putting a path in one
+            // is not a narrowing question -- there is no number to store. Without this the
+            // selector would silently consume a slot and every later offset would be one out.
+            if (port.param.type == fields::value_type::string) {
+                if (port.param.name == c->ports_selector) {
+                    const auto value = n->string_param(port.param.name);
+                    if (!value.empty()) {
+                        st.string_index = static_cast<std::int32_t>(plan->strings.size());
+                        plan->strings.push_back(value);
+                    }
+                }
+                continue;
+            }
+
             plan->value_index["node/" + id + "/" + port.param.name] = plan->values_size;
             plan->values_size += port.param.arity;
             st.values_count += port.param.arity;
@@ -176,7 +200,19 @@ std::shared_ptr<const node_plan> compile(const graph_document&           doc,
         // the evaluator binds them -- `in0` -> plane 0, `in1` -> plane 1 -- and means a combine
         // needs no new plumbing at all.
         const bool is_mask_node = c->group == "mask";
-        for (const auto& p : c->ports) {
+        // INSTANCE PORTS: a shader declaring a SECOND image input must have it routed, or the
+        // edge validates (the validator resolves per instance) and the compiler wires nothing --
+        // "accepted and does nothing", the same family as a parameter with no value slot.
+        // The selector comes from the PLAN'S OWN string table rather than from the document,
+        // because the document node is not in scope here -- and that is the table's purpose:
+        // once compiled, a step carries everything the evaluator and the later passes need.
+        const auto  routing_selector =
+            st.string_index >= 0 && static_cast<std::size_t>(st.string_index) < plan->strings.size()
+                ? plan->strings[st.string_index]
+                : std::string{};
+        std::string routing_reason;
+        const auto  routing_ports = instance_ports(*c, routing_selector, routing_reason);
+        for (const auto& p : routing_ports) {
             if (p.direction != port_direction::input)
                 continue;
             const bool operand = p.domain == port_domain::image ||
@@ -228,7 +264,13 @@ node_values values_of(const graph_document& doc, const node_plan& plan)
         const auto* c = find_node_class(n.cls);
         if (!c)
             continue;
-        for (const auto& port : c->ports) {
+        // INSTANCE PORTS AGAIN, and this one fills the array the evaluator reads. The slots are
+        // allocated per instance above; if the DEFAULTS were written from the class, a shader
+        // parameter would keep whatever the array was initialised to rather than its declared
+        // default -- a node that renders at zero until something writes it.
+        std::string init_reason;
+        const auto  init_ports = instance_ports(*c, n.string_param(c->ports_selector), init_reason);
+        for (const auto& port : init_ports) {
             if (port.domain != port_domain::value || port.direction != port_direction::input)
                 continue;
             const auto it = plan.value_index.find("node/" + n.id + "/" + port.param.name);

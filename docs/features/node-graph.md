@@ -1061,7 +1061,7 @@ Each of these is sequenced rather than open, and the order is riskiest-first:
 And these are **not v1 at all**, each with its hook: effect and source node families (a texture
 hand-off between GL contexts or Vulkan devices is a *device* feature, not a graph one — the `image`
 tags and K-input steps are ready for it); scalar/math nodes; topology changing over time beyond
-bypass and mute; `group` evaluation (the model carries one, inlining at compile is v2); reference
+bypass and mute; `group` evaluation (**the model does NOT carry one** -- this line said it did until 2026-09-12, which is the design written in the present tense; a client's collapsed group lives in the uninterpreted `ui` blob, so groups are a whole feature rather than a compiler step); reference
 ports; fusing linear runs into one pass; preview streams; `duration`/`tween` on a node-parameter
 write, which is the one place "every workflow works on a node parameter" is answered by the timeline
 rather than by the `MIXER` tween.

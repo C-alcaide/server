@@ -54,8 +54,13 @@
 //     ports are refused in v1, so the class would be a node that can only be a pass-through with
 //     a `strength` nobody can apply. Declaring an unusable class is the 202-and-no-picture shape
 //     from the other end: the catalogue would promise something a PUT cannot connect.
-//   * NO `group`. The model carries one (a group is inlined at compile), the evaluator never sees
-//     one, and v1 refuses it.
+//   * NO `group`, AND THE MODEL DOES NOT CARRY ONE EITHER. This line used to say "the model
+//     carries one (a group is inlined at compile)", which was the DESIGN written in the present
+//     tense: `graph_node` and `graph_document` have no group field, and a client's collapsed
+//     group lives in the uninterpreted `ui` blob. Corrected 2026-09-12 after the phase-2 plan
+//     quoted it as shipped state and sized "group evaluation" as a compiler tweak -- it is a
+//     whole feature: the model, the validator, the compiler, the catalogue and the client
+//     contract all gain a concept.
 //
 // Every class gets an implicit `bypass` input from the registry's own constructor rather than from
 // each class's author, so no class can forget it. It is a `discrete` boolean, which makes it a

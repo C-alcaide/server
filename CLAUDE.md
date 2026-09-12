@@ -485,6 +485,39 @@ disagreed about the struct's size. The A/B that "proved" the fault was pre-exist
 the same inconsistent objects every time. **When a fault survives removing the code that could
 cause it, suspect the build before the code.**
 
+## When an assumption held EVERYWHERE, breaking it once breaks every reader differently
+
+Measured 2026-09-12 adding the first node class whose ports come from a FILE rather than from
+the registry. **Seven places asked a node what ports it has**, and every one was written as
+`c->ports` -- the class's list -- because until that class existed it was always right. One
+dynamic class made all seven wrong, and each failed in a way that looks nothing like the
+others:
+
+| reader | how it failed |
+| :--- | :--- |
+| the validator | rejects a parameter the shader really declares |
+| the compiler, slot allocation | no value slot, so a write lands nowhere |
+| the compiler, initial values | the parameter sits at zero instead of its default |
+| the compiler, operand routing | a second image input validates and wires nothing |
+| the stage's publisher | the parameter is invisible to every client |
+| the store's write path | `unknown_path` for something the document would hold |
+| `describe_graph` | `unknown_path` again, from the write path's own validator |
+
+**They were found one at a time, over four rebuilds**, each by a different symptom, because no
+single check can see them: a rejected parameter, an inert one, a missing default and an
+invisible one are four different observations. The last two even produce the SAME message from
+different places.
+
+**The tool that should have come first is `grep`.** `grep -rn "c->ports"` takes ten seconds and
+lists all seven; the fourth symptom is what finally prompted it. So: **when you break an
+invariant that everything relied on, enumerate the readers before fixing the one in front of
+you.** The audit is cheap, the one-at-a-time discovery is not, and the sites you have not found
+yet are indistinguishable from a feature that simply does not work.
+
+And four sites in `api_graph.cpp` were left alone deliberately: the catalogue describes a
+CLASS, where instance ports are not knowable without an instance. An audit's answer is not
+always "change them all" -- but it is always "look at them all".
+
 ## An INTERMITTENT check is worse than a red one, and it will be explained twice before it is read
 
 Measured 2026-09-12, and it had already cost two wrong diagnoses. The same four `grade-graph`

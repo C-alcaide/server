@@ -172,7 +172,24 @@ graph_store::patch_params(const std::string&                             name,
         if (n == doc.nodes.end())
             continue;
         const auto* c = find_node_class(n->cls);
-        if (!c || !find_port(*c, param))
+        if (!c)
+            continue;
+        // THE INSTANCE'S PORTS, not the class's -- the FOURTH place this distinction matters.
+        //
+        // Four readers ask a node what ports it has: the validator, the compiler, the publisher
+        // and this write path. All four were written against `c->ports` because until a dynamic
+        // class existed that was always right, and introducing one made every one of them wrong
+        // in a DIFFERENT way: the validator would reject a real shader parameter, the compiler
+        // would give it no value slot, the publisher would hide it from every client, and this
+        // refuses the write with `unknown_path` for a parameter the document is perfectly
+        // willing to hold.
+        //
+        // Each failure looks nothing like the others from outside, which is why no single check
+        // covers them. This one was found by `graph-stack` writing a shader parameter and being
+        // told it does not exist.
+        std::string ports_reason;
+        const auto  inst = instance_ports(*c, n->string_param(c->ports_selector), ports_reason);
+        if (!find_port_in(inst, param))
             continue;
         n->params[param] = kv.second;
         changed          = true;

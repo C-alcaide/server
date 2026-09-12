@@ -2085,7 +2085,20 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                         const auto* c = graph::find_node_class(n.cls);
                         if (!c)
                             continue;
-                        for (const auto& port : c->ports) {
+                        // THE INSTANCE'S PORTS, not the class's -- the third place this
+                        // distinction matters and the one with no other witness. A dynamic
+                        // class's parameters (an ISF shader's own INPUTS) are absent from the
+                        // class list, so publishing from it makes them invisible to every
+                        // client: the tree shows a node with `bypass` and `mix` and nothing
+                        // else, while the document, the validator and the write path all agree
+                        // they exist.
+                        //
+                        // The validator and the compiler had the same bug and were fixed with
+                        // it; this one was found by `graph-stack` asking for the value back.
+                        std::string ports_reason;
+                        const auto  inst =
+                            graph::instance_ports(*c, n.string_param(c->ports_selector), ports_reason);
+                        for (const auto& port : inst) {
                             if (port.domain != graph::port_domain::value ||
                                 port.direction != graph::port_direction::input)
                                 continue;
@@ -3164,7 +3177,15 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 const auto* c = graph::find_node_class(n.cls);
                 if (!c)
                     continue;
-                for (const auto& port : c->ports) {
+                // THE INSTANCE'S PORTS -- the FIFTH reader of this question, and the one the
+                // WRITE PATH validates against: `api_value` refuses a write whose address is
+                // not in what this returns. So a shader parameter missing here is refused with
+                // `unknown_path` no matter how many of the other four are right, which is
+                // exactly what happened after fixing the first four.
+                std::string ports_reason;
+                const auto  inst =
+                    graph::instance_ports(*c, n.string_param(c->ports_selector), ports_reason);
+                for (const auto& port : inst) {
                     if (port.domain != graph::port_domain::value ||
                         port.direction != graph::port_direction::input)
                         continue;
