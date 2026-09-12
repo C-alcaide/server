@@ -633,6 +633,36 @@ registry's rule for every dead branch.
 passes its input through. That is a real parity gap and `grade-graph` states it in every Vulkan run
 rather than skipping the checks — see §9.
 
+#### 5.3.1 A foreign draw inside the chain, and which way the hazard actually runs
+
+`isf::shader` binds programs, framebuffers, texture units and vertex arrays on the mixer's own GL
+context, in the middle of a chain of kernel passes. The obvious worry is that it disturbs the
+**kernel**, and that a node drawn after an ISF node renders wrongly — a wrong picture in a node
+nobody edited.
+
+**Measured, by compiling the leak in, and the worry is unfounded in that direction.** The kernel
+sets its program, vertex array, viewport, textures and blend state on *every* draw,
+unconditionally — `shader::use()` calls `glUseProgram` with no cached "already bound" check. With
+blending deliberately left enabled and a foreign texture bound after each ISF draw, the `exposure`
+node downstream of the shader graded correctly, its no-ISF control passed, and all thirty-nine
+other checks passed.
+
+**What the leak did reach was the ISF renderer itself.** Its own next frame rendered black — four
+checks at `[0, 0, 0]` — because `render_gl`'s passes write full-screen triangles meaning to
+*replace* the target, and inherited a blend state instead of setting one. It worked before only
+because the kernel disables blending after each of its draws and the ISF output pass disables it
+again, so the path depended on a caller invariant nobody had stated. `render_gl` now sets its own.
+
+A coarser first mutation, which also left the framebuffer and viewport unrestored, failed nineteen
+checks **including the control**: a broken context poisons the channel for every later frame, even
+graphs with no ISF node in them. It proved the arm can fail and isolated nothing, which is why the
+second mutation disturbed only what the renderer never restores. **One variable each** is what
+separated "the kernel is fine" from "the renderer poisons itself".
+
+`grade-graph`'s `isf -> exposure` arm is the only thing in the suite that puts an ordinary pass
+downstream of a foreign one; every other graph is kernel passes end to end, where the kernel's own
+state is the only state there is.
+
 **The table carries exactly the classes the evaluator implements, and no more.** A class in the
 catalogue that a PUT accepts and the renderer ignores is the *202-and-no-picture* failure seen from
 the other end — the same one the timeline's path validation closed. So each family arrived **with
@@ -1173,6 +1203,7 @@ rather than by the `MIXER` tween.
 | that an unbuildable `space` is REFUSED | `grade-graph` | **both mixers.** The crossed `space`/`stage` pair is refused at PUT rather than approximated |
 | that a missing shader leaves the layer RENDERING | `grade-graph` | **both mixers.** Refused at PUT, or the input passed through — never black |
 | **that an `isf` node does NOT draw on Vulkan** | `grade-graph` | **stated, not skipped.** The Vulkan arm asserts the node passes its input through unchanged and says in its own reason line that the backend has no ISF branch yet. A skip is not a pass, and a check that quietly does not run on one backend is how a parity gap stops being visible. It becomes the three picture checks once the branch lands |
+| an ordinary node AFTER a foreign draw | `grade-graph` | **2 checks, OpenGL** — `isf -> exposure(2.0)` at **0.00 LSB** against a closed-form model, with the same exposure and no ISF node in front of it as the control that makes it attributable. The only arm in the suite with an ordinary pass downstream of a foreign one. Mutations: leaving the framebuffer and viewport unrestored fails **19** checks including the control; leaving only blending and the texture unit disturbed fails **4** and leaves the control passing — which is what proved the kernel immune and the ISF renderer vulnerable to itself |
 | the class table against its own rules | `node_registry_self_test` | at boot |
 | the plan's value-NAME table against its values array | `graph_plan_self_test` | at boot, **fatal** — equal length, and every address agreeing with its slot's name. A foreign renderer indexes one by the other's offset, so a short table is an out-of-range read on the frame path and a shifted one puts every parameter on the wrong input, still compiling and still rendering |
 | the validator, one minimal document per failure mode | `graph_validate_self_test` | at boot |

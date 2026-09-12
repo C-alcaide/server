@@ -957,6 +957,27 @@ struct shader::impl
             failed_ = true;
             return 0;
         }
+
+        // ── THIS PASS SETS ITS OWN BLEND STATE, rather than inheriting one ──────────
+        //
+        // Every pass below writes a full-screen triangle and means to REPLACE what is in
+        // the target, so blending must be off. It was off in practice and by accident:
+        // the mixer kernel disables it after each of its draws and the output pass
+        // disables it again, so this path relied on a caller invariant nobody stated.
+        //
+        // MEASURED, by compiling the leak in. Leaving blending enabled with
+        // `glBlendFunc(GL_ZERO, GL_ONE)` after an ISF draw made the NEXT frame of that
+        // same shader render BLACK -- four `grade-graph` checks at [0, 0, 0] -- while
+        // every one of the other thirty-nine passed, including the control with no ISF
+        // node in it.
+        //
+        // SO THE HAZARD IS THE OPPOSITE WAY ROUND FROM THE ONE PREDICTED. The plan
+        // expected a foreign draw to disturb the KERNEL, and the kernel turns out to be
+        // immune: it sets program, vertex array, viewport, textures and blend on every
+        // draw, unconditionally -- `shader::use()` calls `glUseProgram` with no cached
+        // "already bound" check. What was actually exposed is this renderer to ITSELF.
+        glDisable(GL_BLEND);
+
         ensure_imported();
 
         std::map<std::string, bound_image> bound;
