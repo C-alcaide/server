@@ -950,6 +950,46 @@ first node of a two-node chain, and the last node's preview matches the captured
   case, so without this the evaluator never runs and the preview can only be served on a frame
   that was going to be composited anyway.
 
+#### What a preview costs, and the rate to build a client against
+
+Measured by `node-preview-cost`, both mixers, four channels:
+
+| | 1080p50 | 2160p50 |
+| :--- | ---: | ---: |
+| one preview, end to end | **~33 ms** | **~81 ms** |
+| a 16-node strip, every node | **551 ms** | **1294 ms** |
+| sustained rate, one client | ~30/s | **12.6/s** |
+| PNG on the wire | ~10 KB | 37 KB |
+
+**THE COST IS PIXELS, NOT PREVIEWS.** The per-node figure tracks the raster almost exactly — a
+quarter of the pixels costs a bit under half the time — because what a preview spends is a
+full-raster readback and a PNG encode, not fixed overhead. Two consequences for a client:
+**a thumbnail would be the big win** (a 256-px preview is a fraction of the pixels, so a
+fraction of both terms), and **the per-node cost does not grow with chain depth** — 81 ms per
+node at sixteen nodes is the same 81 ms as at two, because a preview reads one step's
+attachment rather than re-running the chain.
+
+**ASKING IN PARALLEL BUYS NOTHING.** Eight requests at once took 642 ms against 653 ms for the
+same eight in sequence. `api_executor_` owns a single thread and serves each request to
+completion in turn, so a client cannot make a strip appear faster by pipelining — it should
+issue previews in whatever order its UI finds simplest and budget one round trip each. That
+same serialisation is why the mixer's single pending slot is safe: two previews are never in
+flight, whatever a client does. **The slot is NOT safe for the reason its own comment gives**,
+which argues from a hover model ("there is one cursor") — it is safe because the executor's
+concurrency is one, and a client fetching a strip of `<img>` tags in parallel gets every
+picture rather than one picture and N-1 refusals.
+
+**The rate to build against is ~10/s at 4K**, which is inside the 12.6/s ceiling with margin.
+Above that a client is only adding queue depth: 25/s and 50/s both deliver the same 12.6/s.
+
+**On OpenGL previews are free; on VULKAN each one costs about a late frame.** At 2160p50,
+polling at 5/s cost 4.79% of frames late and at 12.6/s cost 12.66%, against a control of
+**zero** — the identical graph with nobody asking. OpenGL read 0 at every rate on both rasters.
+The cause is the Vulkan readback: `copy_async` issues its own `submitSingleTimeCommands` and
+allocates a fresh full-raster staging buffer per call, on the same queue the frame is using.
+**Not fixed, and stated rather than left to be discovered** — a client polling a Vulkan channel
+at 4K should stay near 1/s, or the thumbnail above removes the question.
+
 **A preview needs the channel to be TICKING**, and a channel with no consumer never does — the
 same constraint `previz.md` §4 records for `PREVIZ MAP`. The refusal says so ("is the channel
 running?"), which is the message to expect if a preview times out on an idle channel.

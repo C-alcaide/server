@@ -39,6 +39,69 @@
 #include "mixer/mixer.h"
 #include "producer/stage.h"
 
+#ifdef _MSC_VER
+#include <eh.h>
+#include <sstream>
+#include <windows.h>
+
+namespace {
+
+/// A structured exception, surfaced as something with a MESSAGE.
+///
+/// THIS TREE IS BUILT WITH `/EHa`, under which `catch (...)` also catches STRUCTURED
+/// exceptions -- an access violation included. The channel tick's handler is a `catch (...)`
+/// written for ordinary failures, so a memory fault there is swallowed and logged as
+/// `Exception: No diagnostic information available.` -- no code, no address, no clue which of
+/// produce, mix or output faulted.
+///
+/// Measured 2026-09-11: sustained node-preview polling on the VULKAN mixer stopped four
+/// channels ticking and then threw once per frame, 464 times, with exactly that message and
+/// nothing else. OpenGL was clean at the same rates. A fault that reports nothing is
+/// indistinguishable from an ordinary exception, and the whole diagnosis stalls on it.
+///
+/// Installing a translator costs nothing when nothing faults, and it changes no behaviour that
+/// was previously correct: under `/EHa` the same `catch (...)` already caught these. It only
+/// means the log now names the fault.
+struct structured_exception : std::runtime_error
+{
+    structured_exception(unsigned int code, const void* address)
+        : std::runtime_error(describe(code, address))
+    {
+    }
+
+    static std::string describe(unsigned int code, const void* address)
+    {
+        std::ostringstream os;
+        os << "STRUCTURED EXCEPTION 0x" << std::hex << code;
+        switch (code) {
+            case 0xC0000005u: os << " (access violation)"; break;
+            case 0xC0000094u: os << " (integer divide by zero)"; break;
+            case 0xC0000096u: os << " (privileged instruction)"; break;
+            case 0xC00000FDu: os << " (stack overflow)"; break;
+            case 0xC0000409u: os << " (stack buffer overrun / __fastfail)"; break;
+            default: break;
+        }
+        os << " at 0x" << address
+           << " -- this is a MEMORY FAULT reaching a `catch (...)` because the tree is built "
+              "with /EHa, not an ordinary exception";
+        return os.str();
+    }
+};
+
+/// Per THREAD, which is why this is called inside the thread body rather than at start-up.
+void install_seh_translator()
+{
+    _set_se_translator([](unsigned int code, EXCEPTION_POINTERS* ep) {
+        throw structured_exception(code,
+                                   ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionAddress
+                                                             : nullptr);
+    });
+}
+
+} // namespace
+#endif
+
+
 #include <atomic>
 #include <memory>
 
@@ -203,6 +266,11 @@ struct video_channel::impl final
         thread_ = std::thread([this] {
             set_thread_realtime_priority();
             set_thread_name(L"channel-" + std::to_wstring(channel_info_.index));
+#ifdef _MSC_VER
+            // So a memory fault in produce, mix or output names itself instead of reaching the
+            // catch below as "No diagnostic information available". See `structured_exception`.
+            install_seh_translator();
+#endif
 
             while (!abort_request_) {
                 // Started outside the try because the catch needs it: the loop's
@@ -394,6 +462,12 @@ struct video_channel::impl final
                     // Folded into the window a tick late, by construction: it is not
                     // known until after the state above was published.
                     tick_window_.osc.add(osc_elapsed * 1000.0);
+                } catch (const std::exception& e) {
+                    // SPLIT FROM `catch (...)` ON PURPOSE. `CASPAR_LOG_CURRENT_EXCEPTION` prints
+                    // boost's diagnostic information, which is empty for a plain std exception
+                    // and for a translated structured one -- so the message that mattered was
+                    // being thrown away at the only place it was available.
+                    CASPAR_LOG(error) << print() << L" tick failed: " << caspar::u16(e.what());
                 } catch (...) {
                     CASPAR_LOG_CURRENT_EXCEPTION();
 

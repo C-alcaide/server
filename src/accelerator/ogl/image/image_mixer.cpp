@@ -194,17 +194,36 @@ class image_renderer
         //: no stage layer index at all, so `node_plan::document_name` is the only thing a
         //: request can be matched against -- and addressing by document is the better interface
         //: anyway, for the reason `detach` takes no layer: a client knows the look's name.
+        //: Unique for the life of the process, so "is this the request I saw last frame" is
+        //: answerable without a pointer that the next allocation may reuse.
+        std::uint64_t                          id = 0;
         std::string                            graph_name;
         std::string                            node_id;
         std::promise<core::node_preview_image> promise;
     };
     std::mutex                       preview_lock_;
     std::unique_ptr<pending_preview> preview_;
-    //: The request this channel saw at the top of the PREVIOUS frame, compared by pointer so a
-    //: request that has survived a whole frame unclaimed can be told from one that just
-    //: arrived. Render-thread only; the pointer is read under `preview_lock_` with the unique_ptr
-    //: it refers to, and never dereferenced outside it.
-    const pending_preview*           preview_seen_ = nullptr;
+    //: A MONOTONIC ID, not a pointer, and the difference is a real defect rather than taste.
+    //:
+    //: The first version of this compared `preview_.get()` against the raw pointer seen at the
+    //: top of the previous frame, to answer "has this request survived a whole frame unclaimed".
+    //: But the object it named is DESTROYED as soon as the evaluator claims and fulfils it, so
+    //: the stored pointer dangles -- and the very next request is a fresh allocation that the
+    //: allocator is free to place at exactly that address. Under sustained polling that is not a
+    //: remote possibility, it is the common case: same size, same thread, immediately after the
+    //: free. The comparison then says "you have been here a whole frame" about a request that
+    //: arrived microseconds ago, and refuses it with `no layer on this channel is rendering a
+    //: graph named ...` while the graph is right there.
+    //:
+    //: A counter cannot be recycled, so the question it answers stays the question it was asked.
+    std::uint64_t                    preview_next_id_ = 1;
+    std::uint64_t                    preview_seen_id_ = 0;
+
+    //: "Drop the still-frame cache on your next tick", set by the API executor and acted on by
+    //: the render thread -- because `prev_fingerprint_` owns a vector and is the render
+    //: thread's alone. An atomic flag rather than a lock: the render path would otherwise take
+    //: a mutex every frame to answer a question that is almost always "no".
+    std::atomic<bool>                preview_drop_cache_{false};
 
     std::future<core::node_preview_image> arm_node_preview(const std::string& graph_name,
                                                            const std::string& node_id)
@@ -215,6 +234,7 @@ class image_renderer
         auto fut        = req->promise.get_future();
 
         std::lock_guard<std::mutex> lock(preview_lock_);
+        req->id = preview_next_id_++;
         if (preview_) {
             core::node_preview_image superseded;
             superseded.reason = "superseded by a later preview request";
@@ -225,16 +245,39 @@ class image_renderer
         // AND THE STILL-FRAME CACHE HAS TO BE DROPPED, or the preview can only ever be served
         // on a frame that was going to be composited anyway.
         //
-        // MEASURED, and it is the whole reason this line exists: a static colour under a static
-        // graph is exactly the cached case, so the evaluator never ran, the request was never
-        // seen, and every preview timed out at two seconds while the channel was demonstrably
-        // running and the graph demonstrably attached. The symptom -- "is the channel running?"
-        // -- pointed at everything except the cache.
+        // MEASURED, and it is the whole reason this exists: a static colour under a static graph
+        // is exactly the cached case, so the evaluator never ran, the request was never seen,
+        // and every preview timed out at two seconds while the channel was demonstrably running
+        // and the graph demonstrably attached. The symptom -- "is the channel running?" --
+        // pointed at everything except the cache.
         //
-        // Dropping the fingerprint rather than the texture: the next tick then composites once,
-        // serves the request, and re-caches. One extra composition per preview, for something a
-        // human asked for.
-        prev_fingerprint_ = {};
+        // ASKED FOR WITH A FLAG, NOT DONE HERE, and the first version did it here: a bare
+        // `prev_fingerprint_ = {}` on this line. THIS FUNCTION RUNS ON THE API EXECUTOR THREAD
+        // and `prev_fingerprint_` belongs to the RENDER thread, which reads it through
+        // `matches()` and overwrites it through `std::move` on every single frame. It holds a
+        // `std::vector<item_fingerprint>`, so assigning an empty one from here frees that
+        // buffer while the render thread may be walking it or assigning over it -- a data race
+        // on a heap-owning object, once per preview request.
+        //
+        // `preview_lock_` did NOT make it safe, which is what made it easy to write: the lock is
+        // held here, and the render thread never takes it for the fingerprint, so it guarded
+        // nothing at all.
+        //
+        // WHAT IT COST, because the symptoms pointed everywhere but here. Under sustained
+        // polling it corrupted the heap, and corruption surfaces wherever it lands rather than
+        // where it was caused: `std::bad_array_new_length` from a vector with a garbage length
+        // on the OpenGL mixer, 16157 access violations at heap addresses on Vulkan, four
+        // channels ceasing to tick, and -- the one that cost the most -- `grade-graph`'s mask
+        // checks failing with masks that graded the WHOLE IMAGE, in code nothing had touched
+        // for two commits. That last symptom was first attributed to the stale-vtable build
+        // trap and "fixed" by a full rebuild; the rebuild changed nothing and the run that
+        // followed it simply did not hit the race. See CLAUDE.md, where that misattribution is
+        // now corrected.
+        //
+        // The render thread clears it at the top of its own tick. Dropping the FINGERPRINT
+        // rather than the texture: the next tick composites once, serves the request, and
+        // re-caches -- one extra composition per preview, for something a human asked for.
+        preview_drop_cache_.store(true, std::memory_order_release);
         return fut;
     }
 
@@ -361,16 +404,24 @@ class image_renderer
         // again for a still-frame cache hit, and an idle channel is exactly the one that will
         // never claim a request. Putting the refusal after the evaluator would leave the two
         // commonest cases waiting the full two seconds.
+        // THE STILL-FRAME CACHE, DROPPED HERE RATHER THAN BY THE THREAD THAT ASKED.
+        // `prev_fingerprint_` owns a vector and is read and overwritten by this thread every
+        // frame; clearing it from the API executor was a data race that corrupted the heap.
+        // See `arm_node_preview`.
+        if (preview_drop_cache_.exchange(false, std::memory_order_acq_rel)) {
+            prev_fingerprint_ = {};
+        }
+
         {
             std::lock_guard<std::mutex> lock(preview_lock_);
-            if (preview_ && preview_.get() == preview_seen_) {
+            if (preview_ && preview_->id == preview_seen_id_) {
                 core::node_preview_image img;
                 img.reason = "no layer on this channel is rendering a graph named '" +
                              preview_->graph_name + "'";
                 preview_->promise.set_value(std::move(img));
                 preview_.reset();
             }
-            preview_seen_ = preview_.get();
+            preview_seen_id_ = preview_ ? preview_->id : 0;
         }
 
         if (layers.empty()) { // Bypass GPU with empty frame.

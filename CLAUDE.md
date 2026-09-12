@@ -384,13 +384,28 @@ cmake --build d:\Github\CasparVP\build --target casparcg
   dependency, so the TUs that were not also edited kept the OLD vtable layout — and a virtual call
   through a stale index lands on the wrong function.
 
-  It presented as **four `grade-graph` mask checks failing on Vulkan with the masks grading the
-  WHOLE IMAGE** — an ellipse grading at the corner, a qualifier grading its complement, and
-  `mask_combine`'s intersect and subtract both returning union's answer. Nothing in the mask code
-  had been touched for two commits. It reproduced across runs, which is what made it look like a
-  real regression rather than a flake, and the obvious suspect was the six-line change in the same
-  file. **The mask code was never wrong**: after touching every source and deleting the PCH pair,
-  the same tree measured **35/35 on both mixers**.
+  **THE SYMPTOM THIS PARAGRAPH ORIGINALLY CLAIMED WAS NOT THIS TRAP, and the correction is the
+  more useful half.** It said four `grade-graph` mask checks failed on Vulkan with the masks
+  grading the WHOLE IMAGE, that a full rebuild fixed it, and that the mask code was never wrong.
+  The last part is true and the diagnosis was not: the cause was a **data race** in
+  `arm_node_preview`, which cleared the render thread's `prev_fingerprint_` — a vector-owning
+  member — from the API executor thread. It corrupted the heap under sustained preview polling,
+  and heap corruption surfaces wherever it lands rather than where it was caused: the same four
+  mask checks, `std::bad_array_new_length` on OpenGL, 16157 access violations on Vulkan, and four
+  channels ceasing to tick. The full rebuild changed nothing; the run after it simply did not hit
+  the race, and the mask symptom later reappeared on the OTHER backend with the first one clean.
+
+  **The lesson is about attribution, not about either bug.** A rebuild is a plausible-sounding
+  fix for almost anything, so "I rebuilt and it went green" is evidence only if the failure was
+  deterministic beforehand. This one was intermittent at roughly one run in six, which is exactly
+  the rate at which a rebuild looks curative. **Before crediting a build sweep, check that the
+  failure reproduced every time you ran it** — and prefer the explanation that accounts for
+  every symptom over the one that accounts for the one in front of you. An alternating
+  backend is a signature of corruption; a stale object file is deterministic per binary.
+
+  The vtable trap below is still real and still worth the sweep — a new virtual on a widely
+  included base class does produce a binary whose halves disagree. It just was not what happened
+  on 2026-09-11.
 
   Two things to take from it. **A reproducible failure is not evidence of a code defect** — a
   stale object file reproduces perfectly. And the direction of the error is not knowable in
