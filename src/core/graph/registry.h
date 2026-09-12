@@ -263,6 +263,16 @@ enum : std::int32_t
     op_mask_gradient  = 8,
     op_mask_qualifier = 9,
     op_mask_combine   = 10,
+
+    /// AN ISF SHADER AS A NODE. Appended, like everything since `mix`, because these constants
+    /// are INDICES.
+    ///
+    /// It reaches the shader as a `gn_op` like any other class, but nothing in either kernel
+    /// switches on it yet: the class exists so a document can carry one, the catalogue can
+    /// describe it and the validator can check it, which is the same order the graph itself
+    /// shipped in -- `api-graph` covered the document for six commits while nothing evaluated a
+    /// graph, and that was stated rather than implied.
+    op_isf            = 11,
 };
 
 /// The table. Built once, on first call, and never mutated.

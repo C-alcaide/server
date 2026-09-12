@@ -415,6 +415,64 @@ std::vector<node_class> build_classes()
         cs.push_back(std::move(c));
     }
 
+    // ---- an ISF shader, whose ports come from the FILE --------------------------------
+    //
+    // THE FIRST CLASS WHOSE PORTS ARE NOT KNOWN HERE. `path` selects a `.fs` under the media
+    // folder and the shader's own INPUTS become the rest of this node's ports, resolved per
+    // instance by the resolver the shell injects -- see `dynamic_ports`.
+    //
+    // AND IT IS AN ORDINARY NODE, placeable anywhere in a chain. That is worth stating because
+    // the first design restricted it to the head: an ISF shader is GLSL plus a JSON header, so
+    // it is a SHADER PASS, which is exactly what this evaluator already draws. It needs no
+    // pre-pass, no interop and no pass splitting. A foreign RENDERER -- an OFX plug-in with its
+    // own GL or CUDA context -- is the thing that cannot live mid-pass, and conflating the two
+    // nearly cost this feature the workflow that matters: every peer host (Resolume, Natron,
+    // TouchDesigner) lets an effect sit anywhere, and reordering a stack is the creative act.
+    {
+        node_class c;
+        c.id             = "isf";
+        c.label          = "ISF Shader";
+        c.group          = "effect";
+        c.description    = "an Interactive Shader Format shader, from the media folder. "
+                           "With no `path` chosen it passes its input through, so a node can be "
+                           "placed before a shader is picked";
+        c.preview        = true;
+        c.produces_image = true;
+        c.dynamic_ports  = true;
+        c.ports_selector = "path";
+
+        // THE STATIC PART: what every instance has whatever the file says. A shader declaring
+        // its own `path` input cannot shadow this one -- `instance_ports` keeps the static
+        // list first for exactly that reason.
+        {
+            port_desc path;
+            path.param.name        = "path";
+            path.param.type        = fields::value_type::string;
+            path.param.access      = fields::access_t::read_write;
+            path.param.arity       = 1;
+            path.param.description = "the shader file, relative to the media folder";
+            // AN EMPTY STRING, not nothing. `node_registry_self_test` refuses to boot a port
+            // whose default component count does not match its arity -- and it caught this
+            // exact omission, which is what a boot self-test is for: the server would not
+            // start rather than serve a malformed port to a catalogue.
+            //
+            // Empty is also the right VALUE: a node with no path yet is a node whose ports are
+            // not known, which `instance_ports` reports as "needs 'path' before its ports are
+            // known" rather than as a missing shader.
+            path.param.default_value.push_back(std::string{});
+            path.param.value       = path.param.default_value;
+            path.direction         = port_direction::input;
+            path.flow              = port_flow::signal;
+            path.domain            = port_domain::value;
+            c.ports.push_back(std::move(path));
+        }
+        c.ports.push_back(image_port("in", port_direction::input, /*required*/ true));
+        c.ports.push_back(mask_port("mask", port_direction::input));
+        c.ports.push_back(mix_amount());
+        c.ports.push_back(image_port("out", port_direction::output));
+        cs.push_back(std::move(c));
+    }
+
     // ---- the implicit `bypass`, added HERE so no class author can forget it -------------
     //
     // A bypassed node aliases its primary input and costs no draw, so a graph with a bypassed
@@ -477,7 +535,18 @@ std::vector<port_desc> instance_ports(const node_class& cls, const std::string& 
         return cls.ports;
 
     if (selector.empty()) {
-        out_reason = "'" + cls.id + "' needs '" + cls.ports_selector + "' before its ports are known";
+        // NO SELECTOR YET IS NOT A FAULT. An editor drops an `isf` node and then chooses a
+        // shader, and reporting an error in between would make the whole document invalid --
+        // so dropping a node mid-edit would stop the layer rendering.
+        //
+        // That is the failure mode this registry already refuses everywhere else: "a muted edge
+        // or a dead branch must render the layer UNCHANGED, because a muted edge during a show
+        // blacking a layer is the one failure mode nobody would forgive." A node with no shader
+        // selected is a dead branch by exactly that definition, and the evaluator treats it as
+        // bypassed -- it aliases its primary input and costs no draw.
+        //
+        // A WRONG path is a different thing entirely and still faults, because that is a
+        // mistake rather than an unfinished edit.
         return cls.ports;
     }
 
@@ -847,6 +916,7 @@ void node_registry_self_test()
             {op_mask_gradient, "mask_gradient"},
             {op_mask_qualifier, "mask_qualifier"},
             {op_mask_combine, "mask_combine"},
+            {op_isf, "isf"},
         };
         for (const auto& o : ops) {
             if (static_cast<std::size_t>(o.first) >= classes.size())

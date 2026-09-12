@@ -47,6 +47,7 @@
 #include <accelerator/compose_self_test.h>
 
 // The PNG encoder for node previews. In `modules/image` because that is where FFmpeg is.
+#include <modules/isf/isf.h>
 #include <modules/image/util/image_png.h>
 #include <core/stage/stage_fields.h>
 #include <accelerator/ogl/image/image_mixer.h>
@@ -1115,6 +1116,11 @@ struct server::impl
                         reason = "no channel is rendering a graph named '" + graph + "'";
                     return out;
                 };
+                // THE ISF CLASS'S PORT RESOLVER, injected here because `core/graph` must not
+                // link `modules/isf` -- the same argument that keeps FFmpeg out of
+                // `protocol_http` and puts the producer factory on the stage from here.
+                core::graph::set_port_resolver("isf", &isf::resolve_node_ports);
+
                 api_ctx.timelines     = timelines_;
                 api_ctx.graphs        = graphs_;
 

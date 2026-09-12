@@ -10,10 +10,23 @@
 
 #pragma once
 
+#include <core/graph/registry.h>
+
 #include <core/module_dependencies.h>
 
 namespace caspar { namespace isf {
 
 void init(const core::module_dependencies& dependencies);
+
+/// Map one ISF shader's declared INPUTS onto node-graph ports.
+///
+/// Registered by the shell as the `isf` class's port resolver, so `core/graph` can describe a
+/// node whose ports come from a file without linking this module -- the same injection the
+/// stage uses for its producer factory.
+///
+/// `selector` is the node's `path` parameter. Returns an empty list and sets `out_reason` when
+/// the shader cannot be read or its header will not parse; the validator turns that into ONE
+/// fault naming `path`, rather than one per port that went missing with it.
+std::vector<core::graph::port_desc> resolve_node_ports(const std::string& selector, std::string& out_reason);
 
 }} // namespace caspar::isf

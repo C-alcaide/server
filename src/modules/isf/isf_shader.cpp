@@ -1401,6 +1401,114 @@ bool shader::render_into_shared(gl_context&                       ctx,
         width, height, time, time_delta, frame_index, images, static_cast<GLuint>(dst_gl_texture));
 }
 
+namespace {
+
+/// `read_num_array`, at file scope. The shader impl has a private static of the same shape and
+/// this cannot reach it; duplicating four lines beats making the impl's internals public for
+/// one caller.
+void read_num_array_free(const boost::property_tree::ptree& node, const char* key, std::vector<double>& out)
+{
+    if (auto a = node.get_child_optional(key)) {
+        for (const auto& v : *a)
+            out.push_back(v.second.get_value<double>(0.0));
+        if (out.empty())
+            out.push_back(node.get<double>(key, 0.0));
+    } else if (auto one = node.get_optional<double>(key)) {
+        out.push_back(*one);
+    }
+}
+
+} // namespace
+
+std::vector<input> describe_inputs(const std::wstring& path, std::string& out_error)
+{
+    out_error.clear();
+
+    namespace fs = std::filesystem;
+
+    // RESOLVED UNDER THE MEDIA FOLDER, and only under it. A document names a shader the way an
+    // operator does, so the same token must work in both places -- and a graph must not be able
+    // to read a file outside the media root by writing `..` in a parameter.
+    std::string source;
+    try {
+        const auto root = fs::path(u8(env::media_folder()));
+        auto       file = fs::weakly_canonical(root / fs::path(u8(path)));
+        if (!file.has_extension())
+            for (const auto* ext : {".fs", ".glsl", ".frag"})
+                if (fs::exists(fs::path(file).concat(ext)))
+                    file = fs::path(file).concat(ext);
+
+        const auto canon_root = fs::weakly_canonical(root).generic_string();
+        if (file.generic_string().rfind(canon_root, 0) != 0) {
+            out_error = "'" + u8(path) + "' is outside the media folder";
+            return {};
+        }
+        std::error_code ec;
+        if (!fs::is_regular_file(file, ec)) {
+            out_error = "no ISF shader '" + u8(path) + "' under the media folder";
+            return {};
+        }
+        std::ifstream f(file);
+        if (!f) {
+            out_error = "'" + u8(path) + "' could not be read";
+            return {};
+        }
+        source.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    } catch (const std::exception& e) {
+        out_error = std::string("'") + u8(path) + "' could not be read: " + e.what();
+        return {};
+    }
+
+    const auto json = extract_json(source);
+    if (json.empty()) {
+        // A plain GLSL fragment with no ISF header is still playable and simply declares no
+        // inputs -- `discover_shaders` makes the same distinction deliberately. It is not an
+        // error, and the caller gets an empty list with no reason set.
+        return {};
+    }
+
+    boost::property_tree::ptree pt;
+    try {
+        std::istringstream is(json);
+        boost::property_tree::read_json(is, pt);
+    } catch (const std::exception& e) {
+        out_error = std::string("the ISF header of '") + u8(path) + "' is not valid JSON: " + e.what();
+        return {};
+    }
+
+    std::vector<input> out;
+    if (auto inputs = pt.get_child_optional("INPUTS")) {
+        for (const auto& kv : *inputs) {
+            const auto& node = kv.second;
+            input       in;
+            in.name  = node.get<std::string>("NAME", "");
+            in.type  = node.get<std::string>("TYPE", "");
+            in.label = node.get<std::string>("LABEL", in.name);
+            if (in.name.empty() || in.type.empty())
+                continue;
+            in.is_image   = in.type == "image" || in.type == "audio" || in.type == "audioFFT";
+            in.audio_kind = in.type == "audio"      ? audio_input::waveform
+                            : in.type == "audioFFT" ? audio_input::fft
+                                                    : audio_input::none;
+            read_num_array_free(node, "MIN", in.min_value);
+            read_num_array_free(node, "MAX", in.max_value);
+            read_num_array_free(node, "DEFAULT", in.default_value);
+            if (in.type == "long") {
+                if (auto vals = node.get_child_optional("VALUES"))
+                    for (const auto& v : *vals)
+                        in.values.push_back(v.second.get_value<long>(0));
+                if (auto labs = node.get_child_optional("LABELS"))
+                    for (const auto& l : *labs)
+                        in.labels.push_back(l.second.get_value<std::string>(""));
+            }
+            if (in.default_value.empty())
+                in.default_value.push_back(0.0);
+            out.push_back(std::move(in));
+        }
+    }
+    return out;
+}
+
 std::vector<shader_info> discover_shaders()
 {
     namespace fs = std::filesystem;

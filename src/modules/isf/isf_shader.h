@@ -243,4 +243,20 @@ struct shader_info
 /// would need the mixer's context and would take seconds.
 std::vector<shader_info> discover_shaders();
 
+/// The INPUTS one shader declares, parsed from its header and nothing else.
+///
+/// `discover_shaders()` answers "what is there" and reports a COUNT of inputs; this answers
+/// "what does this one take", which is what a caller needs to build a parameter surface from.
+///
+/// NO GL CONTEXT, NO COMPILATION, NO DEVICE -- the same property that makes `discover_shaders`
+/// callable from a protocol thread, and for the same reason: the node graph resolves a node's
+/// ports on the API executor during a PUT, and compiling a shader there would put the mixer's
+/// context on the write path.
+///
+/// `path` is resolved the way `PLAY 1-1 [ISF] <name>` resolves it, so a document may name a
+/// shader the same way an operator does. Returns empty and sets `out_error` when the file
+/// cannot be read or its header cannot be parsed -- an empty list is never a valid answer for a
+/// shader that exists, because a shader with no INPUTS still has its image input.
+std::vector<input> describe_inputs(const std::wstring& path, std::string& out_error);
+
 }} // namespace caspar::isf
