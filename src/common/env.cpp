@@ -33,7 +33,10 @@
 #include <boost/property_tree/xml_parser.hpp>
 
 #include <boost/algorithm/string.hpp>
+#include <atomic>
 #include <fstream>
+#include <functional>
+#include <thread>
 
 namespace caspar { namespace env {
 
@@ -69,11 +72,34 @@ std::wstring resolve_or_create(const std::wstring& folder)
 
 void ensure_writable(const std::wstring& folder)
 {
-    static const std::wstring CREATE_FILE_TEST = L"casparcg_test_writable.empty";
+    // UNIQUE PER PROCESS AND PER CALL, and that is a bug fix rather than tidiness.
+    //
+    // This probe used to be the fixed name `casparcg_test_writable.empty`. Two servers starting
+    // against the same folder -- which is every parallel test run, and any rig where two
+    // instances share a data or template directory -- then race on one filename: each creates
+    // it and each removes it, so one server's `remove` lands between the other's `ofstream` and
+    // its `fail()` check, or its own create fails outright. The loser dies at start-up with
+    // "Directory <x> is not writable.", a message that names a PERMISSION problem and means
+    // CONCURRENCY.
+    //
+    // What that cost is out of proportion to the line: `conformance` and `grading` both carry a
+    // `--sequential` flag that exists ONLY for this, and their headline is computed over the
+    // conversions that SURVIVED -- so a run whose servers lost the race printed a plausible
+    // `81/81 conversions within 1.0 LSB` and read exactly like a clean run of a smaller
+    // battery. It is recorded in three places as a trap to work around; this removes it.
+    //
+    // The probe's question is "can this process write here", and a unique name answers it
+    // identically while making the answer independent of anyone else asking at the same moment.
+    static std::atomic<std::uint64_t> probe_counter{0};
+
+    // The THREAD id rather than a process id: it is std, needs no extra header, and is just as
+    // unique between two servers as a pid is -- nothing here needs the number to mean anything.
+    const auto unique = std::to_wstring(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
+                        L"_" + std::to_wstring(probe_counter.fetch_add(1));
 
     boost::system::error_code   ec;
-    boost::filesystem::path     test_file(folder + L"/" + CREATE_FILE_TEST);
-    boost::filesystem::ofstream out(folder + L"/" + CREATE_FILE_TEST);
+    boost::filesystem::path     test_file(folder + L"/casparcg_writable_" + unique + L".tmp");
+    boost::filesystem::ofstream out(test_file);
 
     if (out.fail()) {
         boost::filesystem::remove(test_file, ec);

@@ -25,16 +25,27 @@ mixers (`--mixer ogl` and `--mixer vulkan`); parity is required, not optional. A
 failure in either has exactly one possible cause, which is what makes every softer
 threshold downstream defensible.
 
-**Add `--sequential` to BOTH on this box, and read the exit code rather than the headline.**
-They start several servers at once over one `build/shell`, and `env::ensure_writable` probes
-with a FIXED filename — so the loser dies at startup with *"Directory data/ is not writable"*,
-which names a directory and means concurrency. Measured 2026-09-11 for `conformance` (it was
-already known for `grading`): three runs came back short, and the failure is nearly invisible
-because the conversions whose server never started are counted as SKIPS while the headline is
-computed over what SURVIVED. A truncated run prints a plausible `81/81 conversions within
-1.0 LSB` and reads exactly like a clean run of a smaller battery. The shortfall is on **stderr**
-and in the **exit code** — so never pipe these through `tail` or `grep`, which replaces the
-status with the pipe's and discards the per-skip lines. `--sequential` is 100/100 on both mixers.
+**`--sequential` IS NO LONGER NEEDED, and the bug it worked around is fixed** (2026-09-12).
+Both batteries start several servers at once over one `build/shell`, and `env::ensure_writable`
+probed with the FIXED filename `casparcg_test_writable.empty` -- so two servers raced on one
+path, and the loser died at start-up with *"Directory data/ is not writable"*, a message that
+names a permission problem and meant concurrency. The probe is now unique per process.
+
+**Why this was worth more than the time it saves.** The failure was nearly invisible: the
+conversions whose server never started are counted as SKIPS while the headline is computed over
+what SURVIVED, so a truncated run printed a plausible `81/81 conversions within 1.0 LSB` and
+read exactly like a clean run of a smaller battery. A workaround for that had been recorded in
+three places, and a documented workaround outlives the bug -- the flag would have been paid
+forever for a problem that was five lines to fix.
+
+Measured after the fix, parallel, **0 skipped rows and full counts on both mixers**:
+`conformance` 100/100 in **174 s (ogl) / 281 s (vulkan)** against roughly twelve minutes each
+sequentially; `grading` 13/13 single, 8/8 stack, 8/8 shuffled in **36 s** each against roughly
+four minutes. A full regression sweep drops from about seventy minutes to about twenty.
+
+**Still read the exit code rather than the headline.** That half of the old advice stands for a
+different reason: a skip is not a pass, and `tail`/`grep` on these replaces the status with the
+pipe's and discards the per-skip lines. `sweep.sh` in the harness does neither.
 
 If the capability you need is missing, add it to the harness (`core/` + a `cli.py`
 subcommand + tests) rather than writing a script in the scratchpad.

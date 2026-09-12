@@ -222,7 +222,16 @@ class image_mixer
     virtual std::future<std::vector<node_preview_image>>
     arm_node_preview(const std::string&              /*graph_name*/,
                      const std::vector<std::string>& node_ids,
-                     int                             /*max_edge*/ = default_preview_edge)
+                     //: NO DEFAULT ARGUMENT, deliberately. One existed and was DEAD: the HTTP
+                     //: route passes this explicitly on every call, so its value won -- and it
+                     //: passed 0, meaning every request without `?max=` did a full-raster
+                     //: readback while this header claimed a 512 thumbnail. A 16-node strip at
+                     //: 2160p50 read 1001 ms that way against about 45 ms with the default
+                     //: actually in force, and both the battery and the feature doc repeated
+                     //: the slow number. **A default expressed in two places is a default in
+                     //: neither**, so the only one lives at the route, which is where the
+                     //: client's absence of a parameter is observed.
+                     int                             /*max_edge*/)
     {
         std::vector<node_preview_image> out(node_ids.size());
         for (auto& o : out)

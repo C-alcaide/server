@@ -24,6 +24,9 @@
 #include "json_state.h"
 #include "boost_prelude.h"
 
+#include <core/mixer/image/image_mixer.h> // core::default_preview_edge -- the ONE place the
+                                          // preview size default is decided; see the route.
+
 #include <common/except.h>
 #include <common/executor.h>
 #include <common/log.h>
@@ -771,16 +774,28 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
                     pos = comma + 1;
                 }
             }
-            // `?max=<pixels>` caps the LONGEST SIDE. Absent or unparseable means the layer's
-            // own raster, which is what every client got before this existed -- a preview that
-            // silently shrank would be a worse default than a slow one.
-            int max_edge = 0;
+            // `?max=<pixels>` caps the LONGEST SIDE. **ABSENT MEANS THE THUMBNAIL DEFAULT**,
+            // and `max=0` is how a client asks for the layer's full raster.
+            //
+            // THE DEFAULT HAS TO BE APPLIED HERE, which is the whole point of this comment.
+            // `core::image_mixer::arm_node_preview` declares `max_edge = default_preview_edge`
+            // as a C++ default argument, and that default is DEAD: this route passes the
+            // parameter explicitly on every call, so whatever it puts here wins. It used to put
+            // 0, so every request without `?max=` asked for a full-raster readback while the
+            // header said the opposite.
+            //
+            // Measured, and it is why this is not a tidy-up: a 16-node strip at 2160p50 read
+            // 1001 ms that way and reads about 45 ms with the default actually applied -- 2.6 ms
+            // per node against 63. The battery reported the slow number for a week and the
+            // feature doc repeated it, because both were measuring a default that was never in
+            // force. **A default expressed in two places is a default in neither.**
+            int max_edge = core::default_preview_edge;
             try {
                 const auto raw = query_param(target.query, "max");
                 if (!raw.empty())
                     max_edge = std::max(0, std::stoi(raw));
             } catch (const std::exception&) {
-                max_edge = 0;
+                max_edge = core::default_preview_edge;
             }
             api_executor_.begin_invoke([self, stream, buffer, gname, nodes, max_edge, method, keep, ver,
                                         authorization, path = target.path]() {

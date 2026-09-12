@@ -959,22 +959,27 @@ first node of a two-node chain, and the last node's preview matches the captured
 
 Measured by `node-preview-cost`, both mixers, four channels:
 
-| | 1080p50 | 2160p50, full raster | 2160p50, `max=512` |
+| | 1080p50 | 2160p50 | 2160p50, `max=0` (full raster) |
 | :--- | ---: | ---: | ---: |
-| one preview, end to end | ~17 ms | ~81 ms | **17-22 ms** |
-| a 16-node strip, one request | **247-277 ms** | 1294 ms (16 requests) | **1001-1042 ms** |
-| sustained rate, one client | ~30/s | 12.6/s | **25/s, not saturated** |
-| PNG on the wire | ~1 KB | 37 KB | **1 KB** |
-| late frames, Vulkan, at 25/s | 0 | 201/2004 (**10.03%**) | 0-1/2007 (**~0%**) |
+| one preview, end to end | ~17 ms | **~18-20 ms** | ~81 ms |
+| a 16-node strip, one request | **~43 ms** | **~43-46 ms** | ~940-960 ms |
+| per node in that strip | 2.7 ms | **2.7-2.9 ms** | ~59 ms |
+| sustained rate, one client | ~30/s | **25/s, not saturated** | 12.6/s |
+| PNG on the wire | ~1 KB | **~1 KB** | 37 KB |
+| late frames, Vulkan, at 25/s | 0 | **~0%** | 201/2004 (10.03%) |
 
-**AND THE 16-NODE STRIP AT 4K IS THE ONE NUMBER THAT DID NOT MOVE MUCH**, which is worth
-stating because the rest of this section would otherwise imply it did. A single 512-px preview
-at 2160p50 costs 17-22 ms, and sixteen of them in one request cost **63-65 ms each** -- the
-strip is still raster-dominated rather than readback-dominated, on BOTH backends, so neither
-the thumbnail nor the batching addresses whatever the remaining term is. Batching bought about
-19% at 4K (1294 -> 1042) and about half at HD (551 -> 247-277). **Unexplained and unprofiled**:
-the obvious candidates are the per-preview tail draw and the composite each request forces by
-dropping the still-frame cache, and no mutation has been run to separate them.
+**AND THIS TABLE WAS WRONG FOR A WEEK, in a way worth recording.** It read 1001-1042 ms for a
+16-node strip at 4K and called the strip "raster-dominated". Both this page and the battery
+were measuring a default that **was never in force**: `arm_node_preview` declared
+`max_edge = default_preview_edge` as a C++ default argument, and the HTTP route passed the
+parameter explicitly on every call -- so the route's value won, and it passed 0, meaning full
+raster. **A default expressed in two places is a default in neither.** It now lives only at
+the route, which is where a client's *absence* of a parameter is actually observed.
+
+**THE STRIP IS NOT RASTER-DOMINATED**, which an earlier version of this page claimed. Sixteen
+nodes in one request cost **~43 ms at 2160p50, 2.7 ms each**, against ~18-20 ms for a single
+one -- the fixed cost of waiting for a frame is paid once for the whole set rather than per
+node. That is the batching working: the same strip was 1294 ms as sixteen separate requests.
 
 **THE COST IS PIXELS, NOT PREVIEWS**, and that was established by measurement rather than
 assumed. The per-node figure tracks the raster; identical code costs nothing at 1080p50 and
