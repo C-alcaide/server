@@ -1,6 +1,7 @@
 # Where to get effects — ISF, OFX, HTML, and the licensing that decides it
 
-> **Status:** SURVEY — compiled 2026-09-09. **§5.3, §5.6 and §6 are measured** — the orb effect was
+> **Status:** SURVEY — compiled 2026-09-09, extended 2026-09-13 (§5.7, desk research only).
+> **§5.3, §5.6 and §6 are measured** — the orb effect was
 > built and played as a layer (§5.3), and — 327 ISF shaders and 147 OFX
 > plugins were played into a real channel and judged from the captured picture. The rest is desk
 > research and says so.
@@ -348,6 +349,55 @@ measured, including `LUT1DEffect`, `LUT3DEffect`, `GammaCorrectionEffect` and `T
 "differs from identity", not "computes the right thing". `SSAOEffect`, `DepthOfFieldEffect` and
 `GodRaysEffect` need real geometry and a depth buffer, which a flat quad does not provide. And
 nothing was measured for frame rate.
+
+### 5.7 Ten more from a social-media round-up — and a licence class §1 had not met yet
+
+Checked 2026-09-13. Desk research: **none of these has been played into a channel.**
+
+| source | ★ | licence | verdict |
+| :--- | ---: | :--- | :--- |
+| [greensock/GSAP](https://github.com/greensock/GSAP) | 28381 | **"no charge" standard** | **The one to take.** Every former members-only plugin, free, commercial |
+| [pmndrs/react-three-fiber](https://github.com/pmndrs/react-three-fiber) | 32272 | MIT | Safe, and **redundant here** — §3.2 already drives three.js directly |
+| [tengbao/vanta](https://github.com/tengbao/vanta) | 7006 | MIT | Drop-in animated backgrounds, but **pushed 2024-03-03**, pinned to three r134 |
+| [dashersw/liquid-glass-js](https://github.com/dashersw/liquid-glass-js) | 991 | MIT | A single "Initial commit", 2025-06-12. A snippet to read, not a dependency |
+| [DavidHDev/react-bits](https://github.com/DavidHDev/react-bits) | 47103 | **MIT + Commons Clause** | Usable IN a product, **not redistributable**. GPL-incompatible |
+| [paper-design/liquid-logo](https://github.com/paper-design/liquid-logo) | 1086 | **PolyForm Shield 1.0** | Noncompete, deliberately broad. GPL-incompatible |
+| [ruucm/shadergradient](https://github.com/ruucm/shadergradient) | 2433 | **NO LICENCE** | Cannot use |
+| [originkit.dev](https://www.originkit.dev/) | — | unstated | React/Framer library with an MCP server; the site 403s |
+| [particles.casberry.in](https://particles.casberry.in/) | — | unstated | Generates three.js particle JS from an LLM prompt; the site 403s |
+
+**GSAP is the find, and its licence changed in a way worth knowing.** The standard licence now
+covers commercial use **at no charge including every formerly members-only plugin** — SplitText,
+MorphSVG and the rest. Drop-in vanilla JS with no build step, which puts it ahead of everything
+else in this table for the HTML producer, and animation TIMING is exactly what a broadcast
+template needs and what none of the shader libraries in §5 provide. The one restriction: you may
+not implement it in a visual animation builder that competes with Webflow. They explicitly permit
+"niche tools with visual interfaces" that do not, so the client in
+[`INTERACTIVE_PREVIZ_SCOPE.md`](INTERACTIVE_PREVIZ_SCOPE.md) is fine — but this is worth
+re-reading on the day that client grows a timeline.
+
+**The new licence class, and it is the reason this section exists.** §1 and §5.5 are about
+*absence* of a licence. Two here have a licence that is present, prominent, and still blocks us:
+
+* **Commons Clause** (`react-bits`) — *"so long as you do not sell, sublicense, or redistribute
+  the components themselves — whether alone, in a bundle, or as a ported version."*
+* **PolyForm Shield** (`liquid-logo`) — *"Any purpose is a permitted purpose, except for
+  providing any product that competes with the software or any product the licensor or any of
+  its affiliates provides using the software"*, and its Competition clause is written to be
+  broad: *"Applications can compete with services, libraries with plugins… even when provided
+  free of charge."*
+
+**Neither may enter this tree.** CasparVP is GPLv3 and both are GPL-incompatible, so the
+question is not whether the effect is good. They could only ever live in an HTML template we
+author — content loaded at runtime, never committed as source — and `react-bits` at 47103★ is
+the most popular thing in this whole document, which is the §5.5 lesson arriving from the
+opposite direction: there, popularity came with *no* licence; here it comes with a licence that
+reads permissive until the clause after the MIT text.
+
+**`shadergradient` is the plain case**: 2433★, no LICENSE file, and a `# License` heading in its
+README with nothing underneath it. §1 applies unchanged.
+
+---
 
 ## 6. MEASURED — what actually loads and renders, 2026-09-09
 
