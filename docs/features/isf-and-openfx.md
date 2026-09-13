@@ -138,6 +138,27 @@ and remotewall — six consumers of one allocation function.
 
 `configuration.ofx` is read for plugin discovery.
 
+### ISF is also a NODE CLASS, and it runs a narrower subset
+
+`isf` is a class in the node graph as well as a producer, so the same `.fs` file can be played as
+a layer or dropped into a look. **The two are different implementations with different
+capabilities**, and the difference is documented rather than discovered:
+
+| | the PRODUCER | the NODE |
+| :--- | :--- | :--- |
+| backends | OpenGL only (it is a producer; the mixer composites its output) | OpenGL **and** Vulkan, gated against one closed-form model on both |
+| `PASSES` | yes | yes, up to **8** distinct `TARGET`s — a node's targets bind into one descriptor set |
+| `PERSISTENT` | yes | yes, per node INSTANCE, with a `reset` port |
+| `IMPORTED` | yes | **refused at PUT** |
+| a sibling `.vs` | yes | **refused at PUT** |
+| `FLOAT` targets | 32-bit | **fp16**, like every other node intermediate |
+
+A node refuses at PUT, naming what is missing, rather than rendering a plausible wrong picture —
+and it refuses on **both** backends even where one could cope, because a document that renders
+differently depending on the mixer is the failure that rule exists to prevent. `docs/features/
+node-graph.md` §8 has the full list and the reasoning; the producer is untouched by any of it, so
+`[ISF] <shader>` still plays whatever a node declines.
+
 ---
 
 ## 2. How to drive it
