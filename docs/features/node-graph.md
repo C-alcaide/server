@@ -1239,14 +1239,29 @@ So **two seven-pass nodes fit and four do not**, on this hardware at this raster
 measurement pass is far worse than the first, the same does-not-recover signature §7.3 records
 for the Vulkan cap. The number to build a look against is two.
 
-**On Vulkan a four-node chain EXHAUSTS VRAM AND RENDERS NOTHING**, which is a defect rather than
-a limit: the ticks fail with `allocateMemory: ErrorOutOfDeviceMemory` (60 of them in one run) and
-the channel then reports **0 late frames**, because a channel that is not drawing has none to
-report. It read as the cheapest arm in the whole battery while two nodes read 83% late. Work that
-grows cannot get cheaper, and that is now a gate — `grade-graph-cost` fails on Vulkan until this
-is fixed, which is the honest state of it. The renderpass holds every attachment until `commit()`,
-so a four-node chain has 28 live at once; §7.3 has the same mechanism at the root of the cost work
-that preceded this.
+**A CHAIN'S PASS BUFFERS ARE POOLED, and before they were a four-node chain rendered NOTHING on
+Vulkan.** A node's targets are dead the moment its last pass has drawn, so the next node takes
+them back and a chain uses one node's worth whatever its length — the same trick node *outputs*
+had already, and §7.3 records why the renderpass makes it necessary: it holds every attachment
+until `commit()`, so nothing is actually freed mid-frame and handing the buffer on directly is
+the only reuse available.
+
+Without it each node allocated its own six. Twenty-four intermediates per channel at 66 MB apiece
+is 1.6 GB per channel and 6.3 GB across four, and Vulkan simply ran out: sixty
+`allocateMemory: ErrorOutOfDeviceMemory` tick failures, after which the channel **reported 0 late
+frames out of 2005 — the cheapest arm in the whole battery — while two nodes reported 83% late.**
+A channel that is not drawing has no late frames to report, which is the same sentence §7.3
+carries for the still-frame cache, reached from a different direction. *Work that grows cannot get
+cheaper* is now a gate in `grade-graph-cost`, and it is what caught this.
+
+Measured after, on Vulkan: one node 9.6%, two nodes 21.9% then 3.3%, four nodes 100% — **drawing,
+monotonic, and no OOM at all.** Four seven-pass nodes at 2160p50 on four channels is still past
+this card; the difference is that it now says so.
+
+**Within a single node the buffers are NOT recycled, deliberately.** An ISF pass may sample any
+target the shader declares rather than only the one before it — that is what naming them is for —
+so all six stay live until the node is done. Recycling them needs a liveness analysis of which
+pass samples which target, for a quarter of the saving this already gets.
 
 **`isf` draws MULTI-PASS on both backends.** A node runs every `PASSES` entry in order, each with
 its own `PASSINDEX` and its own `RENDERSIZE`, and a pass declaring `WIDTH`/`HEIGHT` gets a buffer

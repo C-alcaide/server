@@ -1228,6 +1228,35 @@ class image_renderer
                 // `take_back_for_writing` there.
                 std::vector<std::shared_ptr<texture>> free_attachments;
 
+                // ── AND THE SAME TRICK FOR AN ISF NODE'S PASS BUFFERS ────────────────────
+                //
+                // A seven-pass node takes SIX intermediates. Four of them chained took
+                // twenty-four, per channel, per frame -- because each node allocated its own and
+                // nothing handed them on. At 2160p fp16 that is 66 MB apiece: **1.6 GB per
+                // channel, 6.3 GB across four, before the frame slots multiply it.**
+                //
+                // MEASURED 2026-09-13, and the way it presented is the point. The four-node arm
+                // read **0 late frames out of 2005 -- the cheapest arm in the battery** -- while
+                // the two-node arm read 83%. The server log had sixty
+                // `allocateMemory: ErrorOutOfDeviceMemory` tick failures: the chain had
+                // exhausted the card, the ticks were failing, and a channel that is not drawing
+                // has no late frames to report.
+                //
+                // A NODE'S TARGETS ARE DEAD THE MOMENT ITS LAST PASS HAS DRAWN, so the next node
+                // takes them back and a chain uses ONE node's worth whatever its length. KEYED
+                // BY EXTENT, unlike the list above: node outputs are always the channel raster
+                // and a pass buffer is whatever its `WIDTH`/`HEIGHT` expressions evaluated to.
+                //
+                // WITHIN one node they are NOT recycled, and that is deliberate rather than an
+                // oversight: an ISF pass may sample any target the shader declares, not only the
+                // one before it -- that is what naming them is for -- so the six are all live
+                // until the node is done. Reusing them would need a liveness analysis of which
+                // pass samples which target, for a quarter of the saving this already gets.
+                //
+                // The re-entry is the case `renderpass::take_back_for_writing` exists for, the
+                // same as for the free list above.
+                std::vector<std::pair<std::pair<int, int>, std::shared_ptr<texture>>> free_isf_targets;
+
                 for (std::size_t i = 0; i < plan->steps.size(); ++i) {
                     const auto& st = plan->steps[i];
                     if (alias[i] != static_cast<int>(i)) {
@@ -1451,10 +1480,21 @@ class image_renderer
                                 // from `eUndefined` and discards exactly what it is for.
                                 pass->adopt_as_shader_read(tgt_write[k]);
                             } else {
-                                tgt_read[k] = pass->create_attachment_sized(
-                                    static_cast<uint32_t>(pp.width),
-                                    static_cast<uint32_t>(pp.height),
-                                    common::render_format::fp16);
+                                // A buffer an EARLIER NODE has finished with, of exactly this
+                                // extent, or a new one.
+                                const auto key = std::make_pair(pp.width, pp.height);
+                                const auto it =
+                                    std::find_if(free_isf_targets.begin(), free_isf_targets.end(),
+                                                 [&](const auto& e) { return e.first == key; });
+                                if (it != free_isf_targets.end()) {
+                                    tgt_read[k] = std::move(it->second);
+                                    free_isf_targets.erase(it);
+                                } else {
+                                    tgt_read[k] = pass->create_attachment_sized(
+                                        static_cast<uint32_t>(pp.width),
+                                        static_cast<uint32_t>(pp.height),
+                                        common::render_format::fp16);
+                                }
                                 tgt_write[k] = tgt_read[k];
                             }
                             tgt_names.push_back(pp.target);
@@ -1499,6 +1539,20 @@ class image_renderer
                             for (std::size_t k = 0; k < tgt_names.size(); ++k)
                                 if (tgt_names[k] == isf_plan.back().target)
                                     apply_passthrough(tgt_write[k], dst, format_desc, pass);
+
+                        // ── THIS NODE IS DONE WITH ITS BUFFERS: HAND THEM ON ────────────
+                        //
+                        // After the copy above, not before it -- the final pass's target is read
+                        // one more time there. A PERSISTENT pair is never pooled: it belongs to
+                        // the instance and outlives the frame.
+                        for (std::size_t k = 0; k < tgt_names.size(); ++k) {
+                            if (!tgt_read[k] || tgt_read[k] != tgt_write[k])
+                                continue; // persistent: read and write are different halves
+                            free_isf_targets.emplace_back(
+                                std::make_pair(static_cast<int>(tgt_read[k]->width()),
+                                               static_cast<int>(tgt_read[k]->height())),
+                                std::move(tgt_read[k]));
+                        }
 
                         // ── FLIPPED ONCE PER FRAME, AFTER EVERY PASS ─────────────────────
                         //
