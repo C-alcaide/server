@@ -1224,6 +1224,30 @@ is a capacity limit rather than a defect — eight passes cost 2.6%, and the byp
 both. The saturation defects that used to accompany it (a permanently poisoned frame slot, unbounded
 VRAM, one channel's wait stalling all four) are fixed; see §7.3.
 
+**What multi-pass COSTS, measured 2026-09-13 on four 2160p50 channels.** A seven-pass node is
+seven draws and six intermediate attachments where a single-pass node is one and none, so the
+single-pass ladder cannot see this — sixteen single-pass nodes sit at 0/2004 on the same box in
+the same run:
+
+| chain of seven-pass nodes | draws / intermediates per channel | OpenGL |
+| :--- | :--- | :--- |
+| 1 node | 7 / 6 | 0/2004 |
+| 2 nodes | 14 / 12 | 0/2006, 2/2279 |
+| **4 nodes** | 28 / 24 | **397/2388, then 642/709 at an 88 ms period** |
+
+So **two seven-pass nodes fit and four do not**, on this hardware at this raster — and the second
+measurement pass is far worse than the first, the same does-not-recover signature §7.3 records
+for the Vulkan cap. The number to build a look against is two.
+
+**On Vulkan a four-node chain EXHAUSTS VRAM AND RENDERS NOTHING**, which is a defect rather than
+a limit: the ticks fail with `allocateMemory: ErrorOutOfDeviceMemory` (60 of them in one run) and
+the channel then reports **0 late frames**, because a channel that is not drawing has none to
+report. It read as the cheapest arm in the whole battery while two nodes read 83% late. Work that
+grows cannot get cheaper, and that is now a gate — `grade-graph-cost` fails on Vulkan until this
+is fixed, which is the honest state of it. The renderpass holds every attachment until `commit()`,
+so a four-node chain has 28 live at once; §7.3 has the same mechanism at the root of the cost work
+that preceded this.
+
 **`isf` draws MULTI-PASS on both backends.** A node runs every `PASSES` entry in order, each with
 its own `PASSINDEX` and its own `RENDERSIZE`, and a pass declaring `WIDTH`/`HEIGHT` gets a buffer
 that size — the expressions are arbitrary arithmetic over `$WIDTH`, `$HEIGHT` and the shader's own
@@ -1338,6 +1362,7 @@ rather than by the `MIXER` tween.
 | that a missing shader leaves the layer RENDERING | `grade-graph` | **both mixers.** Refused at PUT, or the input passed through — never black |
 | an `isf` node on **Vulkan**, as a variant pipeline | `grade-graph` | **the same 4 checks, same model, 43/43 both mixers.** The placeholder that asserted "Vulkan does not draw one" is deleted — it said in its own text that failing because the node DREW was the good failure, and it did. **The fixture found four defects before this passed**, none of which fails loudly on its own: the author's parameters based three slots early (a shader reading `mix` as its brightness); the variant ignoring the mixer's runtime output-order flag; a missing perspective divide (correct on default geometry, wrong on any corner-pin); and the input read flipped *and* channel-reversed |
 | that a flip and a channel exchange cannot CANCEL — **paid off on Vulkan** | `grade-graph` | after the perspective divide the two patches read *exact permutations* — top = reversed input × BOTTOM gains, bottom = reversed input × TOP gains — which named both faults at once. Mirror-symmetric gains would have reported two real faults as none |
+| what MULTI-PASS COSTS, and whether the chain drew at all | `grade-graph-cost` | **3 checks, both mixers.** A six-target separable blur at 1, 2 and 4 nodes, on the rungs the single-pass ladder already measured. **The arm lied twice before its controls existed** and both are the shapes this battery was rewritten to remove: first the attach was a copy referencing another battery's names, so every blur arm was SKIPPED and the run reported 5/7 with them absent — a skipped arm is not a failed one. Then on Vulkan four nodes read 0/2005, the cheapest arm in the battery, while two read 83% — the chain had exhausted VRAM and stopped ticking. So blue is a PASS COUNTER (each of the 28 draws adds 1/64; the picture reads 111.0 codes above the ungraded one against a model of 111.6), because a blur has no other observable — blurring a flat field returns that field. And a MONOTONICITY gate, because the counter is captured on ONE channel with nothing else running and cannot see a chain that stops under load |
 | that a node runs EVERY pass, not just the last | `grade-graph` | **1 check, both mixers.** Pass 0 writes `(level, 1-level, 0.3125)` into a target; pass 1 reads it back, ROTATES the channels `.gbr` and halves it. **"It drew twice" has to be distinguishable from "it drew once"** — a two-pass fixture whose second pass ignored the first renders the same picture either way, which is precisely the failure `PASSES` was refused for. Running only pass 1 samples an unwritten buffer and gives BLACK; running only pass 0 leaves a picture **112 LSB** away. The rotation is a 3-CYCLE rather than a reversal on purpose: `.bgr` is its own inverse, so a red/blue exchange in the target binding could cancel against it |
 | that a pass's own SIZE is honoured | `grade-graph` | **1 check, both mixers.** A pass declaring `WIDTH "2"`, `HEIGHT "1"` writes its own `RENDERSIZE.xy / 64` — exactly **8 and 4** codes for a 2×1 buffer, against 3840/64 clipped to 255 for one silently allocated at the channel raster. The value is written by the pass ITSELF rather than sampled at a chosen texel, so bilinear filtering of a two-texel buffer cannot move the answer. `RENDERSIZE` is what the whole `IMG_PIXEL` macro family divides by, so getting it wrong resamples every texture read in the shader rather than merely sizing a buffer oddly |
 | the things a node still REFUSES | `grade-graph` | **2 checks, both mixers** — nine `TARGET`s and a sibling `.vs`. Each is refused on the backend that *could* run it as well as the one that cannot, because a document rendering on one mixer and not the other is the fault this class is arranged to prevent. **These checks exist because the refusal of `PASSES` was documented in three places and implemented in none for a fortnight** — a claimed safety property that nothing exercises is not a safety property. The `.vs` arm is the odd one: both backends ignore a vertex shader identically, so it is not a parity fault at all, and is refused because agreeing on a wrong picture is still wrong |
