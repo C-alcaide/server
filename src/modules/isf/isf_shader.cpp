@@ -1550,6 +1550,40 @@ bool load_shader_source(const std::wstring& path,
     return true;
 }
 
+shader_features describe_features(const std::wstring& path, std::string& out_error)
+{
+    shader_features f;
+
+    std::string  source;
+    std::wstring base;
+    if (!load_shader_source(path, source, base, out_error))
+        return f;
+
+    const auto json = extract_json(source);
+    if (json.empty())
+        return f; // a plain GLSL fragment: one pass, no imports, nothing persistent
+
+    boost::property_tree::ptree pt;
+    try {
+        std::istringstream is(json);
+        boost::property_tree::read_json(is, pt);
+    } catch (const std::exception& e) {
+        out_error = std::string("the ISF header of '") + u8(path) + "' is not valid JSON: " + e.what();
+        return f;
+    }
+
+    if (auto passes = pt.get_child_optional("PASSES")) {
+        f.multipass = passes->size() > 1;
+        for (const auto& kv : *passes)
+            if (kv.second.get_optional<std::string>("PERSISTENT") ||
+                kv.second.get_optional<bool>("PERSISTENT"))
+                f.persistent = true;
+    }
+    if (pt.get_child_optional("IMPORTED"))
+        f.imported = true;
+    return f;
+}
+
 std::vector<input> describe_inputs(const std::wstring& path, std::string& out_error)
 {
     std::string  source;

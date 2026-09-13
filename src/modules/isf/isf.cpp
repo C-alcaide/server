@@ -120,6 +120,43 @@ core::graph::port_desc port_from_input(const input& in)
 
 std::vector<core::graph::port_desc> resolve_node_ports(const std::string& selector, std::string& out_reason)
 {
+    // ── WHAT A NODE CANNOT DO YET IS REFUSED HERE, AT PUT, ON BOTH BACKENDS ─────────────
+    //
+    // THROUGH THE PORT RESOLVER rather than through a new seam, because this already reaches
+    // the validator: a resolver that sets `out_reason` produces ONE fault naming `path`, which
+    // is exactly the message an editor wants -- the shader is unusable, rather than a dozen
+    // parameters having gone missing.
+    //
+    // **AND ON BOTH BACKENDS, EVEN THOUGH OPENGL COULD RUN IT.** `isf::shader` has handled
+    // PASSES, persistent buffers and IMPORTED images for years, so the OpenGL node path would
+    // render a multi-pass shader correctly today. The Vulkan node path is a single generated
+    // fragment shader and would silently render only the LAST pass -- a plausible picture, on
+    // one backend, from a document that is valid on the other. The operator's rule for this
+    // feature is that a document must not render differently depending on the mixer, so the
+    // answer is to refuse it everywhere until the Vulkan pass loop exists, not to let OpenGL
+    // race ahead.
+    //
+    // This costs nothing that ever worked: the `isf` NODE class is new, and multi-pass has
+    // never rendered through it on either mixer. The PRODUCER is untouched and still runs all
+    // of this.
+    std::string feat_error;
+    const auto  feats = describe_features(u16(selector), feat_error);
+    if (feat_error.empty()) {
+        const char* missing = feats.multipass    ? "multiple PASSES"
+                              : feats.persistent ? "a PERSISTENT buffer"
+                              : feats.imported   ? "an IMPORTED image"
+                                                 : nullptr;
+        if (missing) {
+            out_reason = std::string("'") + selector + "' declares " + missing +
+                         ", which an ISF NODE does not implement yet -- the ISF PRODUCER does, so "
+                         "`[ISF] " + selector +
+                         "` still plays it. Refused rather than half-rendered: the OpenGL node "
+                         "path would run it and the Vulkan one would silently render only the "
+                         "last pass, so the same document would look different on the two mixers";
+            return {};
+        }
+    }
+
     const auto inputs = describe_inputs(u16(selector), out_reason);
     if (!out_reason.empty())
         return {};

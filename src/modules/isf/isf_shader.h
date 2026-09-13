@@ -303,4 +303,22 @@ bool load_shader_source(const std::wstring& path,
 
 std::vector<input> describe_inputs(const std::wstring& path, std::string& out_error);
 
+/// What a shader asks for beyond a single pass of plain GLSL.
+///
+/// Exists so a NODE can be refused for something the node evaluator does not implement yet,
+/// while the PRODUCER -- which has run all of this for years -- is untouched. The two have
+/// different capabilities and the same file may be loaded by either.
+struct shader_features
+{
+    /// `PASSES` with more than one entry.
+    bool multipass = false;
+    /// Any pass declaring `PERSISTENT`.
+    bool persistent = false;
+    /// An `IMPORTED` block.
+    bool imported = false;
+};
+
+/// Parse-only, no GL. Empty `out_error` on success.
+shader_features describe_features(const std::wstring& path, std::string& out_error);
+
 }} // namespace caspar::isf
