@@ -514,6 +514,37 @@ std::vector<node_class> build_classes()
                                   "around the shader -- which is not implemented yet",
                                   port_flow::attribute));
 
+        // ── `reset`: RE-SEED THIS NODE'S STATE ───────────────────────────────────────────
+        //
+        // A LEVEL, not an edge, and that is TouchDesigner's shape rather than an invention: its
+        // Feedback and Cache TOPs ship a latching `Reset` ("while On this will empty the cache")
+        // AND a one-frame `Reset Pulse`. One level port is both -- hold it for the first, write
+        // 1 then 0 for the second -- and it needs no edge detection, so the two mixers cannot
+        // disagree about when a pulse was seen.
+        //
+        // While it is held: `FRAMEINDEX` reads 0 and every persistent buffer is re-blackened
+        // each frame. That makes the ISF idiom every published feedback shader uses --
+        // `if (FRAMEINDEX < 1 || resetEvent) { seed }` -- work through this port as well as
+        // through a shader's own `event` input.
+        //
+        // A BOOLEAN SIGNAL, not `port_flow::event`: that flow is declared and refused in v1.
+        {
+            port_desc r;
+            r.param.name        = "reset";
+            r.param.type        = fields::value_type::boolean;
+            r.param.access      = fields::access_t::read_write;
+            r.param.arity       = 1;
+            r.param.description = "while true, re-seed this node: FRAMEINDEX back to 0 and every "
+                                  "persistent buffer cleared. Hold it to latch, pulse it (1 then "
+                                  "0) for a one-frame reset";
+            r.param.default_value.push_back(false);
+            r.param.value       = r.param.default_value;
+            r.direction         = port_direction::input;
+            r.flow              = port_flow::attribute;
+            r.domain            = port_domain::value;
+            c.ports.push_back(std::move(r));
+        }
+
         c.ports.push_back(mix_amount());
         c.ports.push_back(image_port("out", port_direction::output));
         cs.push_back(std::move(c));

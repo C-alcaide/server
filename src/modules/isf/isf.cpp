@@ -181,28 +181,44 @@ std::vector<core::graph::port_desc> resolve_node_ports(const std::string& select
 
 namespace {
 
-/// Compiled shaders, kept between frames and keyed by PATH.
+/// One `isf` node's GL state, living in the slot the mixer keeps for that node.
 ///
-/// PER PATH, NOT PER NODE, and the limit of that is stated rather than discovered later.
-/// Compiling costs milliseconds and a node renders every frame, so something has to persist;
-/// what a cache entry holds is the compiled program and the pass framebuffers.
+/// ── PER NODE INSTANCE, WHICH THE PATH-KEYED CACHE THIS REPLACES COULD NOT BE ────────────────
 ///
-/// SAFE FOR EVERYTHING THIS COMMIT DRAWS, because parameter values are pushed immediately
-/// before each render and the render thread is one thread: two nodes on one shader take turns
-/// and neither sees the other's values.
+/// The map that used to be here was a process-wide `static` keyed by shader PATH. Its own comment
+/// said what was wrong with it: *"NOT SAFE FOR PERSISTENT BUFFERS, which are the ISF spec's
+/// per-SHADER-INSTANCE state ... two nodes sharing this entry would accumulate into one buffer and
+/// each would see the other's history ... this cache becomes per node instance in the same commit
+/// that lands it."* This is that commit.
 ///
-/// NOT SAFE FOR PERSISTENT BUFFERS, which are the ISF spec's per-SHADER-INSTANCE state and
-/// survive between frames -- two nodes sharing this entry would accumulate into one buffer and
-/// each would see the other's history. Nothing declares one until the multi-pass work, and this
-/// cache becomes per node instance in the same commit that lands it.
+/// It is also what every other host does. ISF: a persistent buffer *"stays with your effect until
+/// its deletion"*. TouchDesigner scopes feedback to the operator, Smode to the modifier, vvvv to
+/// the process node, OpenFX to `kOfxPropInstanceData`, *"unique to each plug-in instance"*.
 ///
-/// The GL objects inside belong to the render thread's context, which is the only thread that
-/// reaches this map.
-std::map<std::string, std::unique_ptr<shader>>& node_shader_cache()
+/// **A SHADER IS STILL COMPILED PER INSTANCE, not shared per path.** The producer already builds
+/// one `isf::shader` per producer, and splitting the compiled program from the per-instance
+/// buffers means threading a shared-program concept through a 1795-line class for a cost nobody
+/// has measured. `grade-graph-cost`'s ISF arms -- sixteen nodes on ONE file -- are what would show
+/// it, and they read 0 late on OpenGL. If that changes, the split is the fix and this is the note
+/// that says so.
+struct node_state final : public core::graph::isf_node_state
 {
-    static std::map<std::string, std::unique_ptr<shader>> c;
-    return c;
-}
+    std::unique_ptr<shader> sh;
+    /// Tried and failed: a missing file or a shader that would not compile. Remembered so the
+    /// cost is one attempt rather than one per frame, and one log line rather than fifty a
+    /// second -- the node renders its input through either way.
+    bool failed = false;
+
+    ~node_state() override
+    {
+        // THE MIXER DESTROYS THIS STORE INSIDE A `dispatch_sync` ON ITS RENDER THREAD, which is
+        // the only place the right GL context is current. `~shader` would otherwise free nothing
+        // at all here: it releases through the device it was constructed with, and a node's
+        // shader is built without one.
+        if (sh)
+            sh->release_gl_on_current_context();
+    }
+};
 
 /// Draw one ISF node on the mixer's own GL context.
 bool render_isf_node(const core::graph::isf_node_request& req)
@@ -210,35 +226,48 @@ bool render_isf_node(const core::graph::isf_node_request& req)
     if (req.path.empty() || req.src_tex == 0 || req.dst_tex == 0 || req.width <= 0 || req.height <= 0)
         return false;
 
-    auto& cache = node_shader_cache();
-    auto  it    = cache.find(req.path);
-    if (it == cache.end()) {
+    if (!req.state)
+        return false;
+
+    // THE SLOT IS THE MIXER'S, keyed per node instance; what is in it is this module's. Created
+    // on the node's first drawn frame and destroyed when the node leaves the attached document.
+    if (!*req.state)
+        *req.state = std::make_shared<node_state>();
+    auto& st = static_cast<node_state&>(**req.state);
+
+    if (st.failed)
+        return false;
+
+    if (!st.sh) {
         std::string  source;
         std::wstring base;
         std::string  error;
         if (!load_shader_source(u16(req.path), source, base, error)) {
             // ONCE, NOT EVERY FRAME. A missing shader at 50 fps is 50 identical log lines a
             // second, which buries everything else in the log -- and the node is already
-            // rendering its input unchanged, so the picture is not the thing in doubt. A null
-            // entry is the record that this path has been tried and failed.
+            // rendering its input unchanged, so the picture is not the thing in doubt.
             CASPAR_LOG(warning) << L"[isf] node shader: " << u16(error)
                                 << L" -- the node passes its input through";
-            cache.emplace(req.path, nullptr);
+            st.failed = true;
             return false;
         }
         try {
-            it = cache.emplace(req.path, std::make_unique<shader>(source, base)).first;
+            st.sh = std::make_unique<shader>(source, base);
         } catch (const std::exception& e) {
             CASPAR_LOG(warning) << L"[isf] node shader '" << u16(req.path) << L"' would not compile: "
                                 << u16(e.what()) << L" -- the node passes its input through";
-            cache.emplace(req.path, nullptr);
+            st.failed = true;
             return false;
         }
     }
-    if (!it->second)
-        return false;
 
-    auto& sh = *it->second;
+    auto& sh = *st.sh;
+
+    // THE `reset` PORT, applied before anything is drawn: every persistent buffer back to black,
+    // for as long as the port is held. `FRAMEINDEX` is zeroed by the evaluator, which owns the
+    // count -- see `isf_node_request::frame_index`.
+    if (req.reset)
+        sh.reset_persistent_buffers();
 
     // ── THE NODE'S VALUES ONTO THE SHADER'S INPUTS, BY NAME ─────────────────────────────────
     //
@@ -300,9 +329,21 @@ bool render_isf_node(const core::graph::isf_node_request& req)
                                            // RGBA, because the destination is an ATTACHMENT and
                                            // not a producer's frame. See `in.bgra` above.
                                            /*swap_rb*/ false);
-    // MOMENTARY INPUTS FALL BACK TO 0 AFTER THE FRAME THAT SET THEM, which is what ISF `event`
-    // means. Without this an event set once stays set for the life of the shader.
-    sh.reset_events();
+    // ── ISF `event` INPUTS ARE LEVEL HERE, ON BOTH BACKENDS ─────────────────────────────
+    //
+    // `reset_events()` used to run here, clearing every `event` input after each draw -- which
+    // made an event fire exactly once on OpenGL while the Vulkan path, which copies the
+    // document's value into its uniform block every frame, kept it set until the client wrote 0.
+    // **The same document behaved differently on the two mixers**, which is the one thing this
+    // feature's rules forbid.
+    //
+    // LEVEL on both is the answer that needs no per-instance bookkeeping of a shader input and
+    // no edge detection that the two backends could disagree about: an event is true while the
+    // document says true, and the client pulses it -- write 1, write 0 on the next tick, exactly
+    // as a timeline key or the `reset` port does. It is also what makes `reset` and an `event`
+    // input behave identically, which is one rule for a client to learn instead of two.
+    //
+    // The PRODUCER still calls `reset_events()` on its own path and is untouched.
     return ok;
 }
 

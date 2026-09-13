@@ -136,6 +136,24 @@ class shader
     /// through a preset, and cannot be the target of a binding.
     std::vector<double> get_value(const std::string& name) const;
 
+    /// Free every GL object this shader owns, on the CURRENTLY BOUND context.
+    ///
+    /// `~shader` frees through the device it was given, and a shader built for a NODE has no
+    /// device -- so a node's shader leaked its program, its VAOs and its pass buffers. Harmless
+    /// while there was one cache entry per path for the life of the process; not harmless once
+    /// there is one per node instance and instances come and go with documents.
+    ///
+    /// The caller must have the right context current. The mixer's renderer destroys its store
+    /// inside a `dispatch_sync`, which is where that is true.
+    void release_gl_on_current_context();
+
+    /// Re-blacken every persistent pass buffer, on the currently bound context.
+    ///
+    /// The `reset` port, and the same clear an allocation already does -- VVISF blackens a
+    /// persistent buffer on creation *"as a persistent buffer the content of this frame will
+    /// matter immediately and it will screw things up if it's anything but a black frame"*.
+    void reset_persistent_buffers();
+
     /// Which way to convert around the author's body: +1 encodes to display-referred before
     /// the shader and decodes after, -1 the reverse, 0 applies nothing.
     ///

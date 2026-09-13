@@ -807,7 +807,15 @@ struct shader::impl
     {
         gl_buffer& b = buffers_[name];
         const int  n = persistent ? 2 : 1;
-        if (b.w != w || b.h != h || b.is_float != is_float || b.tex[0] == 0) {
+        // `b.persistent != persistent` IS PART OF THE CONDITION, and was missing.
+        //
+        // A persistent target owns TWO textures and a non-persistent one owns a single texture;
+        // `b.persistent` is only assigned at the end of this function, so comparing it here is
+        // comparing against what the buffer was LAST built as. Without this term, a target that
+        // became persistent without also changing size kept `tex[1] == 0` -- and the ping-pong
+        // then writes to texture 0, which on the next line is also the one being read.
+        if (b.w != w || b.h != h || b.is_float != is_float || b.persistent != persistent ||
+            b.tex[0] == 0) {
             for (int i = 0; i < 2; ++i) {
                 if (b.tex[i]) {
                     glDeleteTextures(1, &b.tex[i]);
@@ -820,6 +828,9 @@ struct shader::impl
             b.h          = h;
             b.is_float   = is_float;
             b.front      = 0;
+            // `b.persistent` is assigned at the END of this function, so the rebuild condition
+            // above compares against the PREVIOUS value -- which is what makes a change to it
+            // trigger this branch at all. See the condition's own note.
 
             // Persistent buffers are read (as the previous frame) before they are first written,
             // so they must start cleared rather than with undefined texture contents.
@@ -1337,6 +1348,36 @@ struct shader::impl
         return true;
     }
 
+    /// Re-blacken every persistent buffer, both slots. The `reset` port.
+    void reset_persistent_buffers()
+    {
+        GLint prev_fbo = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+        GLuint cfbo = 0;
+        glGenFramebuffers(1, &cfbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, cfbo);
+        for (auto& kv : buffers_) {
+            if (!kv.second.persistent)
+                continue;
+            // BOTH SLOTS. Clearing only the write half leaves the read half holding the history
+            // this call exists to discard, and the flip at the end of the frame would bring it
+            // straight back.
+            for (int i = 0; i < 2; ++i) {
+                if (!kv.second.tex[i])
+                    continue;
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                                       kv.second.tex[i], 0);
+                glClearColor(0.f, 0.f, 0.f, 0.f);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+            kv.second.front   = 0;
+            kv.second.written = false;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prev_fbo));
+        glDeleteFramebuffers(1, &cfbo);
+        while (glGetError() != GL_NO_ERROR) {}
+    }
+
     void release_gl()
     {
         if (program_)
@@ -1414,6 +1455,10 @@ void shader::set_output_depth(common::bit_depth depth)
     // `ensure_final` compares the depth it built with instead.
     impl_->out_depth_ = depth;
 }
+
+void shader::release_gl_on_current_context() { impl_->release_gl(); }
+
+void shader::reset_persistent_buffers() { impl_->reset_persistent_buffers(); }
 
 void shader::set_space_conversion(int to_display) { impl_->set_space_conversion(to_display); }
 

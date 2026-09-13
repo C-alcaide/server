@@ -233,6 +233,74 @@ class image_renderer
     std::atomic<std::uint64_t>       channel_frame_{0};
     std::atomic<double>              channel_fps_{0.0};
 
+    // ── ONE STATE SLOT PER `isf` NODE INSTANCE ─────────────────────────────────────────
+    //
+    // Keyed by (document name, node id). That pair IS the instance: a document attaches to at
+    // most one layer, node ids are the client's and survive an edit, and `patch_params` reuses
+    // the plan pointer for value-only changes -- so a slider drag keeps the buffers and deleting
+    // the node drops them.
+    //
+    // The ISF spec requires this: a persistent buffer *"stays with your effect until its
+    // deletion"*. Two nodes on one shader file must not share one, or each accumulates into the
+    // other's history. The node path keyed its shaders by PATH until this landed.
+    //
+    // RENDER THREAD ONLY, like `prev_fingerprint_` beside it. The comment there records what
+    // touching this renderer's state from the API executor cost: a corrupted heap, four mask
+    // checks failing on the wrong backend, and 16157 access violations.
+    struct isf_instance
+    {
+        /// The shader this instance was built for. A node whose `path` changes is a DIFFERENT
+        /// effect: its buffers, its compiled program and its frame count all belong to the old
+        /// shader and mean nothing to the new one.
+        ///
+        /// MEASURED, because the battery caught it on the first run: `grade-graph` attaches
+        /// several shaders in turn as document `gg` node `s1`, and without this the FILTER
+        /// fixture was handed the GENERATOR's compiled shader and rendered [25, 76, 102] --
+        /// the generator's picture, out of the filter's node. Rebuilding on a path change is
+        /// also what TouchDesigner and vvvv do: a changed operator is a new operator.
+        std::string                                  path;
+        std::shared_ptr<core::graph::isf_node_state> state;
+        /// How many frames this instance has DRAWN. ISF's `FRAMEINDEX`, which the spec defines
+        /// as 0 on the instance's first frame -- see `isf_node_request::frame_index`.
+        std::uint32_t frames_drawn = 0;
+        /// The frame this entry was last seen in an attached plan. An entry not marked this
+        /// frame has lost its node and is swept.
+        std::uint64_t marked = 0;
+    };
+    std::map<std::string, isf_instance> isf_instances_;
+    std::uint64_t                       isf_sweep_frame_ = 0;
+
+    /// The slot for one `isf` step, created on its first drawn frame.
+    isf_instance& isf_instance_for(const std::string& document,
+                                   const std::string& node_id,
+                                   const std::string& path)
+    {
+        auto& e = isf_instances_[document + '\0' + node_id];
+        if (e.path != path) {
+            // A different shader on the same node: drop what the old one owned. The state
+            // object's destructor frees its GL resources on this thread, the one with the
+            // context.
+            e.state.reset();
+            e.frames_drawn = 0;
+            e.path         = path;
+        }
+        e.marked = isf_sweep_frame_;
+        return e;
+    }
+
+    /// Drop every instance whose node was not drawn this frame.
+    ///
+    /// A DETACH, A DELETED NODE AND A REPLACED DOCUMENT all reach here the same way: the id
+    /// stops appearing, so the slot goes and the GL objects in it are freed on this thread,
+    /// which is the one with the context. **Marked whether or not the node was BYPASSED** --
+    /// toggling bypass on a feedback effect is a creative gesture, not a reset, and every
+    /// surveyed engine keeps the state through it. Only `reset` clears.
+    void sweep_isf_instances()
+    {
+        for (auto it = isf_instances_.begin(); it != isf_instances_.end();)
+            it = it->second.marked == isf_sweep_frame_ ? std::next(it) : isf_instances_.erase(it);
+    }
+
     std::mutex                       preview_lock_;
     std::unique_ptr<pending_preview> preview_;
     //: A MONOTONIC ID, not a pointer, and the difference is a real defect rather than taste.
@@ -417,6 +485,19 @@ class image_renderer
     std::future<core::render_output>
     operator()(std::vector<layer> layers, const core::video_format_desc& format_desc)
     {
+        // ── ONE SWEEP PER FRAME, AT THE TOP ────────────────────────────────────────────────
+        //
+        // Drop every `isf` instance slot whose node was not drawn in the frame that just
+        // finished: a detached document, a deleted node, a node whose `path` changed. Freeing
+        // here means it happens on THIS thread, which is the one holding the context those GL
+        // objects belong to.
+        //
+        // At the top rather than at the bottom because a frame has several exits -- the
+        // still-frame cache hit, an empty layer list, the no-graph fast path -- and a sweep at
+        // the end would be skipped by most of them, which is how a slot outlives its node.
+        sweep_isf_instances();
+        ++isf_sweep_frame_;
+
         // ── A PREVIEW THIS CHANNEL CANNOT SERVE IS REFUSED, AFTER ONE FULL FRAME ───────
         //
         // The shell resolves a preview by ARMING EVERY CHANNEL and waiting on each one's
@@ -1146,13 +1227,40 @@ class image_renderer
                                              : space_v == 2 && stage_display  ? -1
                                                                               :  0;
 
-                            req.time        = fps > 0.0 ? static_cast<double>(fr) / fps : 0.0;
-                            req.time_delta  = fps > 0.0 ? 1.0 / fps : 0.0;
-                            req.frame_index = static_cast<int>(fr);
+                            // THE NODE'S OWN SLOT, keyed (document, node id) -- see the store.
+                            auto& inst = isf_instance_for(plan->document_name, st.id, req.path);
+                            req.state  = &inst.state;
+
+                            // `reset`, read BY NAME like `space`, for the reason given there:
+                            // counting ports is what put the author's parameters three slots
+                            // early the last time this evaluator did it.
+                            int reset_idx = -1;
+                            if (plan->value_names.size() >= values.size())
+                                for (std::uint32_t q = 0; q < st.values_count; ++q)
+                                    if (plan->value_names[st.values_offset + q] == "reset")
+                                        reset_idx = static_cast<int>(st.values_offset + q);
+                            req.reset = reset_idx >= 0 &&
+                                        static_cast<std::size_t>(reset_idx) < values.size() &&
+                                        values[reset_idx] != 0.0;
+
+                            req.time       = fps > 0.0 ? static_cast<double>(fr) / fps : 0.0;
+                            req.time_delta = fps > 0.0 ? 1.0 / fps : 0.0;
+                            // **THE INSTANCE'S COUNT, NOT THE CHANNEL'S.** The spec puts
+                            // FRAMEINDEX at 0 on the instance's first frame, and every published
+                            // feedback shader seeds itself with `if (FRAMEINDEX < 1 || reset)`.
+                            // On the channel counter a node attached mid-show never sees 0 and
+                            // never initialises. Held at 0 while `reset` is held, so the same
+                            // idiom re-seeds.
+                            req.frame_index = req.reset ? 0 : static_cast<int>(inst.frames_drawn);
 
                             drew = isf_render(req);
-                            if (drew)
+                            if (drew) {
                                 outputs[i] = idst;
+                                // Only a frame that actually DREW advances FRAMEINDEX, so a
+                                // shader that failed to compile does not age past its own seed
+                                // condition while rendering nothing.
+                                inst.frames_drawn = req.reset ? 0 : inst.frames_drawn + 1;
+                            }
                         }
                         if (!drew)
                             outputs[i] = src_isf;

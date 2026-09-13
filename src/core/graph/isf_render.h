@@ -12,9 +12,31 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 
 namespace caspar { namespace core { namespace graph {
+
+/// Whatever `modules/isf` needs to keep for ONE `isf` node between frames.
+///
+/// ── WHY PER INSTANCE, AND WHY THIS IS AN OPAQUE BASE ────────────────────────────────────────
+///
+/// The ISF specification says a persistent buffer is *"saved across frames, and stays with your
+/// effect until its deletion"* -- per EFFECT INSTANCE, not per shader file. Every engine that has
+/// this feature agrees: TouchDesigner scopes it to the operator, Smode to the modifier, vvvv to
+/// the process node, OpenFX to `kOfxPropInstanceData` (*"unique to each plug-in instance, so two
+/// instances of the same plug-in do not share the same data pointer"*).
+///
+/// Two nodes running one shader file must therefore NOT share buffers: each would accumulate into
+/// the other's history. The node path keyed its compiled shaders by PATH, and its own comment
+/// promised this would become per instance in the commit that landed persistent buffers.
+///
+/// OPAQUE, because `core` cannot see a GL object or a `vk::Image`. The evaluator owns the slot and
+/// its lifetime; the module owns what is in it.
+struct isf_node_state
+{
+    virtual ~isf_node_state() = default;
+};
 
 /// One ISF node's draw, as the evaluator hands it to `modules/isf`.
 ///
@@ -50,6 +72,19 @@ struct isf_node_request
     int          width   = 0;
     int          height  = 0;
 
+    /// This node's own state slot, owned by the mixer and keyed per instance. The module fills
+    /// it on first draw and finds its own object there on every later one. Never null.
+    std::shared_ptr<isf_node_state>* state = nullptr;
+
+    /// True while the node's `reset` port is held. Re-seeds the instance: `FRAMEINDEX` back to
+    /// 0 and every persistent buffer re-blackened, every frame it stays true.
+    ///
+    /// LEVEL, NOT EDGE, which is TouchDesigner's shape -- it ships a latching `Reset` *and* a
+    /// one-frame `Reset Pulse`, and a level port is both: hold it for the first, write 1 then 0
+    /// for the second. No edge detection means the two backends cannot disagree about when a
+    /// pulse was seen.
+    bool reset = false;
+
     /// The channel's clock: `TIME`, `TIMEDELTA` and `FRAMEINDEX`. See
     /// `core::image_mixer::set_frame_number` for why these come from the channel rather than
     /// from a wall clock or from the transform.
@@ -63,6 +98,17 @@ struct isf_node_request
 
     double time       = 0.0;
     double time_delta = 0.0;
+
+    /// ISF's `FRAMEINDEX`: **0 on this INSTANCE's first drawn frame**, not the channel's.
+    ///
+    /// The spec defines it that way -- *"this value is 0 when the first frame is rendered"* --
+    /// and the reset idiom every published feedback shader uses depends on it:
+    /// `if (FRAMEINDEX < 1 || resetEvent) { seed the buffer }`. Fed the channel counter, a node
+    /// attached mid-show never sees 0 and such a shader never initialises.
+    ///
+    /// `TIME` and `TIMEDELTA` stay on the CHANNEL clock, deliberately: they are what keeps two
+    /// ISF nodes on a channel in step with each other and with the timeline. The two answer
+    /// different questions and every reference host separates them.
     int    frame_index = 0;
 };
 
