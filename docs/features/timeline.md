@@ -594,8 +594,12 @@ it ended; and nothing could give a field back, because nothing remembered what i
 Here the constant lives in `tweens_`, the timeline publishes into `timeline_overlay_`, and one
 `resolve_drivers()` per tick composes them into `resolved_`. **Ending a driver is then just
 clearing an overlay** — the constant is still there, untouched, and comes back by construction
-rather than by being restored. Two of the stack's five ranks exist so far: timeline over constant.
-Bindings still write the constant directly and move up to their own overlay later.
+rather than by being restored. **All three overlays exist now** — `layer_drivers` carries
+`dominant`, `binding` and `timeline` over the one constant, which is the four-rank stack §10 sets
+out. This paragraph said "two of five so far, bindings still write the constant directly" until
+2026-09-14, and by then §10 forty lines below described the finished thing: a doc contradicting
+itself within one page, which is what a status sentence does if it is not deleted the day it stops
+being true.
 
 `resolved_` holds an entry only for a **driven** layer, so the cost is proportional to what is
 animated rather than to the number of layers.

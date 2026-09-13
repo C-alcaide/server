@@ -57,10 +57,37 @@ flowchart LR
     TICK --> XF["map: IN -> curve -> GAIN -> MIN..MAX -> LAG"]
     XF --> T1["a mixer field<br/><i>patched into the tween, both ends</i>"]
     XF --> T2["a producer parameter<br/><i>ISF / OFX setter</i>"]
+    XF --> T3["a NODE parameter<br/><i>node/id/port in the attached graph</i>"]
     T1 --> PIC(["the picture, this frame"])
     T2 --> PIC
+    T3 --> PIC
     TICK -.->|"published every tick"| PUB[("/channel/n/stage/binding/id/value<br/>/channel/n/stage/source/name/channel")]
 ```
+
+### A NODE parameter is a target too, and nothing here changed to make it one
+
+`node/<id>/<port>` in the layer's attached graph binds exactly like a mixer field — `node/n1/gain`,
+or `node/n1/slope.2` for one component of a vec3 port. **That is the claim the node graph was
+designed around**: a node parameter is one more entry in the address space, so a binding drives
+it, a timeline keys it and `HOLD` takes it with no new mechanism. Measured by `graph-stack` on
+both mixers, which drives the same questions at a node parameter that `timeline-stack` asks at a
+mixer field, precisely so the two answers can be compared.
+
+Plumbing claims are the kind that read as true and are not, which is why that battery exists:
+**`add_binding`, `apply_binding`, `hold_field`, the timeline key, the write path and the
+publication each have their own switch over `target_kind`**, and any one missing its node arm
+gives a parameter that is accepted everywhere and driven by nothing.
+
+One thing genuinely IS different, and it is in `add_binding`. A node id is a property of ONE
+DOCUMENT rather than of a class, so "does this port exist" cannot be answered from the class
+registry — the target is validated against the **attached document**. A binding on a node that
+the next PUT deletes is the case that follows from it.
+
+**Where a binding sits against a document and a `HOLD`** is one stack shared by every target
+kind, set out in [`timeline.md`](timeline.md) §10 rather than repeated here: dominant, then
+binding, then timeline, over one constant. A binding outranks an authored document on a node
+parameter for the same reason it does on a mixer field — a live input beats something written
+down in advance.
 
 **How the write lands (changed 2026-09-10).** A binding used to write its field by *replacing* the
 layer's whole tween with a zero-duration one — correct for the bound field, destructive for every
