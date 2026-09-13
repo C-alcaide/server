@@ -39,4 +39,8 @@ std::vector<core::graph::port_desc> resolve_node_ports(const std::string& select
 /// that case rather than black.
 bool render_node(const core::graph::isf_node_request& req);
 
+/// Generate one ISF shader as Vulkan GLSL. Injected into core at boot, and the reason it is a
+/// seam rather than a call is the same one as above: core cannot link this module.
+core::graph::isf_vulkan_source vulkan_source_for(const std::string& path);
+
 }} // namespace caspar::isf

@@ -1130,6 +1130,7 @@ struct server::impl
                 // active one, so its contract is gated at BOOT rather than on first use:
                 // a generator that packs parameters onto the wrong slots would otherwise
                 // be discovered by a picture, on a Vulkan channel, in a show.
+                core::graph::set_isf_vulkan_source(&isf::vulkan_source_for);
                 isf::isf_vulkan_self_test();
 
                 api_ctx.timelines     = timelines_;

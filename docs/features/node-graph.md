@@ -629,9 +629,20 @@ on the wrong input, with the shader still compiling and still rendering.
 UNCHANGED.** Never black. A shader file moving mid-show must not take a layer off air, which is the
 registry's rule for every dead branch.
 
-**OpenGL only, today.** The evaluator's ISF branch is on the OpenGL mixer; on Vulkan an `isf` node
-passes its input through. That is a real parity gap and `grade-graph` states it in every Vulkan run
-rather than skipping the checks — see §9.
+**Both backends draw one, by two different mechanisms, gated against one model.** On OpenGL the
+evaluator hands the node's textures to `modules/isf`, which runs the author's GLSL on the mixer's
+own GL context. On Vulkan that is impossible -- a node's input is an attachment inside a renderpass
+that commits once per frame, so there is nothing for a GL context to import -- so the shader is
+generated as Vulkan GLSL, compiled to SPIR-V at runtime and bound as a per-layer **variant
+pipeline**, the same mechanism an OCIO transform already uses.
+
+> **Two implementations is a risk, and the batteries are built around it.** Each backend is gated
+> against the *same closed-form model* rather than against the other's output, because comparing
+> them to each other passes any fault they share — and they very nearly shipped the same fault
+> twice. Each rendered the generator fixture **exactly reversed** on its first drawing run, for
+> unrelated reasons: OpenGL swizzled a node attachment as though it were a producer plane, Vulkan
+> ignored the mixer's runtime `F2_OUTPUT_BGRA` flag. Green was correct in both, so a grey fixture
+> would have passed both.
 
 #### 5.3.1 A foreign draw inside the chain, and which way the hazard actually runs
 
@@ -1141,32 +1152,10 @@ only ever sees bytes. The same injection the timeline uses to reach the producer
 
 ## 8. What is not here yet
 
-**An `isf` node does not draw on the Vulkan mixer.** The evaluator's ISF branch is OpenGL-only; on
-Vulkan the node passes its input through, so a document renders differently depending on which
-backend serves it. That is the one place in this feature where the two mixers disagree, and it is
-tracked rather than tolerated — `grade-graph` asserts the pass-through behaviour on every Vulkan run
-so the gap is visible rather than skipped.
-
-**And the obvious shortcut does not work, which is worth stating so it is not re-proposed.** The
-ISF *producer* already runs the full subset on the Vulkan mixer zero-copy, rendering on a
-self-contained GL context straight into a Vulkan image's memory (`gl_export_bridge`,
-`isf::shader::render_into_shared`). That works because a producer renders a whole frame **outside**
-the mixer's renderpass and hands over a finished texture.
-
-A node cannot: it sits **inside** a renderpass that accumulates every layer and commits once at the
-end of the frame, so its input attachment's contents do not exist yet — the commands that write it
-are queued and unsubmitted, and there is nothing for GL to import. Forcing them to exist means
-committing mid-accumulation, which is measured at **241 `ErrorDeviceLost` in one run** (see the
-comment beside the preview block in the Vulkan mixer).
-
-So a Vulkan ISF node needs the shader compiled to SPIR-V and drawn as an ordinary pipeline in the
-same renderpass as every other node pass. That is the work, and it is not small.
-
-*A second finding from the same investigation, recorded so it is not rediscovered:*
-`create_exportable_texture` and `gl_export_bridge` are **UNORM-only on both sides**, and
-`bit_depth` cannot express the difference because unorm16 and fp16 are both "16-bit". Anything that
-ever exports a node-graph attachment must add `eR16G16B16A16Sfloat` ↔ `GL_RGBA16F` to both tables
-and thread `render_format` into the `texture` object — otherwise it clamps a scene-linear,
+**Nothing outstanding for `isf` on either backend at single-pass.** An `isf` node draws on both
+mixers, gated at 1 LSB against the same closed-form model. What is not built yet is multi-pass
+(`PASSES`), persistent buffers and `IMPORTED` images, which are refused at PUT naming what is
+missing rather than half-rendered.
 unbounded buffer and the symptom is silently lost highlights.
 
 
@@ -1218,7 +1207,8 @@ rather than by the `MIXER` tween.
 | that a flip and a channel exchange cannot CANCEL | `grade-graph` | the two gain sets are not channel permutations of each other. The first version of the fixture used red/blue mirrors, where both faults together produce the correct picture and two defects report as none. A companion check gates that the two halves are ≥ 8 LSB apart, so the flip check can fail at all |
 | that an unbuildable `space` is REFUSED | `grade-graph` | **both mixers.** The crossed `space`/`stage` pair is refused at PUT rather than approximated |
 | that a missing shader leaves the layer RENDERING | `grade-graph` | **both mixers.** Refused at PUT, or the input passed through — never black |
-| **that an `isf` node does NOT draw on Vulkan** | `grade-graph` | **stated, not skipped.** The Vulkan arm asserts the node passes its input through unchanged and says in its own reason line that the backend has no ISF branch yet. A skip is not a pass, and a check that quietly does not run on one backend is how a parity gap stops being visible. It becomes the three picture checks once the branch lands |
+| an `isf` node on **Vulkan**, as a variant pipeline | `grade-graph` | **the same 4 checks, same model, 43/43 both mixers.** The placeholder that asserted "Vulkan does not draw one" is deleted — it said in its own text that failing because the node DREW was the good failure, and it did. **The fixture found four defects before this passed**, none of which fails loudly on its own: the author's parameters based three slots early (a shader reading `mix` as its brightness); the variant ignoring the mixer's runtime output-order flag; a missing perspective divide (correct on default geometry, wrong on any corner-pin); and the input read flipped *and* channel-reversed |
+| that a flip and a channel exchange cannot CANCEL — **paid off on Vulkan** | `grade-graph` | after the perspective divide the two patches read *exact permutations* — top = reversed input × BOTTOM gains, bottom = reversed input × TOP gains — which named both faults at once. Mirror-symmetric gains would have reported two real faults as none |
 | an ordinary node AFTER a foreign draw | `grade-graph` | **2 checks, OpenGL** — `isf -> exposure(2.0)` at **0.00 LSB** against a closed-form model, with the same exposure and no ISF node in front of it as the control that makes it attributable. The only arm in the suite with an ordinary pass downstream of a foreign one. Mutations: leaving the framebuffer and viewport unrestored fails **19** checks including the control; leaving only blending and the texture unit disturbed fails **4** and leaves the control passing — which is what proved the kernel immune and the ISF renderer vulnerable to itself |
 | the class table against its own rules | `node_registry_self_test` | at boot |
 | the plan's value-NAME table against its values array | `graph_plan_self_test` | at boot, **fatal** — equal length, and every address agreeing with its slot's name. A foreign renderer indexes one by the other's offset, so a short table is an out-of-range read on the frame path and a shifted one puts every parameter on the wrong input, still compiling and still rendering |

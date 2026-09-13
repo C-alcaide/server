@@ -63,6 +63,33 @@ struct isf_node_request
 /// because a shader that fails to compile mid-show must not take the layer off air.
 using isf_node_renderer = std::function<bool(const isf_node_request&)>;
 
+/// One ISF shader as Vulkan GLSL, ready to compile to SPIR-V.
+///
+/// The Vulkan mixer draws an ISF node as a per-layer VARIANT PIPELINE -- the same mechanism an
+/// OCIO transform already uses -- rather than by running the author's GLSL on a GL context. It
+/// cannot use the GL route: a node's input is an attachment inside a renderpass that commits once
+/// per frame, so there is nothing for a GL context to import, and forcing the issue by committing
+/// mid-accumulation is measured at 241 device losses.
+struct isf_vulkan_source
+{
+    /// The generated GLSL. Empty when `error` is set.
+    std::string source;
+    /// Stable id for the pipeline cache. Two nodes naming the same file share one pipeline.
+    std::string cache_id;
+    /// How many value components the author's inputs consume, so the caller packs exactly that
+    /// many into the uniform array.
+    int value_count = 0;
+    /// Why nothing was generated -- a missing file, an unparseable header, more parameters than
+    /// the uniform array holds. Empty on success.
+    std::string error;
+};
+
+/// Generates the above for a shader path. Null until the ISF module registers itself.
+using isf_vulkan_source_fn = std::function<isf_vulkan_source(const std::string& path)>;
+
+void                        set_isf_vulkan_source(isf_vulkan_source_fn f);
+const isf_vulkan_source_fn& get_isf_vulkan_source();
+
 /// Injected once at boot by `shell/server.cpp`, for the same reason `set_port_resolver` is: the
 /// dependency runs module -> core, so core holds a hook and the module fills it.
 void set_isf_node_renderer(isf_node_renderer r);

@@ -1120,10 +1120,31 @@ class image_renderer
                     // reason. Only a generator with NO input needs a source it will not sample.
                     const auto& src0 =
                         st.in0 < 0 ? head_texture : outputs[alias[st.in0]];
+
+                    // ── AN ISF NODE NAMES ITS SHADER, AND CARRIES THE CHANNEL'S CLOCK ────
+                    //
+                    // A POINTER INTO THE PLAN's own string table, which is immutable and shared
+                    // for the plan's whole life -- so this costs nothing per frame and stays
+                    // valid for as long as the draw does.
+                    //
+                    // The kernel turns it into a pipeline. Not here: the kernel already owns the
+                    // OCIO variant cache and the device handle that builds one, and a second
+                    // cache would be a second answer to "have I compiled this shader".
+                    const std::string* isf_path = nullptr;
+                    if (st.cls == core::graph::op_isf && st.string_index >= 0 &&
+                        static_cast<std::size_t>(st.string_index) < plan->strings.size())
+                        isf_path = &plan->strings[st.string_index];
+
+                    const auto fr  = channel_frame_.load(std::memory_order_relaxed);
+                    const auto fps = channel_fps_.load(std::memory_order_relaxed);
+
                     apply_node(src0,
                                nd.has_in1 ? outputs[alias[st.in1]] : src0,
                                dst, format_desc, pass, nd, node_uv_inv, node_uv_valid,
-                               mask_texture);
+                               mask_texture, isf_path,
+                               fps > 0.0 ? static_cast<double>(fr) / fps : 0.0,
+                               fps > 0.0 ? 1.0 / fps : 0.0,
+                               static_cast<int>(fr));
                     outputs[i] = dst;
 
                     // ── SERVE EVERY SLOT THAT WANTED THIS STEP ────────────────────
@@ -1199,7 +1220,13 @@ class image_renderer
                     const core::graph::node_draw&   nd,
                     const std::array<float, 9>&     node_uv_inv,
                     bool                            node_uv_valid,
-                    const std::shared_ptr<texture>& mask_texture = nullptr)
+                    const std::shared_ptr<texture>& mask_texture = nullptr,
+                    /// Set only for an `isf` node: the shader file its `path` names. The kernel
+                    /// compiles it to a variant pipeline and caches it by this string.
+                    const std::string*              isf_path     = nullptr,
+                    double                          isf_time     = 0.0,
+                    double                          isf_dt       = 0.0,
+                    int                             isf_frame    = 0)
     {
         if (!source_a)
             return;
@@ -1232,6 +1259,10 @@ class image_renderer
         draw_params.background              = target_texture;
         draw_params.geometry                = core::frame_geometry::get_default();
         draw_params.node                    = nd;
+        draw_params.isf_path                = isf_path;
+        draw_params.isf_time                = isf_time;
+        draw_params.isf_time_delta          = isf_dt;
+        draw_params.isf_frame               = isf_frame;
         // The destination is an fp16 attachment, so this draw needs the fp16 pipeline. See the
         // head pass above for why the format is not just a property of the image here.
         draw_params.node_fp16               = true;

@@ -582,6 +582,18 @@ isf_node_renderer& isf_renderer_slot()
 
 void set_isf_node_renderer(isf_node_renderer r) { isf_renderer_slot() = std::move(r); }
 
+namespace {
+isf_vulkan_source_fn& isf_vulkan_slot()
+{
+    static isf_vulkan_source_fn f;
+    return f;
+}
+} // namespace
+
+void set_isf_vulkan_source(isf_vulkan_source_fn f) { isf_vulkan_slot() = std::move(f); }
+
+const isf_vulkan_source_fn& get_isf_vulkan_source() { return isf_vulkan_slot(); }
+
 const isf_node_renderer& get_isf_node_renderer() { return isf_renderer_slot(); }
 
 void set_port_resolver(const std::string& class_id, port_resolver resolver)

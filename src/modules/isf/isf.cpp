@@ -11,6 +11,7 @@
 #include "isf.h"
 #include "isf_producer.h"
 #include "isf_shader.h"
+#include "isf_vulkan_glsl.h"
 
 #include <common/log.h>
 
@@ -267,5 +268,16 @@ bool render_isf_node(const core::graph::isf_node_request& req)
 } // namespace
 
 bool render_node(const core::graph::isf_node_request& req) { return render_isf_node(req); }
+
+core::graph::isf_vulkan_source vulkan_source_for(const std::string& path)
+{
+    const auto r = build_vulkan_fragment_for(path);
+    core::graph::isf_vulkan_source out;
+    out.source      = r.source;
+    out.cache_id    = r.cache_id;
+    out.value_count = r.value_count;
+    out.error       = r.error;
+    return out;
+}
 
 }} // namespace caspar::isf

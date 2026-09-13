@@ -26,6 +26,8 @@
 #include <array>
 
 #include <core/graph/node_draw.h>
+
+#include <string>
 #include <core/frame/frame_transform.h>
 #include <core/frame/geometry.h>
 #include <core/frame/pixel_format.h>
@@ -135,6 +137,23 @@ struct draw_params final
     /// disagree. The prototype carried `bool grade_node_only` beside a `core::grade_node`, and
     /// a state where one said yes and the other was default was expressible.
     core::graph::node_draw node{};
+
+    /// This node is an `isf` node, and this is the shader file its `path` parameter names.
+    ///
+    /// A POINTER INTO THE PLAN, which is immutable and shared, so nothing is copied per draw.
+    /// Empty or null for every other class.
+    ///
+    /// The KERNEL turns this into a pipeline, not the mixer, and that is deliberate: the kernel
+    /// already owns the OCIO variant cache and the device handle that builds one, so putting the
+    /// ISF cache anywhere else would mean two caches and two answers to "have I compiled this".
+    const std::string* isf_path = nullptr;
+
+    /// The channel's clock for this node, feeding ISF's `TIME`, `TIMEDELTA` and `FRAMEINDEX`.
+    /// From `core::image_mixer::set_frame_number` -- the channel's own counter, so two ISF nodes
+    /// on a channel agree and a shader stays in step with the timeline.
+    double isf_time       = 0.0;
+    double isf_time_delta = 0.0;
+    int    isf_frame      = 0;
 
     /// This LAYER draw feeds a node graph running in **working** space.
     ///

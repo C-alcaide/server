@@ -21,6 +21,8 @@
 
 #include "image_kernel.h"
 
+#include <core/graph/isf_render.h>
+
 #include <core/graph/plan.h>
 #include <core/graph/registry.h>
 
@@ -263,6 +265,23 @@ struct image_kernel::impl
     /// spaces, so a pipeline chosen once for the whole pass would apply one layer's transform
     /// to all of them.
     std::shared_ptr<class pipeline> current_ocio_pipeline_;
+
+    /// Compiled ISF pipelines, keyed by the generator's `cache_id` -- which derives from the
+    /// shader PATH, so two nodes running the same file share one pipeline and one compile.
+    ///
+    /// A FAILURE IS REMEMBERED, exactly as the OCIO variant cache remembers one: a shader that
+    /// will not compile costs ONE attempt rather than one per frame, and the node then renders
+    /// its input unchanged. Compiling a broken shader fifty times a second is the difference
+    /// between a visible mistake and a channel that stops making frames.
+    struct isf_variant
+    {
+        std::shared_ptr<class pipeline> pipeline;
+        bool                            failed = false;
+        /// How many value components the shader's OWN inputs take. The node's slots carry the
+        /// class's static ports first, so this is what says where the author's begin.
+        int                             value_count = 0;
+    };
+    std::map<std::string, isf_variant> isf_variants_;
     // ─────────────────────────────────────────────────────────────────────
 
     struct frame_data : public frame_context
@@ -1257,6 +1276,79 @@ struct image_kernel::impl
         // so there is nothing here to overwrite.
         if (params.node_fp16)
             current_ocio_pipeline_ = vulkan_->get_pipeline(depth_, common::render_format::fp16);
+
+        // ── AN ISF NODE IS A VARIANT PIPELINE, THROUGH THE SAME HOOK ────────────────────
+        //
+        // The author's GLSL, generated as Vulkan GLSL by `modules/isf` and compiled to SPIR-V
+        // here. Structurally identical to an OCIO transform: generate, compile, cache by id,
+        // bind for this layer only.
+        //
+        // AFTER the fp16 assignment above and not before, because it must WIN: a node pass
+        // writes an fp16 attachment, and a pipeline carries its colour-attachment format in its
+        // own creation info -- so the variant is built for fp16 too, and overwriting it with the
+        // plain fp16 pipeline would draw the mixer's shader instead of the author's.
+        if (params.isf_path && !params.isf_path->empty()) {
+            const auto pipe = isf_pipeline_for(*params.isf_path);
+            if (pipe)
+                current_ocio_pipeline_ = pipe;
+            // No `else`: a shader that will not compile leaves the node drawing through the
+            // ordinary node pipeline, whose `gn_op` for `isf` does nothing -- so the pass copies
+            // its input. UNCHANGED, never black, which is the registry's rule for a dead branch.
+        }
+    }
+
+    /// How many value components the shader at `path` declares. Populates the cache if this is
+    /// the first ask, so the packing below cannot read a count the pipeline pass has not filled
+    /// in -- the two run in different functions and their order is not otherwise guaranteed.
+    int isf_value_count_for(const std::string& path)
+    {
+        auto it = isf_variants_.find(path);
+        if (it == isf_variants_.end()) {
+            isf_pipeline_for(path);
+            it = isf_variants_.find(path);
+        }
+        return it == isf_variants_.end() ? 0 : it->second.value_count;
+    }
+
+    /// The compiled pipeline for one ISF shader path, or null if it cannot be had.
+    std::shared_ptr<class pipeline> isf_pipeline_for(const std::string& path)
+    {
+        const auto& gen = core::graph::get_isf_vulkan_source();
+        if (!gen)
+            return nullptr;
+
+        // Keyed on the PATH for the lookup that avoids re-generating; the generator's own
+        // `cache_id` is what the pipeline cache keys on. Generation is text and cheap, but it
+        // reads the FILE, and doing that per frame per node would put a disk hit on the frame
+        // path.
+        auto it = isf_variants_.find(path);
+        if (it != isf_variants_.end())
+            return it->second.failed ? nullptr : it->second.pipeline;
+
+        isf_variant v;
+        const auto  src = gen(path);
+        v.value_count   = src.value_count;
+        if (!src.error.empty()) {
+            CASPAR_LOG(warning) << L"[vk_kernel] ISF node '" << u16(path) << L"': " << u16(src.error)
+                                << L" -- the node passes its input through";
+            v.failed = true;
+        } else {
+            const auto spirv = compile_glsl_fragment_to_spirv(src.source, src.cache_id);
+            if (spirv.empty()) {
+                // The compiler has already logged its diagnostic, and `#line 1` in the generated
+                // preamble means the line it names is the line the shader's AUTHOR wrote.
+                CASPAR_LOG(error) << L"[vk_kernel] the ISF shader '" << u16(path)
+                                  << L"' did not compile -- the node passes its input through";
+                v.failed = true;
+            } else {
+                // fp16, because a node attachment is fp16 and a pipeline's colour-attachment
+                // format is part of its creation info.
+                v.pipeline = vulkan_->get_variant_pipeline(depth_, common::render_format::fp16,
+                                                           src.cache_id, spirv);
+            }
+        }
+        isf_variants_[path] = v;
+        return v.failed ? nullptr : v.pipeline;
     }
 
     /// Record GPU upload commands for any LUTs that were prepared.
@@ -1563,6 +1655,42 @@ struct image_kernel::impl
             const auto& nd = params.node;
             uniforms.gn_op      = nd.op;
             uniforms.gn_has_in1 = nd.has_in1 ? 1 : 0;
+
+            // ── AN ISF NODE'S OWN PARAMETERS, COPIED STRAIGHT ACROSS ───────────────────
+            //
+            // The generated shader `#define`s the author's names onto `gn_isf[]` by walking the
+            // shader's declared inputs in order, and the node compiler allocated this node's
+            // value slots by walking the SAME list in the SAME order. So this is a copy and not
+            // a mapping -- there is no second table to drift.
+            //
+            // THE BASE IS DERIVED, NOT WRITTEN DOWN. `instance_ports` returns the class's
+            // STATIC ports first and the file's declared ones after, so an `isf` node's value
+            // slots are `bypass`, `space`, `mix`, then the author's -- and the author's are
+            // always the LAST `value_count` of them. Subtracting gives the offset whatever the
+            // registry's static list happens to be today.
+            //
+            // The first version of this hardcoded "+1", reasoning that `bypass` is the implicit
+            // first port. True, and not the whole list: `space` and `mix` are value ports too,
+            // so every parameter would have arrived three slots early -- and a shader reading
+            // `mix` as its brightness renders perfectly and is wrong.
+            if (params.isf_path && !params.isf_path->empty()) {
+                const int declared = isf_value_count_for(*params.isf_path);
+                const int total    = static_cast<int>(nd.values_count);
+                const int base     = total > declared ? total - declared : 0;
+                const int take     = declared < 32 ? declared : 32;
+                for (int k = 0; k < take && (base + k) < total; ++k)
+                    uniforms.gn_isf[k] = static_cast<float>(nd.values[base + k]);
+                uniforms.gn_isf_count = take;
+
+                uniforms.gn_isf_time      = static_cast<float>(params.isf_time);
+                uniforms.gn_isf_timedelta = static_cast<float>(params.isf_time_delta);
+                uniforms.gn_isf_frame     = params.isf_frame;
+                uniforms.gn_isf_pass      = 0;
+                // RENDERSIZE is the PASS's extent. Single-pass today, so that is the node
+                // attachment, which is the target raster.
+                uniforms.gn_isf_rendersize[0] = static_cast<float>(params.target_width);
+                uniforms.gn_isf_rendersize[1] = static_cast<float>(params.target_height);
+            }
 
             // THE VALUES COME OUT OF THE PLAN'S FLAT ARRAY IN PORT ORDER, which is the
             // contract `plan.cpp` establishes: it walks each class's ports in declaration

@@ -34,6 +34,9 @@ namespace {
 /// `isf_vulkan_self_test` re-checks the ones it can see, but the assertion that matters is the
 /// PICTURE: `grade-graph`'s ISF arm gates the Vulkan result against the same closed-form model
 /// the OpenGL arm uses, so a parameter arriving from the wrong offset fails at 1 LSB.
+/// `flags2`, whose bit 0 is `output_bgra`. The variant must honour it -- see the wrapper at the
+/// end of the generated source.
+constexpr int OFF_FLAGS2         = 736;
 constexpr int OFF_ISF_VALUES     = 1056;
 constexpr int OFF_ISF_COUNT      = 1184;
 constexpr int OFF_ISF_TIME       = 1188;
@@ -167,6 +170,9 @@ vulkan_source build_vulkan_fragment(const std::vector<input>& inputs,
          // constants: this is the seam that fails silently if it ever disagrees.
          "layout(scalar, binding = 2) uniform ParamsBlock {\n"
          "    layout(offset = "
+      << OFF_FLAGS2
+      << ") uint gn_flags2;\n"
+         "    layout(offset = "
       << OFF_ISF_VALUES
       << ") float gn_isf[" << max_isf_values
       << "];\n"
@@ -201,7 +207,18 @@ vulkan_source build_vulkan_fragment(const std::vector<input>& inputs,
          // identifier is a shader that will not load.
          "const vec4 DATE = vec4(0.0, 0.0, 0.0, 0.0);\n"
          "\n"
-         "vec2 isf_FragNormCoord = TexCoord.xy;\n"
+         // THE PERSPECTIVE DIVIDE, which the base shader does and the first version of this did not:
+         // `fragment_shader.frag` samples with `TexCoord.st / TexCoord.q`. With a default
+         // geometry q is 1 and the divide is a no-op, which is exactly why omitting it is easy
+         // and why it must not be omitted -- a layer with a corner-pin or any projective
+         // placement would sample somewhere else entirely.
+         // ISF'S Y IS UP, THE MIXER'S IS DOWN. The spec puts `isf_FragNormCoord` (0,0) at the
+         // BOTTOM left; the mixer's texture coordinate has its origin at the top. A shader whose
+         // output depends on position -- a gradient, a wipe, anything with a `step(0.5, y)` --
+         // renders mirrored without this, and a shader whose output does not depend on position
+         // cannot tell you it is wrong.
+         "vec2 isf_uv = TexCoord.st / TexCoord.q;\n"
+         "vec2 isf_FragNormCoord = vec2(isf_uv.x, 1.0 - isf_uv.y);\n"
          "#define vv_FragNormCoord isf_FragNormCoord\n"
          "#define isf_FragCoord (isf_FragNormCoord * RENDERSIZE)\n"
          "\n";
@@ -221,7 +238,26 @@ vulkan_source build_vulkan_fragment(const std::vector<input>& inputs,
     // producer's plane is bottom-up and BGRA; here the source is a node ATTACHMENT, which is
     // top-down and RGBA, so there is nothing to correct. That asymmetry is the whole of the
     // 2026-09-12 channel-order finding, and this is the other end of it.
-    f << "vec4 _isf_fetch(sampler2D s, vec2 nc) { return texture(s, nc); }\n"
+    // ── THE FETCH UNDOES BOTH CONVENTIONS, AND MEASUREMENT IS WHAT ESTABLISHED THEM ──
+    //
+    // A node attachment on the Vulkan mixer is top-down and holds the mixer's own byte order --
+    // the same order every write in `fragment_shader.frag` chooses at runtime from
+    // `F2_OUTPUT_BGRA`. So a sampler reading one has to flip the coordinate back and apply the
+    // same swizzle, or the author's shader sees a picture that is upside down and has its red
+    // and blue exchanged.
+    //
+    // BOTH WERE MEASURED, SEPARATELY, because the fixture was built to separate them: with the
+    // input reversed and flipped, the filter's TOP patch read [15, 40, 112] -- which is the
+    // reversed source times the BOTTOM gains -- and its bottom patch read [46, 62, 35], the
+    // reversed source times the TOP gains. Two exact permutations, two named checks.
+    //
+    // AND THEY DID NOT CANCEL, which is the whole reason the two gain sets are not red/blue
+    // mirrors of each other. A mirror-symmetric fixture reports these two faults together as no
+    // fault at all.
+    f << "vec4 _isf_fetch(sampler2D s, vec2 nc) {\n"
+         "  vec4 c = texture(s, vec2(nc.x, 1.0 - nc.y));\n"
+         "  return ((gn_flags2 & 1u) != 0u) ? c.bgra : c;\n"
+         "}\n"
          "#define IMG_SIZE(image) vec2(textureSize(image, 0))\n"
          "#define IMG_NORM_PIXEL(image, nc) _isf_fetch(image, vec2(nc))\n"
          "#define IMG_PIXEL(image, pc) IMG_NORM_PIXEL(image, (pc) / IMG_SIZE(image))\n"
@@ -230,12 +266,34 @@ vulkan_source build_vulkan_fragment(const std::vector<input>& inputs,
          "\n"
       << defines.str()
       << "\n"
-         "#define gl_FragColor isf_out_color\n"
+         // -- THE AUTHOR WRITES TO A LOCAL, AND A WRAPPER APPLIES THE MIXER'S BYTE ORDER --
+         //
+         // The Vulkan mixer decides its output byte order at RUNTIME: every write in
+         // `fragment_shader.frag` is `flag2(F2_OUTPUT_BGRA) ? col.bgra : col`. A variant that
+         // wrote straight RGB would therefore be correct on some configurations and reversed on
+         // others -- which is not a thing to leave to luck.
+         //
+         // MEASURED ON THE FIRST RUN THAT DREW: a shader emitting (0.10, 0.30, 0.40) rendered
+         // [102, 76, 25] -- exactly reversed, with GREEN CORRECT. That is the same signature the
+         // OpenGL path produced for its own version of this mistake, and it is why both
+         // `grade-graph` ISF fixtures are asymmetric: a grey one passes this silently.
+         //
+         // `#define main isf_main` renames the author's entry point WITHOUT editing the body,
+         // so the promise that the shader's own source passes through untouched still holds.
+         // The wrapper then runs after it and applies the order the mixer asked for.
+         "vec4 isf_color = vec4(0.0);\n"
+         "#define gl_FragColor isf_color\n"
+         "#define main isf_main\n"
          // `#line 1` so a compiler diagnostic names the line the AUTHOR wrote, not the line of
          // generated preamble it landed on. Without it every error in a shader file points
          // roughly forty lines past where it is.
          "#line 1\n"
-      << body;
+      << body
+      << "\n#undef main\n"
+         "void main() {\n"
+         "  isf_main();\n"
+         "  isf_out_color = ((gn_flags2 & 1u) != 0u) ? isf_color.bgra : isf_color;\n"
+         "}\n";
 
     out.source = f.str();
     return out;
