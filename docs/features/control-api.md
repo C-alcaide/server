@@ -1153,11 +1153,21 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
    `fixed`, so setting a design eye on a camera-mode screen changes nothing. The bridge compares
    intended against actual — both read through the same accessor, so canonicalisation and float
    widening cancel — and a genuine refusal comes back as `field_conflict` with both values.
-3. ~~**No field emits a `DESCRIPTION`.**~~ **CLOSED for the stage, still open for the mixer.**
-   The sixteen stage rows each carry one and the table refuses to load without it, so
-   `HOST_INFO.EXTENSIONS.DESCRIPTION` now derives to `true` and the leaves that carry the key are
-   the stage's. The 177 mixer rows still pass `nullptr`; filling them needs a slot in the eleven
-   macros and is its own commit.
+3. ~~**No field emits a `DESCRIPTION`.**~~ **CLOSED 2026-09-14.** The sixteen stage rows carried
+   one first; the mixer's **178** now do too, so every leaf a client builds a control surface
+   from has a label. The eleven macros gained a trailing `DESC` slot — trailing rather than
+   positional on purpose, because inserting an argument in the middle is 178 chances to put a
+   sentence in the `kf_names` column, which compiles, publishes and is wrong.
+
+   **And it is gated now, which the old text said it was not.** `api-tree` reads
+   `EXTENSIONS.DESCRIPTION` and then counts the mixer leaves that carry the key — **over the
+   MIXER table specifically**, because the stage rows would satisfy an any-leaf-anywhere check on
+   their own and let all 178 mixer rows go back to `nullptr` with the gate still green.
+
+   It earned that on its first run: six enumeration rows (`blend_mode`, `blur_type`,
+   `proj_curve_type`, `proj_source_lens`, `shape_fill_type`, `shape_type`) came back empty
+   because the `E` macro's body has its own argument list and my edit had missed it. 172 of 178
+   is exactly the shape of a defect nobody would have found by reading.
 
    The original finding, kept because the shape of it recurs:
 
