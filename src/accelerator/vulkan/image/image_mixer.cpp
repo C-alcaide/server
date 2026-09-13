@@ -1180,6 +1180,29 @@ class image_renderer
                 }
 
 
+                // ── ATTACHMENTS ARE REUSED WITHIN THE FRAME, NOT ONE PER PASS ──────────
+                //
+                // **THIS IS WHAT MAKES A CHAIN'S MEMORY CONSTANT IN ITS LENGTH.** The evaluator
+                // already drops its reference to a step's output the moment `last_use` says
+                // nothing reads it -- but on this backend that frees nothing: the renderpass
+                // holds a `shared_ptr` to EVERY layer's attachment until `commit()`, because the
+                // command buffer references those images until it is submitted.
+                //
+                // So sixteen passes meant sixteen live 3840x2160 fp16 images per channel --
+                // 1.06 GB -- times four channels times three frame slots. 12.7 GB, which is why
+                // the heavy arms peaked at 15.7 of a 16.4 GB card and why the device pool's size
+                // was a straight trade between running out of memory and allocating a 66 MB
+                // image per pass per frame.
+                //
+                // A released attachment goes on this list and the next pass takes it back, so a
+                // linear chain uses TWO whatever its length. Fan-out is safe by construction: an
+                // output with two consumers is not released until the later of them.
+                //
+                // `renderpass::commit()` emits the write-after-read barrier and the layout
+                // transition back when an attachment is re-entered as a target -- see
+                // `take_back_for_writing` there.
+                std::vector<std::shared_ptr<texture>> free_attachments;
+
                 for (std::size_t i = 0; i < plan->steps.size(); ++i) {
                     const auto& st = plan->steps[i];
                     if (alias[i] != static_cast<int>(i)) {
@@ -1215,7 +1238,16 @@ class image_renderer
                         }
                     }
 
-                    auto dst = pass->create_attachment_as(common::render_format::fp16);
+                    // A released attachment of the right shape, or a new one. Everything on
+                    // the free list came from this same call -- channel raster, fp16 -- so a
+                    // match needs no size or format test.
+                    std::shared_ptr<texture> dst;
+                    if (!free_attachments.empty()) {
+                        dst = std::move(free_attachments.back());
+                        free_attachments.pop_back();
+                    } else {
+                        dst = pass->create_attachment_as(common::render_format::fp16);
+                    }
                     // A MASK GENERATOR HAS NO IMAGE INPUT, so it is handed the head texture as
                     // a source it never samples: the pass computes its value from its own
                     // uniforms, and `apply_node` returns early on a null source.
@@ -1303,9 +1335,20 @@ class image_renderer
                     }
 
 
-                    for (std::size_t j = 0; j < i; ++j)
-                        if (plan->steps[j].last_use == static_cast<std::int32_t>(i))
-                            outputs[j].reset();
+                    for (std::size_t j = 0; j < i; ++j) {
+                        if (plan->steps[j].last_use != static_cast<std::int32_t>(i))
+                            continue;
+                        // ONTO THE FREE LIST rather than simply dropped: dropping returns it to
+                        // a pool that cannot hand it back until the frame commits, because the
+                        // renderpass still holds it. This hands it to the next pass directly.
+                        //
+                        // Only when it is really this step's OWN attachment -- an alias shares
+                        // its predecessor's pointer, and listing one twice would give two passes
+                        // the same image.
+                        if (outputs[j] && alias[j] == static_cast<int>(j))
+                            free_attachments.push_back(outputs[j]);
+                        outputs[j].reset();
+                    }
                 }
 
                 // The set moves to the deferred state; the copies land when the pass commits.

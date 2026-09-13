@@ -169,8 +169,15 @@ struct device::impl : public std::enable_shared_from_this<impl>
     /// 48 x 66 MB = 3.2 GB of that, on a card whose heavy arms already peak at 15.7 of 16.4 GB.
     ///
     /// A linear chain has two or three attachments live at once however long it is, because
-    /// `last_use` returns each one as soon as nothing reads it. Twelve covers that across three
-    /// frame slots with room over.
+    /// `last_use` returns each one as soon as nothing reads it -- and since the evaluator gained
+    /// an intra-frame free list, that is what actually reaches this pool too.
+    ///
+    /// **THE SIZE STOPPED MATTERING, WHICH IS THE EVIDENCE THAT THE FREE LIST IS DOING THE
+    /// WORK.** Measured after it landed: 24 and 48 are indistinguishable -- sixteen passes read
+    /// 260/2003 and 252/2005 late respectively, eight read 52 and 58. Before it, the same two
+    /// settings were the difference between 6.7% and running the card out of memory. A pool
+    /// this size is now headroom rather than a load-bearing number, so it stays at the
+    /// conservative end.
     static constexpr size_t pool_depth = 24;
 
     std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 3>                attachment_pools_;

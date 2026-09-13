@@ -20,6 +20,8 @@
  */
 
 #include "renderpass.h"
+
+#include <algorithm>
 #include "../image/image_kernel.h"
 #include "device.h"
 #include "pipeline.h"
@@ -184,6 +186,48 @@ void renderpass::commit()
         // create a renderpass for each layer
         bool default_cleared = false;
         previous_attachment  = nullptr; // force a fresh render pass to start below
+
+        // ── ATTACHMENTS CURRENTLY HANDED TO THE SAMPLER ────────────────────────────────────
+        //
+        // An attachment that has been finished with is transitioned to `eShaderReadOnlyOptimal`
+        // below so the next pass can sample it. Until this commit, nothing was ever RENDERED
+        // INTO again afterwards -- the node evaluator took a fresh attachment per pass -- so the
+        // reverse transition did not exist.
+        //
+        // It does now, because reusing attachments within a frame is the only way a chain's
+        // memory stops growing with its length: the renderpass holds a reference to every
+        // layer's attachment until `commit()`, so sixteen passes meant sixteen live 4K fp16
+        // images per channel however promptly the evaluator dropped its own references.
+        //
+        // Re-entering one as a target needs BOTH halves: the layout back to
+        // `eRenderingLocalRead`, and a write-after-read barrier against the sampling that the
+        // earlier pass did. Neither is optional and neither is checkable by `vk-validation`,
+        // which reports clean whatever you do -- `grade-graph`'s deep chain and diamond arms are
+        // what actually adjudicate this.
+        std::vector<const class texture*> in_shader_read;
+        const auto take_back_for_writing = [&](const std::shared_ptr<class texture>& tex) {
+            const auto it = std::find(in_shader_read.begin(), in_shader_read.end(), tex.get());
+            if (it == in_shader_read.end())
+                return;
+            in_shader_read.erase(it);
+
+            vk::ImageMemoryBarrier2 b{};
+            b.subresourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+            // WRITE AFTER READ: the earlier pass sampled this image in the fragment stage, and
+            // this pass is about to write it as a colour attachment. Without the barrier the
+            // write may land before that read has happened.
+            b.srcStageMask  = vk::PipelineStageFlagBits2::eFragmentShader;
+            b.srcAccessMask = vk::AccessFlagBits2::eShaderRead;
+            b.dstStageMask  = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
+            b.dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite;
+            b.oldLayout     = vk::ImageLayout::eShaderReadOnlyOptimal;
+            b.newLayout     = vk::ImageLayout::eRenderingLocalRead;
+            b.image         = tex->id();
+
+            vk::DependencyInfo di{};
+            di.setImageMemoryBarriers(b);
+            cmd_buffer.pipelineBarrier2(di);
+        };
         for (auto& layer : layers_) {
             if (layer.attachment != previous_attachment) {
                 // We need to start a new render pass
@@ -208,8 +252,16 @@ void renderpass::commit()
                         vk::DependencyInfo dependencyInfo{};
                         dependencyInfo.setImageMemoryBarriers(memoryBarrier);
                         cmd_buffer.pipelineBarrier2(dependencyInfo);
+
+                        // Remember it is now the sampler's, so re-targeting it later takes it
+                        // back rather than declaring a layout it is not in.
+                        in_shader_read.push_back(previous_attachment.get());
                     }
                 }
+
+                // If this attachment was handed to the sampler earlier in the frame, take it
+                // back before declaring `eRenderingLocalRead` for it.
+                take_back_for_writing(layer.attachment);
 
                 // We only want to clear the default attachment once
                 bool do_clear = (layer.attachment != _default_attachment) || !default_cleared;
