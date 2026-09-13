@@ -37,6 +37,10 @@ namespace {
 /// `flags2`, whose bit 0 is `output_bgra`. The variant must honour it -- see the wrapper at the
 /// end of the generated source.
 constexpr int OFF_FLAGS2         = 736;
+/// `gn_isf_to_display`: which way to convert around the author's body. See the OpenGL preamble
+/// in `isf_shader.cpp` -- the two must agree, because a document must render the same on either
+/// mixer and this is a place where two implementations could quietly diverge.
+constexpr int OFF_ISF_TODISPLAY  = 1212;
 constexpr int OFF_ISF_VALUES     = 1056;
 constexpr int OFF_ISF_COUNT      = 1184;
 constexpr int OFF_ISF_TIME       = 1188;
@@ -194,6 +198,9 @@ vulkan_source build_vulkan_fragment(const std::vector<input>& inputs,
          "    layout(offset = "
       << OFF_ISF_RENDERSIZE
       << ") vec2 gn_isf_rendersize;\n"
+         "    layout(offset = "
+      << OFF_ISF_TODISPLAY
+      << ") int gn_isf_to_display;\n"
          "};\n"
          "\n"
          // ---- ISF's standard uniforms, as the spec names them ----------------------------
@@ -254,9 +261,24 @@ vulkan_source build_vulkan_fragment(const std::vector<input>& inputs,
     // AND THEY DID NOT CANCEL, which is the whole reason the two gain sets are not red/blue
     // mirrors of each other. A mirror-symmetric fixture reports these two faults together as no
     // fault at all.
-    f << "vec4 _isf_fetch(sampler2D s, vec2 nc) {\n"
+    // ── THE SPACE CONVERSION, IDENTICAL TO THE OPENGL PREAMBLE'S ────────────────────
+    //
+    // BT.1886 -- pure gamma 2.4, the curve both mixer shaders carry as `oetf_rec709` /
+    // `eotf_rec709` for SDR. An exact inverse pair, so the round trip is lossless within 0..1.
+    // TRANSFER ONLY: no gamut conversion and no tone map, because the output half bundles those
+    // with a clamp and that composition has no inverse.
+    //
+    // THE TWO BACKENDS MUST AGREE HERE, and this is exactly the kind of place they would not:
+    // the same three lines, written twice, in two languages. `grade-graph` gates both against
+    // the same closed-form model rather than against each other, for that reason.
+    f << "vec3 _isf_enc(vec3 c) { return pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)); }\n"
+         "vec3 _isf_dec(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.4)); }\n"
+         "vec4 _isf_fetch(sampler2D s, vec2 nc) {\n"
          "  vec4 c = texture(s, vec2(nc.x, 1.0 - nc.y));\n"
-         "  return ((gn_flags2 & 1u) != 0u) ? c.bgra : c;\n"
+         "  c = ((gn_flags2 & 1u) != 0u) ? c.bgra : c;\n"
+         "  if (gn_isf_to_display > 0) c.rgb = _isf_enc(c.rgb);\n"
+         "  else if (gn_isf_to_display < 0) c.rgb = _isf_dec(c.rgb);\n"
+         "  return c;\n"
          "}\n"
          "#define IMG_SIZE(image) vec2(textureSize(image, 0))\n"
          "#define IMG_NORM_PIXEL(image, nc) _isf_fetch(image, vec2(nc))\n"
@@ -292,7 +314,10 @@ vulkan_source build_vulkan_fragment(const std::vector<input>& inputs,
       << "\n#undef main\n"
          "void main() {\n"
          "  isf_main();\n"
-         "  isf_out_color = ((gn_flags2 & 1u) != 0u) ? isf_color.bgra : isf_color;\n"
+         "  vec4 o = isf_color;\n"
+         "  if (gn_isf_to_display > 0) o.rgb = _isf_dec(o.rgb);\n"
+         "  else if (gn_isf_to_display < 0) o.rgb = _isf_enc(o.rgb);\n"
+         "  isf_out_color = ((gn_flags2 & 1u) != 0u) ? o.bgra : o;\n"
          "}\n";
 
     out.source = f.str();
@@ -385,7 +410,10 @@ void isf_vulkan_self_test()
                               "IMG_NORM_PIXEL",
                               "IMG_PIXEL",
                               "IMG_SIZE",
-                              "gl_FragColor"};
+                              "gl_FragColor",
+                              "gn_isf_to_display",
+                              "_isf_enc",
+                              "_isf_dec"};
     for (const auto* n : required)
         if (r.source.find(n) == std::string::npos)
             fail(std::string("the generated shader does not declare `") + n +

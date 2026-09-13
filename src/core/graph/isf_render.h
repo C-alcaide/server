@@ -53,6 +53,14 @@ struct isf_node_request
     /// The channel's clock: `TIME`, `TIMEDELTA` and `FRAMEINDEX`. See
     /// `core::image_mixer::set_frame_number` for why these come from the channel rather than
     /// from a wall clock or from the transform.
+    /// Which way to convert around the shader, from the node's `space` port against the
+    /// graph's `stage`: +1 = the pass is WORKING and the shader wants DISPLAY, -1 = the
+    /// opposite, 0 = they already agree and nothing is applied.
+    ///
+    /// Zero for `space: match` and for every agreeing combination, which is the overwhelming
+    /// majority -- at zero the shader is bit-identical to one built before this existed.
+    int to_display = 0;
+
     double time       = 0.0;
     double time_delta = 0.0;
     int    frame_index = 0;

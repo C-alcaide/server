@@ -170,63 +170,19 @@ std::vector<graph_fault> validate(const graph_document& doc, std::vector<std::st
         }
         cls_of[n.id] = c;
 
-        // ── A COLOUR-SPACE ROUND TRIP THAT DOES NOT EXIST YET, REFUSED RATHER THAN FAKED ─────
+        // ── THE `space` CROSSINGS USED TO BE REFUSED HERE, AND ARE NOT ANY MORE ─────────
         //
-        // An ISF node's `space` says which encoding the shader runs in. Two of the four
-        // combinations need NO conversion at all, because the graph's own `stage` has already
-        // put the pass in that encoding:
+        // Two of the four `space`/`stage` combinations need a colour conversion around the
+        // shader, and until that pair was built they were refused at PUT -- deliberately, because
+        // running a shader on the wrong encoding renders a plausible picture and reports nothing.
         //
-        //     stage: display  + space: display  -> the pass IS display-referred. Run it raw.
-        //     stage: working  + space: working  -> the author asked for scene-linear. Run it raw.
+        // The pair exists now, on BOTH backends: a BT.1886 encode before the author's body and
+        // its exact inverse after, in the ISF preamble itself rather than as extra kernel passes.
+        // So all four combinations are legal and the refusal is gone rather than relaxed.
         //
-        // The other two need an encode before the shader and its inverse after, and THAT PAIR IS
-        // NOT BUILT. Shipping them silently would be the worst of the three options: the shader
-        // would render, the picture would look plausible, and every hand-tuned constant in it
-        // would be operating on the wrong numbers -- which is precisely the failure the `space`
-        // port was added to prevent. So it is a refusal at PUT, naming the two values that
-        // would work, rather than a wrong picture at air.
-        //
-        // NOT A COERCION. Silently substituting the other `space` would render something the
-        // operator did not ask for, and the whole point of this port is that the difference is
-        // invisible in the result.
-        if (n.cls == "isf") {
-            // READ AS BOTH AN INDEX AND A NAME, because an enum port is stored as an int64
-            // index and a client may PUT either form -- whether the codec has already coerced
-            // the name to its index depends on the route the document arrived by. Reading only
-            // one form gives a check that silently never fires, which is worse than no check:
-            // it would report the combination as accepted.
-            std::string space;
-            const auto  it = n.params.find("space");
-            if (it != n.params.end() && !it->second.empty()) {
-                if (const auto* str = boost::get<std::string>(&it->second.front()))
-                    space = *str;
-                else if (const auto* ws = boost::get<std::wstring>(&it->second.front()))
-                    space = u8(*ws);
-                else if (const auto* i64 = boost::get<std::int64_t>(&it->second.front()))
-                    space = *i64 == 1 ? "display" : (*i64 == 2 ? "working" : "match");
-                else if (const auto* dbl = boost::get<double>(&it->second.front()))
-                    space = *dbl == 1.0 ? "display" : (*dbl == 2.0 ? "working" : "match");
-            }
-            // `match` ASKS FOR NO CONVERSION and is therefore always satisfiable -- it is the
-            // class default precisely so the catalogue's own default always validates.
-            if (!space.empty() && space != "match") {
-                const bool want_display = space == "display";
-                const bool is_display   = doc.stage == graph_stage::display;
-                if (want_display != is_display) {
-                    out.push_back(err(
-                        n.id, "", "space",
-                        "an `isf` node with space '" + space + "' in a '" +
-                            std::string(stage_name(doc.stage)) +
-                            "'-stage graph needs a colour-space conversion around the shader, "
-                            "which is not implemented yet. Use space '" +
-                            (is_display ? "display" : "working") +
-                            "' to match the graph's stage, or 'match' to take whichever the "
-                            "stage carries, or change the graph's stage. This is refused rather "
-                            "than approximated because a shader run on the wrong encoding still "
-                            "renders, and looks plausible, and is wrong"));
-                }
-            }
-        }
+        // The conversion is TRANSFER ONLY -- no gamut, no tone map -- which is stated in
+        // `node-graph.md` §5.3 and in both preambles, because the mixer's output half bundles
+        // those with a clamp and that composition has no inverse.
 
         // THE PORTS OF THIS INSTANCE. For every class but a dynamic one this is the class's own
         // list; for a dynamic one it comes from the file its selector names.

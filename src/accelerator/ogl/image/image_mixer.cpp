@@ -1107,6 +1107,33 @@ class image_renderer
                             // first tick gives TIME 0 rather than a division by zero.
                             const auto fr  = channel_frame_.load(std::memory_order_relaxed);
                             const auto fps = channel_fps_.load(std::memory_order_relaxed);
+                            // ── WHICH WAY TO CONVERT, from `space` against the graph's stage ──
+                            //
+                            // BY NAME, through the plan's `value_names`, rather than by counting
+                            // ports. The registry's static list for `isf` is bypass, space, mix
+                            // -- and the last time this evaluator counted rather than asked, the
+                            // author's parameters landed three slots early and still rendered.
+                            //
+                            // 0 unless the two actually cross: `match` (0) always agrees by
+                            // definition, and an explicit value that matches the stage needs
+                            // nothing either. So the conversion is off for every case but the
+                            // two the validator used to refuse outright.
+                            int space_idx = -1;
+                            if (plan->value_names.size() >= values.size())
+                                for (std::uint32_t q = 0; q < st.values_count; ++q)
+                                    if (plan->value_names[st.values_offset + q] == "space")
+                                        space_idx = static_cast<int>(st.values_offset + q);
+                            const int space_v =
+                                space_idx >= 0 && static_cast<std::size_t>(space_idx) < values.size()
+                                    ? static_cast<int>(values[space_idx])
+                                    : 0;
+                            const bool stage_display =
+                                plan->stage == core::graph::graph_stage::display;
+                            // 1 = display, 2 = working; 0 = match.
+                            req.to_display = space_v == 1 && !stage_display   ?  1
+                                             : space_v == 2 && stage_display  ? -1
+                                                                              :  0;
+
                             req.time        = fps > 0.0 ? static_cast<double>(fr) / fps : 0.0;
                             req.time_delta  = fps > 0.0 ? 1.0 / fps : 0.0;
                             req.frame_index = static_cast<int>(fr);

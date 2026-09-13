@@ -373,7 +373,10 @@ struct alignas(16) uniform_block
     // shader sizes a buffer with a WIDTH/HEIGHT expression. The IMG_PIXEL macro family divides
     // by it, so a wrong value is a resampled picture rather than an error.
     float    gn_isf_rendersize[2] = {0.f, 0.f};                             // 1204
-    float    gn_isf_pad2      = 0.f;                                        // 1212
+    /// Which way an ISF node converts around the author's body: +1 encode to display before
+    /// and decode after, -1 the reverse, 0 nothing. Replaces what was pure padding, so the
+    /// block does not grow and no offset moves -- the one safe edit to this struct.
+    int32_t  gn_isf_to_display = 0;                                         // 1212
     // Total: 1216 bytes (76 x 16)
 };
 

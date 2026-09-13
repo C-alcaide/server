@@ -173,7 +173,7 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     int   gn_isf_frame;
     int   gn_isf_pass;
     float gn_isf_rendersize[2];
-    float gn_isf_pad2;
+    int   gn_isf_to_display;
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;

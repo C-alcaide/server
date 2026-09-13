@@ -396,6 +396,7 @@ struct shader::impl
         GLint flip = -1;
         GLint bgra = -1;
     };
+    GLint u_to_display_ = -1;
     GLint u_rendersize_ = -1, u_time_ = -1, u_timedelta_ = -1, u_frameindex_ = -1, u_passindex_ = -1,
           u_date_ = -1;
     std::vector<sampler_loc> sampler_locs_; ///< parallel to sampler_names_
@@ -614,9 +615,33 @@ struct shader::impl
             if (const char* t = gl_type_of(in.type))
                 d << "uniform " << t << " " << in.name << ";\n";
         }
-        d << "vec4 _isf_fetch(sampler2D s, vec2 nc, bool flp, bool bgr) {\n"
+        // ── THE COLOUR SPACE THE AUTHOR'S SHADER RUNS IN ───────────────────────────────
+        //
+        // `_isf_to_display` is +1 when a node in a WORKING-stage graph asked for
+        // `space: display`, -1 for the opposite crossing, and 0 when the pass already carries
+        // what the shader wants -- which is every other case, including every use by the ISF
+        // PRODUCER. At 0 the two branches below are not taken and the picture is bit-identical
+        // to before this existed.
+        //
+        // BT.1886, WHICH IS A STANDARD RATHER THAN A NUMBER I PICKED: pure gamma 2.4, the same
+        // curve `oetf_rec709`/`eotf_rec709` carry in both mixer shaders for SDR. An exact
+        // inverse pair, so the round trip is lossless within 0..1.
+        //
+        // ⚠ TRANSFER ONLY, and that is a stated limit rather than an oversight. The gamut is
+        // NOT converted and no tone map is applied, because the mixer's output half bundles the
+        // gamut matrix with a tone map and a clamp and that composition HAS NO INVERSE. So a
+        // shader under `space: display` sees display-ENCODED values in the WORKING gamut, and
+        // anything above 1.0 clips on the way in -- which is what display-referred means, and
+        // what the shader was authored against.
+        d << "uniform int _isf_to_display;\n"
+             "vec3 _isf_enc(vec3 c) { return pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)); }\n"
+             "vec3 _isf_dec(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.4)); }\n"
+             "vec4 _isf_fetch(sampler2D s, vec2 nc, bool flp, bool bgr) {\n"
              "  vec4 c = texture(s, flp ? vec2(nc.x, 1.0 - nc.y) : nc);\n"
-             "  return bgr ? c.bgra : c;\n"
+             "  c = bgr ? c.bgra : c;\n"
+             "  if (_isf_to_display > 0) c.rgb = _isf_enc(c.rgb);\n"
+             "  else if (_isf_to_display < 0) c.rgb = _isf_dec(c.rgb);\n"
+             "  return c;\n"
              "}\n"
              "#define vv_FragNormCoord isf_FragNormCoord\n"
              "#define isf_FragCoord (isf_FragNormCoord * RENDERSIZE)\n"
@@ -636,9 +661,18 @@ struct shader::impl
              "in vec2 isf_FragNormCoord;\n"
           << build_common_decls()
           << "out vec4 isf_out_color;\n"
-             "#define gl_FragColor isf_out_color\n"
+             "vec4 isf_color = vec4(0.0);\n"
+             "#define gl_FragColor isf_color\n"
+             "#define main isf_main\n"
              "#line 1\n"
-          << source_;
+          << source_
+          << "\n#undef main\n"
+             "void main() {\n"
+             "  isf_main();\n"
+             "  isf_out_color = isf_color;\n"
+             "  if (_isf_to_display > 0) isf_out_color.rgb = _isf_dec(isf_out_color.rgb);\n"
+             "  else if (_isf_to_display < 0) isf_out_color.rgb = _isf_enc(isf_out_color.rgb);\n"
+             "}\n";
         return f.str();
     }
 
@@ -710,6 +744,7 @@ struct shader::impl
         u_frameindex_ = glGetUniformLocation(program_, "FRAMEINDEX");
         u_passindex_  = glGetUniformLocation(program_, "PASSINDEX");
         u_date_       = glGetUniformLocation(program_, "DATE");
+        u_to_display_ = glGetUniformLocation(program_, "_isf_to_display");
         sampler_locs_.resize(sampler_names_.size());
         for (std::size_t i = 0; i < sampler_names_.size(); ++i) {
             const auto& n     = sampler_names_[i];
@@ -872,6 +907,11 @@ struct shader::impl
     {
         glUniform2f(u_rendersize_, static_cast<float>(width), static_cast<float>(height));
         glUniform1f(u_time_, static_cast<float>(time));
+        // 0 for everything but the two `space`/`stage` crossings, so an unset uniform and
+        // "no conversion" are the same thing -- which is what keeps every existing caller
+        // bit-identical.
+        if (u_to_display_ >= 0)
+            glUniform1i(u_to_display_, to_display_);
         glUniform1f(u_timedelta_, static_cast<float>(time_delta));
         glUniform1i(u_frameindex_, frame_index);
         glUniform1i(u_passindex_, pass_index);
@@ -943,6 +983,8 @@ struct shader::impl
 
     /// Run all passes on the current GL context. Returns the final raw GL texture (bottom-up RGBA)
     /// and its size via last_w/last_h, or 0 on failure.
+    void set_space_conversion(int v) { to_display_ = v; }
+
     GLuint render_gl(int                               width,
                      int                               height,
                      double                            time,
@@ -1114,6 +1156,8 @@ struct shader::impl
     GLuint out_program_ = 0;
     GLuint out_vao_     = 0;
     GLint  out_src_loc_  = -1;
+    /// See `shader::set_space_conversion`. 0 for everything but the two crossings.
+    int    to_display_   = 0;
     GLint  out_swap_loc_ = -1;
 
     bool ensure_out_program()
@@ -1370,6 +1414,8 @@ void shader::set_output_depth(common::bit_depth depth)
     // `ensure_final` compares the depth it built with instead.
     impl_->out_depth_ = depth;
 }
+
+void shader::set_space_conversion(int to_display) { impl_->set_space_conversion(to_display); }
 
 void shader::reset_events()
 {

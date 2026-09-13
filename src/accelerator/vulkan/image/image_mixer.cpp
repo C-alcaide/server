@@ -1135,6 +1135,24 @@ class image_renderer
                         static_cast<std::size_t>(st.string_index) < plan->strings.size())
                         isf_path = &plan->strings[st.string_index];
 
+                    // WHICH WAY TO CONVERT, from `space` against the graph's stage. BY NAME
+                    // through `value_names`, for the reason the OpenGL evaluator gives at the
+                    // same spot: the last time this counted ports instead of asking, every
+                    // parameter landed three slots early and still rendered.
+                    int space_idx = -1;
+                    if (isf_path && plan->value_names.size() >= values.size())
+                        for (std::uint32_t q = 0; q < st.values_count; ++q)
+                            if (plan->value_names[st.values_offset + q] == "space")
+                                space_idx = static_cast<int>(st.values_offset + q);
+                    const int space_v =
+                        space_idx >= 0 && static_cast<std::size_t>(space_idx) < values.size()
+                            ? static_cast<int>(values[space_idx])
+                            : 0;
+                    const bool stage_display = plan->stage == core::graph::graph_stage::display;
+                    const int  isf_to_display = space_v == 1 && !stage_display   ?  1
+                                                : space_v == 2 && stage_display  ? -1
+                                                                                 :  0;
+
                     const auto fr  = channel_frame_.load(std::memory_order_relaxed);
                     const auto fps = channel_fps_.load(std::memory_order_relaxed);
 
@@ -1144,7 +1162,7 @@ class image_renderer
                                mask_texture, isf_path,
                                fps > 0.0 ? static_cast<double>(fr) / fps : 0.0,
                                fps > 0.0 ? 1.0 / fps : 0.0,
-                               static_cast<int>(fr));
+                               static_cast<int>(fr), isf_to_display);
                     outputs[i] = dst;
 
                     // ── SERVE EVERY SLOT THAT WANTED THIS STEP ────────────────────
@@ -1226,7 +1244,8 @@ class image_renderer
                     const std::string*              isf_path     = nullptr,
                     double                          isf_time     = 0.0,
                     double                          isf_dt       = 0.0,
-                    int                             isf_frame    = 0)
+                    int                             isf_frame    = 0,
+                    int                             isf_to_display = 0)
     {
         if (!source_a)
             return;
@@ -1263,6 +1282,7 @@ class image_renderer
         draw_params.isf_time                = isf_time;
         draw_params.isf_time_delta          = isf_dt;
         draw_params.isf_frame               = isf_frame;
+        draw_params.isf_to_display          = isf_to_display;
         // The destination is an fp16 attachment, so this draw needs the fp16 pipeline. See the
         // head pass above for why the format is not just a property of the image here.
         draw_params.node_fp16               = true;

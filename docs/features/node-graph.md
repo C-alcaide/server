@@ -589,28 +589,41 @@ ISF shader published anywhere was authored against a display-referred 0..1 buffe
 that difference — a threshold, a hue rotate, a `pow` or anything with a hand-tuned constant does
 not, and it will render, look plausible, and be wrong with nothing to report it.
 
-`match` is the default and needs no conversion by construction: the shader runs in whatever encoding
-the graph's `stage` already carries. `display` and `working` ask for a specific one, and a request
-that would need a conversion around the shader is **refused at PUT** — that conversion is not built.
+`match` is the default and needs no conversion by construction: the shader runs in whatever
+encoding the graph's `stage` already carries. `display` and `working` ask for a specific one, and
+where that differs from the stage the evaluator converts around the shader.
 
 | graph `stage` | node `space` | what happens |
 | :--- | :--- | :--- |
-| either | `match` *(default)* | runs in the stage's own encoding. Always valid |
-| `display` | `display` | the pass **is** display-referred. Runs raw |
-| `working` | `working` | the author asked for scene-linear. Runs raw |
-| `display` | `working` | **refused at PUT** — needs a conversion pair that is not built |
-| `working` | `display` | **refused at PUT** — the same |
+| either | `match` *(default)* | runs in the stage's own encoding. No conversion |
+| `display` | `display` | the pass **is** display-referred. No conversion |
+| `working` | `working` | the author asked for scene-linear. No conversion |
+| `working` | `display` | **encode to display before the shader, decode after** |
+| `display` | `working` | **the reverse** |
 
-The crossed pair is **refused rather than approximated**, and the refusal names the values that
-would work. Silently substituting the other `space` would render something the operator did not ask
-for, and running the shader on the wrong encoding is exactly the failure the port exists to prevent.
+**The conversion is BT.1886 — pure gamma 2.4 — and it is a standard rather than a chosen number:**
+the same curve both mixer shaders already carry as `oetf_rec709` / `eotf_rec709` for SDR. The pair
+is an exact inverse, so the round trip is lossless within 0..1.
+
+**⚠ TRANSFER ONLY. The gamut is not converted and no tone map is applied.** That is a limit, not
+an oversight: the mixer's output half bundles the gamut matrix with a tone map and a clamp, and
+that composition has **no inverse**. So a shader under `space: display` sees display-*encoded*
+values in the *working* gamut, and anything above 1.0 clips on the way in — which is what
+display-referred means, and what the shader was authored against.
+
+**It happens inside the ISF preamble on both backends**, not as extra kernel passes: the OpenGL
+preamble in `isf_shader.cpp` and the generated Vulkan variant each carry the same three lines. Two
+implementations of one curve is a real risk, which is why `grade-graph` gates both against the
+same closed form rather than against each other — `dec(enc(x) · g) == x · g^2.4` exactly, measured
+at **[109, 38, 2] against [108.7, 37.8, 1.8]** on both mixers.
 
 > **The default was `display` first, and that was a defect.** It made the class's own catalogue
 > default un-PUT-able — `display` in a `working`-stage graph is one of the refused pairs, so a
 > client fetching `/v1/catalog/node/isf/default` and PUTting it got a fault. `api-graph` caught it
 > on the first run after the refusal landed, because it walks every class's default and asserts it
 > validates. **A class whose own default is refused is broken however good the reason**, and
-> `match` is what makes the default always satisfiable without giving up the refusal.
+> `match` is what makes the default always satisfiable. The crossed pairs were refused outright
+> until the conversion existed; they are legal now, and the refusal is gone rather than relaxed.
 
 **What a shader's uniforms get.** `TIME`, `TIMEDELTA` and `FRAMEINDEX` come from the **channel's own
 frame counter** — the one the timeline uses — so two `isf` nodes on a channel agree and a shader
@@ -1205,7 +1218,7 @@ rather than by the `MIXER` tween.
 | an `isf` node DRAWS, and with the right parameters | `grade-graph` | **4 checks, OpenGL.** A generator fixture whose flat fill is arithmetic on its own declared parameters, gated at **1 LSB** against that model. It differs from the un-graphed layer, so a node that never drew cannot pass it |
 | an `isf` node reads its INPUT — binding, channel order, flip | `grade-graph` | **3 checks, OpenGL.** The generator above is BLIND to all three: it never samples `inputImage`, so it renders identically whether the input was bound right, upside down, channel-swapped, or not at all. A second FILTER fixture applies asymmetric per-channel gains, differing between the top and bottom halves. **It caught a real defect on its first run** — the pass swizzled red/blue on both ends, on the assumption that a node attachment holds BGRA like a producer's plane; it holds RGBA. Green was correct in both readings, so a grey fixture would have passed it silently |
 | that a flip and a channel exchange cannot CANCEL | `grade-graph` | the two gain sets are not channel permutations of each other. The first version of the fixture used red/blue mirrors, where both faults together produce the correct picture and two defects report as none. A companion check gates that the two halves are ≥ 8 LSB apart, so the flip check can fail at all |
-| that an unbuildable `space` is REFUSED | `grade-graph` | **both mixers.** The crossed `space`/`stage` pair is refused at PUT rather than approximated |
+| that `space` is a real CHOICE, not a label | `grade-graph` | **2 checks, both mixers.** The same shader in one working-stage graph at `match` and at `display` must NOT agree — **24.00 LSB apart** — and the converted picture must equal `base x gain^2.4` to 1.5 LSB, which is exact because BT.1886 is a pure power curve. Before the conversion existed this port had ONE reachable behaviour per stage and was a label. The FILTER fixture is used rather than the generator: the generator ignores its input, so the encode on the way IN would be invisible and only half the round trip measured |
 | that a missing shader leaves the layer RENDERING | `grade-graph` | **both mixers.** Refused at PUT, or the input passed through — never black |
 | an `isf` node on **Vulkan**, as a variant pipeline | `grade-graph` | **the same 4 checks, same model, 43/43 both mixers.** The placeholder that asserted "Vulkan does not draw one" is deleted — it said in its own text that failing because the node DREW was the good failure, and it did. **The fixture found four defects before this passed**, none of which fails loudly on its own: the author's parameters based three slots early (a shader reading `mix` as its brightness); the variant ignoring the mixer's runtime output-order flag; a missing perspective divide (correct on default geometry, wrong on any corner-pin); and the input read flipped *and* channel-reversed |
 | that a flip and a channel exchange cannot CANCEL — **paid off on Vulkan** | `grade-graph` | after the perspective divide the two patches read *exact permutations* — top = reversed input × BOTTOM gains, bottom = reversed input × TOP gains — which named both faults at once. Mirror-symmetric gains would have reported two real faults as none |

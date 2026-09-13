@@ -1686,6 +1686,7 @@ struct image_kernel::impl
                 uniforms.gn_isf_timedelta = static_cast<float>(params.isf_time_delta);
                 uniforms.gn_isf_frame     = params.isf_frame;
                 uniforms.gn_isf_pass      = 0;
+                uniforms.gn_isf_to_display = params.isf_to_display;
                 // RENDERSIZE is the PASS's extent. Single-pass today, so that is the node
                 // attachment, which is the target raster.
                 uniforms.gn_isf_rendersize[0] = static_cast<float>(params.target_width);

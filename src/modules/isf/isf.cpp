@@ -263,6 +263,10 @@ bool render_isf_node(const core::graph::isf_node_request& req)
     // existed.
     sh.set_output_depth(common::bit_depth::bit16);
 
+    // The `space` port, resolved against the graph's stage by the evaluator. 0 for every
+    // agreeing combination, which leaves the shader bit-identical to one built before this.
+    sh.set_space_conversion(req.to_display);
+
     image_binding in;
     in.name   = "inputImage";
     in.tex_id = req.src_tex;

@@ -136,6 +136,14 @@ class shader
     /// through a preset, and cannot be the target of a binding.
     std::vector<double> get_value(const std::string& name) const;
 
+    /// Which way to convert around the author's body: +1 encodes to display-referred before
+    /// the shader and decodes after, -1 the reverse, 0 applies nothing.
+    ///
+    /// BT.1886 (pure gamma 2.4), TRANSFER ONLY -- no gamut conversion and no tone map, because
+    /// the mixer's output half bundles those with a clamp and the composition has no inverse.
+    /// Defaults to 0, so the ISF producer and every agreeing node are unaffected.
+    void set_space_conversion(int to_display);
+
     /// Reset all `event`-type inputs to 0 (call once per rendered frame for momentary triggers).
     void reset_events();
 

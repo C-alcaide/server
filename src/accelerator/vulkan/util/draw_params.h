@@ -154,6 +154,9 @@ struct draw_params final
     double isf_time       = 0.0;
     double isf_time_delta = 0.0;
     int    isf_frame      = 0;
+    /// The node's `space` resolved against the graph's stage: +1, -1 or 0. See
+    /// `core::graph::isf_node_request::to_display`.
+    int    isf_to_display = 0;
 
     /// This LAYER draw feeds a node graph running in **working** space.
     ///
