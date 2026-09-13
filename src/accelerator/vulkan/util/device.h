@@ -151,12 +151,27 @@ class device final
                                                      int                   height,
                                                      common::bit_depth     depth,
                                                      uint32_t              components_count,
-                                                     common::render_format render_format = common::render_format::unorm);
+                                                     common::render_format render_format = common::render_format::unorm,
+                                                     /// Skip the internal layout transition; the
+                                                     /// caller will record it into its own
+                                                     /// command buffer. See
+                                                     /// `record_attachment_layout_reset`.
+                                                     bool                  defer_layout  = false);
     // Transitions an attachment texture to eRenderingLocalRead before it is
     // reused as a render target. create_attachment() does this internally for
     // every texture it returns (new or pooled); callers that keep their own
     // cache of attachments across frames (see image_kernel's per-slot pool)
     // must call this themselves on a cache hit, since they bypass create_attachment().
+    /// Record an attachment's "ready to render into" barrier into a command buffer the CALLER
+    /// owns, instead of submitting one of its own.
+    ///
+    /// `cmd_buffer` is a `vk::CommandBuffer*`, erased so this header does not drag vulkan.hpp
+    /// into everything that includes it.
+    ///
+    /// A frame that takes N attachments costs ONE submit this way instead of N. See the note on
+    /// the definition for what N standalone submits measured.
+    void record_attachment_layout_reset(void* cmd_buffer, const std::shared_ptr<class texture>& tex);
+
     void reset_attachment_layout(const std::shared_ptr<class texture>& tex);
     std::shared_ptr<class texture> create_texture(int width, int height, int stride, common::bit_depth depth);
 

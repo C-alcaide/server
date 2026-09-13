@@ -144,6 +144,10 @@ void renderpass::commit()
     // Upload any LUT textures that were updated during draw() calls.
     // Must happen before rendering starts (images need to reach ShaderReadOnlyOptimal).
     _ctx->upload_pending_luts(cmd_buffer);
+    // Every attachment this frame took, transitioned in ONE place instead of one submit each.
+    // Before any `beginRendering`, which is what makes the barriers ordered against the draws
+    // that use those attachments.
+    _ctx->apply_pending_layouts(cmd_buffer);
 
     vk::ClearValue clearColor{vk::ClearColorValue(std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f})};
 

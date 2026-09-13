@@ -92,6 +92,12 @@ struct frame_context
     /// shifts every later vtable slot, and an object file compiled against the old layout
     /// then calls through the wrong one. Keep new virtuals here.
     virtual std::shared_ptr<class pipeline> get_layer_pipeline() const { return nullptr; }
+
+    /// Record any pending attachment layout barriers into this frame's command buffer.
+    ///
+    /// APPENDED, like everything else here, for the vtable reason this interface states at
+    /// length. Default does nothing, so a context that takes no attachments needs no change.
+    virtual void apply_pending_layouts(vk::CommandBuffer /*cmd*/) {}
 };
 
 class renderpass

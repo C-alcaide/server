@@ -454,13 +454,36 @@ struct image_kernel::impl
                     // declares that layout for it. create_attachment() below does this
                     // for a freshly-created/device-pooled texture; this cache bypasses
                     // that call entirely, so it must do the transition itself.
-                    parent->vulkan_->reset_attachment_layout(tex);
+                    // QUEUED, NOT SUBMITTED. `reset_attachment_layout` submits a command
+                    // buffer of its own and takes the shared queue mutex to do it; a graph
+                    // takes one attachment per pass, so that was one submit per pass per
+                    // channel per frame. See `pending_layout_`.
+                    pending_layout_.push_back(tex);
                     return tex;
                 }
             }
-            auto tex =
-                parent->vulkan_->create_attachment(width, height, parent->depth_, components_count, format);
-            // Cap pool to prevent unbounded VRAM growth when consumers hold refs.
+            // `defer_layout = true`: this frame records the barrier itself, with every other
+            // attachment's, in one go. Otherwise a fresh attachment costs its own submit.
+            auto tex = parent->vulkan_->create_attachment(
+                width, height, parent->depth_, components_count, format, /*defer_layout*/ true);
+            pending_layout_.push_back(tex);
+
+            // ── FOUR, AND RAISING IT IS THE WRONG FIX ──────────────────────────────────
+            //
+            // A node graph takes one attachment per pass, so a graphed channel misses this
+            // cache on most of its passes and goes to the DEVICE pool for them. That was
+            // expensive only because every miss -- and every hit -- cost a standalone queue
+            // submit for its layout transition; with those deferred into the frame's own
+            // command buffer, a device-pool hit is cheap and this cache no longer needs to
+            // cover a whole graph.
+            //
+            // RAISING IT TO 24 WAS TRIED AND IS A VRAM DISASTER: this pool is PER SLOT and
+            // there are three, on every channel. At 2160p fp16 that is 24 x 66 MB x 3 x 4
+            // channels ~= 19 GB, and the measurement showed it -- 15289 `allocateMemory:
+            // ErrorOutOfDeviceMemory` tick failures in one run, with the late-frame counts
+            // still looking healthy because the fence fix let each one recover. **A battery
+            // that reports good numbers while thousands of ticks fail is why the log is part
+            // of the verdict.**
             static constexpr size_t MAX_ATTACHMENT_POOL = 4;
             if (attachment_pool_.size() < MAX_ATTACHMENT_POOL)
                 attachment_pool_.push_back(tex);
@@ -469,6 +492,20 @@ struct image_kernel::impl
 
         // Pool of attachment textures for this slot.
         std::vector<std::shared_ptr<class texture>> attachment_pool_;
+
+        /// Attachments handed out this frame that still need their "ready to render into"
+        /// barrier. Emitted together into the frame's own command buffer by
+        /// `apply_pending_layouts`, which `renderpass::commit()` calls before it begins
+        /// rendering -- the same place and the same reasoning as the LUT uploads beside it.
+        std::vector<std::shared_ptr<class texture>> pending_layout_;
+
+        void apply_pending_layouts(vk::CommandBuffer cmd) override
+        {
+            for (auto& tex : pending_layout_)
+                if (tex)
+                    parent->vulkan_->record_attachment_layout_reset(&cmd, tex);
+            pending_layout_.clear();
+        }
     };
 
     frame_data frames_[frame_buffer_size];
@@ -579,6 +616,19 @@ struct image_kernel::impl
         // now leaves the fence SIGNALLED, so the next tick's wait returns at once and the slot
         // repairs itself.
         ctx.submitted = false;
+
+        // ── AND DROP ANY BARRIER LIST THE PREVIOUS FRAME LEFT ────────────────────────────
+        //
+        // `pending_layout_` holds a `shared_ptr` to every attachment awaiting its transition,
+        // and `apply_pending_layouts` clears it -- but that runs from `commit()`, and a frame
+        // has several ways not to reach one: the still-frame cache hit, an empty layer list, an
+        // exception. Anything left behind keeps its attachments alive, so they never return to
+        // the pool and the next frame allocates fresh ones.
+        //
+        // MEASURED: 11993 `allocateMemory: ErrorOutOfDeviceMemory` tick failures in one run,
+        // with the late-frame counts still looking healthy because the fence fix let every one
+        // of them recover. The leak was mine, added with the deferral itself.
+        ctx.pending_layout_.clear();
         ctx.cmd_buffer.reset({});
         return spl::make_shared<renderpass>(&ctx, width, height);
     }

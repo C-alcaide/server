@@ -160,11 +160,18 @@ struct device::impl : public std::enable_shared_from_this<impl>
     /// How many textures of one (format, raster) a pool may hold before it frees them instead.
     /// See the long note on the deleter in `create_attachment`.
     ///
-    /// 48 = the compiler's 16-pass cap x 3 frame slots: what ONE channel can legitimately have
-    /// in flight for a single raster. A VRAM ceiling rather than a tuning knob -- at 2160p fp16
-    /// that is 48 x 66 MB = 3.2 GB per raster per format, already generous on a 16 GB card,
-    /// which is why the number is not larger.
-    static constexpr size_t pool_depth = 48;
+    /// SIZED IN BYTES, NOT IN AMBITION. At 2160p fp16 one attachment is 66 MB, so this pool
+    /// holds ~800 MB per (format, raster) -- idle memory, waiting to be reused.
+    ///
+    /// 48 was tried first, reasoning "the 16-pass cap x 3 frame slots is what one channel can
+    /// legitimately have in flight". That is true of LIVE attachments and wrong for a POOL: the
+    /// live ones are held by the frame, and this only holds the ones nobody wants right now.
+    /// 48 x 66 MB = 3.2 GB of that, on a card whose heavy arms already peak at 15.7 of 16.4 GB.
+    ///
+    /// A linear chain has two or three attachments live at once however long it is, because
+    /// `last_use` returns each one as soon as nothing reads it. Twelve covers that across three
+    /// frame slots with room over.
+    static constexpr size_t pool_depth = 24;
 
     std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 3>                attachment_pools_;
     std::array<std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 4>, 2> device_pools_;
@@ -1215,7 +1222,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
                       int                   height,
                       common::bit_depth     depth,
                       uint32_t              components_count,
-                      common::render_format render_format)
+                      common::render_format render_format,
+                      bool                  defer_layout = false)
     {
         CASPAR_VERIFY(width > 0 && height > 0);
 
@@ -1289,17 +1297,23 @@ struct device::impl : public std::enable_shared_from_this<impl>
                 tex->set_device_luid(_device_luid);
         }
 
-        submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
-            transitionImageLayout(
-                tex->id(),
-                vk::ImageLayout::eUndefined,
-                vk::AccessFlagBits2::eNone,
-                vk::PipelineStageFlagBits2::eTopOfPipe,
-                vk::ImageLayout::eRenderingLocalRead,
-                vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eInputAttachmentRead,
-                vk::PipelineStageFlagBits2::eColorAttachmentOutput | vk::PipelineStageFlagBits2::eFragmentShader,
-                cmd);
-        });
+        // ONLY WHEN THE CALLER IS NOT GOING TO RECORD IT ITSELF. A frame that takes several
+        // attachments records all their barriers into its own command buffer in one go; doing
+        // it here as well would be a wasted submit per attachment. See
+        // `record_attachment_layout_reset`.
+        if (!defer_layout) {
+            submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+                transitionImageLayout(
+                    tex->id(),
+                    vk::ImageLayout::eUndefined,
+                    vk::AccessFlagBits2::eNone,
+                    vk::PipelineStageFlagBits2::eTopOfPipe,
+                    vk::ImageLayout::eRenderingLocalRead,
+                    vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eInputAttachmentRead,
+                    vk::PipelineStageFlagBits2::eColorAttachmentOutput | vk::PipelineStageFlagBits2::eFragmentShader,
+                    cmd);
+            });
+        }
 
         tex->set_depth(depth);
 
@@ -2456,9 +2470,39 @@ std::shared_ptr<texture> device::create_attachment(int                   width,
                                                    int                   height,
                                                    common::bit_depth     depth,
                                                    uint32_t              components_count,
-                                                   common::render_format render_format)
+                                                   common::render_format render_format,
+                                                   bool                  defer_layout)
 {
-    return impl_->create_attachment(width, height, depth, components_count, render_format);
+    return impl_->create_attachment(width, height, depth, components_count, render_format, defer_layout);
+}
+
+void device::record_attachment_layout_reset(void* cmd_buffer, const std::shared_ptr<class texture>& tex)
+{
+    // ── THE SAME BARRIER, RECORDED INTO A COMMAND BUFFER THE CALLER ALREADY HAS ────────────
+    //
+    // `reset_attachment_layout` below does this in a submit of its own -- allocate a command
+    // buffer, take the SHARED QUEUE MUTEX, submit, signal a timeline semaphore. That is fine
+    // once; it is not fine once per attachment per frame.
+    //
+    // MEASURED 2026-09-13: a node graph takes one attachment per pass, and both the pool-hit and
+    // the pool-miss path transitioned it this way -- so sixteen passes on four channels cost
+    // **64 standalone queue submits per frame, 3200 a second, all serialised through one
+    // mutex**. OpenGL has no image layouts and pays none of it, which is why the same ladder
+    // cost 0 late frames there and 9.1% at eight passes on Vulkan.
+    //
+    // Recorded into the frame's own command buffer instead, which is already being built and is
+    // already ordered against the draws that follow -- the same reasoning `do_upload_pending_luts`
+    // gives for putting LUT uploads there: *"that is the only command buffer ordered against the
+    // draw that samples them"*.
+    transitionImageLayout(
+        tex->id(),
+        vk::ImageLayout::eUndefined,
+        vk::AccessFlagBits2::eNone,
+        vk::PipelineStageFlagBits2::eTopOfPipe,
+        vk::ImageLayout::eRenderingLocalRead,
+        vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eInputAttachmentRead,
+        vk::PipelineStageFlagBits2::eColorAttachmentOutput | vk::PipelineStageFlagBits2::eFragmentShader,
+        *static_cast<vk::CommandBuffer*>(cmd_buffer));
 }
 
 void device::reset_attachment_layout(const std::shared_ptr<class texture>& tex)
