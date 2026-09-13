@@ -128,6 +128,9 @@ class renderpass
         uint32_t                                 vertex_buffer_offset = 0;
     };
     std::vector<layer_info> layers_;
+    /// Attachments already in `eShaderReadOnlyOptimal` before this frame began; see
+    /// `adopt_as_shader_read`. Seeded into `commit()`'s own tracking and cleared there.
+    std::vector<std::shared_ptr<class texture>> adopted_shader_read_;
 
   public:
     renderpass(frame_context* ctx, uint32_t width, uint32_t height);
@@ -147,6 +150,17 @@ class renderpass
     /// NOT A VIRTUAL: this header's own rule is that new virtuals go at the END of the
     /// interface, and this needs none -- `frame_context::create_attachment_as` already takes a
     /// width and a height.
+    /// Declare that `tex` is already in `eShaderReadOnlyOptimal` when this frame begins, so
+    /// re-entering it as a render target emits the write-after-read barrier rather than
+    /// declaring a layout it is not in.
+    ///
+    /// **FOR A BUFFER THAT OUTLIVES THE FRAME**, which until ISF's PERSISTENT targets nothing
+    /// did: every other attachment is created inside the frame that uses it, so `commit()`
+    /// learns its layout by watching itself hand it to the sampler. A persistent buffer was
+    /// handed over during the PREVIOUS frame, and the frame that re-targets it has no record of
+    /// that -- it would take the `eUndefined` path and discard the history it exists to keep.
+    void adopt_as_shader_read(const std::shared_ptr<class texture>& tex);
+
     std::shared_ptr<class texture> create_attachment_sized(uint32_t              width,
                                                            uint32_t              height,
                                                            common::render_format format,

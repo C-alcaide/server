@@ -1230,12 +1230,48 @@ that size — the expressions are arbitrary arithmetic over `$WIDTH`, `$HEIGHT` 
 inputs, and **one evaluator serves both mixers** because two would round differently and allocate
 different buffers for one document.
 
-Four things are still refused at PUT, on **both** backends, naming what is missing rather than
+**And it keeps PERSISTENT state, per node INSTANCE.** A `PASSES` entry marked `PERSISTENT`
+survives the frame, so an ISF shader can accumulate, latch, trail or feed back — the same thing a
+Feedback TOP does in TouchDesigner and a modifier's state does in Smode.
+
+Four rules, and every one of them is what the hosts that already have this feature do rather than
+something invented here:
+
+* **The state belongs to the node instance, not the shader file.** The ISF spec says a persistent
+  buffer *"stays with your effect until its deletion"*, and TouchDesigner, Smode, vvvv and
+  OpenFX's `kOfxPropInstanceData` all scope it the same way. Two `isf` nodes on one `.fs` keep
+  separate buffers; keyed by path they would accumulate into each other's history.
+* **It is a PING-PONG PAIR.** A pass that reads and writes one buffer in the same draw is
+  undefined in both APIs, so each target is two textures: this frame writes one and samples the
+  other, and the pair **flips once per frame, after every pass** — not after the pass that wrote
+  it, because a later pass of the same frame must still see the previous frame's content. isf-js
+  does exactly this; VVISF hands the buffer back through a pool.
+* **Created black.** A buffer is read before it is ever written, so undefined contents would be
+  whatever the allocator handed back. VVISF blackens explicitly, and the spec's own
+  `if (FRAMEINDEX < 1)` seeding idiom assumes it.
+* **A RESIZE is a reset.** A target sized from a parameter (`WIDTH: "$size"`) is reallocated and
+  blackened when that parameter moves. The spec says such a buffer is *"resized to accommodate"*
+  and does not say what is in it afterwards; copying would need a filter choice nobody specified.
+  **This is a limit worth knowing rather than a subtlety** — a feedback effect whose buffer is
+  sized from a parameter loses its history when that parameter moves, which is what Smode and
+  VDMX tell their users too.
+
+`FRAMEINDEX` is the **instance's** frame count, 0 on its first drawn frame — fed the channel's
+counter instead, a node attached at frame 40000 would never see 0 and `if (FRAMEINDEX < 1)` would
+never seed.
+
+The **`reset` port** discards it, with **level semantics on both mixers**: held true, every
+buffer is blackened each frame and `FRAMEINDEX` stays 0; a client pulses it for one tick to get
+TouchDesigner's Reset Pulse and holds it for TD's latching Reset. No edge detection anywhere,
+because two backends that each decided what an edge was would eventually disagree about one.
+**Bypass does NOT clear** — toggling bypass on a feedback effect is a creative gesture, and every
+surveyed engine keeps the state through it.
+
+One thing is still refused at PUT, on **both** backends, naming what is missing rather than
 half-rendering it:
 
 | refused | why, and why on both |
 | :--- | :--- |
-| `PERSISTENT` | feedback state is the next commit. OpenGL would render an accumulator correctly through `isf::shader`; Vulkan has no per-instance ping-pong pair yet, so it would sample an unwritten buffer |
 | `IMPORTED` | no route for an external image into a node's descriptor set yet. Set 1 could carry one |
 | more than **8** pass `TARGET`s | a node's targets bind into descriptor set 1, which has eight sampler bindings — a limit of the pipeline layout, not a policy. Vidvox's own Gaussian blur needs six. The OpenGL path has no such limit and refuses anyway |
 | a sibling **`.vs`** | **the one refusal that is NOT a parity fault.** Both node paths ignore a custom vertex shader, so they agree — and agree on a wrong picture: the ISF primer puts a convolution's neighbour offsets in the `.vs`, so the fragment stage reads varyings nothing wrote. 38 of Vidvox's 327 shaders ship one. *Unchanged or refused, never wrong* — and parity is necessary, not sufficient |
@@ -1304,7 +1340,11 @@ rather than by the `MIXER` tween.
 | that a flip and a channel exchange cannot CANCEL — **paid off on Vulkan** | `grade-graph` | after the perspective divide the two patches read *exact permutations* — top = reversed input × BOTTOM gains, bottom = reversed input × TOP gains — which named both faults at once. Mirror-symmetric gains would have reported two real faults as none |
 | that a node runs EVERY pass, not just the last | `grade-graph` | **1 check, both mixers.** Pass 0 writes `(level, 1-level, 0.3125)` into a target; pass 1 reads it back, ROTATES the channels `.gbr` and halves it. **"It drew twice" has to be distinguishable from "it drew once"** — a two-pass fixture whose second pass ignored the first renders the same picture either way, which is precisely the failure `PASSES` was refused for. Running only pass 1 samples an unwritten buffer and gives BLACK; running only pass 0 leaves a picture **112 LSB** away. The rotation is a 3-CYCLE rather than a reversal on purpose: `.bgr` is its own inverse, so a red/blue exchange in the target binding could cancel against it |
 | that a pass's own SIZE is honoured | `grade-graph` | **1 check, both mixers.** A pass declaring `WIDTH "2"`, `HEIGHT "1"` writes its own `RENDERSIZE.xy / 64` — exactly **8 and 4** codes for a 2×1 buffer, against 3840/64 clipped to 255 for one silently allocated at the channel raster. The value is written by the pass ITSELF rather than sampled at a chosen texel, so bilinear filtering of a two-texel buffer cannot move the answer. `RENDERSIZE` is what the whole `IMG_PIXEL` macro family divides by, so getting it wrong resamples every texture read in the shader rather than merely sizing a buffer oddly |
-| the four things a node still REFUSES | `grade-graph` | **3 checks, both mixers** — `PERSISTENT`, nine `TARGET`s, and a sibling `.vs`. Each is refused on the backend that *could* run it as well as the one that cannot, because a document rendering on one mixer and not the other is the fault this class is arranged to prevent. **These checks exist because the refusal of `PASSES` was documented in three places and implemented in none for a fortnight** — a claimed safety property that nothing exercises is not a safety property. The `.vs` arm is the odd one: both backends ignore a vertex shader identically, so it is not a parity fault at all, and is refused because agreeing on a wrong picture is still wrong |
+| the things a node still REFUSES | `grade-graph` | **2 checks, both mixers** — nine `TARGET`s and a sibling `.vs`. Each is refused on the backend that *could* run it as well as the one that cannot, because a document rendering on one mixer and not the other is the fault this class is arranged to prevent. **These checks exist because the refusal of `PASSES` was documented in three places and implemented in none for a fortnight** — a claimed safety property that nothing exercises is not a safety property. The `.vs` arm is the odd one: both backends ignore a vertex shader identically, so it is not a parity fault at all, and is refused because agreeing on a wrong picture is still wrong |
+| a PERSISTENT buffer — that it fills, HOLDS, and lets go only on `reset` | `grade-graph` | **4 checks, both mixers.** A running maximum, then four gestures giving four distinguishable pictures. **The middle one's correct answer is "unchanged", which is also what a raced capture reads**, so it is paired with the `reset` arm whose answer is the *other* picture, 96 LSB away — with no persistence the held reading would be exactly what the reset arm must show, and neither half is satisfiable by a node that kept nothing. A fourth arm re-latches afterwards, without which all three are satisfied by a buffer cleared once and never written again |
+| that the pair actually FLIPS, every frame | `grade-graph` | **1 check, both mixers.** The latch above is satisfied by a buffer **written once** — `max` of a constant is that constant — so the discriminating fixture is a running SUM, which grows only if last frame's content reaches this frame's read every frame. The elapsed frames are read from `channel/1/frame` rather than assumed, because the channel ticks only while something is capturing it |
+| `FRAMEINDEX` is the INSTANCE's, and a resize CLEARS | `grade-graph` | **2 checks, both mixers.** A shader seeding itself with `if (FRAMEINDEX < 1)` and holding that seed: Vulkan fed it the CHANNEL's frame counter until the per-instance store reached it, which passes every one-frame check and never seeds a node attached mid-show. OpenGL had taken it from the instance since the store landed, so this was a parity gap no single-frame fixture could see. The resize arm is a RELATIONSHIP over two captures — the seed's blue marker present, then gone — because an expectation of *black* is also what a node that never drew produces |
+| two PERSISTENT nodes on ONE shader file | `grade-graph` | **1 check, both mixers.** Each latches its own level. Keying state by PATH is safe only while a shader owns nothing but its program; the moment it owns history, two nodes on one file accumulate into each other's |
 | an ordinary node AFTER a foreign draw | `grade-graph` | **2 checks, OpenGL** — `isf -> exposure(2.0)` at **0.00 LSB** against a closed-form model, with the same exposure and no ISF node in front of it as the control that makes it attributable. The only arm in the suite with an ordinary pass downstream of a foreign one. Mutations: leaving the framebuffer and viewport unrestored fails **19** checks including the control; leaving only blending and the texture unit disturbed fails **4** and leaves the control passing — which is what proved the kernel immune and the ISF renderer vulnerable to itself |
 | the class table against its own rules | `node_registry_self_test` | at boot |
 | the plan's value-NAME table against its values array | `graph_plan_self_test` | at boot, **fatal** — equal length, and every address agreeing with its slot's name. A foreign renderer indexes one by the other's offset, so a short table is an out-of-range read on the frame path and a shifted one puts every parameter on the wrong input, still compiling and still rendering |

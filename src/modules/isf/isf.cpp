@@ -144,12 +144,12 @@ std::vector<core::graph::port_desc> resolve_node_ports(const std::string& select
     std::string feat_error;
     const auto  feats = describe_features(u16(selector), feat_error);
     if (feat_error.empty()) {
-        // `multipass` IS NO LONGER REFUSED -- both backends draw N passes now. `persistent`
-        // and `imported` still are, so nothing is ever half-rendered: a shader declaring either
-        // is unusable as a node until the commit that implements it.
-        const char* missing = feats.persistent ? "a PERSISTENT buffer"
-                              : feats.imported ? "an IMPORTED image"
-                                               : nullptr;
+        // `multipass` and `persistent` ARE NO LONGER REFUSED -- both backends draw N passes and
+        // both keep a per-instance ping-pong pair. `imported` still is, so nothing is ever
+        // half-rendered: a shader declaring one is unusable as a node until the commit that
+        // implements it. Descriptor set 1 is where an imported image would bind, beside the
+        // pass targets, so the hook exists.
+        const char* missing = feats.imported ? "an IMPORTED image" : nullptr;
         if (missing) {
             out_reason = std::string("'") + selector + "' declares " + missing +
                          ", which an ISF NODE does not implement yet -- the ISF PRODUCER does, so "

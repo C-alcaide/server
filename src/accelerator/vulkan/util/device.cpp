@@ -2527,6 +2527,45 @@ void device::reset_attachment_layout(const std::shared_ptr<class texture>& tex)
     });
 }
 
+void device::clear_attachment(const std::shared_ptr<class texture>& tex)
+{
+    if (!tex)
+        return;
+
+    impl_->submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+        // FROM `eUndefined`, which DISCARDS whatever the image held -- correct here and only
+        // here, because the whole point of the call is that the contents are to be thrown away.
+        // Everywhere else in this file that matters (`take_back_for_writing`, the pair's
+        // per-frame barrier) must name the real old layout instead, or it discards a frame of
+        // history that something is about to read.
+        transitionImageLayout(tex->id(),
+                              vk::ImageLayout::eUndefined,
+                              vk::AccessFlagBits2::eNone,
+                              vk::PipelineStageFlagBits2::eTopOfPipe,
+                              vk::ImageLayout::eTransferDstOptimal,
+                              vk::AccessFlagBits2::eTransferWrite,
+                              vk::PipelineStageFlagBits2::eTransfer,
+                              cmd);
+
+        const auto range = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+        // Zero in EVERY channel, alpha included: an accumulator that read alpha 1 from an
+        // "empty" buffer would composite its first frame over a history it never wrote.
+        const vk::ClearColorValue black(std::array<float, 4>{0.f, 0.f, 0.f, 0.f});
+        cmd.clearColorImage(tex->id(), vk::ImageLayout::eTransferDstOptimal, black, range);
+
+        // LEFT WHERE A SAMPLER EXPECTS IT. The read half of a ping-pong pair is bound as a
+        // texture without any further barrier, so this is the layout it has to end in.
+        transitionImageLayout(tex->id(),
+                              vk::ImageLayout::eTransferDstOptimal,
+                              vk::AccessFlagBits2::eTransferWrite,
+                              vk::PipelineStageFlagBits2::eTransfer,
+                              vk::ImageLayout::eShaderReadOnlyOptimal,
+                              vk::AccessFlagBits2::eShaderRead,
+                              vk::PipelineStageFlagBits2::eFragmentShader,
+                              cmd);
+    });
+}
+
 std::shared_ptr<texture> device::create_texture(int width, int height, int stride, common::bit_depth depth)
 {
     return impl_->create_texture(width, height, stride, depth, true);

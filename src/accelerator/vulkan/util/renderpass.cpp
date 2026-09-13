@@ -75,6 +75,12 @@ std::shared_ptr<texture> renderpass::create_attachment_as(common::render_format 
     return _ctx->create_attachment_as(_width, _height, components_count, format);
 }
 
+void renderpass::adopt_as_shader_read(const std::shared_ptr<texture>& tex)
+{
+    if (tex)
+        adopted_shader_read_.push_back(tex);
+}
+
 std::shared_ptr<texture> renderpass::create_attachment_sized(uint32_t              width,
                                                             uint32_t              height,
                                                             common::render_format format,
@@ -205,6 +211,13 @@ void renderpass::commit()
         // which reports clean whatever you do -- `grade-graph`'s deep chain and diamond arms are
         // what actually adjudicate this.
         std::vector<const class texture*> in_shader_read;
+        // A PERSISTENT buffer arrives already in that layout, from the frame before this one.
+        // Seeding the list is what makes `take_back_for_writing` below emit the write-after-read
+        // barrier for it instead of the `eUndefined` transition, which would discard exactly the
+        // history a feedback effect exists to keep.
+        for (const auto& adopted : adopted_shader_read_)
+            in_shader_read.push_back(adopted.get());
+        adopted_shader_read_.clear();
         const auto take_back_for_writing = [&](const std::shared_ptr<class texture>& tex) {
             const auto it = std::find(in_shader_read.begin(), in_shader_read.end(), tex.get());
             if (it == in_shader_read.end())

@@ -262,6 +262,27 @@ class image_renderer
         /// also what TouchDesigner and vvvv do: a changed operator is a new operator.
         std::string                                  path;
         std::shared_ptr<core::graph::isf_node_state> state;
+
+        /// One PERSISTENT `TARGET`: a ping-pong pair held for the instance's life.
+        ///
+        /// **TWO TEXTURES, BECAUSE A PASS READS AND WRITES ONE BUFFER IN THE SAME DRAW.** The
+        /// ISF spec is silent on how, and every host that has the feature answers the same way:
+        /// isf-js keeps two textures per target and flips once per frame, VVISF hands one back
+        /// through a pool. Sampling the image you are rendering into is undefined in both APIs,
+        /// so the alternative is not "slower", it is "whatever the driver did today".
+        struct persistent_target
+        {
+            /// `tex[front]` holds the PREVIOUS frame and is what a pass samples;
+            /// `tex[1 - front]` is what this frame writes.
+            std::shared_ptr<texture> tex[2];
+            int                      front = 0;
+            int                      w     = 0;
+            int                      h     = 0;
+            /// Written during THIS frame, so the flip at the end of it applies.
+            bool written = false;
+        };
+        /// Keyed by the shader's own `TARGET` name.
+        std::map<std::string, persistent_target> targets;
         /// How many frames this instance has DRAWN. ISF's `FRAMEINDEX`, which the spec defines
         /// as 0 on the instance's first frame -- see `isf_node_request::frame_index`.
         std::uint32_t frames_drawn = 0;
@@ -283,6 +304,10 @@ class image_renderer
             // object's destructor frees its GL resources on this thread, the one with the
             // context.
             e.state.reset();
+            // AND ITS BUFFERS. A persistent target's history belongs to the shader that wrote
+            // it; handing a new shader a buffer full of the old one's accumulation is worse than
+            // starting black, because it is plausible.
+            e.targets.clear();
             e.frames_drawn = 0;
             e.path         = path;
         }
@@ -1292,8 +1317,36 @@ class image_renderer
                                                 : space_v == 2 && stage_display  ? -1
                                                                                  :  0;
 
+                    // ── THE STATE SLOT FOR THIS NODE INSTANCE ────────────────────────
+                    //
+                    // **Vulkan reached for this store only to SWEEP it until now**, so the map
+                    // was always empty and the sweep a no-op: `FRAMEINDEX` came off the CHANNEL
+                    // frame, which the spec does not say and which is wrong the moment a node is
+                    // attached mid-show -- a shader seeding itself with `if (FRAMEINDEX < 1)`
+                    // would never seed. OpenGL has taken it from the instance since the store
+                    // landed, so this was also a parity gap no single-frame fixture could see.
+                    // A persistent buffer has nowhere else to live either.
+                    isf_instance* isf_inst  = nullptr;
+                    bool          isf_reset = false;
+                    if (isf_path) {
+                        isf_inst = &isf_instance_for(plan->document_name, st.id, *isf_path);
+                        // BY NAME, like `space` above and for the same recorded reason.
+                        if (plan->value_names.size() >= values.size())
+                            for (std::uint32_t q = 0; q < st.values_count; ++q)
+                                if (plan->value_names[st.values_offset + q] == "reset")
+                                    isf_reset = values[st.values_offset + q] > 0.5;
+                    }
+
                     const auto fr  = channel_frame_.load(std::memory_order_relaxed);
                     const auto fps = channel_fps_.load(std::memory_order_relaxed);
+
+                    // ISF's `FRAMEINDEX`: 0 on the INSTANCE's first frame, and 0 again for as
+                    // long as `reset` is held -- TouchDesigner's latching Reset, which a client
+                    // pulses for one tick to get its Reset Pulse. No edge detection anywhere, so
+                    // the two mixers cannot disagree about what an edge was.
+                    const int isf_frame = !isf_inst              ? static_cast<int>(fr)
+                                          : isf_reset            ? 0
+                                                                 : static_cast<int>(isf_inst->frames_drawn);
 
                     const double isf_t  = fps > 0.0 ? static_cast<double>(fr) / fps : 0.0;
                     const double isf_dt = fps > 0.0 ? 1.0 / fps : 0.0;
@@ -1337,23 +1390,73 @@ class image_renderer
                     }
 
                     if (isf_plan.size() > 1) {
-                        // Named targets, allocated once per node per frame and sampled by every
-                        // later pass. In DECLARATION ORDER, which is the order the generated
-                        // shader declares its samplers in -- the two walk one list.
-                        std::vector<std::string>                      tgt_names;
-                        std::array<std::shared_ptr<texture>, 8>       tgt_tex{};
+                        // Named targets, in DECLARATION ORDER -- the order the generated shader
+                        // declares its samplers in, so the two walk one list.
+                        //
+                        // **READ AND WRITE ARE ONE TEXTURE FOR AN ORDINARY TARGET AND TWO FOR A
+                        // PERSISTENT ONE**, which is the whole of the ping-pong. An ordinary
+                        // target is written by an earlier pass of THIS frame and sampled by a
+                        // later one, so there is nothing to keep apart; a persistent target is
+                        // sampled for what the PREVIOUS frame left in it while this frame writes
+                        // the other half. Sampling the image you are rendering into is undefined
+                        // in both APIs, so the alternative to a pair is not "slower" but
+                        // "whatever the driver did today".
+                        std::vector<std::string>                tgt_names;
+                        std::array<std::shared_ptr<texture>, 8> tgt_read{};
+                        std::array<std::shared_ptr<texture>, 8> tgt_write{};
                         for (const auto& pp : isf_plan) {
                             if (pp.target.empty())
                                 continue;
                             if (std::find(tgt_names.begin(), tgt_names.end(), pp.target) !=
                                 tgt_names.end())
                                 continue;
-                            if (tgt_names.size() >= tgt_tex.size())
+                            if (tgt_names.size() >= tgt_read.size())
                                 break;
-                            tgt_tex[tgt_names.size()] =
-                                pass->create_attachment_sized(static_cast<uint32_t>(pp.width),
-                                                              static_cast<uint32_t>(pp.height),
-                                                              common::render_format::fp16);
+                            const auto k = tgt_names.size();
+
+                            if (pp.persistent && isf_inst) {
+                                auto& pt = isf_inst->targets[pp.target];
+                                // ── A RESIZE IS A RESET, NOT A RESAMPLE ──────────────────
+                                //
+                                // A `WIDTH: "$size"` target whose parameter moves gets new
+                                // buffers, blackened. The spec says a persistent buffer is
+                                // "resized to accommodate" and does NOT say what is in it
+                                // afterwards; copying the old contents would need a filter
+                                // choice nobody specified, and every host that documents the
+                                // case tells its users a resize needs a reset in practice.
+                                // Black is the one answer both mixers can give.
+                                const bool resized = pt.w != pp.width || pt.h != pp.height;
+                                if (resized || !pt.tex[0] || !pt.tex[1] || isf_reset) {
+                                    for (int q = 0; q < 2; ++q) {
+                                        if (resized || !pt.tex[q])
+                                            pt.tex[q] = vulkan_->create_attachment(
+                                                pp.width, pp.height, depth_, 4,
+                                                common::render_format::fp16);
+                                        // BOTH HALVES on a reset. Clearing only the write half
+                                        // leaves the read half holding the history this exists
+                                        // to discard, and the flip below brings it straight
+                                        // back -- the trap `reset_persistent_buffers` already
+                                        // records on the OpenGL side.
+                                        vulkan_->clear_attachment(pt.tex[q]);
+                                    }
+                                    pt.w     = pp.width;
+                                    pt.h     = pp.height;
+                                    pt.front = 0;
+                                }
+                                tgt_read[k]  = pt.tex[pt.front];
+                                tgt_write[k] = pt.tex[1 - pt.front];
+                                pt.written   = true;
+                                // The write half came out of the PREVIOUS frame in
+                                // `eShaderReadOnlyOptimal`; say so, or `commit()` transitions it
+                                // from `eUndefined` and discards exactly what it is for.
+                                pass->adopt_as_shader_read(tgt_write[k]);
+                            } else {
+                                tgt_read[k] = pass->create_attachment_sized(
+                                    static_cast<uint32_t>(pp.width),
+                                    static_cast<uint32_t>(pp.height),
+                                    common::render_format::fp16);
+                                tgt_write[k] = tgt_read[k];
+                            }
                             tgt_names.push_back(pp.target);
                         }
 
@@ -1364,17 +1467,17 @@ class image_renderer
                             std::shared_ptr<texture> pdst = dst;
                             for (std::size_t k = 0; k < tgt_names.size(); ++k)
                                 if (tgt_names[k] == pp.target)
-                                    pdst = tgt_tex[k];
+                                    pdst = tgt_write[k];
 
                             apply_node(src0,
                                        nd.has_in1 ? outputs[alias[st.in1]] : src0,
                                        pdst, format_desc, pass, nd, node_uv_inv, node_uv_valid,
                                        mask_texture, isf_path, isf_t, isf_dt,
-                                       static_cast<int>(fr), isf_to_display,
+                                       isf_frame, isf_to_display,
                                        static_cast<int>(pi),
                                        static_cast<float>(pp.width),
                                        static_cast<float>(pp.height),
-                                       &tgt_tex);
+                                       &tgt_read);
                         }
 
                         // ── A LAST PASS THAT NAMES A TARGET STILL HAS TO REACH THE OUTPUT ──
@@ -1395,15 +1498,33 @@ class image_renderer
                         if (!isf_plan.empty() && !isf_plan.back().target.empty())
                             for (std::size_t k = 0; k < tgt_names.size(); ++k)
                                 if (tgt_names[k] == isf_plan.back().target)
-                                    apply_passthrough(tgt_tex[k], dst, format_desc, pass);
+                                    apply_passthrough(tgt_write[k], dst, format_desc, pass);
+
+                        // ── FLIPPED ONCE PER FRAME, AFTER EVERY PASS ─────────────────────
+                        //
+                        // Not after the pass that wrote it: a LATER pass of the same frame that
+                        // samples the target must still see the previous frame's content, which
+                        // is what "persistent" means. isf-js flips here for that reason and the
+                        // OpenGL path already did.
+                        if (isf_inst)
+                            for (auto& kv : isf_inst->targets)
+                                if (kv.second.written) {
+                                    kv.second.front   = 1 - kv.second.front;
+                                    kv.second.written = false;
+                                }
                     } else {
                         apply_node(src0,
                                    nd.has_in1 ? outputs[alias[st.in1]] : src0,
                                    dst, format_desc, pass, nd, node_uv_inv, node_uv_valid,
                                    mask_texture, isf_path, isf_t, isf_dt,
-                                   static_cast<int>(fr), isf_to_display);
+                                   isf_frame, isf_to_display);
                     }
                     outputs[i] = dst;
+
+                    // This instance has now DRAWN a frame. Held in reset it never advances, so
+                    // `FRAMEINDEX` stays 0 for as long as the port is true.
+                    if (isf_inst)
+                        isf_inst->frames_drawn = isf_reset ? 0 : isf_inst->frames_drawn + 1;
 
                     // ── SERVE EVERY SLOT THAT WANTED THIS STEP ────────────────────
                     //

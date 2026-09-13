@@ -173,6 +173,18 @@ class device final
     void record_attachment_layout_reset(void* cmd_buffer, const std::shared_ptr<class texture>& tex);
 
     void reset_attachment_layout(const std::shared_ptr<class texture>& tex);
+
+    /// Blacken an attachment and leave it in `eShaderReadOnlyOptimal`, ready to be SAMPLED.
+    ///
+    /// For a PERSISTENT ISF buffer, which is read before it is ever written: the first frame of
+    /// an accumulator samples it, so undefined image contents would be whatever the allocator
+    /// handed back. Every host that has this feature blackens on creation -- VVISF does it
+    /// explicitly -- and the ISF spec's own `FRAMEINDEX < 1` seeding idiom assumes it.
+    ///
+    /// A SUBMIT OF ITS OWN, deliberately, and the cost note on `record_attachment_layout_reset`
+    /// is why that is fine here: this runs on creation, on a resize and on `reset`, not once per
+    /// frame. The per-frame barrier is the renderpass's `take_back_for_writing`.
+    void clear_attachment(const std::shared_ptr<class texture>& tex);
     std::shared_ptr<class texture> create_texture(int width, int height, int stride, common::bit_depth depth);
 
     /// Can this GPU sample a packed `stride`-component image of `depth`, i.e. will
