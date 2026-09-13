@@ -1,6 +1,40 @@
 CasparVP — Unreleased
 ==========================================
 
+### An `isf` node runs MULTI-PASS and keeps PERSISTENT state — and its buffers changed depth
+
+An `isf` node drew one pass and refused anything else. It now runs every `PASSES` entry with its
+own `PASSINDEX` and `RENDERSIZE`, sizes each from its `WIDTH`/`HEIGHT` expressions, and keeps
+`PERSISTENT` feedback state per node instance — so a shader can accumulate, latch, trail or feed
+back. A `reset` port clears it, with level semantics: held true the buffers are blackened every
+frame and `FRAMEINDEX` stays 0, so a client pulses it for one tick or holds it.
+
+**RENDERED OUTPUT CHANGES FOR AN EXISTING `isf` NODE, and this is the entry's reason for being
+here.** Every pass buffer in the NODE path now runs at **fp16**, where the OpenGL node path's
+final pass was `GL_RGBA16` UNORM. That removes a clip: a node whose shader produced values above
+1.0 was silently flattened to 1.0 and is not any more. It also means `FLOAT: true` gets fp16
+rather than the 32-bit float a reference host gives it, so a slow accumulator will drift
+differently from one. **The ISF PRODUCER is byte-identical** — the flag is off by default and the
+producer never sets it.
+
+Still refused at PUT, on both backends including the one that could cope: `IMPORTED`, more than
+eight pass targets, and a sibling `.vs`. That last is the odd one and worth stating: both
+backends ignore a custom vertex shader, so they AGREE — and agree on a wrong picture, because the
+ISF primer puts a convolution's neighbour offsets there and 38 of Vidvox's 327 shaders ship one.
+Parity is necessary and not sufficient.
+
+Measured at 1 LSB against closed-form models, **59/59 on both mixers**, every persistence reading
+identical between them. What it costs is in `docs/features/node-graph.md` §8: two seven-pass
+nodes fit on OpenGL at 2160p50 on four channels and four do not; on Vulkan even one costs 9.7%.
+
+**And a four-node chain used to render NOTHING on Vulkan.** Each node allocated its own six
+intermediates, so a chain took twenty-four per channel — 6.3 GB across four channels — and the
+card ran out: sixty `allocateMemory: ErrorOutOfDeviceMemory` tick failures, after which the
+channel reported **0 late frames**, because a channel that is not drawing has none to report. It
+read as the cheapest arm in the cost battery while two nodes read 83% late. The buffers are
+pooled across the chain now — six whatever its length — and the arm reads 100% late instead of
+0%, which is a capacity limit honestly stated rather than silence.
+
 ### A per-node PREVIEW — `GET /v1/graph/{name}/preview?node=<id>`
 
 One node's output, as a PNG, after the output half. The second endpoint in this API that is not

@@ -1229,15 +1229,18 @@ seven draws and six intermediate attachments where a single-pass node is one and
 single-pass ladder cannot see this — sixteen single-pass nodes sit at 0/2004 on the same box in
 the same run:
 
-| chain of seven-pass nodes | draws / intermediates per channel | OpenGL |
-| :--- | :--- | :--- |
-| 1 node | 7 / 6 | 0/2004 |
-| 2 nodes | 14 / 12 | 0/2006, 2/2279 |
-| **4 nodes** | 28 / 24 | **397/2388, then 642/709 at an 88 ms period** |
+| chain of seven-pass nodes | draws / intermediates live per channel | OpenGL | Vulkan |
+| :--- | :--- | :--- | :--- |
+| 1 node | 7 / 6 | 3/2035 (0.1%) | 194/2005 (9.7%) |
+| 2 nodes | 14 / 6 | 0/2004 | 417/1908 (21.9%) |
+| **4 nodes** | 28 / 6 | **708/983 (72%)** | **1188/1188 (100%)** |
 
-So **two seven-pass nodes fit and four do not**, on this hardware at this raster — and the second
-measurement pass is far worse than the first, the same does-not-recover signature §7.3 records
-for the Vulkan cap. The number to build a look against is two.
+So **two seven-pass nodes fit on OpenGL and four do not**, on this hardware at this raster; on
+Vulkan even one costs 9.7%. The number to build a look against is two on OpenGL and one on
+Vulkan.
+
+**The intermediate count does not grow with the chain** — six whatever its length — because the
+buffers are pooled; see below. It grew before, and that is what the next paragraph is about.
 
 **A CHAIN'S PASS BUFFERS ARE POOLED, and before they were a four-node chain rendered NOTHING on
 Vulkan.** A node's targets are dead the moment its last pass has drawn, so the next node takes
@@ -1375,7 +1378,7 @@ rather than by the `MIXER` tween.
 | that a flip and a channel exchange cannot CANCEL | `grade-graph` | the two gain sets are not channel permutations of each other. The first version of the fixture used red/blue mirrors, where both faults together produce the correct picture and two defects report as none. A companion check gates that the two halves are ≥ 8 LSB apart, so the flip check can fail at all |
 | that `space` is a real CHOICE, not a label | `grade-graph` | **2 checks, both mixers.** The same shader in one working-stage graph at `match` and at `display` must NOT agree — **24.00 LSB apart** — and the converted picture must equal `base x gain^2.4` to 1.5 LSB, which is exact because BT.1886 is a pure power curve. Before the conversion existed this port had ONE reachable behaviour per stage and was a label. The FILTER fixture is used rather than the generator: the generator ignores its input, so the encode on the way IN would be invisible and only half the round trip measured |
 | that a missing shader leaves the layer RENDERING | `grade-graph` | **both mixers.** Refused at PUT, or the input passed through — never black |
-| an `isf` node on **Vulkan**, as a variant pipeline | `grade-graph` | **the same 4 checks, same model, 43/43 both mixers.** The placeholder that asserted "Vulkan does not draw one" is deleted — it said in its own text that failing because the node DREW was the good failure, and it did. **The fixture found four defects before this passed**, none of which fails loudly on its own: the author's parameters based three slots early (a shader reading `mix` as its brightness); the variant ignoring the mixer's runtime output-order flag; a missing perspective divide (correct on default geometry, wrong on any corner-pin); and the input read flipped *and* channel-reversed |
+| an `isf` node on **Vulkan**, as a variant pipeline | `grade-graph` | **the same 4 checks, same model, and the suite is 59/59 on both mixers today.** The placeholder that asserted "Vulkan does not draw one" is deleted — it said in its own text that failing because the node DREW was the good failure, and it did. **The fixture found four defects before this passed**, none of which fails loudly on its own: the author's parameters based three slots early (a shader reading `mix` as its brightness); the variant ignoring the mixer's runtime output-order flag; a missing perspective divide (correct on default geometry, wrong on any corner-pin); and the input read flipped *and* channel-reversed |
 | that a flip and a channel exchange cannot CANCEL — **paid off on Vulkan** | `grade-graph` | after the perspective divide the two patches read *exact permutations* — top = reversed input × BOTTOM gains, bottom = reversed input × TOP gains — which named both faults at once. Mirror-symmetric gains would have reported two real faults as none |
 | what MULTI-PASS COSTS, and whether the chain drew at all | `grade-graph-cost` | **3 checks, both mixers.** A six-target separable blur at 1, 2 and 4 nodes, on the rungs the single-pass ladder already measured. **The arm lied twice before its controls existed** and both are the shapes this battery was rewritten to remove: first the attach was a copy referencing another battery's names, so every blur arm was SKIPPED and the run reported 5/7 with them absent — a skipped arm is not a failed one. Then on Vulkan four nodes read 0/2005, the cheapest arm in the battery, while two read 83% — the chain had exhausted VRAM and stopped ticking. So blue is a PASS COUNTER (each of the 28 draws adds 1/64; the picture reads 111.0 codes above the ungraded one against a model of 111.6), because a blur has no other observable — blurring a flat field returns that field. And a MONOTONICITY gate, because the counter is captured on ONE channel with nothing else running and cannot see a chain that stops under load |
 | that a node runs EVERY pass, not just the last | `grade-graph` | **1 check, both mixers.** Pass 0 writes `(level, 1-level, 0.3125)` into a target; pass 1 reads it back, ROTATES the channels `.gbr` and halves it. **"It drew twice" has to be distinguishable from "it drew once"** — a two-pass fixture whose second pass ignored the first renders the same picture either way, which is precisely the failure `PASSES` was refused for. Running only pass 1 samples an unwritten buffer and gives BLACK; running only pass 0 leaves a picture **112 LSB** away. The rotation is a 3-CYCLE rather than a reversal on purpose: `.bgr` is its own inverse, so a red/blue exchange in the target binding could cancel against it |
