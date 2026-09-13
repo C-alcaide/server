@@ -1197,10 +1197,35 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
 8. **Authentication is a handshake, not a channel.** Everything after it is cleartext, and the
    password is plain text in the config. It protects against listening, not against reading the
    config, and it is not a reason to expose the port off-segment.
-9. **A subscription is not resumable.** A dropped socket loses the per-connection diff, so a client
-   must re-subscribe and take the full set again. There is no session id to resume, deliberately.
-10. **`throttle_ms` is per message, not per path.** A subscription covering a busy prefix and a
-   quiet one throttles both together.
+9. **A subscription is not resumable, and this is a decision rather than an omission.** Re-examined
+   2026-09-14, because the word "deliberately" had sat here since the feature landed with the
+   reason recorded nowhere — and a deliberate decision with no stated reason is indistinguishable
+   from an unexamined one.
+
+   **The stream is LEVEL-TRIGGERED, so there is nothing to resume.** `collect_events` diffs the
+   live snapshot against `last_values`, this subscriber's current view; there is no event queue
+   and no history. A reconnecting client re-subscribes, `last_values` starts empty, and the first
+   message is the whole subscribed set — which *is* its correct current state. What it loses are
+   intermediate transitions, and those were never promised: `throttle_ms` collapses them and
+   `repetition_filter` drops the unchanged ones.
+
+   The server already relies on exactly this property under load, and says so where it does: a
+   collect that arrives while one is running is **skipped**, "because the next collect diffs
+   against the same `last_values` and therefore carries whatever this one would have".
+
+   So a session id would buy the client nothing it does not already get, and would cost the
+   server per-session history retained for sessions that may never return — unbounded memory for
+   a bandwidth saving on a set the client can simply take again. **What a client does need is to
+   know it dropped**, which a closed socket already tells it.
+
+10. **`throttle_ms` is per message, not per path** — one subscription per session, so a client
+   wanting 50 Hz on `frame` and 2 Hz on a mixer tree opens **two WebSockets**, one per rate.
+   That is the intended answer and not merely a workaround: the rates a client wants are a
+   property of how it draws, so the split belongs where the client makes it.
+
+   Per-prefix throttling is a subscription carrying a rate table and a diff loop consulting it —
+   cheap enough, and not built because no client has asked. The cost of a second socket is what
+   would justify it, and nothing has measured that.
 11. **A `wrap` field with no declared range is not normalised.** The projection angles are the whole
    set: they declare `wrap` because they are periodic and carry no limits, so `proj_yaw` 7.5 rad
    stays 7.5 rad. AMCP stores it the same way, so the two agree -- but a client cannot rely on
