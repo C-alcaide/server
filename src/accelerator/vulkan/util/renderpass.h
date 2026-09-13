@@ -134,6 +134,18 @@ class renderpass
     std::shared_ptr<class texture> create_attachment(uint32_t components_count = 4);
 
     /// A full-size attachment in `format`, for use as commit()'s resolve target.
+    /// An attachment at an EXPLICIT size, for a pass that is not the channel raster -- an ISF
+    /// `PASSES` buffer sized by a `WIDTH`/`HEIGHT` expression. `commit()` gives each layer the
+    /// viewport and scissor of its own attachment.
+    ///
+    /// NOT A VIRTUAL: this header's own rule is that new virtuals go at the END of the
+    /// interface, and this needs none -- `frame_context::create_attachment_as` already takes a
+    /// width and a height.
+    std::shared_ptr<class texture> create_attachment_sized(uint32_t              width,
+                                                           uint32_t              height,
+                                                           common::render_format format,
+                                                           uint32_t              components_count = 4);
+
     std::shared_ptr<class texture> create_attachment_as(common::render_format format,
                                                         uint32_t              components_count = 4);
 

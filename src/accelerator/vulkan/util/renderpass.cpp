@@ -73,6 +73,17 @@ std::shared_ptr<texture> renderpass::create_attachment_as(common::render_format 
     return _ctx->create_attachment_as(_width, _height, components_count, format);
 }
 
+std::shared_ptr<texture> renderpass::create_attachment_sized(uint32_t              width,
+                                                            uint32_t              height,
+                                                            common::render_format format,
+                                                            uint32_t              components_count)
+{
+    // The `frame_context` virtual has always taken an explicit width and height, and
+    // `frame_data` has always honoured them -- no caller ever passed anything but the channel
+    // raster. An ISF `PASSES` buffer sized `"$WIDTH/16.0"` is the first that needs to.
+    return _ctx->create_attachment_as(width, height, components_count, format);
+}
+
 std::shared_ptr<texture> renderpass::result_attachment() const
 {
     if (_resolve_target)
@@ -212,14 +223,33 @@ void renderpass::commit()
 
                 previous_attachment = layer.attachment;
 
+                // ── THE EXTENT IS THE ATTACHMENT'S, NOT THE CHANNEL'S ────────────────────
+                //
+                // Every layer used to be drawn with one viewport and one scissor taken from
+                // `_width/_height`. That is right for every attachment the mixer had until now,
+                // because `create_attachment*` could only make channel-sized ones -- and it is
+                // wrong the moment a layer's target is smaller, which an ISF pass sized
+                // `"$WIDTH/16.0"` is. A full-raster `renderArea` over a smaller attachment is
+                // not a scaled draw, it is invalid.
+                //
+                // `_width/_height` still drive the empty-layers clear and the resolve blit
+                // below, which really are channel-sized.
+                const auto lw = layer.attachment ? static_cast<uint32_t>(layer.attachment->width())
+                                                 : _width;
+                const auto lh = layer.attachment ? static_cast<uint32_t>(layer.attachment->height())
+                                                 : _height;
+                const vk::Viewport layer_viewport{
+                    0.0f, 0.0f, static_cast<float>(lw), static_cast<float>(lh), 0.0f, 1.0f};
+                const vk::Rect2D layer_scissor{{0, 0}, vk::Extent2D{lw, lh}};
+
                 vk::RenderingInfo rendering_info{};
-                rendering_info.renderArea = scissor;
+                rendering_info.renderArea = layer_scissor;
                 rendering_info.layerCount = 1;
                 rendering_info.setColorAttachments(attachment_info);
 
                 cmd_buffer.beginRendering(rendering_info);
-                cmd_buffer.setViewport(0, viewport);
-                cmd_buffer.setScissor(0, scissor);
+                cmd_buffer.setViewport(0, layer_viewport);
+                cmd_buffer.setScissor(0, layer_scissor);
             } else {
                 // We are continuing in the same render pass, so we need a barrier to ensure the attachment is ready
                 vk::MemoryBarrier2 memoryBarrier{};
