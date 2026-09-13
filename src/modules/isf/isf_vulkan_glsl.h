@@ -66,9 +66,20 @@ constexpr int max_isf_values = 32;
 
 /// Generate from an already-parsed shader. Pure text: no GL, no Vulkan, no file system, so a boot
 /// self-test can drive it with a literal.
-vulkan_source build_vulkan_fragment(const std::vector<input>& inputs,
-                                    const std::string&        body,
-                                    const std::string&        cache_key);
+/// How many ISF `TARGET` buffers a generated shader can sample.
+///
+/// Descriptor set 1 carries `OCIO_MAX_TEXTURES` sampler bindings that a variant pipeline may use
+/// freely -- the OCIO transform path's LUTs live there, and a node pass never has one. So a
+/// multi-pass shader's targets cost NO layout change, no new binding and nothing in the uniform
+/// block. A shader wanting more is refused at PUT, naming the limit.
+constexpr int max_isf_targets = 8;
+
+vulkan_source build_vulkan_fragment(const std::vector<input>&       inputs,
+                                    const std::string&              body,
+                                    const std::string&              cache_key,
+                                    /// `PASSES` target names, in declaration order, deduped, empty
+                                    /// ones dropped. A pass may sample any of them by name.
+                                    const std::vector<std::string>& targets = {});
 
 /// Generate from a shader named the way a document names it -- relative to the media folder,
 /// through the same `load_shader_source` the port resolver uses, so a path cannot mean two

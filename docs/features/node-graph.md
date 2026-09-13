@@ -563,7 +563,7 @@ know what it may build before it builds it.
 | `mask_combine` | mask | `mask a`, `mask b` | `mask` | `op`, `invert`, `bypass` |
 | `mix` | combine | `image a`, `image b?`, `mask?` | `image` | `amount`, `bypass` |
 | `over` | combine | `image a`, `image b?` | `image` | `bypass` |
-| `isf` | effect | `image`, `mask?` | `image` | `path`, `space` (`match`/`display`/`working`), `mix`, `bypass`, **plus whatever the shader declares** |
+| `isf` | effect | `image`, `mask?` | `image` | `path`, `space` (`match`/`display`/`working`), `mix`, `reset`, `bypass`, **plus whatever the shader declares** |
 
 **Twelve classes**, and §5.0 has the mask families' parameters in full. `isf` is the odd one and
 §5.3 is why.
@@ -1224,11 +1224,32 @@ is a capacity limit rather than a defect — eight passes cost 2.6%, and the byp
 both. The saturation defects that used to accompany it (a permanently poisoned frame slot, unbounded
 VRAM, one channel's wait stalling all four) are fixed; see §7.3.
 
-**Nothing outstanding for `isf` on either backend at single-pass.** An `isf` node draws on both
-mixers, gated at 1 LSB against the same closed-form model. What is not built yet is multi-pass
-(`PASSES`), persistent buffers and `IMPORTED` images, which are refused at PUT naming what is
-missing rather than half-rendered.
-unbounded buffer and the symptom is silently lost highlights.
+**`isf` draws MULTI-PASS on both backends.** A node runs every `PASSES` entry in order, each with
+its own `PASSINDEX` and its own `RENDERSIZE`, and a pass declaring `WIDTH`/`HEIGHT` gets a buffer
+that size — the expressions are arbitrary arithmetic over `$WIDTH`, `$HEIGHT` and the shader's own
+inputs, and **one evaluator serves both mixers** because two would round differently and allocate
+different buffers for one document.
+
+Four things are still refused at PUT, on **both** backends, naming what is missing rather than
+half-rendering it:
+
+| refused | why, and why on both |
+| :--- | :--- |
+| `PERSISTENT` | feedback state is the next commit. OpenGL would render an accumulator correctly through `isf::shader`; Vulkan has no per-instance ping-pong pair yet, so it would sample an unwritten buffer |
+| `IMPORTED` | no route for an external image into a node's descriptor set yet. Set 1 could carry one |
+| more than **8** pass `TARGET`s | a node's targets bind into descriptor set 1, which has eight sampler bindings — a limit of the pipeline layout, not a policy. Vidvox's own Gaussian blur needs six. The OpenGL path has no such limit and refuses anyway |
+| a sibling **`.vs`** | **the one refusal that is NOT a parity fault.** Both node paths ignore a custom vertex shader, so they agree — and agree on a wrong picture: the ISF primer puts a convolution's neighbour offsets in the `.vs`, so the fragment stage reads varyings nothing wrote. 38 of Vidvox's 327 shaders ship one. *Unchanged or refused, never wrong* — and parity is necessary, not sufficient |
+
+The **ISF PRODUCER** implements all four and is untouched: `[ISF] <shader>` still plays anything
+a node declines.
+
+**Two precision notes, stated because they are limits rather than choices.** Every pass buffer in
+the NODE path runs at **fp16**, on both mixers — the graph's intermediates are fp16 everywhere else
+and the Vulkan node path has no other option, since its attachments come from the mixer's own pool.
+So a pass declaring `FLOAT: true` gets fp16 rather than the 32-bit float a reference host gives it,
+and a slow accumulator will drift differently from one. It also **removes** a clip: the OpenGL node
+path's final pass was `GL_RGBA16` UNORM, so a node's output could not exceed 1.0 at all, which no
+0..1 fixture could see.
 
 
 Each of these is sequenced rather than open, and the order is riskiest-first:
@@ -1281,6 +1302,9 @@ rather than by the `MIXER` tween.
 | that a missing shader leaves the layer RENDERING | `grade-graph` | **both mixers.** Refused at PUT, or the input passed through — never black |
 | an `isf` node on **Vulkan**, as a variant pipeline | `grade-graph` | **the same 4 checks, same model, 43/43 both mixers.** The placeholder that asserted "Vulkan does not draw one" is deleted — it said in its own text that failing because the node DREW was the good failure, and it did. **The fixture found four defects before this passed**, none of which fails loudly on its own: the author's parameters based three slots early (a shader reading `mix` as its brightness); the variant ignoring the mixer's runtime output-order flag; a missing perspective divide (correct on default geometry, wrong on any corner-pin); and the input read flipped *and* channel-reversed |
 | that a flip and a channel exchange cannot CANCEL — **paid off on Vulkan** | `grade-graph` | after the perspective divide the two patches read *exact permutations* — top = reversed input × BOTTOM gains, bottom = reversed input × TOP gains — which named both faults at once. Mirror-symmetric gains would have reported two real faults as none |
+| that a node runs EVERY pass, not just the last | `grade-graph` | **1 check, both mixers.** Pass 0 writes `(level, 1-level, 0.3125)` into a target; pass 1 reads it back, ROTATES the channels `.gbr` and halves it. **"It drew twice" has to be distinguishable from "it drew once"** — a two-pass fixture whose second pass ignored the first renders the same picture either way, which is precisely the failure `PASSES` was refused for. Running only pass 1 samples an unwritten buffer and gives BLACK; running only pass 0 leaves a picture **112 LSB** away. The rotation is a 3-CYCLE rather than a reversal on purpose: `.bgr` is its own inverse, so a red/blue exchange in the target binding could cancel against it |
+| that a pass's own SIZE is honoured | `grade-graph` | **1 check, both mixers.** A pass declaring `WIDTH "2"`, `HEIGHT "1"` writes its own `RENDERSIZE.xy / 64` — exactly **8 and 4** codes for a 2×1 buffer, against 3840/64 clipped to 255 for one silently allocated at the channel raster. The value is written by the pass ITSELF rather than sampled at a chosen texel, so bilinear filtering of a two-texel buffer cannot move the answer. `RENDERSIZE` is what the whole `IMG_PIXEL` macro family divides by, so getting it wrong resamples every texture read in the shader rather than merely sizing a buffer oddly |
+| the four things a node still REFUSES | `grade-graph` | **3 checks, both mixers** — `PERSISTENT`, nine `TARGET`s, and a sibling `.vs`. Each is refused on the backend that *could* run it as well as the one that cannot, because a document rendering on one mixer and not the other is the fault this class is arranged to prevent. **These checks exist because the refusal of `PASSES` was documented in three places and implemented in none for a fortnight** — a claimed safety property that nothing exercises is not a safety property. The `.vs` arm is the odd one: both backends ignore a vertex shader identically, so it is not a parity fault at all, and is refused because agreeing on a wrong picture is still wrong |
 | an ordinary node AFTER a foreign draw | `grade-graph` | **2 checks, OpenGL** — `isf -> exposure(2.0)` at **0.00 LSB** against a closed-form model, with the same exposure and no ISF node in front of it as the control that makes it attributable. The only arm in the suite with an ordinary pass downstream of a foreign one. Mutations: leaving the framebuffer and viewport unrestored fails **19** checks including the control; leaving only blending and the texture unit disturbed fails **4** and leaves the control passing — which is what proved the kernel immune and the ISF renderer vulnerable to itself |
 | the class table against its own rules | `node_registry_self_test` | at boot |
 | the plan's value-NAME table against its values array | `graph_plan_self_test` | at boot, **fatal** — equal length, and every address agreeing with its slot's name. A foreign renderer indexes one by the other's offset, so a short table is an out-of-range read on the frame path and a shifted one puts every parameter on the wrong input, still compiling and still rendering |

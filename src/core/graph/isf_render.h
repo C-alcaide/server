@@ -14,6 +14,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace caspar { namespace core { namespace graph {
 
@@ -137,6 +138,33 @@ struct isf_vulkan_source
     /// the uniform array holds. Empty on success.
     std::string error;
 };
+
+/// One pass of a multi-pass ISF shader, as the evaluator needs it.
+struct isf_pass_plan
+{
+    /// `TARGET`, or empty for the pass that renders the node's output.
+    std::string target;
+    bool        persistent = false;
+    /// This pass's extent, already evaluated from its `WIDTH`/`HEIGHT` expressions.
+    int         width  = 0;
+    int         height = 0;
+};
+
+/// A shader's passes, sized for one draw of one node.
+///
+/// `render_w`/`render_h` are what the node is being asked to produce; `value` resolves a `$name`
+/// in a size expression to the node's current parameter value. **Evaluated ONCE PER FRAME**, as
+/// the spec requires: *"this equation is evaluated once per frame ... it's not evaluated multiple
+/// times if the ISF file describes multiple rendering passes"*.
+using isf_pass_plan_fn = std::function<std::vector<isf_pass_plan>(
+    const std::string&                                     path,
+    int                                                    render_w,
+    int                                                    render_h,
+    const std::function<bool(const std::string&, double&)>& value,
+    std::string&                                           out_error)>;
+
+void                      set_isf_pass_planner(isf_pass_plan_fn f);
+const isf_pass_plan_fn&   get_isf_pass_planner();
 
 /// Generates the above for a shader path. Null until the ISF module registers itself.
 using isf_vulkan_source_fn = std::function<isf_vulkan_source(const std::string& path)>;

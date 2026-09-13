@@ -43,4 +43,12 @@ bool render_node(const core::graph::isf_node_request& req);
 /// seam rather than a call is the same one as above: core cannot link this module.
 core::graph::isf_vulkan_source vulkan_source_for(const std::string& path);
 
+/// A shader's passes, sized for one frame. Injected at boot; see `core::graph::set_isf_pass_planner`.
+std::vector<core::graph::isf_pass_plan>
+plan_passes_for(const std::string&                                     path,
+                int                                                    render_w,
+                int                                                    render_h,
+                const std::function<bool(const std::string&, double&)>& value,
+                std::string&                                           out_error);
+
 }} // namespace caspar::isf

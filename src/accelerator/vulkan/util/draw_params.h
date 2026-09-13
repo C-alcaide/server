@@ -158,6 +158,17 @@ struct draw_params final
     /// `core::graph::isf_node_request::to_display`.
     int    isf_to_display = 0;
 
+    /// Which pass of a multi-pass ISF node this draw is: ISF's `PASSINDEX`.
+    int    isf_pass = 0;
+    /// This pass's own extent -- ISF's `RENDERSIZE`, which the spec says is "the rendering size
+    /// of the CURRENT rendering pass" and so is not the channel raster once a pass is sized by a
+    /// `WIDTH`/`HEIGHT` expression. The `IMG_PIXEL` macro family divides by it.
+    float  isf_rendersize[2] = {0.f, 0.f};
+
+    /// The shader's `PASSES` targets, in declaration order, for this pass to sample. Bound into
+    /// descriptor set 1 -- see the generated shader. Null entries are simply not bound.
+    std::array<std::shared_ptr<class texture>, 8> isf_targets{};
+
     /// This LAYER draw feeds a node graph running in **working** space.
     ///
     /// The shader stops at the working-space boundary -- before tone-map, the gamut matrix and

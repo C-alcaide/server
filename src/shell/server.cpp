@@ -1131,6 +1131,7 @@ struct server::impl
                 // a generator that packs parameters onto the wrong slots would otherwise
                 // be discovered by a picture, on a Vulkan channel, in a show.
                 core::graph::set_isf_vulkan_source(&isf::vulkan_source_for);
+                core::graph::set_isf_pass_planner(&isf::plan_passes_for);
                 isf::isf_vulkan_self_test();
 
                 api_ctx.timelines     = timelines_;

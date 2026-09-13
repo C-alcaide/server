@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -135,6 +136,20 @@ class shader
     /// can be written and not read cannot be described to a control surface, cannot round-trip
     /// through a preset, and cannot be the target of a binding.
     std::vector<double> get_value(const std::string& name) const;
+
+    /// Run every PASS buffer and the final pass target at fp16, rather than at the ISF
+    /// spec's 8-bit / `FLOAT`-32 pair.
+    ///
+    /// FOR THE NODE PATH ONLY, and default off so the ISF PRODUCER is byte-identical. A node
+    /// graph's intermediates are fp16 everywhere else, and the Vulkan node path has no other
+    /// option -- its attachments come from the mixer's own pool. Matching here is what lets one
+    /// document render the same on both mixers.
+    ///
+    /// ⚠ `FLOAT: true` therefore gets fp16, not 32-bit. A slow accumulator drifts differently
+    /// from a reference host; stated in `node-graph.md` rather than left to be discovered.
+    /// It also REMOVES a clip: the OpenGL final pass was `GL_RGBA16` UNORM, so a node's output
+    /// could not exceed 1.0 at all.
+    void set_node_buffer_format(bool fp16);
 
     /// Free every GL object this shader owns, on the CURRENTLY BOUND context.
     ///
@@ -322,10 +337,15 @@ std::vector<shader_info> discover_shaders();
 /// SHARED BY THE PORT RESOLVER AND THE NODE RENDERER so a path cannot mean two different files
 /// to the two of them -- which would give a node its parameters from one shader and its picture
 /// from another. Returns false with `out_error` set.
+///
+/// `out_has_vertex_shader`, when given, reports whether the resolved `.fs` has a SIBLING `.vs`.
+/// It is reported from HERE rather than probed by the caller for the reason above: a second
+/// resolution of the same token is a second chance to disagree about which file it names.
 bool load_shader_source(const std::wstring& path,
                         std::string&        out_source,
                         std::wstring&       out_base_path,
-                        std::string&        out_error);
+                        std::string&        out_error,
+                        bool*               out_has_vertex_shader = nullptr);
 
 std::vector<input> describe_inputs(const std::wstring& path, std::string& out_error);
 
@@ -346,5 +366,36 @@ struct shader_features
 
 /// Parse-only, no GL. Empty `out_error` on success.
 shader_features describe_features(const std::wstring& path, std::string& out_error);
+
+/// One entry of a shader's `PASSES`, as the JSON header declares it.
+struct pass_info
+{
+    /// `TARGET`, or empty for a pass that renders to the node's own output.
+    std::string target;
+    bool        persistent = false;
+    /// `FLOAT`: the author asking for 32-bit precision. The node path runs every buffer at fp16
+    /// (see `set_node_buffer_format`), so this is carried and not honoured -- stated in
+    /// `node-graph.md` rather than silently ignored.
+    bool        is_float = false;
+    /// `WIDTH` / `HEIGHT` as written: expressions over `$WIDTH`, `$HEIGHT` and the shader's own
+    /// inputs, or empty for "the size asked of the node".
+    std::string w_expr;
+    std::string h_expr;
+};
+
+/// A shader's passes, in declaration order. One entry for a single-pass shader.
+std::vector<pass_info> describe_passes(const std::wstring& path, std::string& out_error);
+
+/// Evaluate one `WIDTH`/`HEIGHT` expression.
+///
+/// **THE SAME EVALUATOR BOTH BACKENDS USE.** ISF sizes are arbitrary arithmetic over `$WIDTH`,
+/// `$HEIGHT` and the shader's declared inputs, so two implementations would round differently
+/// and the two mixers would allocate different buffers for one document -- which is the failure
+/// this whole feature's rules exist to prevent. `var` resolves a `$name` to its current value.
+int eval_pass_size(const std::string&                              expr,
+                   int                                             fallback,
+                   int                                             render_w,
+                   int                                             render_h,
+                   const std::function<bool(const std::string&, double&)>& var);
 
 }} // namespace caspar::isf

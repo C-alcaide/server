@@ -295,11 +295,17 @@ class expr_eval
     }
 };
 
-int eval_size_expr(const std::string&                                expr,
-                   int                                               fallback,
-                   int                                               render_w,
-                   int                                               render_h,
-                   const std::map<std::string, std::vector<double>>& values)
+/// The evaluator proper. `lookup` resolves a bare `$name` other than WIDTH/HEIGHT.
+///
+/// ONE BODY, TWO FRONT DOORS: the OpenGL path has a shader's own `values_` map to hand it, and
+/// the node evaluator has the plan's value array. Both arrive here, because two implementations
+/// of an arbitrary arithmetic expression would round differently and the two mixers would then
+/// allocate different buffers for one document.
+int eval_size_expr_impl(const std::string&                                     expr,
+                        int                                                    fallback,
+                        int                                                    render_w,
+                        int                                                    render_h,
+                        const std::function<bool(const std::string&, double&)>& lookup)
 {
     if (expr.empty())
         return fallback;
@@ -308,9 +314,9 @@ int eval_size_expr(const std::string&                                expr,
             return render_w;
         if (n == "HEIGHT")
             return render_h;
-        auto it = values.find(n);
-        if (it != values.end() && !it->second.empty())
-            return it->second[0];
+        double v = 0.0;
+        if (lookup && lookup(n, v))
+            return v;
         return 0.0;
     };
     expr_eval e(expr, var);
@@ -327,6 +333,23 @@ int eval_size_expr(const std::string&                                expr,
         return fallback;
     const int v = static_cast<int>(std::lround(d));
     return v > 0 ? v : fallback;
+}
+
+/// The map-shaped front door the OpenGL render path already used.
+int eval_size_expr(const std::string&                                expr,
+                   int                                               fallback,
+                   int                                               render_w,
+                   int                                               render_h,
+                   const std::map<std::string, std::vector<double>>& values)
+{
+    return eval_size_expr_impl(
+        expr, fallback, render_w, render_h, [&](const std::string& n, double& out) {
+            const auto it = values.find(n);
+            if (it == values.end() || it->second.empty())
+                return false;
+            out = it->second[0];
+            return true;
+        });
 }
 
 } // namespace
@@ -785,13 +808,26 @@ struct shader::impl
         return t;
     }
 
-    static GLuint make_buffer_tex(int w, int h, bool is_float, bool deep = false)
+    static GLuint make_buffer_tex(int w, int h, bool is_float, bool deep = false, bool node_fp16 = false)
     {
         GLuint t = 0;
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D, t);
         set_tex_params();
-        if (is_float)
+        // ── THE NODE PATH RUNS EVERY BUFFER AT fp16 ────────────────────────────────────
+        //
+        // A node graph's intermediates are fp16 everywhere else, and the Vulkan node path has no
+        // other option -- its attachments come from the mixer's pool. Matching here is what lets
+        // one document render the same on both mixers.
+        //
+        // It also REMOVES A CLIP the OpenGL path had: the final pass target was `GL_RGBA16`
+        // UNORM, so a node's output could not exceed 1.0 however unbounded the chain around it.
+        //
+        // ⚠ `FLOAT: true` gets fp16 rather than 32-bit here. An accumulator drifts differently
+        // from a reference host; `node-graph.md` says so rather than leaving it to be found.
+        if (node_fp16)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
+        else if (is_float)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
         else if (deep)
             // Only the FINAL pass target asks for this. An intermediate PASSES
@@ -823,7 +859,7 @@ struct shader::impl
                 }
             }
             for (int i = 0; i < n; ++i)
-                b.tex[i] = make_buffer_tex(w, h, is_float);
+                b.tex[i] = make_buffer_tex(w, h, is_float, false, node_fp16_);
             b.w          = w;
             b.h          = h;
             b.is_float   = is_float;
@@ -867,7 +903,7 @@ struct shader::impl
         if (final_tex_ == 0 || final_w_ != w || final_h_ != h || final_deep_ != deep) {
             if (final_tex_)
                 glDeleteTextures(1, &final_tex_);
-            final_tex_  = make_buffer_tex(w, h, false, deep);
+            final_tex_  = make_buffer_tex(w, h, false, deep, node_fp16_);
             final_w_    = w;
             final_h_    = h;
             final_deep_ = deep;
@@ -995,6 +1031,7 @@ struct shader::impl
     /// Run all passes on the current GL context. Returns the final raw GL texture (bottom-up RGBA)
     /// and its size via last_w/last_h, or 0 on failure.
     void set_space_conversion(int v) { to_display_ = v; }
+    void set_node_buffer_format(bool v) { node_fp16_ = v; }
 
     GLuint render_gl(int                               width,
                      int                               height,
@@ -1169,6 +1206,8 @@ struct shader::impl
     GLint  out_src_loc_  = -1;
     /// See `shader::set_space_conversion`. 0 for everything but the two crossings.
     int    to_display_   = 0;
+    /// See `shader::set_node_buffer_format`. False for the producer.
+    bool   node_fp16_    = false;
     GLint  out_swap_loc_ = -1;
 
     bool ensure_out_program()
@@ -1456,6 +1495,8 @@ void shader::set_output_depth(common::bit_depth depth)
     impl_->out_depth_ = depth;
 }
 
+void shader::set_node_buffer_format(bool fp16) { impl_->set_node_buffer_format(fp16); }
+
 void shader::release_gl_on_current_context() { impl_->release_gl(); }
 
 void shader::reset_persistent_buffers() { impl_->reset_persistent_buffers(); }
@@ -1587,11 +1628,14 @@ void read_num_array_free(const boost::property_tree::ptree& node, const char* ke
 bool load_shader_source(const std::wstring& path,
                         std::string&       out_source,
                         std::wstring&      out_base_path,
-                        std::string&       out_error)
+                        std::string&       out_error,
+                        bool*              out_has_vertex_shader)
 {
     out_error.clear();
     out_source.clear();
     out_base_path.clear();
+    if (out_has_vertex_shader)
+        *out_has_vertex_shader = false;
 
     namespace fs = std::filesystem;
 
@@ -1632,6 +1676,12 @@ bool load_shader_source(const std::wstring& path,
         source.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
         // The DIRECTORY, which is what an IMPORTED relative path is resolved against.
         out_base_path = u16(file.parent_path().generic_string());
+
+        // A SIBLING `.vs`, reported off the file we actually opened. 38 of Vidvox's 327 shaders
+        // ship one, and they are not decorative: `Multi Pass Gaussian Blur.vs` computes its
+        // neighbour offsets there and reads the shader's own `blurAmount` to do it.
+        if (out_has_vertex_shader)
+            *out_has_vertex_shader = fs::is_regular_file(fs::path(file).replace_extension(".vs"), ec);
     } catch (const std::exception& e) {
         out_error = std::string("'") + u8(path) + "' could not be read: " + e.what();
         return false;
@@ -1639,6 +1689,64 @@ bool load_shader_source(const std::wstring& path,
 
     out_source = std::move(source);
     return true;
+}
+
+int eval_pass_size(const std::string&                                     expr,
+                   int                                                    fallback,
+                   int                                                    render_w,
+                   int                                                    render_h,
+                   const std::function<bool(const std::string&, double&)>& var)
+{
+    // Straight through to the evaluator the OpenGL path has always used, with the variable
+    // lookup supplied by the caller instead of read from a shader's own `values_`. One
+    // implementation, so the two backends cannot disagree about a buffer's size.
+    return eval_size_expr_impl(expr, fallback, render_w, render_h, var);
+}
+
+std::vector<pass_info> describe_passes(const std::wstring& path, std::string& out_error)
+{
+    std::vector<pass_info> out;
+
+    std::string  source;
+    std::wstring base;
+    if (!load_shader_source(path, source, base, out_error))
+        return out;
+
+    const auto json = extract_json(source);
+    if (json.empty()) {
+        out.push_back(pass_info{}); // a plain GLSL fragment is one pass to the node's output
+        return out;
+    }
+
+    boost::property_tree::ptree pt;
+    try {
+        std::istringstream is(json);
+        boost::property_tree::read_json(is, pt);
+    } catch (const std::exception& e) {
+        out_error = std::string("the ISF header of '") + u8(path) + "' is not valid JSON: " + e.what();
+        return out;
+    }
+
+    if (auto passes = pt.get_child_optional("PASSES")) {
+        for (const auto& kv : *passes) {
+            pass_info pi;
+            pi.target = kv.second.get<std::string>("TARGET", "");
+            if (const auto b = kv.second.get_optional<bool>("PERSISTENT"))
+                pi.persistent = *b;
+            else if (const auto i = kv.second.get_optional<int>("PERSISTENT"))
+                pi.persistent = *i != 0;
+            if (const auto b = kv.second.get_optional<bool>("FLOAT"))
+                pi.is_float = *b;
+            else if (const auto i = kv.second.get_optional<int>("FLOAT"))
+                pi.is_float = *i != 0;
+            pi.w_expr = kv.second.get<std::string>("WIDTH", "");
+            pi.h_expr = kv.second.get<std::string>("HEIGHT", "");
+            out.push_back(std::move(pi));
+        }
+    }
+    if (out.empty())
+        out.push_back(pass_info{});
+    return out;
 }
 
 shader_features describe_features(const std::wstring& path, std::string& out_error)

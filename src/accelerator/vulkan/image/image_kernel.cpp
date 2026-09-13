@@ -1404,6 +1404,20 @@ struct image_kernel::impl
             const auto pipe = isf_pipeline_for(*params.isf_path);
             if (pipe)
                 current_ocio_pipeline_ = pipe;
+
+            // ── THE PASS TARGETS, INTO DESCRIPTOR SET 1 ──────────────────────────────────
+            //
+            // The same slots an OCIO transform writes its LUTs to, and free here because a node
+            // pass never carries one -- cleared just above, so nothing of a previous layer's
+            // survives. LINEAR/CLAMP rather than nearest: that is what the OpenGL path gives a
+            // pass buffer, and a `TARGET` sampled at a different size is the case `WIDTH`
+            // expressions exist for.
+            for (std::size_t k = 0; k < params.isf_targets.size(); ++k) {
+                if (!params.isf_targets[k])
+                    continue;
+                current_lut_views_.ocio[k]    = params.isf_targets[k]->view();
+                current_lut_views_.ocio_nearest[k] = false;
+            }
             // No `else`: a shader that will not compile leaves the node drawing through the
             // ordinary node pipeline, whose `gn_op` for `isf` does nothing -- so the pass copies
             // its input. UNCHANGED, never black, which is the registry's rule for a dead branch.
@@ -1798,12 +1812,19 @@ struct image_kernel::impl
                 uniforms.gn_isf_time      = static_cast<float>(params.isf_time);
                 uniforms.gn_isf_timedelta = static_cast<float>(params.isf_time_delta);
                 uniforms.gn_isf_frame     = params.isf_frame;
-                uniforms.gn_isf_pass      = 0;
+                uniforms.gn_isf_pass      = params.isf_pass;
                 uniforms.gn_isf_to_display = params.isf_to_display;
                 // RENDERSIZE is the PASS's extent. Single-pass today, so that is the node
                 // attachment, which is the target raster.
-                uniforms.gn_isf_rendersize[0] = static_cast<float>(params.target_width);
-                uniforms.gn_isf_rendersize[1] = static_cast<float>(params.target_height);
+                // THE PASS'S extent, which the evaluator supplies -- not the channel raster,
+                // once a pass is sized by an expression. Falls back to the target size for a
+                // single-pass node, where they are the same thing.
+                uniforms.gn_isf_rendersize[0] = params.isf_rendersize[0] > 0.f
+                                                    ? params.isf_rendersize[0]
+                                                    : static_cast<float>(params.target_width);
+                uniforms.gn_isf_rendersize[1] = params.isf_rendersize[1] > 0.f
+                                                    ? params.isf_rendersize[1]
+                                                    : static_cast<float>(params.target_height);
             }
 
             // THE VALUES COME OUT OF THE PLAN'S FLAT ARRAY IN PORT ORDER, which is the

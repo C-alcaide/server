@@ -621,6 +621,18 @@ isf_vulkan_source_fn& isf_vulkan_slot()
 }
 } // namespace
 
+namespace {
+isf_pass_plan_fn& isf_planner_slot()
+{
+    static isf_pass_plan_fn f;
+    return f;
+}
+} // namespace
+
+void set_isf_pass_planner(isf_pass_plan_fn f) { isf_planner_slot() = std::move(f); }
+
+const isf_pass_plan_fn& get_isf_pass_planner() { return isf_planner_slot(); }
+
 void set_isf_vulkan_source(isf_vulkan_source_fn f) { isf_vulkan_slot() = std::move(f); }
 
 const isf_vulkan_source_fn& get_isf_vulkan_source() { return isf_vulkan_slot(); }

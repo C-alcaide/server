@@ -14,6 +14,7 @@
 #include <common/log.h>
 
 #include <functional>
+#include <algorithm>
 #include <sstream>
 
 namespace caspar { namespace isf {
@@ -92,9 +93,10 @@ int components_of(const std::string& t)
 
 } // namespace
 
-vulkan_source build_vulkan_fragment(const std::vector<input>& inputs,
-                                    const std::string&        body,
-                                    const std::string&        cache_key)
+vulkan_source build_vulkan_fragment(const std::vector<input>&       inputs,
+                                    const std::string&              body,
+                                    const std::string&              cache_key,
+                                    const std::vector<std::string>& targets)
 {
     vulkan_source out;
     out.cache_id = "isf:" + cache_key;
@@ -109,6 +111,13 @@ vulkan_source build_vulkan_fragment(const std::vector<input>& inputs,
     if (static_cast<int>(images.size()) > max_image_slots) {
         out.error = "this shader declares " + std::to_string(images.size()) +
                     " image inputs and the mixer binds " + std::to_string(max_image_slots) +
+                    ". Refused rather than bound to whatever is in the spare slots";
+        return out;
+    }
+
+    if (static_cast<int>(targets.size()) > max_isf_targets) {
+        out.error = "this shader declares " + std::to_string(targets.size()) +
+                    " PASSES targets and the mixer can sample " + std::to_string(max_isf_targets) +
                     ". Refused rather than bound to whatever is in the spare slots";
         return out;
     }
@@ -230,6 +239,24 @@ vulkan_source build_vulkan_fragment(const std::vector<input>& inputs,
          "#define isf_FragCoord (isf_FragNormCoord * RENDERSIZE)\n"
          "\n";
 
+    // ---- the PASSES targets, in descriptor set 1 -----------------------------------------
+    //
+    // SET 1, NOT SET 0. Set 0's sampler array is the mixer's own plane slots and is full; set 1
+    // carries `OCIO_MAX_TEXTURES` bindings that a variant pipeline may use as it likes, and a
+    // node pass never has an OCIO transform. So multi-pass costs no descriptor layout change, no
+    // new binding in set 0 and nothing in the uniform block -- which is the whole reason this
+    // shape was chosen over a second descriptor set.
+    //
+    // Bound per LAYER by the kernel, through the same `lut_views.ocio` slots OCIO writes, with a
+    // linear/clamp sampler -- which is what the OpenGL path gives a pass buffer too.
+    for (std::size_t k = 0; k < targets.size(); ++k) {
+        f << "layout(set = 1, binding = " << (k + 1) << ") uniform sampler2D _isf_tgt_" << k
+          << ";\n";
+        f << "#define " << targets[k] << " _isf_tgt_" << k << "\n";
+        f << "#define _" << targets[k] << "_imgSize vec2(textureSize(_isf_tgt_" << k << ", 0))\n";
+    }
+    f << "\n";
+
     // ---- the image inputs as macros over the bound slots ---------------------------------
     //
     // A `#define` per name rather than a sampler variable, because a sampler cannot be assigned
@@ -342,7 +369,22 @@ vulkan_source build_vulkan_fragment_for(const std::string& path)
         return out;
     }
 
-    return build_vulkan_fragment(inputs, source, path);
+    // THE PASS TARGETS, so the generated shader can declare a sampler for each. Deduped and in
+    // declaration order, which is the order the evaluator binds them in -- the two walk the same
+    // list, so a mismatch is not possible rather than merely unlikely.
+    std::vector<std::string> targets;
+    for (const auto& pi : describe_passes(u16(path), err)) {
+        if (pi.target.empty())
+            continue;
+        if (std::find(targets.begin(), targets.end(), pi.target) == targets.end())
+            targets.push_back(pi.target);
+    }
+    if (!err.empty()) {
+        out.error = err;
+        return out;
+    }
+
+    return build_vulkan_fragment(inputs, source, path, targets);
 }
 
 void isf_vulkan_self_test()

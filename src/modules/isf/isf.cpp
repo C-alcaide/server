@@ -11,6 +11,8 @@
 #include "isf.h"
 #include "isf_producer.h"
 #include "isf_shader.h"
+
+#include <algorithm>
 #include "isf_vulkan_glsl.h"
 
 #include <common/log.h>
@@ -142,10 +144,12 @@ std::vector<core::graph::port_desc> resolve_node_ports(const std::string& select
     std::string feat_error;
     const auto  feats = describe_features(u16(selector), feat_error);
     if (feat_error.empty()) {
-        const char* missing = feats.multipass    ? "multiple PASSES"
-                              : feats.persistent ? "a PERSISTENT buffer"
-                              : feats.imported   ? "an IMPORTED image"
-                                                 : nullptr;
+        // `multipass` IS NO LONGER REFUSED -- both backends draw N passes now. `persistent`
+        // and `imported` still are, so nothing is ever half-rendered: a shader declaring either
+        // is unusable as a node until the commit that implements it.
+        const char* missing = feats.persistent ? "a PERSISTENT buffer"
+                              : feats.imported ? "an IMPORTED image"
+                                               : nullptr;
         if (missing) {
             out_reason = std::string("'") + selector + "' declares " + missing +
                          ", which an ISF NODE does not implement yet -- the ISF PRODUCER does, so "
@@ -153,6 +157,69 @@ std::vector<core::graph::port_desc> resolve_node_ports(const std::string& select
                          "` still plays it. Refused rather than half-rendered: the OpenGL node "
                          "path would run it and the Vulkan one would silently render only the "
                          "last pass, so the same document would look different on the two mixers";
+            return {};
+        }
+    }
+
+    // ── AND THE BINDING LIMIT, REFUSED ON BOTH BACKENDS FOR THE SAME REASON ─────────────
+    //
+    // A node's pass targets bind into descriptor set 1, which carries `OCIO_MAX_TEXTURES`
+    // sampler bindings a variant pipeline may use as it likes. That is a real limit of the
+    // pipeline layout rather than a policy -- and it is generous in practice: Vidvox's own
+    // Gaussian blur needs six.
+    //
+    // **The OpenGL node path has NO such limit**, because `isf::shader` binds targets as plain
+    // GL textures and would render a nine-target shader correctly. Refusing there too is the
+    // whole point: a document that renders on one mixer and not the other is exactly the fault
+    // this class is arranged to prevent, and the generator's own refusal would only be reached
+    // on the Vulkan backend -- too late, and only for half the operators.
+    {
+        std::string pass_error;
+        const auto  passes = describe_passes(u16(selector), pass_error);
+        if (pass_error.empty()) {
+            std::vector<std::string> targets;
+            for (const auto& pi : passes) {
+                if (pi.target.empty())
+                    continue;
+                if (std::find(targets.begin(), targets.end(), pi.target) == targets.end())
+                    targets.push_back(pi.target);
+            }
+            if (static_cast<int>(targets.size()) > max_isf_targets) {
+                out_reason = std::string("'") + selector + "' declares " +
+                             std::to_string(targets.size()) + " PASSES targets and a node can " +
+                             "sample " + std::to_string(max_isf_targets) +
+                             " -- the mixer binds them into one descriptor set. The ISF PRODUCER "
+                             "has no such limit, so `[ISF] " + selector + "` still plays it";
+                return {};
+            }
+        }
+    }
+
+    // ── A SIBLING `.vs` IS REFUSED, AND THIS ONE IS NOT A PARITY FAULT ─────────────────
+    //
+    // Both node paths ignore a custom vertex shader today -- the OpenGL one constructs
+    // `isf::shader` without a vertex source, and the Vulkan generator emits its own -- so the
+    // two mixers AGREE. They agree on the wrong picture.
+    //
+    // A `.vs` is where the ISF specification's own primer puts per-vertex work: chapter 6
+    // computes a convolution's eight neighbour coordinates as `vec2 d = 1.0/RENDERSIZE` in the
+    // vertex stage and interpolates them. Drop it and the fragment shader reads varyings that
+    // were never written -- a shader that compiles, runs, and renders something plausible and
+    // wrong. Measured over Vidvox's collection: 38 of 327 shaders ship one.
+    //
+    // So the rule here is the rule everywhere else in this resolver -- **unchanged or refused,
+    // never wrong** -- and the PRODUCER, which honours `.vs` and has for years, still plays it.
+    {
+        std::string  vs_source;
+        std::wstring vs_base;
+        std::string  vs_error;
+        bool         has_vs = false;
+        if (load_shader_source(u16(selector), vs_source, vs_base, vs_error, &has_vs) && has_vs) {
+            out_reason = std::string("'") + selector +
+                         "' ships a sibling `.vs`, which an ISF NODE does not run yet. Its "
+                         "fragment shader would read varyings nothing wrote -- a plausible wrong "
+                         "picture rather than a failure. The ISF PRODUCER honours it, so `[ISF] " +
+                         selector + "` still plays it";
             return {};
         }
     }
@@ -291,6 +358,9 @@ bool render_isf_node(const core::graph::isf_node_request& req)
     // 8 bits on the way out -- which is what an ISF ramp measured before `set_output_depth`
     // existed.
     sh.set_output_depth(common::bit_depth::bit16);
+    // fp16 for every pass buffer and the final target: the node graph's intermediates are fp16
+    // everywhere, and the Vulkan node path has no other option. See `set_node_buffer_format`.
+    sh.set_node_buffer_format(true);
 
     // The `space` port, resolved against the graph's stage by the evaluator. 0 for every
     // agreeing combination, which leaves the shader bit-identical to one built before this.
@@ -350,6 +420,31 @@ bool render_isf_node(const core::graph::isf_node_request& req)
 } // namespace
 
 bool render_node(const core::graph::isf_node_request& req) { return render_isf_node(req); }
+
+std::vector<core::graph::isf_pass_plan>
+plan_passes_for(const std::string&                                     path,
+                int                                                    render_w,
+                int                                                    render_h,
+                const std::function<bool(const std::string&, double&)>& value,
+                std::string&                                           out_error)
+{
+    std::vector<core::graph::isf_pass_plan> out;
+    const auto                              passes = describe_passes(u16(path), out_error);
+    if (!out_error.empty())
+        return out;
+
+    for (const auto& pi : passes) {
+        core::graph::isf_pass_plan pp;
+        pp.target     = pi.target;
+        pp.persistent = pi.persistent;
+        // ONCE PER FRAME, per the spec, and per pass only because each pass has its own
+        // expressions -- the VALUES they read do not change between passes of one frame.
+        pp.width  = eval_pass_size(pi.w_expr, render_w, render_w, render_h, value);
+        pp.height = eval_pass_size(pi.h_expr, render_h, render_w, render_h, value);
+        out.push_back(std::move(pp));
+    }
+    return out;
+}
 
 core::graph::isf_vulkan_source vulkan_source_for(const std::string& path)
 {

@@ -1295,13 +1295,114 @@ class image_renderer
                     const auto fr  = channel_frame_.load(std::memory_order_relaxed);
                     const auto fps = channel_fps_.load(std::memory_order_relaxed);
 
-                    apply_node(src0,
-                               nd.has_in1 ? outputs[alias[st.in1]] : src0,
-                               dst, format_desc, pass, nd, node_uv_inv, node_uv_valid,
-                               mask_texture, isf_path,
-                               fps > 0.0 ? static_cast<double>(fr) / fps : 0.0,
-                               fps > 0.0 ? 1.0 / fps : 0.0,
-                               static_cast<int>(fr), isf_to_display);
+                    const double isf_t  = fps > 0.0 ? static_cast<double>(fr) / fps : 0.0;
+                    const double isf_dt = fps > 0.0 ? 1.0 / fps : 0.0;
+
+                    // ── A MULTI-PASS ISF NODE IS N DRAWS, NOT ONE ─────────────────────────
+                    //
+                    // The pass plan comes from `modules/isf` through the injected planner, which
+                    // walks the SAME parser and the SAME size evaluator the OpenGL path uses --
+                    // never a second implementation, because two evaluators of an arbitrary
+                    // arithmetic expression round differently and the two mixers would then
+                    // allocate different buffers for one document.
+                    //
+                    // Sizes are evaluated ONCE for the node, not once per pass: the spec says
+                    // "this equation is evaluated once per frame ... not multiple times if the
+                    // ISF file describes multiple rendering passes".
+                    std::vector<core::graph::isf_pass_plan> isf_plan;
+                    if (isf_path) {
+                        const auto& planner = core::graph::get_isf_pass_planner();
+                        if (planner) {
+                            std::string perr;
+                            isf_plan = planner(
+                                *isf_path, dst->width(), dst->height(),
+                                [&](const std::string& name, double& out) {
+                                    // A `$name` in a WIDTH/HEIGHT expression is one of THIS
+                                    // node's parameters, found by name for the reason given
+                                    // above `space`.
+                                    if (plan->value_names.size() < values.size())
+                                        return false;
+                                    for (std::uint32_t q = 0; q < st.values_count; ++q) {
+                                        if (plan->value_names[st.values_offset + q] != name)
+                                            continue;
+                                        out = values[st.values_offset + q];
+                                        return true;
+                                    }
+                                    return false;
+                                },
+                                perr);
+                            if (!perr.empty())
+                                isf_plan.clear();
+                        }
+                    }
+
+                    if (isf_plan.size() > 1) {
+                        // Named targets, allocated once per node per frame and sampled by every
+                        // later pass. In DECLARATION ORDER, which is the order the generated
+                        // shader declares its samplers in -- the two walk one list.
+                        std::vector<std::string>                      tgt_names;
+                        std::array<std::shared_ptr<texture>, 8>       tgt_tex{};
+                        for (const auto& pp : isf_plan) {
+                            if (pp.target.empty())
+                                continue;
+                            if (std::find(tgt_names.begin(), tgt_names.end(), pp.target) !=
+                                tgt_names.end())
+                                continue;
+                            if (tgt_names.size() >= tgt_tex.size())
+                                break;
+                            tgt_tex[tgt_names.size()] =
+                                pass->create_attachment_sized(static_cast<uint32_t>(pp.width),
+                                                              static_cast<uint32_t>(pp.height),
+                                                              common::render_format::fp16);
+                            tgt_names.push_back(pp.target);
+                        }
+
+                        for (std::size_t pi = 0; pi < isf_plan.size(); ++pi) {
+                            const auto& pp = isf_plan[pi];
+                            // A TARGET pass writes its buffer; the final empty-target pass writes
+                            // the node's own output, which is what the next node reads.
+                            std::shared_ptr<texture> pdst = dst;
+                            for (std::size_t k = 0; k < tgt_names.size(); ++k)
+                                if (tgt_names[k] == pp.target)
+                                    pdst = tgt_tex[k];
+
+                            apply_node(src0,
+                                       nd.has_in1 ? outputs[alias[st.in1]] : src0,
+                                       pdst, format_desc, pass, nd, node_uv_inv, node_uv_valid,
+                                       mask_texture, isf_path, isf_t, isf_dt,
+                                       static_cast<int>(fr), isf_to_display,
+                                       static_cast<int>(pi),
+                                       static_cast<float>(pp.width),
+                                       static_cast<float>(pp.height),
+                                       &tgt_tex);
+                        }
+
+                        // ── A LAST PASS THAT NAMES A TARGET STILL HAS TO REACH THE OUTPUT ──
+                        //
+                        // The spec's shape is that the final pass renders the effect's picture,
+                        // and nearly every shader writes it by leaving `TARGET` off. Nothing
+                        // FORBIDS naming one, though, and `isf::shader` has always coped: its
+                        // loop returns `last_tex`, which is that buffer.
+                        //
+                        // Vulkan would have left `dst` untouched -- so the node would have
+                        // rendered whatever the pooled attachment last held, on one backend
+                        // only, from a document the other renders correctly. That is the exact
+                        // failure `PASSES` was refused for, reintroduced one shader shape later.
+                        //
+                        // One extra draw, and only for shaders shaped this way. Copying rather
+                        // than re-targeting the last pass keeps a PERSISTENT last target
+                        // accumulating, which re-targeting would silently stop.
+                        if (!isf_plan.empty() && !isf_plan.back().target.empty())
+                            for (std::size_t k = 0; k < tgt_names.size(); ++k)
+                                if (tgt_names[k] == isf_plan.back().target)
+                                    apply_passthrough(tgt_tex[k], dst, format_desc, pass);
+                    } else {
+                        apply_node(src0,
+                                   nd.has_in1 ? outputs[alias[st.in1]] : src0,
+                                   dst, format_desc, pass, nd, node_uv_inv, node_uv_valid,
+                                   mask_texture, isf_path, isf_t, isf_dt,
+                                   static_cast<int>(fr), isf_to_display);
+                    }
                     outputs[i] = dst;
 
                     // ── SERVE EVERY SLOT THAT WANTED THIS STEP ────────────────────
@@ -1395,7 +1496,13 @@ class image_renderer
                     double                          isf_time     = 0.0,
                     double                          isf_dt       = 0.0,
                     int                             isf_frame    = 0,
-                    int                             isf_to_display = 0)
+                    int                             isf_to_display = 0,
+                    /// ISF `PASSINDEX`, and this pass's own extent for `RENDERSIZE`.
+                    int                             isf_pass       = 0,
+                    float                           isf_rw         = 0.f,
+                    float                           isf_rh         = 0.f,
+                    /// The shader's `PASSES` targets, for this pass to sample.
+                    const std::array<std::shared_ptr<texture>, 8>* isf_targets = nullptr)
     {
         if (!source_a)
             return;
@@ -1433,6 +1540,11 @@ class image_renderer
         draw_params.isf_time_delta          = isf_dt;
         draw_params.isf_frame               = isf_frame;
         draw_params.isf_to_display          = isf_to_display;
+        draw_params.isf_pass                = isf_pass;
+        draw_params.isf_rendersize[0]       = isf_rw;
+        draw_params.isf_rendersize[1]       = isf_rh;
+        if (isf_targets)
+            draw_params.isf_targets = *isf_targets;
         // The destination is an fp16 attachment, so this draw needs the fp16 pipeline. See the
         // head pass above for why the format is not just a property of the image here.
         draw_params.node_fp16               = true;
