@@ -157,6 +157,15 @@ struct device::impl : public std::enable_shared_from_this<impl>
     // 0 = unorm8, 1 = unorm16, 2 = fp16. The render format has to be part of the key:
     // a VkImage's format is fixed at creation, so pooling fp16 with unorm16 would hand
     // an fp16 attachment back as a unorm16 one. Same hazard as the OGL texture pool.
+    /// How many textures of one (format, raster) a pool may hold before it frees them instead.
+    /// See the long note on the deleter in `create_attachment`.
+    ///
+    /// 48 = the compiler's 16-pass cap x 3 frame slots: what ONE channel can legitimately have
+    /// in flight for a single raster. A VRAM ceiling rather than a tuning knob -- at 2160p fp16
+    /// that is 48 x 66 MB = 3.2 GB per raster per format, already generous on a 16 GB card,
+    /// which is why the number is not larger.
+    static constexpr size_t pool_depth = 48;
+
     std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 3>                attachment_pools_;
     std::array<std::array<tbb::concurrent_unordered_map<size_t, texture_queue_t>, 4>, 2> device_pools_;
     std::array<tbb::concurrent_unordered_map<size_t, buffer_queue_t>, 2>                 host_pools_;
@@ -1215,6 +1224,12 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         // TODO (perf) Shared pool.
         auto pool   = &attachment_pools_[depth_pool_index][static_cast<size_t>(width) << 16 | static_cast<size_t>(height)];
+        // A `concurrent_bounded_queue` is UNBOUNDED until a capacity is set, so this call is
+        // what makes `try_push` in the deleter able to refuse. Without it that `try_push` always
+        // succeeds and the ceiling is decorative -- which is exactly the shape of the leak this
+        // fixes, so it is set on the same line that first reaches the bucket.
+        if (pool->capacity() > pool_depth)
+            pool->set_capacity(pool_depth);
         auto extent = vk::Extent3D{static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
 
         std::shared_ptr<texture> tex;
@@ -1290,7 +1305,30 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         auto ptr = tex.get();
         return std::shared_ptr<texture>(
-            ptr, [tex = std::move(tex), pool, self = shared_from_this()](texture*) mutable { pool->push(tex); });
+            ptr, [tex = std::move(tex), pool, self = shared_from_this()](texture*) mutable {
+                // ── THE POOL HAS A CEILING, AND IT USED NOT TO ────────────────────────────
+                //
+                // `tbb::concurrent_bounded_queue` is unbounded until somebody sets a capacity,
+                // and nobody did: every attachment ever returned was kept for the life of the
+                // process, with no eviction and no age-out. `gc()` is the only release path and
+                // its only caller is an AMCP command.
+                //
+                // MEASURED 2026-09-13 at 2160p50 on four channels with sixteen node passes
+                // each: a 3840x2160 fp16 attachment is 66 MB, ~20 are live per channel per
+                // frame, and **VRAM climbed to 15.8 GB of a 16.4 GB card and stayed there** --
+                // pinned until the process exited, long after the documents were detached.
+                // `vk::Device::allocateMemory: ErrorOutOfDeviceMemory` then threw out of an
+                // attachment allocation, which poisoned a frame slot's fence and cost that
+                // channel ~3300 ms per frame **permanently** (see `image_kernel.cpp`).
+                //
+                // DROPPED RATHER THAN POOLED when the bucket is full: `tex` is the last owner,
+                // so this frees the VkImage and its memory and the ceiling is a real VRAM
+                // ceiling. A miss costs one `createImage` + `allocateMemory`, which is what the
+                // pool exists to avoid and is still far cheaper than exhausting the device.
+                if (!pool->try_push(tex)) {
+                    // Full. Let it go.
+                }
+            });
     }
 
     /// Which pipeline / attachment pool a (depth, render_format) pair selects. fp16 is a
@@ -1399,6 +1437,9 @@ struct device::impl : public std::enable_shared_from_this<impl>
         }
 
         auto pool   = &device_pools_[depth_pool_index][stride - 1][(width << 16 & 0xFFFF0000) | (height & 0x0000FFFF)];
+        // Bounded for the same reason as the attachment pool; see the note there.
+        if (pool->capacity() > pool_depth)
+            pool->set_capacity(pool_depth);
         auto extent = vk::Extent3D{static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
         std::shared_ptr<texture> tex;
         if (!pool->try_pop(tex)) {
@@ -1438,7 +1479,14 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         auto ptr = tex.get();
         return std::shared_ptr<texture>(
-            ptr, [tex = std::move(tex), pool, self = shared_from_this()](texture*) mutable { pool->push(tex); });
+            ptr, [tex = std::move(tex), pool, self = shared_from_this()](texture*) mutable {
+                // Bounded for the same reason as the attachment pool above -- an unbounded
+                // return queue is a VRAM leak with a slow fuse. See the note there for the
+                // measurement that established it.
+                if (!pool->try_push(tex)) {
+                    // Full. Let it go.
+                }
+            });
     }
 
     std::shared_ptr<buffer> create_buffer(int size, bool write)

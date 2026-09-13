@@ -320,6 +320,15 @@ struct image_kernel::impl
             return parent->vulkan_->get_pipeline(parent->depth_, parent->render_format_);
         }
         virtual vk::CommandBuffer               get_command_buffer() { return cmd_buffer; }
+        /// Has anything been submitted with `fence` since it was last reset?
+        ///
+        /// FALSE MEANS "DO NOT WAIT ON IT". A frame that throws between `create_renderpass` and
+        /// `submit()` leaves this slot with a fence nothing will ever signal; waiting on one is
+        /// a guaranteed full-budget stall per frame, permanently. Belt and braces beside moving
+        /// the reset into `submit()`: the reset move makes the fence signalled rather than
+        /// unsignallable, and this makes the wait unnecessary either way.
+        bool                                    submitted = false;
+
         virtual void                            submit()
         {
             auto vk_device = parent->vulkan_->getVkDevice();
@@ -352,7 +361,14 @@ struct image_kernel::impl
                 submitInfo.setSignalSemaphores(render_sem);
                 submitInfo.pNext = &timelineInfo;
             }
+            // RESET HERE, one statement before the submission that signals it, so no throwable
+            // work can ever run between the two. `create_renderpass` has already waited on this
+            // fence, so resetting it is safe; what is NOT safe is resetting it there and
+            // reaching a throw before getting here. See the long note in `create_renderpass`.
+            vk_device.resetFences(fence);
             parent->vulkan_->submit(submitInfo, fence);
+            // ONLY NOW is a wait on this fence guaranteed to terminate.
+            submitted = true;
         }
 
         void*                           render_complete_semaphore_handle() override
@@ -508,14 +524,39 @@ struct image_kernel::impl
     {
         auto  device = vulkan_->getVkDevice();
         auto& ctx    = frames_[(++current_frame_index_) % frame_buffer_size];
-        if (ctx.fence) {
-            // NEVER reset on a timeout: this slot's previous submission may still be
-            // executing, and resetting its fence and command buffer under it is undefined
-            // behaviour that presents as a GPU hang and then a TDR. See gpu_wait.h.
+        // NEVER reset on a timeout: this slot's previous submission may still be executing,
+        // and resetting its fence and command buffer under it is undefined behaviour that
+        // presents as a GPU hang and then a TDR. See gpu_wait.h.
+        //
+        // AND ONLY WAIT ON A FENCE SOMETHING WAS ACTUALLY SUBMITTED WITH. `submitted` is false
+        // for a slot whose frame threw before reaching `submit()` -- see the note on it and in
+        // `submit()`. Waiting on such a fence can never return, because nothing will ever
+        // signal it.
+        if (ctx.fence && ctx.submitted)
             wait_for_fence(device, ctx.fence, L"[Vulkan image_kernel] renderpass slot");
-            device.resetFences(ctx.fence);
-        }
 
+        // ── THE FENCE IS **NOT** RESET HERE, AND THAT IS THE WHOLE FIX ────────────────────
+        //
+        // It used to be, on this line, immediately after the wait. Everything a frame does then
+        // happened between the reset and the submission that re-signals it: every attachment
+        // allocation, every pipeline build, every descriptor write, the whole recording -- with
+        // no try/catch and no guard anywhere on that path. **Any throw in that window left the
+        // fence reset with no submission attached to it, i.e. unsignallable for the life of the
+        // process**, and this slot then cost the full `gpu_wait_budget` every time round the
+        // ring, forever, whatever was being drawn.
+        //
+        // MEASURED 2026-09-13 at 2160p50 on four channels with sixteen node passes each:
+        // VRAM reached 15.8 GB of 16.4, `vk::Device::allocateMemory: ErrorOutOfDeviceMemory`
+        // threw out of an attachment allocation, and from that moment the channel reported a
+        // ~3300 ms frame period **with its graph detached and nothing to draw**. 3300 ms is not
+        // a slow GPU: it is 10 s of budget divided by three frame slots, one of them dead.
+        //
+        // It is reset in `submit()` instead, immediately before the submission that signals it
+        // -- which is the shape every other fence user in this tree already has
+        // (`av_vulkan_export.cpp`, `av_vulkan_import.cpp`, `d3d11_import_bridge.cpp`). A throw
+        // now leaves the fence SIGNALLED, so the next tick's wait returns at once and the slot
+        // repairs itself.
+        ctx.submitted = false;
         ctx.cmd_buffer.reset({});
         return spl::make_shared<renderpass>(&ctx, width, height);
     }
