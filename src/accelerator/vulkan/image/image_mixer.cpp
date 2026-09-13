@@ -720,6 +720,18 @@ class image_renderer
                 for (auto& itm : l.items) {
                     item_fingerprint ifp;
                     ifp.transform  = itm.transforms.image_transform;
+
+                    // A TIME-DEPENDENT GRAPH NEVER MATCHES. An `isf` node's picture moves with
+                    // nothing in the transform moving -- `TIME`, and soon a persistent buffer
+                    // -- and this fingerprint compares the transform and nothing about time. So
+                    // a static layer under such a graph was served the same cached frame
+                    // forever. Marking the fingerprint incomplete reuses the rule the texture
+                    // futures already rely on: "an incomplete fingerprint never matches". One
+                    // pointer test for every other item, and only the graph that actually
+                    // contains such a node gives up its cache.
+                    if (const auto& np = itm.transforms.image_transform.node_plan;
+                        np && np->time_dependent)
+                        fp.complete = false;
                     ifp.geometry   = itm.geometry;
                     ifp.pix_desc   = itm.pix_desc;
                     ifp.blend_mode = l.blend_mode;

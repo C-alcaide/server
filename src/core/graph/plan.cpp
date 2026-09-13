@@ -255,9 +255,16 @@ std::shared_ptr<const node_plan> compile(const graph_document&           doc,
     // A MATERIALISED MASK COSTS A PASS TOO, and the cap has to see it -- otherwise a document
     // of sixteen image nodes plus fanned-out masks passes validation and then asks the frame
     // path for more draws than the cap promised.
-    for (const auto& st : plan->steps)
+    for (const auto& st : plan->steps) {
         if (st.produces_image || st.produces_mask)
             ++plan->image_passes;
+        // The one class whose picture moves with nothing in the document moving. If a second
+        // such class ever exists it joins this test, and `graph_plan_self_test` asserts the
+        // flag on an `isf` plan and its ABSENCE on a CDL chain -- so a class added here by
+        // mistake would be caught by the second half.
+        if (st.cls == op_isf)
+            plan->time_dependent = true;
+    }
 
     for (const auto& f : faults)
         if (f.sev == graph_fault::severity::coercion)
@@ -364,6 +371,15 @@ void graph_plan_self_test()
         if (p->image_passes != 2)
             fail("a chain of two grading nodes is " + std::to_string(p->image_passes) +
                  " image passes; it must be 2 -- `input` and `output` draw nothing of their own");
+
+        // A GRADING CHAIN IS NOT TIME-DEPENDENT. The negative half of the `time_dependent`
+        // check: an exposure and a CDL are pure functions of their inputs and values, so this
+        // plan must keep its still-frame cache. If this fires, something flagged a class that
+        // should not be, and every static channel with a graph lost its cache.
+        if (p->time_dependent)
+            fail("a chain of two grading nodes is marked time-dependent; only a class whose "
+                 "picture moves with nothing in the document moving may set that, and it would "
+                 "disable the still-frame cache on every graphed channel");
 
         // EVERY OFFSET DISTINCT AND IN RANGE. An overlap is the defect that makes two
         // parameters share a slider, and it is invisible until somebody drags one.
@@ -492,6 +508,23 @@ void graph_plan_self_test()
         if (p->image_passes != 1)
             fail("a masked exposure is " + std::to_string(p->image_passes) +
                  " image passes; a fused mask costs none, so it must be 1");
+
+        // AN ISF PLAN IS TIME-DEPENDENT, WITH NO SHADER FILE NEEDED. A node with no `path` yet
+        // is legal -- an editor drops it and then picks a shader -- and compiles to a step of
+        // class `isf` that passes its input through. That is enough for the flag, which is a
+        // property of the CLASS and not of any particular shader. The positive half of the
+        // check `p->time_dependent` above is the negative half of.
+        {
+            graph_document iso;
+            iso.name  = "iso";
+            iso.nodes = {node("in", "input"), node("s", "isf"), node("out", "output")};
+            iso.edges = {edge("x1", "in", "out", "s", "in"), edge("x2", "s", "out", "out", "in")};
+            const auto ip = build(iso);
+            if (!ip->time_dependent)
+                fail("a plan containing an `isf` node is not marked time-dependent, so the "
+                     "still-frame cache would FREEZE a shader that animates from TIME on a static "
+                     "layer -- which is exactly what it did before this flag existed");
+        }
 
         auto two = d;
         two.nodes.push_back(node("e2n", "exposure"));

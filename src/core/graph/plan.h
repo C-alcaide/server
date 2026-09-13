@@ -171,6 +171,23 @@ struct node_plan
     /// is what keeps a graph with everything bypassed byte-identical to no graph at all.
     std::int32_t image_passes = 0;
 
+    /// This graph's picture can change with NOTHING in the document changing.
+    ///
+    /// An `isf` node animates from `TIME` and, once persistent buffers land, accumulates state
+    /// across frames -- so two ticks with the same plan pointer, the same values and the same
+    /// source produce different pictures. The still-frame cache compares exactly those things
+    /// (`image_transform::operator==` is `node_plan.get()` and `node_values`, nothing else) and
+    /// would therefore FREEZE such a node on a static layer. Measured 2026-09-13: it did.
+    ///
+    /// A FLAG ON THE PLAN rather than a frame number in the fingerprint, because a frame term
+    /// would make every fingerprint unique and disable the cache on EVERY channel -- the exact
+    /// regression `core::image_mixer::set_frame_number` was kept off `image_transform` to avoid.
+    /// This costs one pointer test per item, and only a graph that actually contains such a
+    /// node pays with its cache.
+    ///
+    /// Set by the compiler, so the evaluators do not each re-derive it from the step list.
+    bool time_dependent = false;
+
     /// Reported to the client, not acted on: a legal-but-lossy join the author should see.
     std::vector<coercion> coercions;
 
