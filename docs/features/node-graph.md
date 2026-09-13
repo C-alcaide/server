@@ -987,30 +987,68 @@ channels of 2160p50 H.264 saturated the box before any node drew, so it measured
 
 | nodes | OpenGL | Vulkan |
 | ---: | :--- | :--- |
-| 0 (no graph) | 0 / 2003 | 0 / 1751 |
-| 4 | 0 / 2005 | 74 / 2005 — **3.7%** |
-| 8 | 0 / 2002 | 182 / 2003 — **9.1%** |
-| 16 — the cap | 0 / 2004 | **does not sustain** |
+| 0 (no graph) | 0 / 2003 | 0–1 / 2003 |
+| 4 | 0 / 2005 | 26 / 2004 — 1.3% |
+| 8 | 0 / 2002 | 52 / 2005 — **2.6%** |
+| 16 — the cap | 0 / 2004 | 260 / 2003 — **13%** |
 | 16, all bypassed | 0 / 2005 | 0 / 2003 |
-| 4 ISF | 0 / 2005 | 70 / 2004 — 3.5% |
-| 16 ISF | 0 / 2002 | 81 / 192 — **42%** |
+| 4 ISF | 0 / 2005 | 22 / 2007 |
+| 16 ISF | 0 / 2002 | 197 / 2002 — 10% |
 
-**OpenGL sustains the cap. Vulkan does not, and the failure is not graceful.** The bypassed arm is
-clean on both, which is what makes the cost attributable to the passes rather than to the document:
-same nodes, same publication, no draws.
+Peak VRAM on the Vulkan arms: **4.6 GB, flat**, with 0 tick failures.
 
-> ### ⚠ The Vulkan mixer does not recover from saturation
+**Eight passes at 2.6% is the number to plan a show against.** The cap is usable rather than free,
+and what remains is honest GPU work — 64 full-raster fp16 passes per frame is a lot of fill rate.
+The bypassed control is 0 on both mixers, which is what makes the cost attributable to the passes
+rather than to the document.
+
+> ### How these numbers were reached, because Vulkan was three times worse
 >
-> This is the more serious half. Once an arm saturates the GPU, the channel does not come back:
-> this battery's **second pass reads seconds per frame on every arm including `n0`, which has no
-> graph at all**, and the server log carries *"the GPU did not complete a submission within the
-> wait budget"*. The heaviest arm is now ordered **last** so it cannot contaminate the others —
-> before that, the bypassed control measured 3766 ms immediately after the cap arm and took every
-> comparison down with it.
+> It read **9.1% at eight passes and did not sustain sixteen**, where OpenGL cost nothing. Three
+> causes, in increasing order of how much they mattered.
 >
-> **For an operator that means a momentary overload degrades a channel until the server is
-> restarted**, rather than dropping frames while it lasts and recovering. Not fixed here; stated
-> so nobody plans a show against the old number.
+> **A queue submit per attachment per frame.** Every attachment needed a layout transition, and
+> both the pool-hit and the pool-miss path did it in a submit of its own — allocate a command
+> buffer, take the shared queue mutex, submit. One attachment per pass × 16 passes × 4 channels is
+> **64 standalone submits per frame, 3200 a second**, through one mutex. OpenGL has no image
+> layouts and paid none of it. They ride the frame's own command buffer now.
+>
+> **A chain's memory grew with its length — the one that mattered.** The evaluator drops a step's
+> output as soon as `last_use` says nothing reads it, and on OpenGL that frees it. On Vulkan it
+> frees nothing: the renderpass holds a reference to every layer's attachment until `commit()`,
+> because the command buffer references those images until submission. Sixteen passes meant
+> sixteen live 4K fp16 images per channel — 1.06 GB — × 4 channels × 3 frame slots =
+> **12.7 GB on a 16.4 GB card**. A free list now hands a released attachment straight to the next
+> pass, so a linear chain uses **two** however long it is.
+>
+> **Re-entering an attachment as a target needed a barrier that did not exist**, because nothing
+> had ever been rendered into twice in one frame: the layout back to `eRenderingLocalRead` *and* a
+> write-after-read barrier against the earlier pass's sampling. `vk-validation` can check neither
+> — it reports clean whatever you do — so `grade-graph`'s deep chain and diamond arms are what
+> adjudicate it.
+>
+> **And the device pool's size stopped mattering, which is the evidence the free list is doing the
+> work.** 24 and 48 now measure identically; before it they were the difference between 6.7% late
+> and exhausting the card.
+
+> ### The Vulkan mixer used to never recover from saturation — fixed
+>
+> Once an arm saturated the GPU the channel never came back: a channel with **no graph at all**
+> still read ~3.3 s per frame, with *"the GPU did not complete a submission within the wait
+> budget"* in the log, until the server was restarted. Two causes:
+>
+> **A fence was reset too early.** `create_renderpass` reset a frame slot's fence and then ran the
+> whole frame before the submission that re-signals it — every allocation, every pipeline build,
+> the entire recording, with no guard on that path. Any throw in that window left a fence nothing
+> would ever signal, and the slot then cost the full 10 s wait budget every time round the ring,
+> forever. 10 s ÷ 3 slots = the 3.3 s measured. The reset now sits one statement before the submit,
+> which is the shape every other fence user in this tree already had.
+>
+> **The texture pools were unbounded**, so VRAM pinned at 15.8 GB of 16.4 until the process exited
+> and `allocateMemory` threw — which is what poisoned the fence in the first place.
+>
+> A third, structural: the slot wait ran on the device's single io_context thread, so one
+> channel's wait stalled all four. It runs on the channel's own thread now.
 
 **The raster is part of the result.** At 1080p25 every arm read 0 including the cap — a battery
 with no discriminating power rather than a finding. 2160p50 is eight times the pixel rate, and on
@@ -1181,23 +1219,10 @@ only ever sees bytes. The same injection the timeline uses to reach the producer
 
 ## 8. What is not here yet
 
-> ### ⚠ Two findings from 2026-09-13 that a client and an operator both need
->
-> **An ISF node that animates was FROZEN by the still-frame cache, on both mixers.** The cache
-> compares a layer's transform -- plan pointer and values -- and nothing about time, so a shader
-> driven by `TIME` over a static layer changed nothing it could see and the same composited frame
-> was served forever. Fixed by `node_plan::time_dependent`, which marks such a plan's fingerprint
-> incomplete. Every ISF fixture before this was time-independent, which is why a frozen animation
-> passed 45/45.
->
-> **The 16-pass cap is NOT reachable on the Vulkan mixer at 2160p50 on four channels**, and the
-> failure is not graceful. Measured with the composite actually redrawing: OpenGL sustains the cap
-> at 0/2004 late; Vulkan costs 3.7% at four passes, 9.1% at eight, and saturates at sixteen. Worse,
-> **the Vulkan mixer does not recover from that saturation** -- after a saturating arm, a channel
-> with *no graph at all* still reads seconds per frame, and the server log carries "the GPU did not
-> complete a submission within the wait budget". A momentary overload therefore degrades a channel
-> until it is restarted. Neither the cap nor the recovery behaviour is fixed here; both are stated
-> so nobody plans a show against the old number.
+**Sixteen 4K passes on four channels cost 13% of frames on Vulkan and nothing on OpenGL**, which
+is a capacity limit rather than a defect — eight passes cost 2.6%, and the bypassed control is 0 on
+both. The saturation defects that used to accompany it (a permanently poisoned frame slot, unbounded
+VRAM, one channel's wait stalling all four) are fixed; see §7.3.
 
 **Nothing outstanding for `isf` on either backend at single-pass.** An `isf` node draws on both
 mixers, gated at 1 LSB against the same closed-form model. What is not built yet is multi-pass
@@ -1247,7 +1272,7 @@ rather than by the `MIXER` tween.
 | a graph VERB and a node WRITE inside a batch, and label coalescing | `api-graph` | **6 checks, both mixers** — including that three writes under one label are ONE undo, which is the claim a client's slider depends on |
 | a per-node PREVIEW, and that it is THAT node's output | `grade-graph` | **4 checks, both mixers** — the first node of a two-node chain at **0.40 LSB** against its own expected value, which is what a capture-the-layer implementation fails; the last node's at **0.00** against the captured layer |
 | what a realistic look costs the PUBLICATION | `publication-cost` | a graph arm: **+14 leaves**, taking a fully dressed channel to 92 against the 596 that cost frames. Both mixers |
-| what sixteen passes COST, and that they ran at all | `grade-graph-cost` | **CORRECTED 2026-09-13 — the old "0 late at the cap" measured the still-frame cache, not the passes.** See §7.3: the fixture was cacheable, so the composite was served from cache and the passes never ran. With a redrawing composite: **OpenGL 0/2004 at the cap; Vulkan 3.7% at four passes, 9.1% at eight, does not sustain sixteen, and does not recover from the saturation.** The picture control proves the passes ran ONCE and cannot distinguish a cached frame from a drawn one |
+| what sixteen passes COST, and that they ran at all | `grade-graph-cost` | **CORRECTED 2026-09-13 — the old "0 late at the cap" measured the still-frame cache, not the passes.** See §7.3: the fixture was cacheable, so the composite was served from cache and the passes never ran. With a redrawing composite: **OpenGL 0/2004 at the cap; Vulkan 1.3% at four passes, 2.6% at eight, 13% at sixteen, 4.6 GB flat.** The picture control proves the passes ran ONCE and cannot distinguish a cached frame from a drawn one |
 | the CATALOGUE, and that `suggest`/`preview`/PUT agree | `api-graph` | **6 checks, both mixers** — 65 (class, port) pairs walked, 0 disagreements. The agreement is the claim; any one endpoint answering is not |
 | an `isf` node DRAWS, and with the right parameters | `grade-graph` | **4 checks, OpenGL.** A generator fixture whose flat fill is arithmetic on its own declared parameters, gated at **1 LSB** against that model. It differs from the un-graphed layer, so a node that never drew cannot pass it |
 | an `isf` node reads its INPUT — binding, channel order, flip | `grade-graph` | **3 checks, OpenGL.** The generator above is BLIND to all three: it never samples `inputImage`, so it renders identically whether the input was bound right, upside down, channel-swapped, or not at all. A second FILTER fixture applies asymmetric per-channel gains, differing between the top and bottom halves. **It caught a real defect on its first run** — the pass swizzled red/blue on both ends, on the assumption that a node attachment holds BGRA like a producer's plane; it holds RGBA. Green was correct in both readings, so a grey fixture would have passed it silently |
