@@ -520,21 +520,43 @@ struct image_kernel::impl
         }
     }
 
-    spl::shared_ptr<renderpass> create_renderpass(uint32_t width, uint32_t height)
+    /// Advance to the next frame slot and wait for the GPU to be done with it.
+    ///
+    /// ── CALLED ON THE CHANNEL'S OWN THREAD, NOT THE DEVICE THREAD ───────────────────────
+    ///
+    /// This used to live inside `create_renderpass`, which runs inside the mixer's
+    /// `dispatch_async` lambda -- i.e. **on the single io_context thread that every channel's
+    /// uploads, composition and transfers share**. One channel waiting for its own GPU work
+    /// therefore stopped all four, and under saturation that turned one late channel into four.
+    ///
+    /// The OpenGL device documents the same rule on its readback path and obeys it: *"Wait for
+    /// the readback by yielding to the io_context between checks, never by blocking: this runs
+    /// on the single GL thread, so blocking it would stall every other channel's uploads and
+    /// composition too."* This was the one place in the Vulkan backend that did not.
+    ///
+    /// SAFE OFF THE DEVICE THREAD because a frame slot belongs to one kernel, a kernel belongs
+    /// to one mixer, and a mixer belongs to one channel -- so nothing else is touching this
+    /// slot -- and `vkWaitForFences` needs no external synchronisation. The command buffer
+    /// reset stays on the device thread, where the pool is used.
+    void wait_for_next_slot()
     {
         auto  device = vulkan_->getVkDevice();
         auto& ctx    = frames_[(++current_frame_index_) % frame_buffer_size];
-        // NEVER reset on a timeout: this slot's previous submission may still be executing,
-        // and resetting its fence and command buffer under it is undefined behaviour that
-        // presents as a GPU hang and then a TDR. See gpu_wait.h.
+        // NEVER reset on a timeout: this slot's previous submission may still be executing, and
+        // resetting its fence and command buffer under it is undefined behaviour that presents
+        // as a GPU hang and then a TDR. See gpu_wait.h.
         //
-        // AND ONLY WAIT ON A FENCE SOMETHING WAS ACTUALLY SUBMITTED WITH. `submitted` is false
-        // for a slot whose frame threw before reaching `submit()` -- see the note on it and in
-        // `submit()`. Waiting on such a fence can never return, because nothing will ever
-        // signal it.
+        // AND ONLY WAIT ON A FENCE SOMETHING WAS ACTUALLY SUBMITTED WITH -- see `submitted`.
         if (ctx.fence && ctx.submitted)
             wait_for_fence(device, ctx.fence, L"[Vulkan image_kernel] renderpass slot");
+    }
 
+    spl::shared_ptr<renderpass> create_renderpass(uint32_t width, uint32_t height)
+    {
+        // THE SLOT `wait_for_next_slot` ALREADY ADVANCED TO AND WAITED ON. The index is not
+        // advanced again here: doing so would skip a slot per frame and return a renderpass
+        // whose fence nobody waited for.
+        auto& ctx = frames_[current_frame_index_ % frame_buffer_size];
         // ── THE FENCE IS **NOT** RESET HERE, AND THAT IS THE WHOLE FIX ────────────────────
         //
         // It used to be, on this line, immediately after the wait. Everything a frame does then
@@ -2506,6 +2528,8 @@ image_kernel::image_kernel(const spl::shared_ptr<device>& device,
 {
 }
 image_kernel::~image_kernel() {}
+
+void image_kernel::wait_for_next_slot() { impl_->wait_for_next_slot(); }
 
 spl::shared_ptr<renderpass> image_kernel::create_renderpass(uint32_t width, uint32_t height)
 {

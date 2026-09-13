@@ -41,6 +41,13 @@ class image_kernel final : public std::enable_shared_from_this<image_kernel>
     image_kernel& operator=(const image_kernel&);
 
   public:
+    /// Advance to the next frame slot and wait for the GPU to finish with it.
+    ///
+    /// MUST be called on the CHANNEL thread, before the mixer dispatches its frame to
+    /// the device thread. Waiting inside that dispatch blocks the one thread every
+    /// channel shares, which turns one saturated channel into four. See the definition.
+    void wait_for_next_slot();
+
     image_kernel(const spl::shared_ptr<class device>& device,
                  common::bit_depth                     depth,
                  common::render_format                 render_format = common::render_format::unorm);

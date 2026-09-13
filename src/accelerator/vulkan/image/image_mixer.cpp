@@ -522,6 +522,19 @@ class image_renderer
             prev_fingerprint_ = std::move(fingerprint);
         }
 
+        // ── WAIT FOR THE FRAME SLOT HERE, ON THE CHANNEL'S OWN THREAD ────────────────────
+        //
+        // Not inside the lambda below. That lambda runs on the device's SINGLE io_context
+        // thread, which every channel's uploads, composition and transfers share -- so a
+        // channel waiting there for its own GPU work stopped all four, and under saturation one
+        // late channel became four. The OpenGL device states the rule on its readback path and
+        // obeys it; this was the one place in the Vulkan backend that did not.
+        //
+        // Safe here: a frame slot belongs to one kernel, a kernel to one mixer, a mixer to one
+        // channel, so nothing else touches it -- and `vkWaitForFences` needs no external
+        // synchronisation. The command-buffer reset stays on the device thread with its pool.
+        kernel_.wait_for_next_slot();
+
         auto f = std::move(vulkan_->dispatch_async(
             [this, format_desc, cal_lut = calibration_lut_, cal_strength = calibration_strength_,
              cal_bypass = calibration_bypass_, ws_composite = working_space_composite,
