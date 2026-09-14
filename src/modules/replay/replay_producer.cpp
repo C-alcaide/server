@@ -245,8 +245,11 @@ core::draw_frame replay_producer::receive_impl(core::video_field field, int nb_s
         refresh_skip_counter_ = 0;
         
         int64_t current_len = (int64_t)reader_->GetTotalFrames();
-        // If length changed, update duration
-        if (current_len > duration_) {
+        // TRACKS IT IN BOTH DIRECTIONS. This was `if (current_len > duration_)`, which is why
+        // the reader's missing prune above could never have been noticed from the outside: even
+        // once the reader told the truth, the producer kept the high-water mark. A rolling
+        // buffer's length goes DOWN as often as it goes up.
+        if (current_len > 0) {
             duration_ = current_len;
         }
     }

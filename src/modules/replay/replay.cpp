@@ -48,22 +48,54 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
     bool is_mav = boost::algorithm::iends_with(path_w, L".mav") || boost::algorithm::iends_with(path_w, L".MAV");
     
     if (!is_mav) {
-         // Check if file.mav exists
-         boost::filesystem::path p(path_w);
-         if (p.is_absolute()) {
-             if (boost::filesystem::exists(p.string() + ".mav")) {
-                 path_w += L".mav";
-                 is_mav = true;
-             }
-         } else {
-             // Relative to media
-             boost::filesystem::path m(env::media_folder());
-             m /= p;
-             if (boost::filesystem::exists(m.string() + ".mav")) {
-                 path_w += L".mav";
-                 is_mav = true;
-             }
-         }
+        // ── A SEGMENTED RECORDING HAS NO `<name>.mav`, WHICH IS WHAT THIS USED TO LOOK FOR ──
+        //
+        // The writer produces `<name>.mav.000`, `.001`, ... and an `.idx.NNN` beside each. There
+        // is no file called `<name>.mav` and there never was, so this probe failed for every
+        // recording this module has ever made, the factory declined, and AMCP answered the
+        // generic **"File not found."**
+        //
+        // **THAT IS EVERY PLAYBACK EXAMPLE IN THE GUIDE** -- `PLAY 1-10 "my_recording"`, the
+        // growing-buffer example, the LOOP/IN/OUT example, all of them. Only the undocumented
+        // `PLAY 1-10 "my_recording.mav"` spelling reached the producer, because that one is
+        // accepted on the suffix above without any file having to exist.
+        //
+        // Found 2026-09-14 by the first check ever written against this module, which is the
+        // whole argument for writing it: the module is 2,900 lines and its front door did not
+        // open.
+        boost::filesystem::path p(path_w);
+        if (!p.is_absolute())
+            p = boost::filesystem::path(env::media_folder()) / p;
+
+        // TWO LAYOUTS, AND THE PROBE HAS TO KNOW BOTH -- which is the half that made this
+        // defect survive a first fix. `ReplaySegmentedWriter::Open` creates a DIRECTORY and
+        // writes `media/<name>/<name>.mav.NNN` inside it; `ReplaySegmentedReader::Open`
+        // already accepts that form and the older flat `media/<name>.mav.NNN` beside it. A
+        // probe that knew only the flat form declined every recording this server makes.
+        //
+        // ANY segment, not segment zero: retention deletes from the front, so a buffer that
+        // has rolled starts at `.081` or wherever it has got to. Looking for `.000` would
+        // work until the first cleanup and then stop.
+        //
+        // Matched on the `.idx.` rather than the `.mav.`, for the same reason the reader's
+        // prune is: cleanup removes the payload first and the index second, so an index that
+        // is present is a segment that is definitively readable.
+        auto holds_a_segment = [](const boost::filesystem::path& dir, const std::string& stem) {
+            boost::system::error_code ec;
+            if (!boost::filesystem::is_directory(dir, ec))
+                return false;
+            for (boost::filesystem::directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
+                if (it->path().filename().string().rfind(stem + ".idx.", 0) == 0)
+                    return true;
+            }
+            return false;
+        };
+
+        const auto name = p.filename().string();
+        if (holds_a_segment(p, name) || holds_a_segment(p.parent_path(), name)) {
+            path_w += L".mav";
+            is_mav  = true;
+        }
     }
 
     if (!is_mav) return core::frame_producer::empty();

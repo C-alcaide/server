@@ -280,7 +280,24 @@ std::future<bool> replay_consumer::send(core::video_field field, const core::con
     
     int res = VMX_EncodeBGRA(vmx_, (unsigned char*)data, stride, interlaced);
     if (res != VMX_ERR_OK) {
-        return make_ready_future(false);
+        // ── A BAD FRAME SKIPS A FRAME; IT DOES NOT END THE RECORDING ───────────────────
+        //
+        // This returned `false`, and `output::do_send` reads a false future as "this
+        // consumer has failed": it erases it from `consumers_` **with no log line of any
+        // kind**. So one rejected frame deleted the replay consumer permanently, the
+        // buffer stopped growing, `INFO` still showed nothing wrong because the consumer
+        // was simply gone, and the operator found out when they tried to play the moment
+        // back.
+        //
+        // An instant-replay buffer is exactly the consumer that must not do that -- it is
+        // armed for hours against a moment nobody can schedule. Log once and keep going;
+        // the next frame is a fresh encode.
+        if (!encode_failure_warned_) {
+            encode_failure_warned_ = true;
+            CASPAR_LOG(warning) << print() << L" VMX encode rejected a frame (error " << res
+                                << L"); skipping it and continuing to record. This is logged once.";
+        }
+        return make_ready_future(true);
     }
     
     // Reuse pre-allocated encode buffer instead of allocating per-frame

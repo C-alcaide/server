@@ -83,6 +83,7 @@ catch its mutation cannot fail*.
 | an OCIO stage | `ocio`, `ocio-display`, `ocio-look`, `ocio-lut3d`, `consumer-view` as the stage dictates |
 | the composite / blend / alpha domain | `blend-domain`, `alpha-domain`, `mix-stage` |
 | the decode path | `flat-decoded` (the only 1 LSB decode gate), `sdi-input`, `source-colorspace` |
+| **the replay module** — the recorder, the segmented store, the growing-file producer, the factory probe | `replay`, **both mixers**. And note what makes it runnable at all: both segmentation parameters are per-recording, so `?segment=1&max_duration=4` rolls the retention path in about ten seconds where the DEFAULTS need **24 hours**. A battery that needed a day to exercise its own subject would never be run. **Its load-bearing check is "the reported timeline does not exceed what is on disk", and the first version of it could not fail**: the reader's error is proportional to how long the PRODUCER has been open, so reading the timeline two seconds after `PLAY` gave 82 frames on the un-pruned build against 78 on the fixed one and a 125-frame gate — **5/5 green on the mutation it was written to catch**. Holding playback for 20 s while the writer keeps rolling makes the same mutation report **624 against 125**. Still measured by nothing: interrupted-recording recovery, `400 EXPORT BUSY`, `LIVE` freshness and tearing, and cost |
 | consumer **metadata** — colour signalling, HDR static data | `signalling` (DeckLink), `signalling --stream` (FFmpeg). **Vulkan output has no coverage — see below** |
 | consumer **pixels** | `sdi-output` (`--hdr-metadata` for the DeckLink HDR block), `consumer-view`, or `cli.py run --consumer <name>` |
 | Vulkan API usage rather than picture | `vk-validation` — **but it cannot currently fail; see below** |
@@ -586,6 +587,20 @@ Every arm that already differs from the base is fine, which is why this had not 
 Look for it wherever a check asserts an IDENTITY: a round trip, a no-op, a restore, a release, a
 `CLEAR`. `sampled-captures-cannot-resolve-a-short-loop` and `false-green-from-wrong-input` are the
 same family reached from other directions.
+
+**A THIRD WAY IN, and it does not touch the oracle at all: the check LOOKED IN THE WRONG PLACE.**
+Measured 2026-09-14 writing the replay module's first battery. It globbed `media/<name>.mav.*`;
+`ReplaySegmentedWriter::Open` creates a DIRECTORY and writes `media/<name>/<name>.mav.NNN`. The
+battery read 0 segments for 74 seconds and reported **"the recorder writes nothing"** -- while 85
+segments had been written one directory down and retention had correctly pruned them to four.
+
+**A battery that cannot see its subject reports its own blindness as the subject's failure, and it
+reads exactly like a real finding.** A defect was then hunted through `output.cpp`'s CPU-readback
+handshake, an instrumentation build was made, and a consumer guard was reverted to isolate a cause
+that did not exist -- all against a recorder that was working perfectly. The cheapest check that
+would have stopped it: **`docs/guides/REPLAY_MODULE_USAGE.md` documented the directory layout
+correctly, and had done all along.** When a subsystem reports NOTHING rather than WRONG, read the
+doc that says where its output goes before reading the code that produces it.
 
 **And it does not need an identity oracle to bite -- a MISREAD FIELD produces the same thing.**
 Measured 2026-09-11 on the graph batch: a check read `history.depth`, a key the reply does not

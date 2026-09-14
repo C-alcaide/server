@@ -552,6 +552,46 @@ void ReplaySegmentedReader::Refresh()
         return;
     }
 
+    // ── SEGMENTS THE WRITER HAS DELETED GO FIRST ────────────────────────────────────────
+    //
+    // Retention deletes from the FRONT while this reader only ever appended: `segments_` was
+    // cleared or pushed to and never erased, so a recording's timeline grew forever. An operator
+    // seeking to "the start" landed in material deleted minutes ago, and the number a client
+    // draws its scrub bar from was fiction.
+    //
+    // With the defaults -- a 24-hour buffer in 60-second segments -- this needs a day of
+    // recording to show. A sports buffer of a few minutes hits it in a few minutes, which is
+    // what the feature is FOR.
+    //
+    // Checked against the `.idx`, not the `.mav`: the writer removes the payload first and the
+    // index second, so a segment whose index is gone is definitively gone, while one whose
+    // payload has just gone might still be mid-cleanup.
+    {
+        std::size_t dropped = 0;
+        while (!segments_.empty()) {
+            boost::system::error_code ec;
+            if (boost::filesystem::exists(segments_.front().idx_path, ec))
+                break;
+            dropped += segments_.front().indices.size();
+            segments_.erase(segments_.begin());
+        }
+        if (dropped > 0) {
+            total_frames_ = total_frames_ > dropped ? total_frames_ - dropped : 0;
+            // The global frame numbering is relative to the first segment held, so everything
+            // after a drop has to be renumbered or every seek lands in the wrong place.
+            std::size_t running = 0;
+            for (auto& seg : segments_) {
+                seg.global_start_frame = running;
+                running += seg.indices.size();
+            }
+        }
+    }
+
+    if (segments_.empty()) {
+        Open(base_path_);
+        return;
+    }
+
     // Incremental refresh:
     // 1. Update last segment
     // 2. Scan for next segments

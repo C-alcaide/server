@@ -85,6 +85,9 @@ struct replay_consumer : public core::frame_consumer
     
     // Pre-allocated encode buffer to avoid per-frame allocation
     std::vector<uint8_t>    encode_buffer_;
+    /// One line per consumer for a rejected frame, not one per frame: a systematic
+    /// encode failure is a wall of identical lines at the channel's frame rate.
+    bool                    encode_failure_warned_ = false;
 
 public:
     replay_consumer(std::string path, VMX_PROFILE quality);

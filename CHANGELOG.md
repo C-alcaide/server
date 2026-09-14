@@ -1,6 +1,34 @@
 CasparVP — Unreleased
 ==========================================
 
+### `PLAY` on a replay recording works, and its timeline stops lying
+
+**`PLAY 1-10 "my_recording"` answered `File not found.` for the whole life of the module.** The
+factory probed for a file called `<name>.mav`; a recording is a DIRECTORY, `media/<name>/`, holding
+`<name>.mav.NNN` and `<name>.idx.NNN`. Every playback example in
+`docs/guides/REPLAY_MODULE_USAGE.md` used a spelling the factory declined — only the undocumented
+`PLAY 1-10 "my_recording.mav"` reached the producer, because that one is accepted on the suffix
+without any file having to exist. The probe now accepts both the directory layout and the older
+flat one, matching on the `.idx` because cleanup removes the payload first and the index second.
+
+**And the reported timeline grew without bound.** `ReplaySegmentedReader::Refresh()` extended the
+last segment and appended new ones — there was no `erase` anywhere in the reader — while retention
+deletes from the front; and `replay_producer` raised `duration_` only when it grew, so even a
+reader that pruned could not have shrunk it. Two defects in series, which is why neither was
+visible from outside. **Measured 2026-09-14: after 20 s of playback against a live 4-second
+buffer, the producer reported 624 frames where 125 existed on disk** — five times the material
+that was there, so an operator seeking to "the start" landed in a segment deleted seconds ago and
+a client's scrub bar was fiction. It now reports 89 (OpenGL) / 94 (Vulkan) against the same 125.
+
+**A rejected frame no longer deletes the recording.** `replay_consumer::send()` returned `false`
+on any `VMX_EncodeBGRA` failure, and `output::do_send` reads a false future as "this consumer has
+failed" and erases it from `consumers_` **with no log line of any kind**. One bad frame silently
+ended a buffer armed for hours. It now logs once and keeps recording.
+
+Measured by the module's first battery in 2,900 lines — `cli.py replay`, **5/5 on both mixers**,
+with the timeline check shown to fail (624 against a 125 gate) under a build with the prune
+reverted. `docs/features/replay.md` §4 has the table and §4.1 the four defects.
+
 ### An `isf` node runs MULTI-PASS and keeps PERSISTENT state — and its buffers changed depth
 
 An `isf` node drew one pass and refused anything else. It now runs every `PASSES` entry with its
