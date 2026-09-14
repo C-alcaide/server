@@ -200,6 +200,18 @@ replay_consumer::replay_consumer(std::string path, VMX_PROFILE quality)
 
 replay_consumer::~replay_consumer()
 {
+    // -- DRAIN THE QUEUE BEFORE CLOSING ANYTHING ---------------------------------------
+    //
+    // The worker holds raw pointers into `vmx_` and `writer_`, so the ORDER here is the whole
+    // of its safety: ask it to stop, let it finish the frames it already has, join it, and
+    // only then close the writer and destroy the codec. `worker_loop` exits on an EMPTY
+    // queue rather than on the flag, so "stop" means "finish what you accepted" -- the
+    // frames in it are frames the operator believes are recorded.
+    worker_stop_.store(true, std::memory_order_release);
+    queue_cv_.notify_all();
+    if (worker_.joinable())
+        worker_.join();
+
     // Close writer first to flush pending data and finalize index
     if (writer_) {
         try {
@@ -242,112 +254,197 @@ void replay_consumer::initialize(const core::video_format_desc& format_desc,
     
     // Default 1 hour if not set? No, strictly use config.
     if (writer_) writer_->Open(base_p, max_duration_sec_, segment_duration_sec_, width_, height_, fps_);
+
+    // STARTED HERE, NOT IN THE CONSTRUCTOR, because the worker touches `vmx_`, `width_`,
+    // `height_` and the open writer, and none of those exist until this call: a consumer is
+    // constructed from the AMCP string and only learns the channel's format when it is added.
+    if (vmx_ && writer_ && !worker_.joinable())
+        worker_ = std::thread([this] { worker_loop(); });
 }
 
 std::future<bool> replay_consumer::send(core::video_field field, const core::const_frame frame)
 {
-    if (!vmx_ || !writer_) return make_ready_future(false);
-    
-    // Check pixel format - expect BGRA
+    if (!vmx_ || !writer_)
+        return make_ready_future(false);
+
+    // -- THE CHANNEL THREAD DOES A COPY AND A PUSH, AND NOTHING ELSE --------------------
+    //
+    // Everything that was here -- the VMX encode, the payload assembly, `fwrite` + `fflush`
+    // twice -- is on `worker_loop()` now. `output.cpp` waits on this future and measures the
+    // wait as the channel's remaining headroom, so what happens between here and the return
+    // is paid by every layer on the channel, not only by the recording.
+    //
+    // Measured 2026-09-14 at 1080p50 before this split: `consume_load` 0.0003 idle against
+    // 0.127 recording -- an eighth of the frame budget, on the thread that paces the channel.
+    //
+    // The copy is not avoidable: the const_frame's host buffer is recycled as soon as the
+    // channel moves on, and holding the frame alive instead would pin a mixer readback
+    // buffer for as long as the queue is deep.
+    auto& data_array = frame.image_data(0);
+    if (data_array.size() == 0 || data_array.data() == nullptr)
+        return make_ready_future(true);
+
+    int stride = (int)width_ * 4; // BGRA 32bit assumed
+    if (data_array.size() >= (size_t)(stride * height_))
+        stride = (int)(data_array.size() / height_);
+
+    pending_frame pf;
+    pf.stride = stride;
+    pf.bgra.assign(data_array.data(), data_array.data() + data_array.size());
+    auto& audio_vec = frame.audio_data();
+    pf.audio.assign(audio_vec.begin(), audio_vec.end());
+
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (queue_.size() >= queue_capacity_) {
+            // -- DROP, DO NOT BLOCK, AND NEVER RETURN `false` --------------------------
+            //
+            // Blocking here would put the disk's worst case straight back onto the channel,
+            // which is the whole defect this queue exists to remove. Returning `false` would
+            // be worse still: `output::do_send` reads a false future as "this consumer has
+            // failed" and erases it from `consumers_` with no log line at all, so a single
+            // slow moment would end a buffer armed for hours.
+            //
+            // A dropped frame is one frame missing from the recording, and the index carries
+            // real timestamps, so playback stays correct across the gap.
+            frames_dropped_.fetch_add(1, std::memory_order_relaxed);
+            if (!drop_warned_) {
+                drop_warned_ = true;
+                CASPAR_LOG(warning) << print()
+                                    << L" write queue full; dropping frames. The volume is not keeping up "
+                                       L"with the channel. Logged once; the count is published as "
+                                       L"`dropped_frames`.";
+            }
+            graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+            return make_ready_future(true);
+        }
+        queue_.push_back(std::move(pf));
+        graph_->set_value("queue", (double)queue_.size() / (double)queue_capacity_);
+    }
+    queue_cv_.notify_one();
+
+    return make_ready_future(true);
+}
+
+void replay_consumer::worker_loop()
+{
+    // The encode buffer, the FPS window and `frames_written_` belong to this thread now:
+    // nothing else touches them, so none of them needs a lock.
+    while (true) {
+        pending_frame f;
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            queue_cv_.wait(lock,
+                           [this] { return worker_stop_.load(std::memory_order_acquire) || !queue_.empty(); });
+            // DRAIN BEFORE STOPPING. The frames already accepted from the channel are frames
+            // the operator believes are recorded, and the segment index has to be finalised
+            // over all of them -- so the exit is "the queue is empty", not "stop was asked".
+            if (queue_.empty())
+                return;
+            f = std::move(queue_.front());
+            queue_.pop_front();
+        }
+
+        try {
+            write_one(f);
+        } catch (const std::exception&) {
+            // `std::exception` rather than `...`: this tree builds with /EHa, under which a
+            // catch-all also catches access violations and would turn memory corruption into
+            // a recording that quietly stops.
+            CASPAR_LOG_CURRENT_EXCEPTION();
+        }
+    }
+}
+
+void replay_consumer::write_one(pending_frame& f)
+{
     auto now = std::chrono::steady_clock::now();
     frames_since_update_++;
     auto duration_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_fps_update_).count();
-    
+
     if (duration_sec >= 1.0) {
-        current_fps_ = frames_since_update_ / duration_sec;
+        current_fps_         = frames_since_update_ / duration_sec;
         frames_since_update_ = 0;
-        last_fps_update_ = now;
-        
+        last_fps_update_     = now;
+
         if (graph_.get()) {
-             std::wstringstream stats;
-             stats.precision(2);
-             stats << std::fixed;
-             stats << print() << L" - Fps: " << current_fps_ << L" frames:" << frames_written_ << L" time:" << (double)frames_written_ / fps_;
-             graph_->set_text(stats.str());
+            std::wstringstream stats;
+            stats.precision(2);
+            stats << std::fixed;
+            stats << print() << L" - Fps: " << current_fps_ << L" frames:" << frames_written_
+                  << L" time:" << (double)frames_written_ / fps_;
+            graph_->set_text(stats.str());
         }
     }
 
-    auto& data_array = frame.image_data(0);
-    const uint8_t* data = data_array.data();
-    int stride = (int)width_ * 4; // BGRA 32bit assumed
-    // Could check data_array.size() / height_ for stride if needed
-    if (data_array.size() >= (size_t)(stride * height_)) {
-         stride = (int)(data_array.size() / height_);
-    }
-    
     // Assume progressive for now (0)
     int interlaced = 0;
-    
-    int res = VMX_EncodeBGRA(vmx_, (unsigned char*)data, stride, interlaced);
+
+    int res = VMX_EncodeBGRA(vmx_, (unsigned char*)f.bgra.data(), f.stride, interlaced);
     if (res != VMX_ERR_OK) {
-        // ── A BAD FRAME SKIPS A FRAME; IT DOES NOT END THE RECORDING ───────────────────
-        //
-        // This returned `false`, and `output::do_send` reads a false future as "this
-        // consumer has failed": it erases it from `consumers_` **with no log line of any
-        // kind**. So one rejected frame deleted the replay consumer permanently, the
-        // buffer stopped growing, `INFO` still showed nothing wrong because the consumer
-        // was simply gone, and the operator found out when they tried to play the moment
-        // back.
-        //
-        // An instant-replay buffer is exactly the consumer that must not do that -- it is
-        // armed for hours against a moment nobody can schedule. Log once and keep going;
-        // the next frame is a fresh encode.
+        // A BAD FRAME SKIPS A FRAME; IT DOES NOT END THE RECORDING. This used to return
+        // `false` from `send()`, which `output::do_send` reads as "this consumer has failed"
+        // and acts on by erasing it from `consumers_` with no log line of any kind.
         if (!encode_failure_warned_) {
             encode_failure_warned_ = true;
             CASPAR_LOG(warning) << print() << L" VMX encode rejected a frame (error " << res
-                                << L"); skipping it and continuing to record. This is logged once.";
+                                << L"); skipping it and continuing to record. Logged once.";
         }
-        return make_ready_future(true);
+        return;
     }
-    
+
     // Reuse pre-allocated encode buffer instead of allocating per-frame
     size_t max_size = (size_t)width_ * height_ * 4;
     if (encode_buffer_.size() < max_size) {
         encode_buffer_.resize(max_size);
     }
-    
+
     int size = VMX_SaveTo(vmx_, encode_buffer_.data(), (int)max_size);
-    /* 
-    Updated to match replay module format roughly
+    /*
     Format per frame in .mav:
        uint32 audio_size
        byte[] audio_data
        ... VMX stream ...
     */
-    
+
     if (size > 0) {
-        // Audio
-        // Frame audio is vector<int32_t>
-        auto& audio_vec = frame.audio_data();
-        uint32_t audio_bytes = (uint32_t)(audio_vec.size() * sizeof(int32_t));
-        
+        uint32_t audio_bytes = (uint32_t)(f.audio.size() * sizeof(int32_t));
+
         // Aggregate payload
-        size_t total_size = sizeof(uint32_t) + audio_bytes + (size_t)size;
+        size_t               total_size = sizeof(uint32_t) + audio_bytes + (size_t)size;
         std::vector<uint8_t> payload(total_size);
-        
+
         uint8_t* ptr = payload.data();
-        memcpy(ptr, &audio_bytes, sizeof(uint32_t)); 
+        memcpy(ptr, &audio_bytes, sizeof(uint32_t));
         ptr += sizeof(uint32_t);
-        
+
         if (audio_bytes > 0) {
-            memcpy(ptr, audio_vec.data(), audio_bytes); 
+            memcpy(ptr, f.audio.data(), audio_bytes);
             ptr += audio_bytes;
         }
 
         memcpy(ptr, encode_buffer_.data(), (size_t)size);
-        
+
         // Timestamp (Microseconds since epoch)
-        uint64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
+        uint64_t timestamp =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count();
 
         writer_->WriteFrame(payload.data(), payload.size(), timestamp);
-        
+
         frames_written_++;
-        
+
         graph_->set_value("buffered-video", (double)size / (double)max_size);
     }
-    
-    return make_ready_future(true);
+
+    // Published from the worker because `dropped_frames` is the only number that says the
+    // volume is not keeping up -- the future this consumer returns is always ready, so it
+    // cannot carry that and never could.
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        state_["dropped_frames"] = frames_dropped_.load(std::memory_order_relaxed);
+        state_["frames_written"] = frames_written_;
+    }
 }
 
 core::monitor::state replay_consumer::state() const

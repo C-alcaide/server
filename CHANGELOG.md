@@ -1,6 +1,28 @@
 CasparVP — Unreleased
 ==========================================
 
+### Recording a channel costs it a third of what it did
+
+`replay_consumer::send()` encoded the frame and called `WriteFrame` — `fwrite` + `fflush` for the
+payload and again for the index — **inline on the channel thread**, and `output.cpp` waits on that
+future and measures the wait as the channel's remaining headroom. So one replay recording spent an
+eighth of the frame budget of the channel it was recording, and a slow volume stalled every layer
+on air rather than only the recording.
+
+`send()` now copies into a **bounded** queue and returns; a worker does the encode, the payload
+assembly and both flushes. Measured at 1080p50 with `cli.py replay`'s cost arm, `consume_load`
+idle → recording:
+
+* **OpenGL: 0.127 → 0.0475.** Vulkan: 0.041. Zero late frames on either side of the change.
+
+A full queue **drops a frame and never returns `false`** — blocking would put the disk's worst
+case straight back on the channel, and a false future makes `output::do_send` erase the consumer
+silently. The drop count is published as `dropped_frames`, which is the only back-pressure signal
+available, because an always-ready future cannot carry one.
+
+The remaining 4% is the per-frame copy (8.3 MB at 1080p50), which cannot go without pinning a
+mixer readback buffer for the depth of the queue. `docs/features/replay.md` §5 gap 0 states it.
+
 ### `PLAY` on a replay recording works, and its timeline stops lying
 
 **`PLAY 1-10 "my_recording"` answered `File not found.` for the whole life of the module.** The

@@ -79,6 +79,7 @@ that needed a day to exercise its own subject would never be run.
 | retention DELETES rather than growing forever | the companion to the one below, and the reason it means anything | levels at **4** of a 4 s buffer; unbounded would be 12 |
 | a recording still being written plays back | the growing-file case IS the feature | `file/length` 79, `file/fps` 25 |
 | **the reported TIMELINE does not exceed what is on disk** | the writer deletes and the reader must notice, or an operator seeking to "the start" lands in material deleted minutes ago | **89 frames against 125 on disk** (ogl), 94 (vulkan) |
+| recording does not cost the channel its cadence | a second server at **1080p50** — twice the flush rate and twice the bytes — because the record path is on the thread that paces the channel. Gated on LATE FRAMES rather than on the load: a load figure is a number to track, a late frame is the cadence actually missed | `consume_load` **0.127 → 0.0475** across the §5 gap-0 fix; 0 late frames either side |
 
 **The last one is the check this battery exists for, and the first version of it could not fail.**
 It read the timeline two seconds after `PLAY`, and the reader's error is proportional to *how long
@@ -89,8 +90,9 @@ same mutation report **624 frames against 125** — five times the buffer that e
 `docs/`-wide: *a check whose observation window is shorter than the defect's growth time is a check
 that cannot fail*, and it looks exactly like a passing one.
 
-**Still not measured:** interrupted-recording recovery, `400 EXPORT BUSY`, `LIVE` mode's freshness
-and tearing, and cost. §5 keeps them.
+**Still not measured:** interrupted-recording recovery, `400 EXPORT BUSY`, and `LIVE` mode's
+freshness and tearing. §5 keeps them. Cost is measured — it is the sixth check, and closing §5's
+gap 0 is what it was added for.
 
 ### 4.1 What the first run found — four defects, and a fifth in the battery
 
@@ -127,38 +129,51 @@ right the whole time.
 
 ## 5. Known gaps
 
-0. **THE RECORD PATH RUNS ON THE CHANNEL THREAD, AND FLUSHES TWICE PER FRAME.** Found by audit
-   2026-09-14, unmeasured, and stated here rather than fixed because §5.1 is the reason to
-   measure it first.
+0. ~~**THE RECORD PATH RUNS ON THE CHANNEL THREAD, AND FLUSHES TWICE PER FRAME.**~~
+   **Closed 2026-09-14, with the number that made it worth closing.**
 
-   `replay_consumer::send()` encodes the frame, copies it, and calls
-   `ReplaySegmentedWriter::WriteFrame` inline, then returns `make_ready_future(true)`.
-   `WriteFrame` does `fwrite` + **`fflush`** for the payload and again for the index entry. So a
-   50p channel makes a hundred forced flushes a second, on the thread that paces the channel.
+   `replay_consumer::send()` encoded the frame, copied it, and called
+   `ReplaySegmentedWriter::WriteFrame` inline; `WriteFrame` does `fwrite` + **`fflush`** for
+   the payload and again for the index entry. `output.cpp` waits on the consumer's future and
+   measures that wait as the channel's remaining headroom — *"send() blocks until the device
+   accepts the frame. Its size relative to the frame period is the remaining headroom."* So a
+   50p channel made a hundred forced flushes a second **on the thread that paces every layer
+   on it**, and a slow or busy volume stalled the whole channel rather than only the
+   recording.
 
-   **That is the channel's headroom being spent**, and `output.cpp` says so where it measures it:
-   *"send() blocks until the device accepts the frame. Its size relative to the frame period is
-   the remaining headroom."* A slow or busy volume therefore stalls every layer on that channel,
-   not only the recording — and because `send()` returns an already-ready future, the channel can
-   never observe the consumer struggling. It always reports instant success, so there is no
-   back-pressure signal at all.
+   Measured at 1080p50 with `cli.py replay`'s cost arm:
 
-   **The flushing itself is not the mistake** — it is what makes the live-playback-while-recording
-   case work, since the producer reads the file as it grows. The question is which thread pays for
-   it. Every other file consumer in this tree buffers: `ffmpeg_consumer` has
-   `frame_buffer_.set_capacity(realtime_ ? 1 : 64)` and a worker thread. The same shape here would
-   keep the flush and move it off the channel, and would let a full queue become the honest
-   back-pressure the future is supposed to carry.
+   | | `consume_load` idle | `consume_load` recording | late frames added over 20 s |
+   | :--- | :--- | :--- | :--- |
+   | before, OpenGL | 0.00027 | **0.127** | 0 |
+   | after, OpenGL | 0.00031 | **0.0475** | 0 |
+   | after, Vulkan | 0.00028 | **0.041** | 0 |
 
-   **`consume_max_ms` is already published per consumer**, so this is measurable today without
-   writing anything new — which is what makes it a gap with a number rather than an opinion.
+   `send()` now copies the frame into a **bounded** queue and returns; a worker does the
+   encode, the payload assembly and both flushes. Bounded is the point — an unbounded queue
+   converts a disk that cannot keep up into memory growth, which fails later and worse. The
+   shape is `ffmpeg_consumer`'s, which this note already cited as the precedent.
+
+   **A full queue drops a frame and never returns `false`.** Blocking would put the disk's
+   worst case straight back on the channel, which is the defect being removed; returning
+   `false` would be worse still, because `output::do_send` reads a false future as "this
+   consumer has failed" and erases it silently (§4.1, defect 4). A dropped frame is one frame
+   missing from a recording whose index carries real timestamps, so playback stays correct
+   across the gap — and the count is published as `dropped_frames`, which is the only signal
+   there is, since an always-ready future cannot carry back-pressure and never could.
+
+   **What is left, and why it is not a defect:** an eighth of the budget became a
+   twenty-fifth, not zero. The remaining cost is the **copy** — 8.3 MB per frame at 1080p50,
+   on the channel thread. It is not avoidable without pinning a mixer readback buffer for as
+   long as the queue is deep, which trades a measured 4% for an unmeasured stall on the
+   mixer. Stated rather than fixed.
 
 1. ~~**No coverage.**~~ **Closed 2026-09-14** — `cli.py replay`, 5/5 both mixers, §4. This was
    the stated reason gap 0 was not simply fixed: a 2,900-line module with no battery is the worst
    possible place to start a threading change, and the refactor would have been unfalsifiable.
-   **That reason is now gone, so gap 0 is the next thing to do here** — and the battery above
-   drives exactly the path it would move (continuous record plus live playback on one channel),
-   so a regression in it would be visible.
+   **That reason is now gone, and gap 0 was closed the same day** — the battery above drives
+   exactly the path it moved, and its cost arm is what makes the before/after attributable
+   rather than plausible.
 2. **Interrupted-recording recovery is unverified** — the case the segmented design exists for.
 3. **No cost measurement.** Continuous recording plus live playback on one channel has no measured
    overhead, so there is no guidance on how many replay channels a machine sustains.
@@ -169,8 +184,9 @@ right the whole time.
 
 The module predates this document and its history is not traced. From 2026-09-14:
 
-* `replay: the front door opens, the timeline shrinks, and a bad frame no longer kills the
+* `replay: the front door opens, the timeline stops lying, and a bad frame no longer kills the
   recording` — the four defects in §4.1, with the module's first battery.
+* `replay: the record path comes off the channel thread` — gap 0 above, 0.127 → 0.0475.
 
 ---
 
