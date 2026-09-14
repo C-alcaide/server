@@ -105,7 +105,6 @@ class shader
     shader& operator=(const shader&) = delete;
 
     const std::vector<input>& inputs() const;
-    const std::string&        description() const;
     shader_role               role() const;
 
     /// Names of declared image inputs (order = declaration order).

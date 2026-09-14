@@ -372,7 +372,6 @@ struct shader::impl
 {
     std::string  source_;
     std::wstring base_path_;
-    std::string  description_;
 
     std::vector<input>                         inputs_;
     std::vector<std::string>                   image_names_; ///< declared image input names (order)
@@ -470,7 +469,6 @@ struct shader::impl
             }
         }
 
-        description_ = pt.get<std::string>("DESCRIPTION", "");
 
         if (auto inputs = pt.get_child_optional("INPUTS")) {
             for (const auto& kv : *inputs) {
@@ -1466,7 +1464,6 @@ shader::~shader()
 }
 
 const std::vector<input>& shader::inputs() const { return impl_->inputs_; }
-const std::string&        shader::description() const { return impl_->description_; }
 shader_role               shader::role() const { return impl_->role_; }
 std::vector<std::string>  shader::image_input_names() const { return impl_->image_names_; }
 std::vector<shader::audio_input_desc> shader::audio_inputs() const { return impl_->audio_desc_; }

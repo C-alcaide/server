@@ -416,7 +416,7 @@ json::object port_to_json(const gr::port_desc& p)
 {
     json::object o;
     o["name"]      = p.param.name;
-    o["direction"] = p.direction == gr::port_direction::input ? "input" : "output";
+    o["direction"] = gr::direction_name(p.direction);
     o["domain"]    = gr::domain_name(p.domain);
     o["flow"]      = gr::flow_name(p.flow);
     o["required"]  = p.required;
