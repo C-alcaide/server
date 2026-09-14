@@ -82,7 +82,10 @@ class LTCInputImpl {
 
     // Device Management
     std::string current_device_name;
-    int         current_device_index_ = -1; // -1 = default
+    int         current_device_index_ = -1; // -1 = default, or "the requested name did not resolve"
+    /// The index PortAudio actually opened. Distinct from the above because they DIFFER on the
+    /// fallback path, and that difference is the whole of what `INFO LTC` was failing to say.
+    int         active_device_index_  = -1;
     std::mutex  device_mutex;
 
     static int stream_callback(const void*                     input,
@@ -135,7 +138,8 @@ class LTCInputImpl {
 
     // Internal start logic — caller must hold device_mutex
     bool start_unlocked() {
-        if (running) return true;
+        if (running)
+            return true;
         
         // ltc_decoder_create(apv, queue_len): apv is audio-frames-per-video-frame
         // (sample_rate / video_fps), used only as the initial bit-period estimate
@@ -159,6 +163,21 @@ class LTCInputImpl {
         if (!dev_info || dev_info->maxInputChannels < 1) {
             CASPAR_LOG(error) << "LTC: Device " << device_idx << " has no input channels";
             return false;
+        }
+
+        // ── SAY SO WHEN THE REQUEST WAS NOT HONOURED ───────────────────────────────────
+        //
+        // An unrecognised name leaves `current_device_index_` at -1 and this function opens
+        // the DEFAULT input instead. That fallback is deliberate -- a missing audio interface
+        // must not take a playout server down -- but it was silent, and `INFO LTC` reported
+        // the requested name as though it were the open one. An operator who mistyped a
+        // device, or whose interface was absent at boot, was told they had it and saw a
+        // plausible timecode from the system clock.
+        if (!current_device_name.empty() && current_device_index_ < 0) {
+            CASPAR_LOG(warning) << "LTC: device \"" << current_device_name
+                                << "\" was not found; falling back to the default input ("
+                                << (dev_info->name ? dev_info->name : "unnamed")
+                                << "). `INFO LTC` reports this as `fallback`.";
         }
 
         PaStreamParameters input_params{};
@@ -210,10 +229,13 @@ class LTCInputImpl {
         running = true;
         CASPAR_LOG(info) << "LTC: Capturing from device " << device_idx 
                          << " (" << (dev_info ? dev_info->name : "unknown") << ")";
+        // The index that was actually opened, which is what `INFO LTC` reports as `device`.
+        active_device_index_ = device_idx;
         return true;
     }
 
     void stop_unlocked() {
+        active_device_index_ = -1;
         if (stream_) {
             Pa_StopStream(stream_);
             Pa_CloseStream(stream_);
@@ -314,6 +336,22 @@ public:
 
     std::string get_current_device_name() {
          return current_device_name.empty() ? "Default" : current_device_name;
+    }
+
+    /// The device actually OPEN, asked of PortAudio rather than remembered, so it cannot
+    /// drift from what the stream is really reading.
+    std::string get_active_device_name() {
+        std::lock_guard<std::mutex> lock(device_mutex);
+        if (active_device_index_ < 0)
+            return {};
+        const PaDeviceInfo* info = Pa_GetDeviceInfo(active_device_index_);
+        return (info && info->name) ? std::string(info->name) : std::string();
+    }
+
+    /// A name was asked for and did not resolve, so the default is open instead.
+    bool is_device_fallback() {
+        std::lock_guard<std::mutex> lock(device_mutex);
+        return !current_device_name.empty() && current_device_index_ < 0 && active_device_index_ >= 0;
     }
     
     std::string get_current_timecode_string() {
@@ -418,6 +456,8 @@ bool LTCInput::get_timecode_anchor(int fps, uint32_t& out_frame, std::chrono::st
 std::vector<std::string> LTCInput::get_capture_devices() { return LTCInputImpl::instance().get_capture_devices(); }
 bool LTCInput::set_capture_device(const std::string& name) { return LTCInputImpl::instance().set_capture_device(name); }
 std::string LTCInput::get_current_device_name() { return LTCInputImpl::instance().get_current_device_name(); }
+std::string LTCInput::get_active_device_name() { return LTCInputImpl::instance().get_active_device_name(); }
+bool        LTCInput::is_device_fallback() { return LTCInputImpl::instance().is_device_fallback(); }
 bool LTCInput::is_using_system_clock() { return LTCInputImpl::instance().is_using_system_clock(); }
 void LTCInput::shutdown() { LTCInputImpl::instance().shutdown(); }
 

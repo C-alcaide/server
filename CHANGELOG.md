@@ -1,6 +1,29 @@
 CasparVP — Unreleased
 ==========================================
 
+### `INFO LTC` reports the device it is actually listening to
+
+**`LTC LOAD "anything at all"` answered `202 LTC LOAD OK` and `INFO LTC` then reported that
+string as `<device>`** — while `start_unlocked()` had opened `Pa_GetDefaultInputDevice()`
+instead, because `find_device_by_name` returns −1 for a name it does not know. Measured
+2026-09-14: a load of `no_such_device_xyz` was really listening to *"Webcam 4 (NDI Webcam
+Audio)"*, and the operator was shown a plausible timecode off the system clock.
+
+**The fallback stays** — a missing audio interface must not take a playout server down — **and
+is now said out loud.** `INFO LTC` reports `device` (the device actually open, from PortAudio's
+own table), `requested` (what was asked for) and `fallback` (whether the two differ), and the
+fallback logs a warning once. The header comment on `set_capture_device` claimed *"Returns true
+if found and set"*, which had been wrong since the fallback was written.
+
+`<device>` changes meaning for any client reading it: it was the requested name and is now the
+open one. That is the value it should always have carried, and the requested name is still
+available under `requested`.
+
+Measured by the module's first battery, `cli.py ltc`, **4/4 on both mixers** — including a real
+decode with no timecode hardware: libltc's own encoder generates the signal, the PortAudio
+consumer plays it into VB-Audio's virtual cable, and the LTC input reads it back. Sent
+`10:11:12:00`, decoded `10:11:12:08`.
+
 ### Every producer that plays a timeline is now scrubbable from the control API
 
 `replay` declared the transport contract first; **all eight transport producers declare it now** —

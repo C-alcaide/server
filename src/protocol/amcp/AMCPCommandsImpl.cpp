@@ -5076,7 +5076,22 @@ std::wstring info_ltc_command(command_context& ctx)
     // Convert bool manually to string, property tree might output 0/1 or true/false depending on locale
     info.add(L"ltc.valid", caspar::ltc::LTCInput::instance().is_valid() ? L"true" : L"false");
     info.add(L"ltc.source", caspar::ltc::LTCInput::instance().is_using_system_clock() ? L"System Clock" : L"LTC");
-    info.add(L"ltc.device", caspar::u16(caspar::ltc::LTCInput::instance().get_current_device_name()));
+    // ── `device` IS THE DEVICE ACTUALLY OPEN, not the one that was asked for ───────────
+    //
+    // It used to be the REQUESTED name, which is a different thing whenever the request did
+    // not resolve: `set_capture_device` falls back to the default input and still returns
+    // true, so `LTC LOAD "typo"` answered 202 and this reported `typo` as though it were
+    // listening to it. An operator who mistyped a device, or whose interface was absent at
+    // boot, was told they had it and shown a plausible timecode off the system clock.
+    //
+    // The fallback stays -- a missing audio interface must not take a playout server down --
+    // and is now SAID: `requested` carries what was asked for and `fallback` says the two
+    // differ. Measured 2026-09-14 by this module's first battery.
+    const auto active    = caspar::ltc::LTCInput::instance().get_active_device_name();
+    const auto requested = caspar::ltc::LTCInput::instance().get_current_device_name();
+    info.add(L"ltc.device", caspar::u16(active.empty() ? std::string("none") : active));
+    info.add(L"ltc.requested", caspar::u16(requested));
+    info.add(L"ltc.fallback", caspar::ltc::LTCInput::instance().is_device_fallback() ? L"true" : L"false");
     
     std::vector<std::string> devices = caspar::ltc::LTCInput::instance().get_capture_devices();
     for (const auto& dev : devices) {

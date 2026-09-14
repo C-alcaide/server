@@ -48,8 +48,29 @@ namespace caspar { namespace ltc {
         
         // Device management
         std::vector<std::string> get_capture_devices();
-        bool set_capture_device(const std::string& device_name); // Returns true if found and set
+
+        /// Select the capture device. **Returns true if a stream was opened, which is NOT the
+        /// same as the requested device having been found** -- an unknown name falls back to
+        /// the default input and still succeeds. That fallback is deliberate: a missing audio
+        /// interface must not take a playout server down.
+        ///
+        /// The comment here used to read "Returns true if found and set", which was wrong from
+        /// the day the fallback was written, and `INFO LTC` reported the REQUESTED name as
+        /// though it were the open one -- so an operator who mistyped a device was told they
+        /// had it. Ask `get_active_device_name()` for what is actually open and
+        /// `is_device_fallback()` for whether the request was honoured.
+        bool set_capture_device(const std::string& device_name);
+
+        /// The name the operator ASKED for, verbatim. Empty if none was ever set.
         std::string get_current_device_name();
+
+        /// The device actually OPEN, from PortAudio's own table. Differs from the above
+        /// whenever the requested name did not resolve; empty if no stream is open.
+        std::string get_active_device_name();
+
+        /// Was a device requested by name and not found, so the default is open instead?
+        bool is_device_fallback();
+
         bool is_using_system_clock();
         void shutdown();
     };
