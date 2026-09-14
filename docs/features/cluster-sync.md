@@ -140,6 +140,19 @@ configured.
 **Still measured by nothing:** the content-sync watchdog's divergence report, and any partition or
 node-loss behaviour.
 
+**And a TIMELINE does not stay in sync across nodes, which is measured as far as one box allows.**
+`CLUSTER SCHEDULE TIMELINE 1 PLAY <name> AT <frame>` starts one frame-exactly on every node — the
+relay carries AMCP text and `TIMELINE` is an AMCP channel command — but `transport::position_at`
+is then handed `video_channel::frame_counter_`, a per-process counter with no connection to the
+PTP `frame_clock`. Neither `video_channel.cpp` nor `stage.cpp` mentions the cluster at all.
+
+Measured 2026-09-14 on two nodes on one box: timelines within ±1 frame over 175 s, channel tick
+0 frames off the PTP clock over 230 s. **Those zeroes do not mean there is no drift** — two
+processes on one machine share an oscillator, so the fixture cannot produce the divergence it was
+pointed at, and ±1 frame is its own resolution floor. The real case needs two machines.
+`docs/plans/CLUSTER_TIMELINE_SYNC_PLAN.md` has the numbers, why they are bounds rather than
+answers, and three shapes a fix could take.
+
 **`frame_clock_self_test()`, at every boot, unconditional.** The frame arithmetic is a pure
 function — no cluster, no network, no channel — so it is asserted at start-up rather than left
 to a two-machine battery that does not exist. It throws, which aborts the server.
