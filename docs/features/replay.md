@@ -5,7 +5,7 @@
 > **Commands:** none of its own — a `replay` consumer, a `replay` producer with `CALL` subcommands, and since 2026-09-14 the transport contract as control-API parameters
 > **Architecture:** none, deliberately — the ring buffer and disk layout are conventional; nothing about the shape needs explaining beyond the guide
 > **Guide:** [`../guides/REPLAY_MODULE_USAGE.md`](../guides/REPLAY_MODULE_USAGE.md)
-> **Coverage:** `replay` — 5/5 both mixers
+> **Coverage:** `replay` — 11/11 both mixers (recording, retention, growing-file playback, the transport parameters, and cost)
 
 Records a channel continuously to a segmented store, then plays any point in that recording back —
 including while it is still being written — so a moment can be reviewed or exported without

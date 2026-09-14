@@ -1131,8 +1131,9 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
 
 ## 5. Known gaps
 
-0. **`params/*` is unmeasured, and it is the one part of the tree that a bare `catch (...)`
-   can empty without anyone noticing.** The node is built by ASKING the producer -- the only
+0. ~~**`params/*` is unmeasured**~~ **— CLOSED, 38/38 both mixers; the account below is kept
+   because the trap is not.** It is the one part of the tree that a bare `catch (...)`
+   can empty without anyone noticing. The node is built by ASKING the producer -- the only
    part of the tree that is -- so the handler around `describe_params` decides what a failure
    looks like. It caught `...`, and **this tree is built with `/EHa`**, under which `catch (...)`
    also swallows STRUCTURED exceptions.
