@@ -63,4 +63,9 @@ class frame_clock
     }
 };
 
+/// Assert the frame arithmetic at boot. Pure -- no cluster, no network, no channel -- so it
+/// runs unconditionally rather than waiting for a two-machine battery that does not exist.
+/// Throws on disagreement, which aborts the start-up.
+void frame_clock_self_test();
+
 }}} // namespace caspar::cluster::sync

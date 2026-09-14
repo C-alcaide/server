@@ -1,6 +1,35 @@
 CasparVP — Unreleased
 ==========================================
 
+### A cluster node counted frames wrong at every NTSC rate
+
+`frame_clock::ptp_ns_to_frame` — how a node answers *"which frame is it"* — computed
+`floor(a) + floor(b)` where the answer is `floor(a + b)`. The whole-seconds term truncates and
+the lost fraction was dropped rather than carried, so **on any 1001-denominator frame rate the
+reported frame number was one frame low**, on a fraction of instants that depends on the
+sub-second phase:
+
+* **29.97p: wrong on 58% of instants. 59.94p: 76%. 23.976p: 78%.** 25p and 50p: exact, because
+  `den` is 1 there and the two forms agree.
+
+Two nodes sampling at slightly different phases therefore disagreed about the frame number,
+which is the one thing cluster sync exists to prevent. `sync_framerate_from_channels()` passes
+`video_format_desc().framerate` straight through, so the 1001 denominators reach it on any
+NTSC-rate channel.
+
+The corrected form carries the remainder, and agrees with the exact rational value over 240,000
+random instants across six frame rates.
+
+**Gated by a new boot self-test**, `frame_clock_self_test()`, which runs unconditionally — the
+arithmetic is a pure function, so it needs no cluster, no network and no channel. Its oracle is
+the *relationship* between `ptp_ns_to_frame` and `frame_to_ptp_ns` rather than a second copy of
+the formula. **Mutation-verified: with the original arithmetic compiled back in the server
+refuses to start**, naming 29.97p.
+
+`docs/features/cluster-sync.md` also had two claims corrected by the same audit: that no
+`configuration.cluster` keys are read (thirteen are), and a §1 that omitted the PTP clock, the
+command relay, the virtual channel map and the scheduler — most of the module.
+
 ### `INFO LTC` reports the device it is actually listening to
 
 **`LTC LOAD "anything at all"` answered `202 LTC LOAD OK` and `INFO LTC` then reported that

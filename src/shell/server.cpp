@@ -57,6 +57,7 @@
 #include <core/mixer/audio/audio_analysis.h>
 #include <core/address/target.h>
 #include <core/graph/graph_store.h>
+#include <modules/cluster/sync/frame_clock.h>
 #include <core/graph/plan.h>
 #include <core/graph/isf_render.h>
 #include <core/graph/registry.h>
@@ -245,6 +246,10 @@ struct server::impl
         core::graph::node_registry_self_test();
         core::graph::graph_validate_self_test();
         core::graph::graph_plan_self_test();
+        // The cluster's frame arithmetic. Unconditional: it is a pure function, it needs no
+        // cluster configured, and a node that miscounts frames is the one failure this whole
+        // module exists to prevent.
+        cluster::sync::frame_clock_self_test();
         core::graph::graph_store_self_test();
         accelerator::ogl::run_compose_self_test();
         accelerator::ogl::run_node_uv_self_test();
