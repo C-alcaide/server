@@ -588,7 +588,7 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
             return tree_at(*hub_, config_, path.substr(std::string("/v1/tree").size()), context_);
 
         if (starts_with(path, "/v1/value/"))
-            return read_value(*hub_, path.substr(std::string("/v1/value").size()));
+            return read_value(*hub_, context_, path.substr(std::string("/v1/value").size()));
 
         if (path == "/v1/timeline")
             return get_timeline(context_, "");

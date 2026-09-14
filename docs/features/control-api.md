@@ -751,6 +751,54 @@ The AMCP siblings are `INFO OFX` and `INFO ISF`, which answer the same thing as 
 
 ---
 
+### The transport contract — the same six names on every producer that plays
+
+`params/*` above describes whatever a plugin happens to declare. **The transport contract is the
+opposite: a fixed vocabulary, identical across producers, so a scrub bar needs no per-producer
+knowledge.** It lives in `core/producer/transport_params.h`.
+
+| parameter | type | access | meaning |
+| :--- | :--- | :--- | :--- |
+| `position` | integer, frames | read/write | the playhead, from the start of the material. **Writing it seeks** |
+| `speed` | real | read/write | 1.0 nominal; negative is reverse where the producer supports it |
+| `loop` | boolean | read/write | wrap at `out` back to `in` |
+| `in` | integer, frames | read/write | first frame of the playable range |
+| `out` | integer, frames | read/write | end of the playable range |
+| `length` | integer, frames | **read only** | the length of the MATERIAL, not of the range |
+| `pingpong` | boolean | read/write | reverse at `out` instead of wrapping |
+
+**A producer declares only what it implements.** `replay` has no `pingpong`; `image_scroll` has
+only `speed`. A contract that forced every row onto every producer would produce parameters that
+accept a write and change nothing — the `MIXER EXPOSURE` class, a command that returns success
+and moves no pixel.
+
+**`position` is `SEEK` expressed as state rather than as an action, and that is the whole point.**
+Writing a frame number *is* setting the playhead, and the getter already existed as the published
+`file/frame` leaf. As a parameter it is scrubbable, **bindable and keyframable**; as an action it
+would be none of those — a timeline cannot key an action, and a binding cannot drive one.
+
+It is also a genuine feedback hazard, and it is resolved rather than ignored: a `read_write`
+playhead on a producer that advances by itself means a timeline driving `position` fights the
+producer's own per-frame advance. That is exactly what a scrub *is*, so ownership decides it —
+while a timeline or binding owns the parameter it is authoritative, and on release the producer
+resumes **from where the playhead was left** rather than from the value captured on entry.
+`position` is the first parameter for which those two differ.
+
+**`length` is the material, and `in`/`out` are the range.** AMCP conflates them —
+`ffmpeg_producer`'s `CALL LENGTH` sets the *clip* duration — so the contract picks the meaning
+the published `file/length` leaf already has in every producer that has one, and expresses the
+range only through `in`/`out`. `CALL LENGTH` keeps working and simply has no parameter twin. For
+a growing recording `length` changes under the reader, which is the case `replay` exists for.
+
+**Nothing here deprecates a `CALL` verb.** Every producer keeps its `call()`; the parameter is a
+second, typed route to the same member, and a producer delegates both to one place so the two
+cannot drift. `cli.py replay` asserts exactly that: `CALL 1-10 SPEED 0.5` then a GET of
+`.../params/speed` reads `0.5`.
+
+Declared today by `replay` (`position`, `speed`, `loop`, `in`, `out`, `length`). The remaining
+seven transport producers are `docs/plans/PRODUCER_TRANSPORT_API_PLAN.md` P2–P4; until then their
+transport is AMCP-only, which is what the plan exists to close.
+
 ### `params/*` — enough to GENERATE a control surface, not merely to drive one
 
 A client that already knows a plugin can drive it from `/v1/value`. A client that has never seen

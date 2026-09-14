@@ -44,6 +44,7 @@
 #include <common/env.h>
 #include <common/future.h> 
 #include <core/frame/frame.h>
+#include <core/producer/producer_params.h>
 #include <core/frame/pixel_format.h>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
@@ -787,6 +788,175 @@ void replay_producer::configure(const std::vector<std::wstring>& params)
              }
         }
     }
+}
+
+// ── THE TRANSPORT CONTRACT ──────────────────────────────────────────────────────────────
+//
+// `core/producer/transport_params.h` owns the names, types and semantics; this supplies the two
+// closures and the ranges this producer actually knows. Every accessor reaches the SAME member
+// `call()` writes, so `CALL 1-10 SPEED 2` and a `PUT .../params/speed` cannot drift.
+//
+// Called on the stage executor and nowhere else (`producer_params.h`), which is what makes the
+// bare atomics below sufficient: nothing here races another writer, and the one non-atomic it
+// touches -- `fractional_frame_` -- is taken under `reader_mutex_` exactly as `call()` does.
+std::vector<core::param_desc> replay_producer::parameters()
+{
+    using core::transport_param;
+
+    std::vector<core::param_desc> out;
+    int                           idx = 0;
+
+    const int64_t dur = duration_.load();
+
+    // ---- position: SEEK as state ------------------------------------------------------
+    {
+        auto p = core::make_transport_param(transport_param::position, idx++);
+        p.min  = 0.0;
+        // The range moves with a growing recording, which is the case this producer exists for.
+        // Published from the CURRENT duration rather than from a fixed length, so a client's
+        // scrub bar is right for the buffer that exists now.
+        if (dur > 0)
+            p.max = static_cast<double>(dur - 1);
+        p.default_value.push_back(static_cast<int64_t>(0));
+
+        p.get = [this] {
+            core::monitor::vector_t v;
+            v.push_back(frame_num_.load());
+            return v;
+        };
+        p.set = [this](const core::monitor::vector_t& v) {
+            std::vector<double> n;
+            if (v.size() != 1 || !core::as_numbers(v, n))
+                return false;
+            const int64_t target = static_cast<int64_t>(n[0]);
+            if (target < 0)
+                return false;
+            frame_num_ = target;
+            // The same two lines `CALL SEEK` ends with: a seek that leaves the fractional
+            // accumulator behind lands between frames on the next tick at any speed but 1.
+            std::lock_guard<std::mutex> rlock(reader_mutex_);
+            fractional_frame_ = 0.0;
+            return true;
+        };
+        out.push_back(std::move(p));
+    }
+
+    // ---- speed ------------------------------------------------------------------------
+    {
+        auto p = core::make_transport_param(transport_param::speed, idx++);
+        // NO declared range, deliberately. This producer plays at any rate and in reverse, so a
+        // fabricated 0..4 would be a lie a client draws a slider from -- `param_desc` says an
+        // absent range is the honest answer and this is what it means.
+        p.default_value.push_back(1.0);
+
+        p.get = [this] {
+            core::monitor::vector_t v;
+            v.push_back(speed_.load());
+            return v;
+        };
+        p.set = [this](const core::monitor::vector_t& v) {
+            std::vector<double> n;
+            if (v.size() != 1 || !core::as_numbers(v, n))
+                return false;
+            speed_ = n[0];
+            return true;
+        };
+        out.push_back(std::move(p));
+    }
+
+    // ---- loop -------------------------------------------------------------------------
+    {
+        auto p = core::make_transport_param(transport_param::loop, idx++);
+        p.default_value.push_back(false);
+
+        p.get = [this] {
+            core::monitor::vector_t v;
+            v.push_back(loop_.load());
+            return v;
+        };
+        p.set = [this](const core::monitor::vector_t& v) {
+            std::vector<double> n;
+            if (v.size() != 1 || !core::as_numbers(v, n))
+                return false;
+            loop_ = n[0] != 0.0;
+            return true;
+        };
+        out.push_back(std::move(p));
+    }
+
+    // ---- in ---------------------------------------------------------------------------
+    {
+        auto p = core::make_transport_param(transport_param::in, idx++);
+        p.min  = 0.0;
+        if (dur > 0)
+            p.max = static_cast<double>(dur - 1);
+        p.default_value.push_back(static_cast<int64_t>(0));
+
+        p.get = [this] {
+            core::monitor::vector_t v;
+            v.push_back(in_point_.load());
+            return v;
+        };
+        p.set = [this](const core::monitor::vector_t& v) {
+            std::vector<double> n;
+            if (v.size() != 1 || !core::as_numbers(v, n))
+                return false;
+            const int64_t target = static_cast<int64_t>(n[0]);
+            if (target < 0)
+                return false;
+            in_point_ = target;
+            return true;
+        };
+        out.push_back(std::move(p));
+    }
+
+    // ---- out --------------------------------------------------------------------------
+    {
+        auto p = core::make_transport_param(transport_param::out, idx++);
+        p.min  = 0.0;
+        if (dur > 0)
+            p.max = static_cast<double>(dur);
+        p.description += ". Write 0 to follow the material, which is this producer's default and "
+                         "what a live recording wants";
+        p.default_value.push_back(static_cast<int64_t>(0));
+
+        p.get = [this] {
+            core::monitor::vector_t v;
+            // The EFFECTIVE end, not the raw member: 0 means "follow the material", and a
+            // client that read a literal 0 back would draw an empty range. `receive_impl`
+            // resolves it the same way.
+            const int64_t raw = out_point_.load();
+            v.push_back(raw > 0 ? raw : duration_.load());
+            return v;
+        };
+        p.set = [this](const core::monitor::vector_t& v) {
+            std::vector<double> n;
+            if (v.size() != 1 || !core::as_numbers(v, n))
+                return false;
+            const int64_t target = static_cast<int64_t>(n[0]);
+            if (target < 0)
+                return false;
+            out_point_ = target;
+            return true;
+        };
+        out.push_back(std::move(p));
+    }
+
+    // ---- length: the MATERIAL, read-only ----------------------------------------------
+    {
+        auto p = core::make_transport_param(transport_param::length, idx++);
+        p.get  = [this] {
+            core::monitor::vector_t v;
+            v.push_back(duration_.load());
+            return v;
+        };
+        // No `set`. `access_t::read` says so and the write route checks it, but leaving the
+        // closure empty means a route that ever forgot to check faults instead of silently
+        // succeeding.
+        out.push_back(std::move(p));
+    }
+
+    return out;
 }
 
 core::monitor::state replay_producer::state() const { return state_; }

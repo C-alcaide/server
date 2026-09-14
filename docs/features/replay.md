@@ -2,7 +2,7 @@
 
 > **State:** shipped; measured since 2026-09-14
 > **Modules:** `src/modules/replay`
-> **Commands:** none of its own — a `replay` consumer, a `replay` producer with `CALL` subcommands
+> **Commands:** none of its own — a `replay` consumer, a `replay` producer with `CALL` subcommands, and since 2026-09-14 the transport contract as control-API parameters
 > **Architecture:** none, deliberately — the ring buffer and disk layout are conventional; nothing about the shape needs explaining beyond the guide
 > **Guide:** [`../guides/REPLAY_MODULE_USAGE.md`](../guides/REPLAY_MODULE_USAGE.md)
 > **Coverage:** `replay` — 5/5 both mixers
@@ -79,6 +79,9 @@ that needed a day to exercise its own subject would never be run.
 | retention DELETES rather than growing forever | the companion to the one below, and the reason it means anything | levels at **4** of a 4 s buffer; unbounded would be 12 |
 | a recording still being written plays back | the growing-file case IS the feature | `file/length` 79, `file/fps` 25 |
 | **the reported TIMELINE does not exceed what is on disk** | the writer deletes and the reader must notice, or an operator seeking to "the start" lands in material deleted minutes ago | **89 frames against 125 on disk** (ogl), 94 (vulkan) |
+| **the transport parameters are declared, and `position` SEEKS** | the fixture records colour A then colour B ON AIR, so scrubbing between them returns two DIFFERENT colours. A flat-colour recording would make this check unfailable — every frame the same, and a `position` that stored a number and seeked nothing would pass | at frame 25 the picture reads (65,127,193); at 131, (193,128,66). dR **+128**, dB **−127** |
+| `length` is read-only and the write is REFUSED | an access flag nothing checks is a comment | `PUT length` → `not_writable` |
+| `CALL SPEED` and the API parameter are one value | the two facades delegate to the same member, so they cannot drift | `CALL 1-10 SPEED 0.5` → `.../params/speed` reads 0.5 |
 | recording does not cost the channel its cadence | a second server at **1080p50** — twice the flush rate and twice the bytes — because the record path is on the thread that paces the channel. Gated on LATE FRAMES rather than on the load: a load figure is a number to track, a late frame is the cadence actually missed | `consume_load` **0.127 → 0.0475** across the §5 gap-0 fix; 0 late frames either side |
 
 **The last one is the check this battery exists for, and the first version of it could not fail.**

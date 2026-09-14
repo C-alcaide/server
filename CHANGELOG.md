@@ -1,6 +1,38 @@
 CasparVP — Unreleased
 ==========================================
 
+### A replay buffer can be scrubbed from the control API, and a producer parameter can be READ
+
+**Counted 2026-09-14: thirteen producers implement `frame_producer::call()`, two implement
+`parameters()`, and nothing routes `/v1` onto `call()`.** So the control API could watch a
+producer and drive almost none of them — and the one where that hurts most is `replay`, whose
+entire interaction is scrubbing.
+
+`replay_producer` now declares the **transport contract** (`core/producer/transport_params.h`):
+`position`, `speed`, `loop`, `in`, `out` and a read-only `length`, under
+`/v1/.../foreground/params/`. Declaring them makes them typed, discoverable, range-checked,
+**bindable and keyframable** — a producer parameter is already a timeline target. `position` is
+`SEEK` expressed as state rather than as an action, which is what buys all of that.
+
+Every accessor delegates to the same member `call()` writes, so `CALL 1-10 SPEED 0.5` and a PUT
+to `.../params/speed` reach one value by construction. **No `CALL` verb is deprecated.**
+
+**And a bug this exposed: `GET /v1/value/.../foreground/params/{name}` answered `unknown_path`
+for a parameter the same path accepted a PUT to.** The read route served the state snapshot only,
+which worked for exactly as long as every producer with parameters also published its values
+there — `isf` and `ofx` do, so the assumption was invisible, and `api_value.cpp`'s own comment
+stated it: *"which is where the producer's own `state()` publishes it, so reads need nothing
+new."* `replay` is the first that does not, deliberately: `monitor::state` is rebuilt every tick
+with a ceiling around 600 leaves per channel on this box, so transport parameters are pulled on
+request rather than published fifty times a second at nobody. `read_value` now asks the producer,
+exactly as the write route and the tree already did.
+
+Measured by `cli.py replay`, **11/11 on both mixers**, including the check the rest exist to
+support: the fixture records one colour then another ON AIR, and writing `position` between them
+moves the decoded picture by **dR +128 / dB −127**. A flat-colour recording would have made that
+check unfailable — every frame identical, and a `position` that stored a number and seeked
+nothing would have passed it.
+
 ### Recording a channel costs it a third of what it did
 
 `replay_consumer::send()` encoded the frame and called `WriteFrame` — `fwrite` + `fflush` for the

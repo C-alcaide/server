@@ -751,7 +751,7 @@ json::object host_info(const http_config& cfg, int subscriptions)
     return info;
 }
 
-api_reply read_value(const state_hub& hub, const std::string& path)
+api_reply read_value(const state_hub& hub, const api_context& ctx, const std::string& path)
 {
     const auto segments = split_path(path);
     if (segments.size() < 3 || segments[0] != "channel")
@@ -781,6 +781,50 @@ api_reply read_value(const state_hub& hub, const std::string& path)
             r["value"] = vector_to_json(kv.second);
             r["type"]  = osc_tags(kv.second);
             return api_reply::ok_with(std::move(r));
+        }
+    }
+
+    // ── NOT PUBLISHED, AND FOR A PRODUCER PARAMETER IT NEVER WILL BE ───────────────────
+    //
+    // `channel/{n}/stage/layer/{m}/foreground/params/{name}`. The write route has always
+    // resolved this by ASKING the producer (`is_param_path` -> `describe_params` -> `set_param`);
+    // the read route answered from the snapshot, which worked for exactly as long as every
+    // producer with parameters also published its values there. `isf` and `ofx` did, so the
+    // assumption was invisible for as long as they were the only two.
+    //
+    // `replay_producer` is the first that does not, and deliberately: `monitor::state` is a
+    // flat_map rebuilt every tick with a ceiling around 600 leaves per channel on this box, so
+    // six transport parameters times the layers on a channel is budget spent on data nobody is
+    // watching. They are pulled on request instead.
+    //
+    // The result was a route that ACCEPTED A PUT at a path it then answered `unknown_path` for
+    // on GET -- found 2026-09-14 by the first battery to write a parameter on a producer that
+    // does not double-publish. Asking here is what the tree already does for the same node, and
+    // it costs one stage-executor round trip on a discovery call.
+    {
+        const auto seg = split_path(path);
+        if (seg.size() == 8 && seg[0] == "channel" && seg[2] == "stage" && seg[3] == "layer" &&
+            seg[5] == "foreground" && seg[6] == "params" && ctx.stage &&
+            seg[4].find_first_not_of("0123456789") == std::string::npos && !seg[4].empty()) {
+            const int layer = std::atoi(seg[4].c_str());
+            if (auto stage = ctx.stage(ch)) {
+                try {
+                    for (const auto& q : stage->describe_params(layer).get()) {
+                        if (q.name != seg[7])
+                            continue;
+                        json::object r;
+                        r["path"]  = full;
+                        r["value"] = vector_to_json(q.value);
+                        r["type"]  = osc_tags(q.value);
+                        return api_reply::ok_with(std::move(r));
+                    }
+                } catch (const std::exception&) {
+                    // A layer that went away between the request and this query. `std::exception`
+                    // and NOT `...`: this tree is built with /EHa, under which a catch-all also
+                    // swallows access violations -- which is precisely how an OFX fault once
+                    // turned into "OFX plugins declare no parameters".
+                }
+            }
         }
     }
 

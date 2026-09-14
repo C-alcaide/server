@@ -31,6 +31,7 @@
 #pragma once
 
 #include <core/producer/frame_producer.h>
+#include <core/producer/transport_params.h>
 #include <core/frame/frame_factory.h>
 #include <core/video_format.h>
 #include <common/diagnostics/graph.h>
@@ -79,7 +80,10 @@ struct replay_producer : public core::frame_producer
     std::atomic<bool>       loop_ = false;
     std::atomic<int64_t>    duration_ = 0;
     std::atomic<int64_t>    in_point_ = 0;
-    std::atomic<int64_t>    out_point_ = -1; // -1 means end of file
+    /// **0 means "follow the material"**, not -1: `configure()` sets it to 0 and every reader
+    /// tests `out_point_ > 0`. The comment here said -1 and had done since the module landed,
+    /// which is the kind of claim that survives because nothing reads it twice.
+    std::atomic<int64_t>    out_point_ = 0;
 
     // Decoding
     std::vector<uint8_t>    read_buffer_;
@@ -95,6 +99,15 @@ public:
 
     core::draw_frame receive_impl(core::video_field field, int nb_samples) override;
     std::future<std::wstring> call(const std::vector<std::wstring>& params) override;
+
+    /// The transport contract (`core/producer/transport_params.h`) -- `position`, `speed`,
+    /// `loop`, `in`, `out` and a read-only `length`. Every one delegates to the same member
+    /// `call()` writes, so the AMCP verb and the API parameter reach one value by construction
+    /// rather than by agreement.
+    ///
+    /// No `pingpong`: this producer does not implement it, and declaring a parameter that
+    /// accepts a write and does nothing is the `MIXER EXPOSURE` class.
+    std::vector<core::param_desc> parameters() override;
     bool is_ready() override;
     
     // Configures producer from PLAY command arguments

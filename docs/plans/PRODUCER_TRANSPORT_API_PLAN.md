@@ -1,7 +1,7 @@
 # Plan: the producer control surface reaches the API — a declared transport contract
 
-> **Status:** UNIMPLEMENTED — 2026-09-14 — written today; nothing started
-> **Falsifier:** `transport_params`
+> **Status:** PARTIAL — 2026-09-14 — P1 shipped (the contract, and `replay` implementing it); P2-P5 open
+> **Falsifier:** none — PARTIAL carries its outcomes in §4, which marks each phase
 
 Arose from the replay work of the same day (`docs/features/replay.md` §4.1), which found a module
 whose entire interaction is scrubbing and whose entire control surface is AMCP.
@@ -107,7 +107,7 @@ this paragraph exists.
 
 ## 4. Sequencing — each phase is a commit with its own gate
 
-### P1 — the contract, and `replay` as its first implementation
+### P1 — the contract, and `replay` as its first implementation — **SHIPPED 2026-09-14**
 
 * `src/core/producer/transport_params.h` (new): the canonical rows — name, `value_type`,
   `access_t`, unit, bounding, and the one-line semantic each. No behaviour, no dependencies
@@ -120,6 +120,24 @@ this paragraph exists.
   The last part is what makes it more than a value check: write `position` and the decoded
   frame must change, which is the only oracle that can distinguish a parameter that seeks from
   one that stores a number. `replay` (6/6) must stay green, both mixers.
+
+**What P1 found, and the two places it departed from this plan.**
+
+* **The gate went into `replay` rather than `producer-params`**, which this plan named. The
+  oracle has to be a picture, and a picture oracle needs a recording whose frames DIFFER —
+  `replay`'s fixture was a flat colour, against which *"write `position` and the picture
+  changes"* is unfailable, and building a two-colour recording inside `producer-params` would
+  have duplicated the whole recording half of this battery. The fixture now records colour A,
+  then colour B on air, and the check is that scrubbing between them returns both.
+* **`GET /v1/value/.../params/{name}` answered `unknown_path` for a path that accepted a PUT.**
+  The read route served the state snapshot only, and `api_value.cpp`'s own comment stated the
+  assumption — *"which is where the producer's own `state()` publishes it, so reads need nothing
+  new"* — which held for exactly as long as `isf` and `ofx` were the only two producers with
+  parameters, because both double-publish. D6 makes `replay` the first that does not. Fixed in
+  the same commit: `read_value` asks the producer, as the write route and the tree already did.
+  **One reader, enumerated before fixing** (`CLAUDE.md`'s rule), with one consequence left
+  standing: a parameter a producer does not publish emits no CHANGE EVENTS over `api-events`,
+  which is the honest price of D6 and is recorded in §8.
 
 **Why replay first rather than ffmpeg:** it is the module whose natural client is a scrub bar, it
 is the one this plan came out of, and — since 2026-09-14 — it is the only one of the eight with
@@ -208,6 +226,15 @@ producers' worth of intuition.
 ---
 
 ## 8. What this does not fix
+
+**No change events for a transport parameter.** D6 keeps parameters out of the per-tick snapshot,
+and `api-events` computes its diff over that snapshot — so a client polls `/v1/value` or the tree
+for a parameter's value and is not told when it moves. For `position` on a playing producer that
+is arguably right (it moves every frame, and `file/frame` is already published for exactly that
+monitoring purpose); for `speed` and `loop` it is a real gap. The fix is not "publish them" —
+that is the cost D6 refuses — but a change-event source that reads descriptors rather than the
+snapshot, which nothing needs yet.
+
 
 The control API still cannot express **a gesture**. Scrubbing is a stream of `position` writes,
 and eight of those a second over HTTP is a different conversation from one keyframed ramp. The

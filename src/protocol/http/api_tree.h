@@ -72,6 +72,18 @@ json::object host_info(const http_config& cfg, int subscriptions);
 /// A registry path that the snapshot does not carry reads as the descriptor's default,
 /// because a parameter at its default is not published -- the alternative would be
 /// `unknown_path` for every untouched parameter, which is indistinguishable from a typo.
-api_reply read_value(const state_hub& hub, const std::string& path);
+/// One leaf, by path.
+///
+/// Takes the `api_context` for ONE reason: a producer parameter's value cannot be read from the
+/// snapshot. `/v1/value/.../foreground/params/<name>` used to answer from published state alone,
+/// which worked for exactly as long as every producer with parameters also published them --
+/// `isf` and `ofx` did, so the assumption was invisible, and `api_value.cpp`'s own comment stated
+/// it: *"which is where the producer's own `state()` publishes it, so reads need nothing new."*
+///
+/// `replay_producer` is the first that does not, deliberately: `monitor::state` is rebuilt every
+/// tick and the ceiling on this box is around 600 leaves per channel, so transport parameters are
+/// pulled on request rather than published fifty times a second at nobody. The consequence was a
+/// route that accepted a PUT at a path it then answered `unknown_path` for on GET.
+api_reply read_value(const state_hub& hub, const api_context& ctx, const std::string& path);
 
 }}} // namespace caspar::protocol::http
