@@ -5,7 +5,7 @@
 > **Commands:** 4 fork-specific AMCP commands, registered by the module
 > **Architecture:** [`../architecture/CLUSTER_SYNC_DESIGN.md`](../architecture/CLUSTER_SYNC_DESIGN.md)
 > **Guide:** [`../guides/CLUSTER_SYNC.md`](../guides/CLUSTER_SYNC.md)
-> **Coverage:** `cluster` — 7/7 both mixers, two nodes on one box — plus `frame_clock_self_test` at boot
+> **Coverage:** `cluster` — 8/8 both mixers, light AND 4K-loaded, two nodes on one box — plus `frame_clock_self_test` at boot
 
 Keeps playback aligned across several CasparCG servers driving one wall, so a clip started on four
 machines shows the same frame on all four. A scheduled start time and a shared frame clock, with a
@@ -103,6 +103,7 @@ multi-node half is no longer unverified.
 | and the clock RUNS at the channel's rate | two stopped clocks agree perfectly, so "they agree" is satisfiable by a feature that does nothing | **120 frames in 2 s** at 59.94 |
 | **a command SCHEDULED on the master is executed BY THE CLIENT** | the oracle is a PICTURE on the other process — a relay that accepted the command, rewrote the channel and dropped it satisfies every check above, `MEMBER: connected` included | client renders `(32, 192, 64)`, the scheduled colour |
 | **both nodes EXECUTE on the same frame, and on the one they were given** | the reason the module exists rather than an operator sending two `PLAY`s. Both halves asserted: the two ACTUALs within a frame of each other, **and** each ACTUAL within two frames of its TARGET — two nodes that both fire 120 frames early agree perfectly | **target and actual identical on both**, frame 1329784901 |
+| **and it SURVIVES a 4K decode on both nodes** | every check above runs a colour producer at 1080p — the cheapest thing this server renders. A cluster is deployed where the load is | at **2160p50** with a 4K clip looping on each node: target and actual identical on both, while the channels dropped **3 and 6 late frames** |
 
 **WHY ONE BOX IS ENOUGH.** `create_udp_socket` sets `SO_REUSEADDR`, so two processes can both
 bind the PTP ports and join the multicast group; `relay-port` is per-member configurable. **WSL is
@@ -127,6 +128,14 @@ enter it. *Before recording something as untested, check whether it is observabl
 Mutation-verified, and the mutation is instructive: with the dispatch loop's `target_frame >
 now_frame` guard removed, both nodes fire **120 frames early and in perfect agreement with each
 other** — the "they agree" half passes and only the "on the right frame" half catches it.
+
+**The loaded arm is the one that answers "does this work in a venue".** The light arm proves the
+protocol; it runs the lightest thing the server can render, on an idle box, so a green light arm
+says nothing about a busy one — and the scheduler's dispatch loop is a thread competing with
+decodes and mixers for the same cores. The loaded arm puts a real 4K decode on both nodes of one
+box hosting both servers, which is harsher than the two-machine deployment it stands in for, and
+the late-frame counts are reported so a reader can see the load was real rather than merely
+configured.
 
 **Still measured by nothing:** the content-sync watchdog's divergence report, and any partition or
 node-loss behaviour.

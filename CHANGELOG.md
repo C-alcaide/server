@@ -1,6 +1,19 @@
 CasparVP — Unreleased
 ==========================================
 
+### Cluster frame accuracy, measured under a real 4K load
+
+The cluster checks all ran at 1080p59.94 with a **colour producer** — no decode, no file, no
+resampling, which is the cheapest thing this server can render. A cluster is deployed precisely
+where the load is, and the scheduler's dispatch loop is a thread competing with decodes and mixers
+for the same cores, so that proved the protocol and nothing about a busy machine.
+
+`cli.py cluster` now repeats the check that matters at **2160p50 with a real 4K clip decoding and
+looping on both nodes**, on one box hosting both servers — harsher than the two-machine deployment
+it stands in for. **Target and actual frame identical on both nodes**, on both mixers, while the
+channels themselves dropped 3–6 late frames — so the load was real and the scheduler was
+unaffected by it.
+
 ### `CLUSTER STATUS` reports which frame the scheduler last fired on
 
 A *correct* scheduled execution used to be invisible. The dispatch loop logged only when a command
