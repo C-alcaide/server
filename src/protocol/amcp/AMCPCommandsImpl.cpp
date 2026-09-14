@@ -5198,6 +5198,10 @@ std::wstring info_isf_command(command_context& ctx)
         node.put(L"isf-version", caspar::u16(s.isf_version));
         node.put(L"inputs", s.inputs);
         node.put(L"multipass", s.multipass);
+        // WHERE a shader can be used, not merely what it is: a filter needs a layer beneath it,
+        // a generator does not, and a transition needs two sources. A client sorting a list of
+        // 300 shaders wants this before it wants anything else here.
+        node.put(L"role", caspar::u16(caspar::isf::role_name(s.role)));
         node.put(L"vertex-shader", s.has_vertex_shader);
         std::wstring cats;
         for (const auto& c : s.categories)

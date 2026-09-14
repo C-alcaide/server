@@ -379,7 +379,6 @@ struct shader::impl
     //: given at `image_input_names()`.
     std::vector<shader::audio_input_desc> audio_desc_;
     std::map<std::string, std::vector<double>> values_;
-    shader_role                                role_ = shader_role::generator;
 
     std::string vertex_source_; ///< custom .vs body (empty = generated)
 
@@ -516,17 +515,6 @@ struct shader::impl
                 inputs_.push_back(std::move(in));
             }
         }
-
-        // Role from ISF conventions.
-        auto has_image = [&](const std::string& n) {
-            return std::find(image_names_.begin(), image_names_.end(), n) != image_names_.end();
-        };
-        if (has_image("startImage") && has_image("endImage"))
-            role_ = shader_role::transition;
-        else if (has_image("inputImage"))
-            role_ = shader_role::filter;
-        else
-            role_ = shader_role::generator;
 
         // IMPORTED images.
         if (auto imp = pt.get_child_optional("IMPORTED")) {
@@ -1464,7 +1452,6 @@ shader::~shader()
 }
 
 const std::vector<input>& shader::inputs() const { return impl_->inputs_; }
-shader_role               shader::role() const { return impl_->role_; }
 std::vector<std::string>  shader::image_input_names() const { return impl_->image_names_; }
 std::vector<shader::audio_input_desc> shader::audio_inputs() const { return impl_->audio_desc_; }
 
@@ -1837,6 +1824,27 @@ std::vector<input> describe_inputs(const std::wstring& path, std::string& out_er
     return out;
 }
 
+shader_role role_of(const std::vector<std::string>& image_input_names)
+{
+    const auto has = [&](const char* n) {
+        return std::find(image_input_names.begin(), image_input_names.end(), n) !=
+               image_input_names.end();
+    };
+    // ISF's own conventions, and the order matters: a transition declares `startImage` AND
+    // `endImage`, and some also declare `inputImage`, so the two-image test has to come first.
+    if (has("startImage") && has("endImage"))
+        return shader_role::transition;
+    if (has("inputImage"))
+        return shader_role::filter;
+    return shader_role::generator;
+}
+
+const char* role_name(shader_role r)
+{
+    return r == shader_role::transition ? "transition" : r == shader_role::filter ? "filter"
+                                                                                 : "generator";
+}
+
 std::vector<shader_info> discover_shaders()
 {
     namespace fs = std::filesystem;
@@ -1928,8 +1936,19 @@ std::vector<shader_info> discover_shaders()
                 if (const auto c = kv.second.get_value<std::string>(); !c.empty())
                     info.categories.push_back(c);
 
-        if (auto inputs = pt.get_child_optional("INPUTS"))
+        if (auto inputs = pt.get_child_optional("INPUTS")) {
             info.inputs = static_cast<int>(inputs->size());
+
+            // The NAMES of the image inputs, which is what the role is derived from. The count
+            // above cannot answer it: `inputImage` and a float slider are both one input.
+            std::vector<std::string> image_names;
+            for (const auto& kv : *inputs) {
+                const auto t = kv.second.get<std::string>("TYPE", "");
+                if (t == "image" || t == "audio" || t == "audioFFT")
+                    image_names.push_back(kv.second.get<std::string>("NAME", ""));
+            }
+            info.role = role_of(image_names);
+        }
 
         if (auto passes = pt.get_child_optional("PASSES"))
             info.multipass = passes->size() > 1;

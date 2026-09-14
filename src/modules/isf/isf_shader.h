@@ -74,6 +74,22 @@ enum class shader_role
     transition, ///< image inputs "startImage" + "endImage" + a float "progress"
 };
 
+/// The role a shader plays, from the image inputs it declares.
+///
+/// **ONE RULE, AND THAT IS THE POINT OF IT BEING A FUNCTION.** Two callers want this -- the
+/// listing that answers `INFO ISF`, and anything that loads a shader for real -- and they parse
+/// the header by different routes: `discover_shaders` reads the JSON and nothing else, while
+/// `shader` builds a full input table. A second copy of the rule would drift, and the two would
+/// then disagree about whether a shader is a filter, which is exactly the class of divergence
+/// the pass-size evaluator already had to be made single-sourced to avoid.
+///
+/// `image_input_names` is the declared image inputs in declaration order.
+shader_role role_of(const std::vector<std::string>& image_input_names);
+
+/// `"generator"`, `"filter"` or `"transition"` -- the wire spelling, for `INFO ISF` and anything
+/// else that reports it. Beside the classifier so the names cannot drift from the enum.
+const char* role_name(shader_role r);
+
 /// One image bound for a render: either an existing GL texture (zero-copy) or a CPU RGBA buffer
 /// (bottom-up, tightly packed width*height*4) that the shader uploads on the GL thread.
 struct image_binding
@@ -105,7 +121,6 @@ class shader
     shader& operator=(const shader&) = delete;
 
     const std::vector<input>& inputs() const;
-    shader_role               role() const;
 
     /// Names of declared image inputs (order = declaration order).
     ///
@@ -299,6 +314,12 @@ struct shader_info
 
     int  inputs    = 0;     ///< how many INPUTS it declares, image inputs included
     bool multipass = false; ///< true when it declares PASSES
+
+    /// Generator, filter or transition -- see `role_of`. **This is the field a client sorts a
+    /// shader list by**: a filter needs a layer beneath it, a generator does not, and a
+    /// transition needs two sources, so it decides where a shader can be used at all rather
+    /// than merely describing it.
+    shader_role role = shader_role::generator;
     bool has_vertex_shader = false; ///< a sibling `.vs` exists, so it overrides the pass-through
 
     /// Set when the file was read but its header could not be parsed as JSON, with the reason.

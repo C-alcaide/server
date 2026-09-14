@@ -28,8 +28,6 @@ set(SOURCES
     replay_extended_index.h
     replay_segmented_storage.cpp
     replay_segmented_storage.h
-    replay_file_operations.cpp
-    replay_file_operations.h
     replay_consumer.cpp
     replay_consumer.h
     replay_producer.cpp
