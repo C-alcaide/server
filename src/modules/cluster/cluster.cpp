@@ -86,6 +86,16 @@ std::wstring cluster_status_command(protocol::amcp::command_context& ctx)
         if (g_state.active && !g_state.watchdog_armed) {
             arm_watchdog(ctx.channels);
         }
+        // ── AND TAKE THE FRAME RATE FROM THE CHANNEL WHILE WE ARE HERE ─────────────────
+        //
+        // `frame_clock` is constructed at a hardcoded 50 fps and only `SCHEDULE` and `TRACK`
+        // used to correct it, so a cluster that was configured, PTP-locked and relay-connected
+        // still numbered frames at 50 until somebody issued one of those two -- and `FRAME`
+        // here, the only number an operator can see, was simply wrong. Measured 2026-09-14 on
+        // a 1080p5994 channel: 100 frames advanced in 2 seconds against the 120 the format
+        // demands, which is exactly 50.
+        if (g_state.active)
+            sync_framerate_from_channels();
     }
 
     std::lock_guard<std::mutex> lock(g_state_mutex);
@@ -569,6 +579,16 @@ void start_cluster(const cluster_config& config,
         g_state.relay->set_command_handler(
             [](int64_t target_frame, const std::wstring& command) {
                 std::lock_guard<std::mutex> lock(g_state_mutex);
+                // ── THE CLIENT'S FRAME RATE, BEFORE IT ACTS ON A RELAYED FRAME NUMBER ──
+                //
+                // **This is the one that mattered.** A client receives its commands over the
+                // relay and may never have an AMCP command issued to it directly, so the two
+                // call sites that corrected the frame rate -- `SCHEDULE` and `TRACK`, both
+                // local commands -- never ran on it. The MASTER syncs when it schedules and
+                // the CLIENT did not, so a target frame computed at 59.94 was interpreted at
+                // the hardcoded 50: the two nodes acted on the same frame number at different
+                // real times, which is the precise failure this module exists to prevent.
+                sync_framerate_from_channels();
                 if (g_state.scheduler) {
                     g_state.scheduler->schedule(target_frame, std::wstring(command));
                 }

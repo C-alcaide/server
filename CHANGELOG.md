@@ -1,6 +1,25 @@
 CasparVP — Unreleased
 ==========================================
 
+### A cluster client numbered frames at 50 fps whatever its channel was
+
+`frame_clock` is constructed at a hardcoded 50 fps and `sync_framerate_from_channels()` corrects
+it from the channel — but it was called from only two **local** AMCP commands, `CLUSTER SCHEDULE`
+and `CLUSTER TRACK`. So a cluster that was configured, PTP-locked and relay-connected still
+numbered frames at 50 until one of those was issued.
+
+**And a client never issues either.** It receives its commands over the relay, so neither call
+site runs on it: the master syncs when it schedules and the client did not. A target frame
+computed at 59.94 was interpreted at 50, and **the two nodes acted on the same frame number at
+different real times** — the precise failure cluster sync exists to prevent.
+
+Now synced from `CLUSTER STATUS` as well, so the `FRAME` an operator reads is truthful, and from
+the relay's command handler, which is the path a client actually takes. Measured on a 1080p5994
+channel: **100 frames advanced in 2 seconds before, 120 after.**
+
+Found by the first run of `cli.py cluster` — two real nodes on one machine, 5/5 on both mixers,
+PTP locking in 1 s at 70 µs offset and the two nodes agreeing on the frame number to 0 frames.
+
 ### A cluster node counted frames wrong at every NTSC rate
 
 `frame_clock::ptp_ns_to_frame` — how a node answers *"which frame is it"* — computed

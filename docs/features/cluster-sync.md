@@ -5,7 +5,7 @@
 > **Commands:** 4 fork-specific AMCP commands, registered by the module
 > **Architecture:** [`../architecture/CLUSTER_SYNC_DESIGN.md`](../architecture/CLUSTER_SYNC_DESIGN.md)
 > **Guide:** [`../guides/CLUSTER_SYNC.md`](../guides/CLUSTER_SYNC.md)
-> **Coverage:** `frame_clock_self_test` at boot — the frame arithmetic. No battery: multi-node behaviour is still driven by nothing
+> **Coverage:** `cluster` — 5/5 both mixers, two nodes on one box — plus `frame_clock_self_test` at boot
 
 Keeps playback aligned across several CasparCG servers driving one wall, so a clip started on four
 machines shows the same frame on all four. A scheduled start time and a shared frame clock, with a
@@ -37,12 +37,19 @@ reads like a thin feature, and this is not one:
 
 **Singleton state behind one mutex** (`g_state_mutex`), with the watchdog above.
 
-**One implementation detail worth surfacing, because it is a trap the module already caught
-itself:** `frame_clock` is default-constructed at a **hardcoded 50 fps**, and
-`sync_framerate_from_channels()` exists to correct it from the local channel's actual format. The
-module's own comment says it is re-checked on every command rather than once, because it is cheap.
-So the correct frame rate depends on a command having been issued — a fresh cluster that has been
-scheduled but never otherwise touched is the case to think about.
+**The hardcoded 50 fps was a real defect, not merely a case to think about — fixed 2026-09-14.**
+`frame_clock` is default-constructed at 50 fps and `sync_framerate_from_channels()` corrects it
+from the local channel's format, but it was called from only **two local AMCP commands**,
+`SCHEDULE` and `TRACK`. So a cluster that was configured, PTP-locked and relay-connected still
+numbered frames at 50 until somebody issued one of those.
+
+**And the client is the node that never does.** A client receives its commands over the relay;
+neither of those two call sites runs on it. The master syncs when it schedules and the client did
+not, so a target frame computed at 59.94 was interpreted at 50 — the two nodes acting on the same
+frame number at different real times, which is exactly what this module exists to prevent.
+
+It is now synced from `CLUSTER STATUS` as well (so the `FRAME` an operator reads is truthful) and
+from the relay's own command handler, which is the path a client actually takes.
 
 ---
 
@@ -84,6 +91,29 @@ it does not attempt to keep running correctly through a partition, it detects an
 
 ## 4. Verification — what is measured, and what is not
 
+**`cli.py cluster`, 5/5 on both mixers, 2026-09-14 — two real nodes, on one machine.** The
+multi-node half is no longer unverified.
+
+| check | what it holds | measured |
+| :--- | :--- | :--- |
+| both nodes start in their configured mode | `CLUSTER STATUS` says `DISABLED` when no config was parsed, so this also proves the `<cluster>` block is read | master/client |
+| the client's PTP clock LOCKS | a node that never exchanged a Sync/Delay_Req pair stays `initializing` | **locked in 1 s, offset 70 µs** |
+| the relay CONNECTS | UDP multicast for the clock and TCP for commands are different transports, so PTP can be green while commands have nowhere to go | `MEMBER: 127.0.0.1:N connected` |
+| **the two nodes AGREE on the frame number** | the feature's whole promise; everything else is plumbing in service of it | **0 frames** over 7 samples |
+| and the clock RUNS at the channel's rate | two stopped clocks agree perfectly, so "they agree" is satisfiable by a feature that does nothing | **120 frames in 2 s** at 59.94 |
+
+**WHY ONE BOX IS ENOUGH.** `create_udp_socket` sets `SO_REUSEADDR`, so two processes can both
+bind the PTP ports and join the multicast group; `relay-port` is per-member configurable. **WSL is
+not the route**: there is no Linux build of this server, and WSL2 sits behind a NAT'd virtual
+switch where host↔guest UDP multicast does not work — which is exactly the PTP half.
+
+**The battery runs at 59.94 deliberately**, for the same reason the boot self-test covers
+1001-denominator rates: at 25p and 50p the arithmetic defect below is invisible.
+
+**Still measured by nothing:** a scheduled command actually *executing* on both nodes at the same
+frame, the virtual channel map, the content-sync watchdog's divergence report, and any partition
+or node-loss behaviour.
+
 **`frame_clock_self_test()`, at every boot, unconditional.** The frame arithmetic is a pure
 function — no cluster, no network, no channel — so it is asserted at start-up rather than left
 to a two-machine battery that does not exist. It throws, which aborts the server.
@@ -104,7 +134,16 @@ back in, the server **refuses to start**, naming 29.97p.
 the command relay, the virtual channel map, the scheduler firing on the right frame, and the
 watchdog's divergence report. That is the feature's whole purpose and it is unverified — §5.
 
-### 4.1 What the audit found
+### 4.1 What the audit and the first battery run found
+
+**The frame clock ran at 50 fps on a 59.94 channel.** Found by the battery's own logged number on
+its first run — and *not* by its check, whose first gate was ±50% and admitted 100 frames where
+120 were due. A tolerance wide enough to accept a different standard frame rate is not a
+tolerance. The gate is ±8% now, which is comfortably tighter than the 17% gap between 50 and
+59.94 and comfortably looser than the sampling jitter. Mutation-verified: with the sync removed
+the check reads 100 against 120 and fails.
+
+
 
 **`ptp_ns_to_frame` was one frame low on every fractional frame rate.** It computed
 `floor(a) + floor(b)` where the answer is `floor(a + b)`: the whole-seconds term
@@ -138,7 +177,10 @@ The corrected form carries the remainder and was checked against the exact ratio
    2026-09-14** — thirteen keys plus two sub-trees are read; see §2. Recorded here rather than
    deleted because the reason it was believed is reusable: the module's entry point is called
    from a GENERATED header, so it looks unreachable to a grep.
-4. **Multi-node behaviour is entirely unverified**, which is the feature's whole purpose — and
+4. ~~**Multi-node behaviour is entirely unverified.**~~ **CLOSED 2026-09-14** — `cli.py cluster`
+   runs two nodes on one box, §4. What remains unverified is narrower and named there: a
+   scheduled command executing on both nodes at the same frame, the virtual channel map, and the
+   watchdog's divergence report. The original note read — and
    it is verifiable on ONE machine, which is the useful half of this line. `create_udp_socket`
    sets `SO_REUSEADDR`, so two server processes on one host can both bind the PTP ports and
    join the multicast group, and `relay-port` is per-member configurable. **WSL is not the
