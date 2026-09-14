@@ -253,6 +253,25 @@ int portaudio_device_manager::get_preferred_host_api(host_api_preference prefere
     return Pa_HostApiTypeIdToHostApiIndex(type);
 }
 
+// ── `PaHostApiInfo::defaultInput/OutputDevice` IS ALREADY A GLOBAL DEVICE INDEX ────────────
+//
+// PortAudio's own header says so: *"The value will be a device index ranging from 0 to
+// (Pa_GetDeviceCount()-1), or paNoDevice"*. These two functions passed it to
+// `Pa_HostApiDeviceIndexToDeviceIndex()`, which expects a host-API-RELATIVE index -- so
+// whenever the global index exceeded that API's own device count the conversion returned
+// `paInvalidDevice`, and the function **returned that -1 immediately** instead of falling
+// through to the next API or to `Pa_GetDefaultOutputDevice()`.
+//
+// **THE WHOLE DEFAULT-DEVICE PATH WAS THEREFORE DEAD** on any box where ASIO or WASAPI is
+// present. Measured 2026-09-14: `ADD 1 PORTAUDIO` with no `DEVICE=` at all failed with
+// `501 ADD FAILED`, and a `DEVICE=` naming something that does not exist logged
+// *"Device not found: X. Using default."* and then threw
+// *"No PortAudio output device available"* -- the message and the behaviour disagreeing,
+// which is how it stayed invisible: the log says a fallback happened and there was none.
+//
+// Six sites, all the same mistake, found by grepping the conversion rather than fixing the
+// one in front of us.
+
 int portaudio_device_manager::get_default_output_device(host_api_preference preference) const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -267,14 +286,14 @@ int portaudio_device_manager::get_default_output_device(host_api_preference pref
         if (api_idx >= 0) {
             const PaHostApiInfo* api_info = Pa_GetHostApiInfo(api_idx);
             if (api_info && api_info->defaultOutputDevice >= 0)
-                return Pa_HostApiDeviceIndexToDeviceIndex(api_idx, api_info->defaultOutputDevice);
+                return api_info->defaultOutputDevice;
         }
         // Then WASAPI
         api_idx = Pa_HostApiTypeIdToHostApiIndex(paWASAPI);
         if (api_idx >= 0) {
             const PaHostApiInfo* api_info = Pa_GetHostApiInfo(api_idx);
             if (api_info && api_info->defaultOutputDevice >= 0)
-                return Pa_HostApiDeviceIndexToDeviceIndex(api_idx, api_info->defaultOutputDevice);
+                return api_info->defaultOutputDevice;
         }
         // Fallback to system default
         return Pa_GetDefaultOutputDevice();
@@ -292,7 +311,7 @@ int portaudio_device_manager::get_default_output_device(host_api_preference pref
     if (api_idx >= 0) {
         const PaHostApiInfo* api_info = Pa_GetHostApiInfo(api_idx);
         if (api_info && api_info->defaultOutputDevice >= 0)
-            return Pa_HostApiDeviceIndexToDeviceIndex(api_idx, api_info->defaultOutputDevice);
+            return api_info->defaultOutputDevice;
     }
 
     return -1;
@@ -311,13 +330,13 @@ int portaudio_device_manager::get_default_input_device(host_api_preference prefe
         if (api_idx >= 0) {
             const PaHostApiInfo* api_info = Pa_GetHostApiInfo(api_idx);
             if (api_info && api_info->defaultInputDevice >= 0)
-                return Pa_HostApiDeviceIndexToDeviceIndex(api_idx, api_info->defaultInputDevice);
+                return api_info->defaultInputDevice;
         }
         api_idx = Pa_HostApiTypeIdToHostApiIndex(paWASAPI);
         if (api_idx >= 0) {
             const PaHostApiInfo* api_info = Pa_GetHostApiInfo(api_idx);
             if (api_info && api_info->defaultInputDevice >= 0)
-                return Pa_HostApiDeviceIndexToDeviceIndex(api_idx, api_info->defaultInputDevice);
+                return api_info->defaultInputDevice;
         }
         return Pa_GetDefaultInputDevice();
     }
@@ -334,7 +353,7 @@ int portaudio_device_manager::get_default_input_device(host_api_preference prefe
     if (api_idx >= 0) {
         const PaHostApiInfo* api_info = Pa_GetHostApiInfo(api_idx);
         if (api_info && api_info->defaultInputDevice >= 0)
-            return Pa_HostApiDeviceIndexToDeviceIndex(api_idx, api_info->defaultInputDevice);
+            return api_info->defaultInputDevice;
     }
 
     return -1;

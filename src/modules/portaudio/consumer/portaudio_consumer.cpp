@@ -90,6 +90,9 @@ struct portaudio_consumer : public core::frame_consumer
     // PortAudio stream
     PaStream*            stream_         = nullptr;
     int                  device_index_   = -1;
+    /// A name was asked for and did not resolve, so the DEFAULT device is open instead. Kept
+    /// because `device_index_ >= 0` cannot say whether it got there by request or by fallback.
+    bool                 device_fallback_ = false;
 
     // Ring buffer: bridges push (write thread) to pull (PA callback)
     std::unique_ptr<spsc_ring_buffer> ring_buffer_;
@@ -267,6 +270,7 @@ struct portaudio_consumer : public core::frame_consumer
         if (!device_name_.empty()) {
             device_index_ = mgr.find_output_device(device_name_, host_api_pref_);
             if (device_index_ < 0) {
+                device_fallback_ = true;
                 CASPAR_LOG(warning) << print() << L" Device not found: " << u16(device_name_)
                                    << L". Using default.";
             }
@@ -440,6 +444,24 @@ struct portaudio_consumer : public core::frame_consumer
     core::monitor::state state() const override
     {
         core::monitor::state s;
+        // ── WHICH DEVICE IS ACTUALLY OPEN ──────────────────────────────────────────────
+        //
+        // Published because an unrecognised `DEVICE=` falls back to the default and the
+        // consumer then plays somewhere the operator did not ask for. A warning is logged, but
+        // a log line is not an interface: it is written once, is unavailable to a client that
+        // connected later, and nothing can assert on it. The same shape as `INFO LTC`'s
+        // `device`/`requested`/`fallback`, and for the same reason.
+        //
+        // `device` is asked of PortAudio rather than remembered, so it cannot drift from what
+        // the stream is really writing to.
+        if (device_index_ >= 0) {
+            const PaDeviceInfo* info = Pa_GetDeviceInfo(device_index_);
+            s["device"] = (info && info->name) ? std::string(info->name) : std::string("unknown");
+        } else {
+            s["device"] = std::string("none");
+        }
+        s["requested"] = device_name_;
+        s["fallback"]  = device_fallback_;
         s["buffer/fill"]    = static_cast<int64_t>(ring_buffer_ ? ring_buffer_->read_available() : 0);
         s["buffer/underruns"] = underrun_count_.load(std::memory_order_relaxed);
         s["buffer/overflows"] = overflow_count_.load(std::memory_order_relaxed);

@@ -1,11 +1,11 @@
 # PortAudio — host audio API access
 
-> **State:** shipped, unmeasured
+> **State:** shipped; measured since 2026-09-14
 > **Modules:** `src/modules/portaudio`
 > **Commands:** 1 (`INFO PORTAUDIO`, fork-only)
 > **Architecture:** none, deliberately — an enumeration and a device open
 > **Guide:** [`../guides/PORTAUDIO_MODULE.md`](../guides/PORTAUDIO_MODULE.md)
-> **Coverage:** **none**
+> **Coverage:** `portaudio` — 4/4 both mixers
 
 Audio I/O through PortAudio, giving access to host audio APIs that the stock consumer set does not
 reach — which on Windows means WASAPI and ASIO rather than only MME.
@@ -57,17 +57,44 @@ Operator detail: [`../guides/PORTAUDIO_MODULE.md`](../guides/PORTAUDIO_MODULE.md
 
 ---
 
-## 2. Verification
+## 2. Verification — what is measured, and what is not
 
-**Nothing** — and this is **the cheapest untested command in the fork to cover**. `INFO PORTAUDIO`
-takes no parameters, needs no hardware beyond whatever the machine has, and returns a `201` with a
-device list. Asserting it replies `201` and names at least one API is a few lines, and would prove
-the module initialises at all.
+**`cli.py portaudio`, 4/4 on both mixers, 2026-09-14** — the module's first coverage, and it
+found a defect that had killed the entire default-device path.
 
-Worth stating what that would *not* cover: whether any enumerated device can actually be opened, and
-whether audio played through one is correct. Neither is reachable without knowing the rig's devices.
+| check | what it holds |
+| :--- | :--- |
+| `INFO PORTAUDIO` reports an initialised library and enumerates devices | this command **is** the discovery mechanism; a server reporting `not initialized` has no audio while every other battery stays green, because none of them listen |
+| **a device name from this command's own list is accepted and opened** | the discovery contract: a name the server lists must be a name the server accepts |
+| and an unknown device falls back **and says so** | the companion — without it the check above passes for a consumer that reports `fallback=false` unconditionally |
+| `ADD 1 PORTAUDIO` with no `DEVICE=` opens the default | the simplest invocation there is, and the one that was dead |
 
----
+**What it cannot see: whether sound comes out.** `cli.py ltc` covers that end to end — it plays
+LTC through this consumer into a virtual cable and decodes it back — so the audio path is
+measured, just not from here.
+
+### 2.1 What the first run found
+
+**`PaHostApiInfo::defaultOutputDevice` is a GLOBAL device index**, which PortAudio's own header
+states: *"a device index ranging from 0 to (Pa_GetDeviceCount()-1)"*. Six sites passed it to
+`Pa_HostApiDeviceIndexToDeviceIndex()`, which expects a host-API-**relative** index. Whenever the
+global index exceeded that API's own device count the conversion returned `paInvalidDevice`, and
+the function **returned that −1 immediately** instead of falling through to the next API or to
+`Pa_GetDefaultOutputDevice()`.
+
+So on any machine with ASIO or WASAPI present — this one has both — **the whole default-device
+path was dead**: `ADD 1 PORTAUDIO` with no `DEVICE=` answered `501 ADD FAILED`, and a `DEVICE=`
+naming something that does not exist logged *"Device not found: X. Using default."* and then threw
+*"No PortAudio output device available"*.
+
+**The message and the behaviour disagreeing is how it stayed hidden.** The log says a fallback
+happened; there was none. Six sites, all the same mistake, found by grepping the conversion rather
+than fixing the one in front of us.
+
+**Also added:** the consumer publishes `device`, `requested` and `fallback`, so which device is
+open is answerable from the API rather than only from a log line — which is written once, is
+unavailable to a client that connected later, and which nothing can assert on.
+
 
 ## 3. Known gaps
 

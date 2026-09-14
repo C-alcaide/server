@@ -1,6 +1,28 @@
 CasparVP — Unreleased
 ==========================================
 
+### `ADD 1 PORTAUDIO` works again — the default-device path was dead
+
+`PaHostApiInfo::defaultOutputDevice` is a **global** device index; PortAudio's own header says so.
+Six sites in `portaudio_device.cpp` passed it to `Pa_HostApiDeviceIndexToDeviceIndex()`, which
+expects a host-API-**relative** index — so whenever the global index exceeded that API's own device
+count the conversion returned `paInvalidDevice` and the lookup **returned that −1 immediately**,
+never falling through to the next API or to `Pa_GetDefaultOutputDevice()`.
+
+On any machine with ASIO or WASAPI present, that made the whole default path dead:
+
+* `ADD 1 PORTAUDIO` with no `DEVICE=` answered **`501 ADD FAILED`**;
+* `ADD 1 PORTAUDIO DEVICE=<a name that does not exist>` logged *"Device not found: X. Using
+  default."* and then threw *"No PortAudio output device available"*.
+
+**The log saying a fallback happened when none did is how this stayed invisible.**
+
+The consumer also now publishes `device` (the device actually open, asked of PortAudio rather than
+remembered), `requested` and `fallback`, so an operator can tell from the API where audio is going
+rather than from a warning logged once at start-up.
+
+Measured by the module's first battery, `cli.py portaudio`, **4/4 on both mixers**, mutation-verified.
+
 ### Cluster frame accuracy, measured under a real 4K load
 
 The cluster checks all ran at 1080p59.94 with a **colour producer** — no decode, no file, no
