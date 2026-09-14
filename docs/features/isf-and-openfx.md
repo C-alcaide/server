@@ -238,41 +238,49 @@ the interesting behaviour belongs to third-party code. What is *ours* and testab
 
 ## 5. Known gaps
 
-0. **One multi-pass shader renders wrongly; the multi-pass ENGINE appears sound.** The first
-   version of this entry claimed multi-pass breaks above a low pass count, on the strength of
-   `Bloom` returning its source byte-identically. **That was a false positive** — `Bloom`'s
-   `intensity` input has `DEFAULT: 0`, so an unchanged image is the correct answer at defaults.
-   Recorded because the mistake is the instructive part: *a shader doing nothing may be obeying
-   its own defaults*, and the header must be read before its output is called a fault.
+0. ~~**One multi-pass shader renders wrongly.**~~ **FOUND AND FIXED 2026-09-14 — it was the
+   HOST, and it affected eight shaders.**
 
-   What the engine was then probed for, with purpose-built shaders, all exact to 1 LSB:
+   `isf_vertShaderInit()` drew a full-screen TRIANGLE via the `gl_VertexID` trick, so
+   `isf_FragNormCoord` was **0 or 2** at the vertices. Interpolated over the visible 0..1 square
+   that is exactly right, which is why all 276 shaders without a `.vs` were unaffected and why
+   every purpose-built probe of the pass mechanics passed.
 
-   | probe | result |
-   | :--- | :--- |
-   | pass 0 writes a buffer, pass 1 reads it | correct |
-   | three chained buffers, A→B→C→out | correct |
-   | final pass writing to a `TARGET` (as `Bloom` and `Multi Pass Gaussian Blur` do) | correct |
-   | downscaled intermediate (`$WIDTH/8`) then full-size out | correct |
+   **A `.vs` doing a NON-LINEAR operation at vertex time sees the 2.** Adding a constant is
+   linear and interpolates correctly even over 0..2; `clamp` does not. Vidvox's shaders compute
+   `clamp(isf_FragNormCoord - blurRadiusInPixels, 0.0, 1.0)`, and at the vertex where the
+   coordinate is 2 that clamps to 1 — annihilating the offset, after which the varying spans
+   0→0.5 across the visible area and every tap lands in the top-left quadrant.
 
-   So chaining, targeted final passes and per-pass sizing all work.
+   It was invisible at radius 0 because the shaders' own
+   `(blurRadius==0.0) ? isf_FragNormCoord : clamp(...)` takes the unclamped branch there, which
+   is precisely why the picture was byte-exact at minimum blur and drifted further from correct
+   as the radius grew.
 
-   **What remains is `Multi Pass Gaussian Blur` (11 passes, and it has a `.vs`).** Against a
-   textured source, sweeping its `blurAmount`:
+   **The oracle needs no model: a blur preserves the mean.** Measured on a 512×512 checkerboard,
+   `Multi Pass Gaussian Blur` (11 passes), mean RGB relative to `blurAmount` 0:
 
-   | `blurAmount` | mean RGB | note |
+   | `blurAmount` | before | after |
    | ---: | :--- | :--- |
-   | 0 (min) | (136.4, 130.0, 121.5) | **exactly the source** — pass-through is right |
-   | 1 | (124.3, 139.8, 121.3) | |
-   | 4 | (88.4, 169.3, 120.6) | |
-   | 12 | (27.2, 225.7, 114.8) | |
-   | 24 (default) | (8.0, 244.5, 110.3) | |
+   | 4 | +0.1, −0.3, −0.1 | −0.1, −0.2, −0.1 |
+   | 12 | **+6.9, −5.6, +1.1** | −0.2, −0.3, −0.1 |
+   | 24 | **+23.4, −17.9, +4.5** | **−0.3, −0.4, −0.1** |
 
-   A blur preserves the mean at any radius. Red falls monotonically and green rises with it, so
-   the fault is in the **sampling offsets** and scales with tap count — not in the pass mechanics,
-   which are exact at radius 0. Its `.vs` emits `out vec2 texOffsets[5]`, an **array varying**,
-   computed from `RENDERSIZE`, `PASSINDEX` and `blurAmount`; that is the obvious next place to
-   look and has not been looked at. **One shader is confirmed wrong. The other 15 multi-pass
-   shaders are unverified, not known-broken.**
+   `Fast Blur` spot-checked the same way: within 0.3 across its whole range. The residual is
+   edge handling and is expected.
+
+   **Eight of the 38 `.vs` shaders were affected** — every one that clamps: `Bloom`,
+   `City Lights`, `Edge Blur`, `Fast Blur`, `Gloom`, `Glow`, `Glow-Fast`,
+   `Multi Pass Gaussian Blur`. `Life` does vertex-time arithmetic without clamping and was
+   never affected, which is the distinction that matters: **linearity, not the `.vs` itself.**
+
+   Now a quad over 0..1 (`GL_TRIANGLE_STRIP`, four vertices), matching the reference
+   implementation, so a vertex-stage clamp is a no-op.
+
+   *And the entry this replaces is worth keeping in mind:* its first version blamed the engine on
+   the strength of `Bloom` returning its source byte-identically, which was a false positive —
+   `Bloom`'s `intensity` defaults to 0, so an unchanged image is correct at defaults. A shader
+   doing nothing may be obeying its own defaults.
 
 1. **No coverage.** §4.1 is a self-contained check needing only a fixture shader.
 2. **The `eUndefined` layout fix is unverified on both paths.**

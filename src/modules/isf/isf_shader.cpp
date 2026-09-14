@@ -692,8 +692,34 @@ struct shader::impl
         v << "#version 330 core\n"
              "out vec2 isf_FragNormCoord;\n"
           << build_common_decls()
+          // ── A QUAD OVER 0..1, NOT A TRIANGLE OVER 0..2 ────────────────────────────────
+          //
+          // This used to be the `gl_VertexID` full-screen-triangle trick, whose three vertices
+          // carry an `isf_FragNormCoord` of 0 or **2**. Interpolated over the visible 0..1
+          // square that gives exactly the right value, so every shader that merely READS the
+          // coordinate in the fragment stage is unaffected -- which is all 276 of Vidvox's
+          // shaders without a `.vs`, and every purpose-built probe this engine was tested with.
+          //
+          // **A `.vs` DOING ARITHMETIC AT VERTEX TIME SEES THE 2, AND VIDVOX'S SHADERS CLAMP.**
+          // `Multi Pass Gaussian Blur.vs` computes
+          // `clamp(isf_FragNormCoord - blurRadiusInPixels, 0.0, 1.0)`; at the vertex where the
+          // coordinate is 2 that clamps to 1, annihilating the offset, and the varying then
+          // interpolates 0->1 across a triangle spanning 0->2. The sampling coordinates are
+          // therefore HALVED over the visible area and every tap lands in the top-left quadrant
+          // of the buffer it is reading.
+          //
+          // It is invisible at radius 0 because the shader's own
+          // `(blurRadius==0.0) ? isf_FragNormCoord : clamp(...)` takes the UNCLAMPED branch
+          // there -- which is exactly why the picture was byte-exact at minimum blur and drifted
+          // further from correct as the radius grew. Measured 2026-09-14 before the fix: mean
+          // RGB (136,130,121) at `blurAmount` 0, which is the source, against (8,244,110) at 24
+          // -- a blur that changes the mean, which a blur cannot do.
+          //
+          // The reference implementation draws a quad over 0..1, so a vertex-stage clamp is a
+          // no-op there. Four vertices as a strip costs one extra vertex invocation per pass and
+          // makes this host agree with the format's own shaders.
           << "void isf_vertShaderInit() {\n"
-             "  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
+             "  vec2 p = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));\n"
              "  isf_FragNormCoord = p;\n"
              "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
              "}\n";
@@ -1112,7 +1138,8 @@ struct shader::impl
 
             set_scalar_uniforms(pw, ph, time, time_delta, frame_index, static_cast<int>(i));
             bind_samplers(bound);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            // A STRIP OF FOUR, matching the 0..1 quad `isf_vertShaderInit` now emits.
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
             last_tex = write_tex;
             last_w   = pw;

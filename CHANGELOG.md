@@ -1,6 +1,32 @@
 CasparVP — Unreleased
 ==========================================
 
+### Eight ISF blur and glow shaders rendered wrongly — the host drew the wrong primitive
+
+`isf_vertShaderInit()` drew a full-screen **triangle**, so `isf_FragNormCoord` was **0 or 2** at
+the vertices. Interpolated across the visible 0..1 square that is exactly right — which is why all
+276 Vidvox shaders without a `.vs` were unaffected, and why the multi-pass engine measured sound
+on every purpose-built probe.
+
+**A `.vs` doing a non-linear operation at vertex time sees the 2.** Adding a constant interpolates
+correctly even over 0..2; `clamp` does not. Vidvox's blur family computes
+`clamp(isf_FragNormCoord - blurRadiusInPixels, 0.0, 1.0)`, which at the 2 vertex clamps to 1 and
+annihilates the offset — the varying then spans 0→0.5 across the screen and every tap lands in the
+top-left quadrant of the buffer.
+
+Measured on a 512×512 checkerboard with `Multi Pass Gaussian Blur`, mean RGB against `blurAmount`
+0 — **a blur preserves the mean, which is an oracle needing no model**:
+
+* at `blurAmount` 12: **+6.9, −5.6** before, −0.2, −0.3 after
+* at `blurAmount` 24: **+23.4, −17.9** before, −0.3, −0.4 after
+
+`Fast Blur` holds to 0.3 across its whole range. **Eight of the 38 `.vs` shaders were affected** —
+every one that clamps: `Bloom`, `City Lights`, `Edge Blur`, `Fast Blur`, `Gloom`, `Glow`,
+`Glow-Fast`, `Multi Pass Gaussian Blur`.
+
+The host now draws a quad over 0..1 (`GL_TRIANGLE_STRIP`, four vertices), matching the reference
+implementation, so a vertex-stage clamp is a no-op. One extra vertex invocation per pass.
+
 ### `ADD 1 PORTAUDIO` works again — the default-device path was dead
 
 `PaHostApiInfo::defaultOutputDevice` is a **global** device index; PortAudio's own header says so.
