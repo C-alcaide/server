@@ -1,6 +1,10 @@
 # Plan: a timeline that stays in sync across a cluster
 
-> **Status:** RESEARCH — 2026-09-14 — measured, not started; §2 is why the decisive number cannot be measured on this box
+> **Status:** RESEARCH — 2026-09-14 — **PARKED, blocked on hardware: this needs TWO MACHINES.**
+> Everything measurable on one box has been measured and is in §1; §2 is why that is not the
+> answer. **Do not re-measure on one box** — a second fixture there will produce the same table
+> of zeroes for the same structural reason, and reading it as "no drift" is the mistake this
+> plan exists to prevent
 > **Falsifier:** `timeline_clock_source`
 
 Two cluster nodes can be told to **start** a timeline on the same frame today, and that is
