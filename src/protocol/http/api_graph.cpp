@@ -846,7 +846,7 @@ api_reply graph_attach_verb(const api_context& ctx, const std::string& name,
         bool ok = false;
         try {
             ok = stage->detach_graph(where->layer).get();
-        } catch (...) {
+        } catch (const std::exception&) {
             return api_reply::fail(api_code::internal, "the detach threw");
         }
         json::object r;
@@ -884,7 +884,7 @@ api_reply graph_attach_verb(const api_context& ctx, const std::string& name,
     core::stage_base::attach_result res{};
     try {
         res = stage->attach_graph(layer, name).get();
-    } catch (...) {
+    } catch (const std::exception&) {
         return api_reply::fail(api_code::internal, "the attach threw");
     }
 

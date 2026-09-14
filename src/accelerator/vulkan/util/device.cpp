@@ -2487,9 +2487,9 @@ void device::record_attachment_layout_reset(void* cmd_buffer, const std::shared_
 {
     // ── THE SAME BARRIER, RECORDED INTO A COMMAND BUFFER THE CALLER ALREADY HAS ────────────
     //
-    // `reset_attachment_layout` below does this in a submit of its own -- allocate a command
-    // buffer, take the SHARED QUEUE MUTEX, submit, signal a timeline semaphore. That is fine
-    // once; it is not fine once per attachment per frame.
+    // This USED to be done in a submit of its own -- allocate a command buffer, take the SHARED
+    // QUEUE MUTEX, submit, signal a timeline semaphore. That is fine once; it is not fine once
+    // per attachment per frame, which is what the node graph made it.
     //
     // MEASURED 2026-09-13: a node graph takes one attachment per pass, and both the pool-hit and
     // the pool-miss path transitioned it this way -- so sixteen passes on four channels cost
@@ -2510,21 +2510,6 @@ void device::record_attachment_layout_reset(void* cmd_buffer, const std::shared_
         vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eInputAttachmentRead,
         vk::PipelineStageFlagBits2::eColorAttachmentOutput | vk::PipelineStageFlagBits2::eFragmentShader,
         *static_cast<vk::CommandBuffer*>(cmd_buffer));
-}
-
-void device::reset_attachment_layout(const std::shared_ptr<class texture>& tex)
-{
-    impl_->submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
-        transitionImageLayout(
-            tex->id(),
-            vk::ImageLayout::eUndefined,
-            vk::AccessFlagBits2::eNone,
-            vk::PipelineStageFlagBits2::eTopOfPipe,
-            vk::ImageLayout::eRenderingLocalRead,
-            vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eInputAttachmentRead,
-            vk::PipelineStageFlagBits2::eColorAttachmentOutput | vk::PipelineStageFlagBits2::eFragmentShader,
-            cmd);
-    });
 }
 
 void device::clear_attachment(const std::shared_ptr<class texture>& tex)

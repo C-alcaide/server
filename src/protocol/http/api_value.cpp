@@ -327,7 +327,7 @@ api_reply prepare_set(const std::string& path, const json::object& op, prepared_
             return api_reply::fail(api_code::field_wrong_type, "tween must be a name");
         try {
             out.tween = caspar::tweener(u16(std::string(t->as_string().c_str())));
-        } catch (...) {
+        } catch (const std::exception&) {
             return api_reply::fail(api_code::bad_request, std::string("no such tween: ") + t->as_string().c_str());
         }
     }
@@ -377,7 +377,7 @@ api_reply write_stage_value(const api_context& ctx,
     json::value doc;
     try {
         doc = body.empty() ? json::value(json::object()) : json::parse(body);
-    } catch (...) {
+    } catch (const std::exception&) {
         return api_reply::fail(api_code::bad_request, "body is not valid JSON");
     }
     if (!doc.is_object())
@@ -511,7 +511,7 @@ api_reply write_node_value(const api_context& ctx,
     json::value doc;
     try {
         doc = body.empty() ? json::value(json::object()) : json::parse(body);
-    } catch (...) {
+    } catch (const std::exception&) {
         return api_reply::fail(api_code::bad_request, "body is not valid JSON");
     }
     if (!doc.is_object())
@@ -532,7 +532,7 @@ api_reply write_node_value(const api_context& ctx,
     std::vector<core::param_snapshot> params;
     try {
         params = stage->describe_graph(layer).get();
-    } catch (...) {
+    } catch (const std::exception&) {
         return api_reply::fail(api_code::internal, "describing the graph threw");
     }
     const auto p = std::find_if(params.begin(), params.end(),
@@ -580,7 +580,7 @@ api_reply write_node_value(const api_context& ctx,
         try {
             ok = want ? stage->hold_field(layer, node_path).get()
                       : stage->release_field(layer, node_path).get();
-        } catch (...) {
+        } catch (const std::exception&) {
             ok = false;
         }
         if (want && !ok)
@@ -626,7 +626,7 @@ api_reply write_node_value(const api_context& ctx,
     if (const auto* h = op.if_contains("hold"); h && h->is_bool() && h->as_bool()) {
         try {
             held = stage->hold_field(layer, node_path).get();
-        } catch (...) {
+        } catch (const std::exception&) {
             held = false;
         }
     }
@@ -638,7 +638,7 @@ api_reply write_node_value(const api_context& ctx,
     bool applied = false;
     try {
         applied = stage->set_node_param(layer, node_path, operand, label).get();
-    } catch (...) {
+    } catch (const std::exception&) {
         return api_reply::fail(api_code::internal, "the node parameter write threw");
     }
     if (!applied)
@@ -703,7 +703,7 @@ api_reply write_param_value(const api_context& ctx,
     json::value doc;
     try {
         doc = body.empty() ? json::value(json::object()) : json::parse(body);
-    } catch (...) {
+    } catch (const std::exception&) {
         return api_reply::fail(api_code::bad_request, "body is not valid JSON");
     }
     if (!doc.is_object())
@@ -738,9 +738,21 @@ api_reply write_param_value(const api_context& ctx,
         return api_reply::fail(api_code::channel_not_found, "no channel " + std::to_string(channel));
 
     std::vector<core::param_snapshot> params;
+    // ── `std::exception` AND NOT `...`, FOR THE REASON THIS EXACT CALL ALREADY PROVED ──
+    //
+    // This tree is built with `/EHa`, under which a bare `catch (...)` also catches STRUCTURED
+    // exceptions -- an access violation included. `describe_params` is the call that faulted on
+    // every OFX plugin with a 2D parameter; `api_tree.cpp`'s copy ate it, answered with an empty
+    // parameter node, and the reading was "OFX plugins do not group their parameters" rather
+    // than "the server is corrupting memory here". It cost most of a session.
+    //
+    // THAT FIX WAS APPLIED WHERE THE BUG WAS FOUND AND NOWHERE ELSE. This file had twelve
+    // `catch (...)` and no `catch (std::exception)` at all, six of them wrapping stage calls --
+    // including this one, the same function. Memory corruption must reach a crash dump; only a
+    // C++ exception is the benign failure these handlers are written for.
     try {
         params = stage->describe_params(layer).get();
-    } catch (...) {
+    } catch (const std::exception&) {
         return api_reply::fail(api_code::internal, "the parameter query threw");
     }
 
@@ -800,7 +812,7 @@ api_reply write_param_value(const api_context& ctx,
     bool applied = false;
     try {
         applied = stage->set_param(layer, name, operand).get();
-    } catch (...) {
+    } catch (const std::exception&) {
         return api_reply::fail(api_code::internal, "the parameter write threw");
     }
 
@@ -841,7 +853,7 @@ api_reply write_value(const api_context& ctx,
     json::value doc;
     try {
         doc = body.empty() ? json::value(json::object()) : json::parse(body);
-    } catch (...) {
+    } catch (const std::exception&) {
         return api_reply::fail(api_code::bad_request, "body is not valid JSON");
     }
     if (!doc.is_object())
@@ -864,7 +876,7 @@ api_reply write_value(const api_context& ctx,
             return api_reply::fail(api_code::field_wrong_type, "tween must be a name");
         try {
             tween = caspar::tweener(u16(std::string(t->as_string().c_str())));
-        } catch (...) {
+        } catch (const std::exception&) {
             return api_reply::fail(api_code::bad_request,
                                    std::string("no such tween: ") + t->as_string().c_str());
         }

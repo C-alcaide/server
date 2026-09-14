@@ -172,7 +172,6 @@ class device final
     /// the definition for what N standalone submits measured.
     void record_attachment_layout_reset(void* cmd_buffer, const std::shared_ptr<class texture>& tex);
 
-    void reset_attachment_layout(const std::shared_ptr<class texture>& tex);
 
     /// Blacken an attachment and leave it in `eShaderReadOnlyOptimal`, ready to be SAMPLED.
     ///
@@ -253,10 +252,11 @@ class device final
     /// eColorAttachmentOptimal, which is exactly what copy_async() above assumes,
     /// so the two compose without a further transition.
     ///
-    /// `source` is left in eTransferSrcOptimal. That is safe for a mixer attachment
-    /// because the attachment pool calls reset_attachment_layout() (from
-    /// eUndefined) before reusing one -- the same reason copy_async() may leave it
-    /// that way.
+    /// `source` is left in eTransferSrcOptimal. That is safe for a mixer attachment because
+    /// a pooled one is transitioned from `eUndefined` before it is reused -- by
+    /// `record_attachment_layout_reset` into the frame's own command buffer, or by
+    /// `create_attachment` itself when the caller has not asked to defer it. Same reason
+    /// `copy_async()` may leave it that way.
     ///
     /// Returns nullptr if the reduction fails.
     std::shared_ptr<class texture> reduce_texture(const std::shared_ptr<class texture>& source, int levels);

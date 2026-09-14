@@ -454,10 +454,10 @@ struct image_kernel::impl
                     // declares that layout for it. create_attachment() below does this
                     // for a freshly-created/device-pooled texture; this cache bypasses
                     // that call entirely, so it must do the transition itself.
-                    // QUEUED, NOT SUBMITTED. `reset_attachment_layout` submits a command
-                    // buffer of its own and takes the shared queue mutex to do it; a graph
-                    // takes one attachment per pass, so that was one submit per pass per
-                    // channel per frame. See `pending_layout_`.
+                    // QUEUED, NOT SUBMITTED. This transition used to go out in a command
+                    // buffer of its own, taking the shared queue mutex to do it; a graph takes
+                    // one attachment per pass, so that was one submit per pass per channel per
+                    // frame. See `pending_layout_`.
                     pending_layout_.push_back(tex);
                     return tex;
                 }

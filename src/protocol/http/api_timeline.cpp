@@ -1338,7 +1338,7 @@ api_reply get_timeline_resolved(const api_context& ctx, const std::string& name,
             at               = std::stod(at_text, &used);
             if (used != at_text.size())
                 throw std::invalid_argument("trailing");
-        } catch (...) {
+        } catch (const std::exception&) {
             return api_reply::fail(api_code::bad_request,
                                     "at= takes a position in seconds, got '" + at_text + "'");
         }

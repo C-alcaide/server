@@ -493,7 +493,7 @@ api_reply run_action(const api_context& ctx, const std::string& path, const std:
             if (!doc.is_object())
                 return api_reply::fail(api_code::bad_request, "body must be a JSON object");
             obj = doc.as_object();
-        } catch (...) {
+        } catch (const std::exception&) {
             return api_reply::fail(api_code::bad_request, "body is not valid JSON");
         }
     }
@@ -564,9 +564,10 @@ api_reply run_action(const api_context& ctx, const std::string& path, const std:
             return r;
         f.get();
     } catch (const std::exception& e) {
+        // NO `catch (...)` AFTER THIS. There was one, and under `/EHa` its only remaining job was
+        // to swallow a STRUCTURED exception -- every C++ exception is already handled above. An
+        // access violation here must reach a crash dump rather than become a 500.
         return api_reply::fail(api_code::internal, e.what());
-    } catch (...) {
-        return api_reply::fail(api_code::internal, "the action threw");
     }
 
     log_it(u16(verb));
@@ -586,7 +587,7 @@ api_reply validate_batch(const api_context& ctx, const std::string& body, batch_
     json::value doc;
     try {
         doc = json::parse(body);
-    } catch (...) {
+    } catch (const std::exception&) {
         return api_reply::fail(api_code::bad_request, "body is not valid JSON");
     }
     if (!doc.is_object())
@@ -837,15 +838,14 @@ api_reply apply_batch(const api_context& ctx, const batch_plan& plan)
         for (auto& kv : delayed)
             kv.second->release();
     } catch (const std::exception& e) {
+        // NO `catch (...)` AFTER THIS, for the reason given at the other site: it would catch a
+        // structured exception and nothing else, since C++ exceptions land here. Losing the
+        // `abort()` of the delayed locks to an access violation costs nothing -- the process is
+        // already corrupt and the right outcome is a dump, not a tidy 500.
         for (auto& kv : delayed)
             kv.second->abort();
         CASPAR_LOG_CURRENT_EXCEPTION();
         return api_reply::fail(api_code::internal, std::string("the batch threw while being applied: ") + e.what());
-    } catch (...) {
-        for (auto& kv : delayed)
-            kv.second->abort();
-        CASPAR_LOG_CURRENT_EXCEPTION();
-        return api_reply::fail(api_code::internal, "the batch threw while being applied");
     }
 
     try {
