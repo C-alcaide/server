@@ -183,7 +183,11 @@ void command_relay::start_client_listener(const std::string& bind_address, uint1
     client_port_         = port;
     running_             = true;
     listener_thread_     = std::thread([this] { client_listener_loop(); });
-    CASPAR_LOG(info) << L"[cluster] Client relay listening on port " << port;
+    // NO "listening" LINE HERE. It used to be logged from this thread, before the listener
+    // thread had attempted anything, so a bind that then failed left a log saying both
+    // "listening on port N" and "Failed to bind relay listener on port N". The success line
+    // is emitted by `client_listener_loop` once the socket is actually accepting.
+    CASPAR_LOG(debug) << L"[cluster] Client relay listener starting on port " << port;
 }
 
 void command_relay::stop()
@@ -402,8 +406,31 @@ void command_relay::client_listener_loop()
         return;
     }
 
+    // ── EXCLUSIVE, NOT REUSED -- THIS LISTENER USED TO STEAL AMCP'S PORT ───────────────
+    //
+    // `SO_REUSEADDR` on a TCP listener means different things on the two platforms. On POSIX
+    // it permits rebinding a port left in TIME_WAIT, which is what it is usually wanted for.
+    // **On Windows it permits binding a port ANOTHER LIVE SOCKET IS ALREADY LISTENING ON**,
+    // and the two then split incoming connections unpredictably.
+    //
+    // `relay-port` used to default to 5250, which is also AMCP's default, so a client node on
+    // a stock config did exactly that. Measured 2026-09-14 with the relay pointed at the AMCP
+    // port: the bind SUCCEEDED, the log said "Client relay listening on port 5290", and the
+    // relay then accepted the harness's AMCP connections and logged them as
+    // **"Master connected to client relay"**. AMCP was dead on that node -- connect succeeds,
+    // every command times out -- and nothing anywhere reported an error.
+    //
+    // `SO_EXCLUSIVEADDRUSE` is the Windows option that means what `SO_REUSEADDR` means on
+    // POSIX here: fail rather than share. A clean bind failure is already handled below and is
+    // infinitely better than silently eating another service's clients.
+#ifdef _WIN32
+    int exclusive = 1;
+    setsockopt(listen_sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+               reinterpret_cast<const char*>(&exclusive), sizeof(exclusive));
+#else
     int reuse = 1;
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+#endif
 
     sockaddr_in addr = {};
     addr.sin_family  = AF_INET;
@@ -422,6 +449,7 @@ void command_relay::client_listener_loop()
         return;
     }
     listen_socket_ = static_cast<uintptr_t>(listen_sock);
+    CASPAR_LOG(info) << L"[cluster] Client relay listening on port " << client_port_;
 
     // Set accept timeout so we can check running_ flag
 #ifdef _WIN32

@@ -5,7 +5,7 @@
 > **Commands:** 4 fork-specific AMCP commands, registered by the module
 > **Architecture:** [`../architecture/CLUSTER_SYNC_DESIGN.md`](../architecture/CLUSTER_SYNC_DESIGN.md)
 > **Guide:** [`../guides/CLUSTER_SYNC.md`](../guides/CLUSTER_SYNC.md)
-> **Coverage:** `cluster` — 5/5 both mixers, two nodes on one box — plus `frame_clock_self_test` at boot
+> **Coverage:** `cluster` — 6/6 both mixers, two nodes on one box — plus `frame_clock_self_test` at boot
 
 Keeps playback aligned across several CasparCG servers driving one wall, so a clip started on four
 machines shows the same frame on all four. A scheduled start time and a shared frame clock, with a
@@ -101,6 +101,7 @@ multi-node half is no longer unverified.
 | the relay CONNECTS | UDP multicast for the clock and TCP for commands are different transports, so PTP can be green while commands have nowhere to go | `MEMBER: 127.0.0.1:N connected` |
 | **the two nodes AGREE on the frame number** | the feature's whole promise; everything else is plumbing in service of it | **0 frames** over 7 samples |
 | and the clock RUNS at the channel's rate | two stopped clocks agree perfectly, so "they agree" is satisfiable by a feature that does nothing | **120 frames in 2 s** at 59.94 |
+| **a command SCHEDULED on the master is executed BY THE CLIENT** | the oracle is a PICTURE on the other process — a relay that accepted the command, rewrote the channel and dropped it satisfies every check above, `MEMBER: connected` included | client renders `(32, 192, 64)`, the scheduled colour |
 
 **WHY ONE BOX IS ENOUGH.** `create_udp_socket` sets `SO_REUSEADDR`, so two processes can both
 bind the PTP ports and join the multicast group; `relay-port` is per-member configurable. **WSL is
@@ -110,9 +111,14 @@ switch where host↔guest UDP multicast does not work — which is exactly the P
 **The battery runs at 59.94 deliberately**, for the same reason the boot self-test covers
 1001-denominator rates: at 25p and 50p the arithmetic defect below is invisible.
 
-**Still measured by nothing:** a scheduled command actually *executing* on both nodes at the same
-frame, the virtual channel map, the content-sync watchdog's divergence report, and any partition
-or node-loss behaviour.
+The last check exercises the virtual channel map too: virtual channel 2 is mapped to the client,
+so `is_local(2)` is false, `route_command` sends it over the relay, and the map rewrites `2-` to
+the client's physical `1-`. Mutation-verified — with `is_local` forced true the client renders
+black and **only that check fails**, `MEMBER: connected` still green.
+
+**Still measured by nothing:** whether the two nodes execute on the *same frame* (this proves the
+command arrives and renders, not that it landed on the scheduled frame), the content-sync
+watchdog's divergence report, and any partition or node-loss behaviour.
 
 **`frame_clock_self_test()`, at every boot, unconditional.** The frame arithmetic is a pure
 function — no cluster, no network, no channel — so it is asserted at start-up rather than left
@@ -187,15 +193,23 @@ The corrected form carries the remainder and was checked against the exact ratio
    route**: there is no Linux build of this server, and WSL2 is NAT'd behind a virtual switch
    so host↔WSL2 UDP multicast does not work — which is exactly the PTP half.
 
-5. **`relay-port` defaults to 5250, which is also the AMCP port**, so a client node with an
-   otherwise-default config asks its relay listener to bind a port the AMCP server already
-   holds. A bind failure is logged as an error and the thread exits — but
-   `start_client_listener` logs *"Client relay listening on port N"* from the CALLING thread
-   before the listener has attempted anything, so the log says both. **And the listener sets
-   `SO_REUSEADDR`**, which on Windows permits binding a port another socket already holds
-   rather than refusing — so the two may both bind and compete for connections, which is worse
-   than a clean failure. Found by reading on 2026-09-14 and **not tested**: stated as a
-   question for the one-box battery above to answer, not as a finding.
+5. ~~**`relay-port` defaults to 5250, which is also the AMCP port.**~~ **TESTED AND FIXED
+   2026-09-14, and it was worse than the guess.** Pointed at the AMCP port, the relay's bind
+   **succeeded**: `SO_REUSEADDR` on Windows permits binding a port another live socket is
+   already listening on. The log read *"Client relay listening on port 5290"*, and the relay
+   then accepted the harness's AMCP connections and logged each one as **"Master connected to
+   client relay"**. AMCP was dead on that node — connect succeeds, every command times out —
+   and nothing anywhere reported an error.
+
+   Three fixes: the listener uses **`SO_EXCLUSIVEADDRUSE`** on Windows, which is what
+   `SO_REUSEADDR` means on POSIX here (fail rather than share), so the collision is now a
+   `[fatal] Failed to setup AMCP controller on port N. It is likely already in use`; the
+   *"listening"* line moved to after the bind actually succeeds, having previously been logged
+   from the calling thread before the listener attempted anything; and **the default is 5252**,
+   so a stock config does not collide at all.
+
+   `casparcg.config`'s reference block also showed `<member>…:5250</member>` and
+   `<relay-port>5250</relay-port>`, which taught the collision to anyone who copied it.
 
 ---
 

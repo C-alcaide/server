@@ -1,6 +1,34 @@
 CasparVP — Unreleased
 ==========================================
 
+### A cluster client's relay silently ate AMCP's connections
+
+`relay-port` defaulted to **5250 — the AMCP port** — so a client node on an otherwise-stock
+config asked its relay listener to bind the port AMCP already held. On Windows that **succeeded**:
+`SO_REUSEADDR` there permits binding a port another live socket is already listening on.
+
+Measured 2026-09-14. The log read *"Client relay listening on port 5290"*, and the relay then
+accepted ordinary AMCP connections and logged each one as **"Master connected to client relay"**.
+AMCP was dead on that node — the TCP connect succeeds and every command times out — and nothing
+anywhere reported an error.
+
+Three changes:
+
+* the listener uses **`SO_EXCLUSIVEADDRUSE`** on Windows, which is what `SO_REUSEADDR` means on
+  POSIX in this position: fail rather than share. A collision is now
+  `[fatal] Failed to setup AMCP controller on port N. It is likely already in use`;
+* **the default `relay-port` is 5252**, so a stock config does not collide;
+* the *"Client relay listening on port N"* line is logged after the bind succeeds. It was
+  previously emitted from the calling thread before the listener had attempted anything, so a
+  failed bind produced a log saying both "listening" and "Failed to bind".
+
+`casparcg.config`'s commented reference also showed `<relay-port>5250</relay-port>` and members on
+`:5250`, which taught the collision to anyone who copied it; it now shows 5252 and says the relay
+port must not be the AMCP port.
+
+**Operators with an explicit `<relay-port>5250</relay-port>` must change it** — that configuration
+previously "worked" by breaking AMCP silently and now refuses to start, which is the point.
+
 ### A cluster client numbered frames at 50 fps whatever its channel was
 
 `frame_clock` is constructed at a hardcoded 50 fps and `sync_framerate_from_channels()` corrects

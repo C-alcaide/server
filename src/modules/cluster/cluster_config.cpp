@@ -129,7 +129,11 @@ cluster_config parse_cluster_config(const boost::property_tree::wptree& properti
         // Client: master address
         auto master_w = node.get<std::wstring>(L"master", L"");
         cfg.master_address = narrow(master_w);
-        cfg.relay_port = static_cast<uint16_t>(node.get<int>(L"relay-port", 5250));
+        // 5252, NOT 5250. The old default was AMCP's own port, so a client node that did not
+        // set this explicitly asked its relay to bind the port AMCP already had -- which on
+        // Windows succeeded, silently, and left the relay eating AMCP's clients. 5253 is the
+        // config's own second AMCP listener, so 5252 is the first free neighbour.
+        cfg.relay_port = static_cast<uint16_t>(node.get<int>(L"relay-port", 5252));
 
     } catch (const std::exception& e) {
         CASPAR_LOG(error) << L"[cluster] Config parse error: " << e.what();
