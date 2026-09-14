@@ -5,7 +5,7 @@
 > **Commands:** 4 fork-specific AMCP commands, registered by the module
 > **Architecture:** [`../architecture/CLUSTER_SYNC_DESIGN.md`](../architecture/CLUSTER_SYNC_DESIGN.md)
 > **Guide:** [`../guides/CLUSTER_SYNC.md`](../guides/CLUSTER_SYNC.md)
-> **Coverage:** `cluster` — 6/6 both mixers, two nodes on one box — plus `frame_clock_self_test` at boot
+> **Coverage:** `cluster` — 7/7 both mixers, two nodes on one box — plus `frame_clock_self_test` at boot
 
 Keeps playback aligned across several CasparCG servers driving one wall, so a clip started on four
 machines shows the same frame on all four. A scheduled start time and a shared frame clock, with a
@@ -102,6 +102,7 @@ multi-node half is no longer unverified.
 | **the two nodes AGREE on the frame number** | the feature's whole promise; everything else is plumbing in service of it | **0 frames** over 7 samples |
 | and the clock RUNS at the channel's rate | two stopped clocks agree perfectly, so "they agree" is satisfiable by a feature that does nothing | **120 frames in 2 s** at 59.94 |
 | **a command SCHEDULED on the master is executed BY THE CLIENT** | the oracle is a PICTURE on the other process — a relay that accepted the command, rewrote the channel and dropped it satisfies every check above, `MEMBER: connected` included | client renders `(32, 192, 64)`, the scheduled colour |
+| **both nodes EXECUTE on the same frame, and on the one they were given** | the reason the module exists rather than an operator sending two `PLAY`s. Both halves asserted: the two ACTUALs within a frame of each other, **and** each ACTUAL within two frames of its TARGET — two nodes that both fire 120 frames early agree perfectly | **target and actual identical on both**, frame 1329784901 |
 
 **WHY ONE BOX IS ENOUGH.** `create_udp_socket` sets `SO_REUSEADDR`, so two processes can both
 bind the PTP ports and join the multicast group; `relay-port` is per-member configurable. **WSL is
@@ -116,9 +117,19 @@ so `is_local(2)` is false, `route_command` sends it over the relay, and the map 
 the client's physical `1-`. Mutation-verified — with `is_local` forced true the client renders
 black and **only that check fails**, `MEMBER: connected` still green.
 
-**Still measured by nothing:** whether the two nodes execute on the *same frame* (this proves the
-command arrives and renders, not that it landed on the scheduled frame), the content-sync
-watchdog's divergence report, and any partition or node-loss behaviour.
+**That last check needed an observable that did not exist.** The dispatch loop logged only when a
+command was **late by more than a frame**, so a *correct* execution emitted nothing and the frame
+it fired on could not be asked for from outside the process at all. `CLUSTER STATUS` now reports
+`EXECUTED`, `LAST-EXEC-TARGET` and `LAST-EXEC-ACTUAL`, each node reporting its own — so the
+comparison is between two self-reported frame numbers and the harness's polling latency cannot
+enter it. *Before recording something as untested, check whether it is observable.*
+
+Mutation-verified, and the mutation is instructive: with the dispatch loop's `target_frame >
+now_frame` guard removed, both nodes fire **120 frames early and in perfect agreement with each
+other** — the "they agree" half passes and only the "on the right frame" half catches it.
+
+**Still measured by nothing:** the content-sync watchdog's divergence report, and any partition or
+node-loss behaviour.
 
 **`frame_clock_self_test()`, at every boot, unconditional.** The frame arithmetic is a pure
 function — no cluster, no network, no channel — so it is asserted at start-up rather than left

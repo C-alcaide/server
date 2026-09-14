@@ -137,6 +137,15 @@ std::wstring cluster_status_command(protocol::amcp::command_context& ctx)
     // Scheduler
     if (g_state.scheduler) {
         reply << L"PENDING-COMMANDS: " << g_state.scheduler->pending_count() << L"\r\n";
+        // The last execution, so frame-accuracy is answerable from outside the process. TARGET
+        // is what was asked for and ACTUAL is the frame the dispatch loop fired on; both are
+        // -1 until something has run. Comparing TARGET across two nodes says they were told the
+        // same thing, and comparing ACTUAL says they did it at the same time -- which is the
+        // whole feature, and was previously visible only as a log line that a CORRECT execution
+        // did not emit.
+        reply << L"EXECUTED: " << g_state.scheduler->executed_count() << L"\r\n";
+        reply << L"LAST-EXEC-TARGET: " << g_state.scheduler->last_target_frame() << L"\r\n";
+        reply << L"LAST-EXEC-ACTUAL: " << g_state.scheduler->last_actual_frame() << L"\r\n";
     }
 
     // Members (master mode)

@@ -95,6 +95,14 @@ void command_scheduler::dispatch_loop()
                                     << L" frames: " << cmd.command_text.substr(0, 60);
             }
 
+            // Recorded BEFORE the executor runs, so the frame is the one the command was
+            // dispatched on rather than the one it happened to finish on -- an AMCP command
+            // that takes several frames to complete would otherwise report a frame it did not
+            // fire on, which is precisely the number this exists to make trustworthy.
+            last_target_frame_.store(cmd.target_frame, std::memory_order_relaxed);
+            last_actual_frame_.store(now_frame, std::memory_order_relaxed);
+            executed_count_.fetch_add(1, std::memory_order_relaxed);
+
             // Execute
             try {
                 executor_(cmd.command_text);

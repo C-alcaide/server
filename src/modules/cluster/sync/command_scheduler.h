@@ -68,6 +68,19 @@ class command_scheduler
     /// Get the current frame from the underlying clock
     int64_t current_frame() const { return clock_->current_frame(); }
 
+    // ── WHAT THE LAST EXECUTION ACTUALLY DID ────────────────────────────────────────────
+    //
+    // A correct execution used to be INVISIBLE. The dispatch loop logged only when a command
+    // was late by more than a frame, so "did the two nodes fire on the same frame" -- the
+    // feature's entire promise -- could not be asked from outside the process at all. A
+    // battery could see the command's EFFECT (a picture changing) and never the frame.
+    //
+    // That is the "check whether the thing is observable before recording it as untested"
+    // case from `CLAUDE.md`, and it is why `CLUSTER STATUS` now reports these three.
+    int64_t last_target_frame() const { return last_target_frame_.load(); }
+    int64_t last_actual_frame() const { return last_actual_frame_.load(); }
+    int64_t executed_count() const { return executed_count_.load(); }
+
   private:
     void dispatch_loop();
 
@@ -80,6 +93,13 @@ class command_scheduler
 
     std::atomic<bool> running_{false};
     std::thread       dispatch_thread_;
+
+    /// -1 until something has executed, so "never fired" is distinguishable from "fired at
+    /// frame 0" -- which are the same reading if this were zero-initialised, and frame 0 is
+    /// reachable when the epoch origin is in the future.
+    std::atomic<int64_t> last_target_frame_{-1};
+    std::atomic<int64_t> last_actual_frame_{-1};
+    std::atomic<int64_t> executed_count_{0};
 };
 
 }}} // namespace caspar::cluster::sync

@@ -1,6 +1,22 @@
 CasparVP — Unreleased
 ==========================================
 
+### `CLUSTER STATUS` reports which frame the scheduler last fired on
+
+A *correct* scheduled execution used to be invisible. The dispatch loop logged only when a command
+was **late by more than a frame**, so "did the two nodes fire on the same frame" — the feature's
+entire promise — could not be asked from outside the process.
+
+`CLUSTER STATUS` now carries `EXECUTED`, `LAST-EXEC-TARGET` and `LAST-EXEC-ACTUAL`. The frame is
+recorded *before* the executor runs, so it is the frame the command was dispatched on rather than
+the one it happened to finish on; both frame fields are `-1` until something has executed, so
+"never fired" is distinguishable from "fired at frame 0".
+
+Measured with the new observable, two nodes on one box at 59.94: **target and actual identical on
+both**, frame 1329784901. `cli.py cluster` gates it, and mutation-verifies it — with the dispatch
+loop's target-frame guard removed both nodes fire 120 frames early *and in perfect agreement with
+each other*, which is why the check asserts agreement **and** correctness rather than either alone.
+
 ### A cluster client's relay silently ate AMCP's connections
 
 `relay-port` defaulted to **5250 — the AMCP port** — so a client node on an otherwise-stock
