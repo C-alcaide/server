@@ -60,6 +60,7 @@
 #include <core/module_dependencies.h>
 #include <core/producer/frame_producer_registry.h>
 #include <core/video_format.h>
+#include <core/producer/transport_params.h>
 
 #include <boost/algorithm/string.hpp>
 
@@ -1370,6 +1371,172 @@ struct hap_producer_impl final : public core::frame_producer
     }
 
     // ── AMCP call handler ──
+    // ── THE TRANSPORT CONTRACT ──────────────────────────────────────────────────────────
+    //
+    // `core/producer/transport_params.h` owns the names, types and semantics; this supplies the
+    // closures, each reaching the SAME member `call()` below uses. So `CALL 1-1 SPEED 2` and a
+    // `PUT .../params/speed` cannot drift, and no `CALL` verb is deprecated.
+    //
+    // **IDENTICAL IN ALL THREE GPU-DIRECT PRODUCERS**, because their transport state is the
+    // same eight members under the same eight names -- two of them were written from the third.
+    // That is the case the shared contract exists for: before it, the same seven verbs were
+    // hand-written four times over (here, twice more, and in `ffmpeg_producer`) and no client
+    // could address any of them generically.
+    //
+    // Stage executor only (`producer_params.h`), which is the thread `call()` already reaches
+    // this producer on -- so the plain `in_frame_`/`out_frame_`/`total_frames_` members below
+    // are exactly as safe here as they are there.
+    std::vector<core::param_desc> parameters() override
+    {
+        using core::transport_param;
+
+        std::vector<core::param_desc> out;
+        int                           idx = 0;
+
+        const int64_t total = total_frames_;
+
+        auto scalar = [](auto v) {
+            core::monitor::vector_t x;
+            x.push_back(v);
+            return x;
+        };
+        auto one_number = [](const core::monitor::vector_t& v, double& n) {
+            std::vector<double> parsed;
+            if (v.size() != 1 || !core::as_numbers(v, parsed))
+                return false;
+            n = parsed[0];
+            return true;
+        };
+
+        // ---- position: SEEK as state, via the same request slot `CALL SEEK` writes ------
+        {
+            auto p = core::make_transport_param(transport_param::position, idx++);
+            p.min  = 0.0;
+            if (total > 0)
+                p.max = static_cast<double>(total - 1);
+            p.default_value.push_back(static_cast<int64_t>(0));
+
+            p.get = [this, scalar] { return scalar(frame_count_.load()); };
+            p.set = [this, one_number](const core::monitor::vector_t& v) {
+                double n = 0;
+                if (!one_number(v, n) || n < 0)
+                    return false;
+                // The decode thread picks this up, exactly as it does for `CALL SEEK`. Writing
+                // `frame_count_` directly would move the REPORTED position without moving the
+                // decoder, which is the shape of a parameter that looks like it works.
+                seek_request_.store(static_cast<int64_t>(n));
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        // ---- speed ---------------------------------------------------------------------
+        {
+            auto p = core::make_transport_param(transport_param::speed, idx++);
+            // No declared range: these producers play in reverse and at any rate.
+            p.default_value.push_back(1.0);
+            p.get = [this, scalar] { return scalar(speed_.load()); };
+            p.set = [this, one_number](const core::monitor::vector_t& v) {
+                double n = 0;
+                if (!one_number(v, n))
+                    return false;
+                speed_.store(n);
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        // ---- loop ----------------------------------------------------------------------
+        {
+            auto p = core::make_transport_param(transport_param::loop, idx++);
+            p.default_value.push_back(false);
+            p.get = [this, scalar] { return scalar(loop_.load()); };
+            p.set = [this, one_number](const core::monitor::vector_t& v) {
+                double n = 0;
+                if (!one_number(v, n))
+                    return false;
+                loop_.store(n != 0.0);
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        // ---- in ------------------------------------------------------------------------
+        {
+            auto p = core::make_transport_param(transport_param::in, idx++);
+            p.min  = 0.0;
+            if (total > 0)
+                p.max = static_cast<double>(total - 1);
+            p.default_value.push_back(static_cast<int64_t>(0));
+            p.get = [this, scalar] { return scalar(in_frame_); };
+            p.set = [this, one_number](const core::monitor::vector_t& v) {
+                double n = 0;
+                if (!one_number(v, n) || n < 0)
+                    return false;
+                in_frame_ = static_cast<int64_t>(n);
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        // ---- out -----------------------------------------------------------------------
+        {
+            auto p = core::make_transport_param(transport_param::out, idx++);
+            p.min  = 0.0;
+            if (total > 0)
+                p.max = static_cast<double>(total);
+            p.description += ". Write a value at or past the end to play to EOF, which is the "
+                             "default";
+            p.default_value.push_back(static_cast<int64_t>(0));
+            p.get = [this, scalar] {
+                // The EFFECTIVE end. The member holds -1 for "play to EOF" and a client that
+                // read a literal -1 back would draw a negative range; `receive_impl` resolves
+                // it the same way.
+                return scalar(out_frame_ >= 0 ? out_frame_ : total_frames_);
+            };
+            p.set = [this, one_number](const core::monitor::vector_t& v) {
+                double n = 0;
+                if (!one_number(v, n) || n < 0)
+                    return false;
+                const int64_t target = static_cast<int64_t>(n);
+                // At or past the material is "no bound", stored as the -1 the rest of this
+                // producer already tests for -- so there is one representation of EOF rather
+                // than two that have to agree.
+                out_frame_ = (total_frames_ > 0 && target >= total_frames_) ? -1 : target;
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        // ---- length: the MATERIAL, read-only -------------------------------------------
+        //
+        // Declared only when the container gave one. `total_frames_` is -1 for material whose
+        // length is unknown, and publishing that as a length is a number a client would draw a
+        // scrub bar from.
+        if (total > 0) {
+            auto p = core::make_transport_param(transport_param::length, idx++);
+            p.get  = [this, scalar] { return scalar(total_frames_); };
+            out.push_back(std::move(p));
+        }
+
+        // ---- pingpong ------------------------------------------------------------------
+        {
+            auto p = core::make_transport_param(transport_param::pingpong, idx++);
+            p.default_value.push_back(false);
+            p.get = [this, scalar] { return scalar(pingpong_.load()); };
+            p.set = [this, one_number](const core::monitor::vector_t& v) {
+                double n = 0;
+                if (!one_number(v, n))
+                    return false;
+                pingpong_.store(n != 0.0);
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        return out;
+    }
+
     std::future<std::wstring> call(const std::vector<std::wstring>& params) override
     {
         std::wstring result;

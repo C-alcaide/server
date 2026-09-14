@@ -28,6 +28,7 @@
 #include "../util/image_view.h"
 
 #include <core/frame/frame_transform.h>
+#include <core/producer/transport_params.h>
 
 #include <common/env.h>
 #include <common/filesystem.h>
@@ -267,6 +268,49 @@ struct image_scroll_producer : public core::frame_producer
     double speed_from_duration(double duration_seconds) const
     {
         return get_total_num_pixels() / (duration_seconds * format_desc_.fps);
+    }
+
+    // ── THE TRANSPORT CONTRACT, the one row this producer has ─────────────────────────
+    //
+    // `core/producer/transport_params.h`. `speed` alone: there is no position to seek to --
+    // a scroll is an offset accumulated per frame, not an index into material -- and no
+    // length, loop, in or out. **A producer declares only what it IMPLEMENTS.**
+    //
+    // NOTE THE SIGN. `CALL SPEED` negates in both directions (`-speed_.fetch()` out,
+    // `-val` in), because positive means "scroll up" to an operator and means a decreasing
+    // offset internally. The parameter keeps the OPERATOR's sign, so it agrees with the AMCP
+    // verb; a parameter that published the internal sign would read back the negative of what
+    // was written through the other facade, which is the kind of disagreement this contract
+    // exists to prevent.
+    std::vector<core::param_desc> parameters() override
+    {
+        using core::transport_param;
+
+        std::vector<core::param_desc> out;
+
+        auto p = core::make_transport_param(transport_param::speed, 0);
+        // No declared range: a scroll runs at any rate in either direction.
+        p.default_value.push_back(0.0);
+
+        p.get = [this] {
+            core::monitor::vector_t v;
+            v.push_back(-speed_.fetch());
+            return v;
+        };
+        p.set = [this](const core::monitor::vector_t& v) {
+            std::vector<double> n;
+            if (v.size() != 1 || !core::as_numbers(v, n))
+                return false;
+            // Duration 0 and linear, i.e. an immediate change: `CALL SPEED <v> <duration>
+            // <tween>` keeps the tweened form, which a single scalar write has no way to
+            // express. A client that wants the ramp uses the timeline, which is what a
+            // parameter being keyframable is FOR.
+            speed_ = speed_tweener(speed_.fetch(), -n[0], 0, tweener(L"linear"));
+            return true;
+        };
+        out.push_back(std::move(p));
+
+        return out;
     }
 
     std::future<std::wstring> call(const std::vector<std::wstring>& params) override

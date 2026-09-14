@@ -25,6 +25,8 @@
 
 #include "av_producer.h"
 
+#include <core/producer/transport_params.h>
+
 #include <common/env.h>
 #include <common/executor.h>
 #include <common/os/filesystem.h>
@@ -193,6 +195,199 @@ struct ffmpeg_producer : public core::frame_producer
     }
 
     bool is_ready() override { return producer_->is_ready(); }
+
+    // ── THE TRANSPORT CONTRACT ──────────────────────────────────────────────────────────
+    //
+    // `core/producer/transport_params.h` owns the names, types and semantics; this supplies the
+    // closures. Every one reaches the SAME `AVProducer` accessor `call()` below uses, so `CALL
+    // 1-1 SPEED 2` and a `PUT .../params/speed` cannot drift. Nothing below is deprecated.
+    //
+    // This is the producer that proves the contract is GENERAL rather than shaped around the one
+    // it was written for: `replay` declares five rows and this declares all seven, including the
+    // `pingpong` that `replay` has no implementation of.
+    //
+    // Stage executor only (`producer_params.h`), which is the same thread `call()` already
+    // reaches this producer on.
+    std::vector<core::param_desc> parameters() override
+    {
+        using core::transport_param;
+
+        std::vector<core::param_desc> out;
+        int                           idx = 0;
+
+        const auto file_len = producer_->file_duration();
+
+        // ---- position: SEEK as state --------------------------------------------------
+        {
+            auto p = core::make_transport_param(transport_param::position, idx++);
+            p.min  = 0.0;
+            // The range is the MATERIAL, not the clip: a client scrubbing wants to reach a frame
+            // outside the current in/out, and `AVProducer::seek` accepts one.
+            if (file_len)
+                p.max = static_cast<double>(*file_len > 0 ? *file_len - 1 : 0);
+            p.default_value.push_back(static_cast<int64_t>(0));
+
+            p.get = [this] {
+                core::monitor::vector_t v;
+                v.push_back(producer_->time());
+                return v;
+            };
+            p.set = [this](const core::monitor::vector_t& v) {
+                std::vector<double> n;
+                if (v.size() != 1 || !core::as_numbers(v, n))
+                    return false;
+                const int64_t target = static_cast<int64_t>(n[0]);
+                if (target < 0)
+                    return false;
+                producer_->seek(target);
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        // ---- speed --------------------------------------------------------------------
+        {
+            auto p = core::make_transport_param(transport_param::speed, idx++);
+            // No declared range: this producer plays in reverse and at any rate, and
+            // `av_producer.h` documents what that costs on a long-GOP codec. A fabricated
+            // 0..4 would be a lie a client draws a slider from.
+            p.default_value.push_back(1.0);
+
+            p.get = [this] {
+                core::monitor::vector_t v;
+                v.push_back(producer_->speed());
+                return v;
+            };
+            p.set = [this](const core::monitor::vector_t& v) {
+                std::vector<double> n;
+                if (v.size() != 1 || !core::as_numbers(v, n))
+                    return false;
+                producer_->speed(n[0]);
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        // ---- loop ---------------------------------------------------------------------
+        {
+            auto p = core::make_transport_param(transport_param::loop, idx++);
+            p.default_value.push_back(false);
+
+            p.get = [this] {
+                core::monitor::vector_t v;
+                v.push_back(producer_->loop());
+                return v;
+            };
+            p.set = [this](const core::monitor::vector_t& v) {
+                std::vector<double> n;
+                if (v.size() != 1 || !core::as_numbers(v, n))
+                    return false;
+                producer_->loop(n[0] != 0.0);
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        // ---- in -----------------------------------------------------------------------
+        {
+            auto p = core::make_transport_param(transport_param::in, idx++);
+            p.min  = 0.0;
+            if (file_len)
+                p.max = static_cast<double>(*file_len > 0 ? *file_len - 1 : 0);
+            p.default_value.push_back(static_cast<int64_t>(0));
+
+            p.get = [this] {
+                core::monitor::vector_t v;
+                v.push_back(producer_->start());
+                return v;
+            };
+            p.set = [this](const core::monitor::vector_t& v) {
+                std::vector<double> n;
+                if (v.size() != 1 || !core::as_numbers(v, n))
+                    return false;
+                const int64_t target = static_cast<int64_t>(n[0]);
+                if (target < 0)
+                    return false;
+                producer_->start(target);
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        // ---- out ----------------------------------------------------------------------
+        {
+            auto p = core::make_transport_param(transport_param::out, idx++);
+            p.min  = 0.0;
+            if (file_len)
+                p.max = static_cast<double>(*file_len);
+            p.default_value.push_back(static_cast<int64_t>(0));
+
+            p.get = [this] {
+                core::monitor::vector_t v;
+                // `start() + duration()`, which is what `CALL OUT` reports. `duration()` falls
+                // back to int64 max for a stream, so the sum is clamped to the material where
+                // one is known rather than published as a number no client can use.
+                const int64_t d = producer_->duration();
+                const int64_t s = producer_->start();
+                int64_t       o = (d == std::numeric_limits<int64_t>::max()) ? s : s + d;
+                if (auto fl = producer_->file_duration(); fl && o > *fl)
+                    o = *fl;
+                v.push_back(o);
+                return v;
+            };
+            p.set = [this](const core::monitor::vector_t& v) {
+                std::vector<double> n;
+                if (v.size() != 1 || !core::as_numbers(v, n))
+                    return false;
+                const int64_t target = static_cast<int64_t>(n[0]);
+                const int64_t s      = producer_->start();
+                if (target < s)
+                    return false;
+                // The same conversion `CALL OUT` does: this producer stores a DURATION and the
+                // contract names an END, so one is expressed in terms of the other here rather
+                // than in two places that could disagree.
+                producer_->duration(target - s);
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        // ---- length: the MATERIAL, read-only ------------------------------------------
+        //
+        // Declared only when the material HAS a length. A live stream has none, and publishing
+        // 0 or int64 max would be a number a client would draw a scrub bar from.
+        if (file_len) {
+            auto p = core::make_transport_param(transport_param::length, idx++);
+            p.get  = [this] {
+                core::monitor::vector_t v;
+                v.push_back(producer_->file_duration().value_or(0));
+                return v;
+            };
+            out.push_back(std::move(p));
+        }
+
+        // ---- pingpong -----------------------------------------------------------------
+        {
+            auto p = core::make_transport_param(transport_param::pingpong, idx++);
+            p.default_value.push_back(false);
+
+            p.get = [this] {
+                core::monitor::vector_t v;
+                v.push_back(producer_->pingpong());
+                return v;
+            };
+            p.set = [this](const core::monitor::vector_t& v) {
+                std::vector<double> n;
+                if (v.size() != 1 || !core::as_numbers(v, n))
+                    return false;
+                producer_->pingpong(n[0] != 0.0);
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        return out;
+    }
 
     std::future<std::wstring> call(const std::vector<std::wstring>& params) override
     {

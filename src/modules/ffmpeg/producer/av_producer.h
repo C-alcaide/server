@@ -45,6 +45,15 @@ class AVProducer
     AVProducer& duration(int64_t duration);
     int64_t     duration() const;
 
+    /// The length of the MATERIAL, as opposed to `duration()`, which is the length of the
+    /// playable CLIP. The impl has always had it -- `state()` publishes it as the second
+    /// element of `file/frame` -- and this exposes it because the transport contract's
+    /// `length` means the material and nothing else (`core/producer/transport_params.h`).
+    ///
+    /// Optional because a stream has no length, and `{}` is the honest answer where
+    /// `duration()` falls back to `int64_t` max.
+    std::optional<int64_t> file_duration() const;
+
     // Playback speed multiplier.
     //   1.0  = normal,  0.5 = half-speed,  0.0 = freeze
     //  -1.0  = reverse at normal speed,  -0.5 = reverse at half-speed

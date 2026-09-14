@@ -1,6 +1,31 @@
 CasparVP — Unreleased
 ==========================================
 
+### Every producer that plays a timeline is now scrubbable from the control API
+
+`replay` declared the transport contract first; **all eight transport producers declare it now** —
+`ffmpeg`, `hap`, `cuda_prores`, `cuda_notchlc`, `replay`, `gstreamer`, `artnet` and
+`image_scroll` — each publishing only the rows it implements, under
+`/v1/.../foreground/params/`. A producer parameter is already a **binding and timeline-keyframe
+target**, so a keyframed speed ramp or a scripted scrub needs no new machinery.
+
+**No `CALL` verb is deprecated anywhere.** Every accessor delegates to the same member `call()`
+writes, so the two facades reach one value by construction rather than by agreement — measured
+in both directions (`CALL LOOP 1` then read the parameter; PUT `pingpong` then read it back).
+
+**The oracle worth stating, because it is stronger than the obvious one.** `position` is gated by
+the burnt-in frame marker, not by "the picture changed": write `position = N` and the frame that
+comes back must **be** N. Measured on `ffmpeg` at 42, 137 and 7 — all three exact. A seek that
+lands one frame off produces a picture that is *almost* right, which is worse than one obviously
+wrong because it gets explained as rounding; `frame_pin.py` records three findings and twelve
+cases that were exactly that.
+
+What each producer declares, and the two AMCP conventions the contract had to pick between
+(`length` as the material rather than the clip; `out` as an end rather than a duration), are in
+`docs/features/control-api.md`. Still measured to the PICTURE on `ffmpeg` and `replay` only: the
+GPU-direct trio's rows are verified as declared, not as driven, because there is no NotchLC or
+Hap encoder on this box to build a frame-identifying fixture with.
+
 ### A replay buffer can be scrubbed from the control API, and a producer parameter can be READ
 
 **Counted 2026-09-14: thirteen producers implement `frame_producer::call()`, two implement

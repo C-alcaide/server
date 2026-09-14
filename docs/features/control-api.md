@@ -795,9 +795,25 @@ second, typed route to the same member, and a producer delegates both to one pla
 cannot drift. `cli.py replay` asserts exactly that: `CALL 1-10 SPEED 0.5` then a GET of
 `.../params/speed` reads `0.5`.
 
-Declared today by `replay` (`position`, `speed`, `loop`, `in`, `out`, `length`). The remaining
-seven transport producers are `docs/plans/PRODUCER_TRANSPORT_API_PLAN.md` P2–P4; until then their
-transport is AMCP-only, which is what the plan exists to close.
+**Declared today by all eight transport producers**, each publishing only the rows it implements:
+
+| producer | rows |
+| :--- | :--- |
+| `ffmpeg` | all seven |
+| `hap`, `cuda_prores`, `cuda_notchlc` | all seven (one shared implementation — their transport state is the same eight members under the same eight names) |
+| `replay` | six; no `pingpong` |
+| `gstreamer` | `position`, `length` |
+| `artnet` (DMX recording) | `position`, `length` |
+| `image_scroll` | `speed` |
+
+`length` appears only where the material HAS a length — a live stream declares no `length` rather
+than a fabricated 0, and `ffmpeg` omits the row entirely for one.
+
+**What still has no parameter is an ACTION.** GStreamer's `PAUSE`/`RESUME` pause the *pipeline*
+where the stage's `play`/`pause`/`resume` verbs pause the *layer* — a real difference, and an
+argument for a producer-level action route one day. It is not an argument for pretending an
+action is a value, so those stay on `CALL`.
+`docs/plans/PRODUCER_TRANSPORT_API_PLAN.md` §7 says what would settle it.
 
 ### `params/*` — enough to GENERATE a control surface, not merely to drive one
 

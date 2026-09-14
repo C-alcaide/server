@@ -46,6 +46,7 @@
 #include <core/frame/pixel_format.h>
 #include <core/monitor/monitor.h>
 #include <core/video_format.h>
+#include <core/producer/transport_params.h>
 
 #include <common/bit_depth.h>
 
@@ -1134,6 +1135,66 @@ struct gst_producer : public core::frame_producer
     /// FFmpeg producer answers: LOOP, IN and OUT are properties of a *file* producer that
     /// owns its own reader, and this one owns a pipeline whose source may be a socket. A
     /// command that cannot mean anything here is refused rather than silently accepted.
+    // ── THE TRANSPORT CONTRACT, the two rows this producer actually has ────────────────
+    //
+    // `core/producer/transport_params.h`. `position` and `length` only: GStreamer's `call()`
+    // has no speed, loop, in, out or pingpong, and **a producer declares only what it
+    // IMPLEMENTS** -- a row that accepted a write and changed nothing would be the
+    // `MIXER EXPOSURE` class, a command that returns success and moves no pixel.
+    //
+    // ITS `PAUSE`/`RESUME`/`PLAY` STAY ACTIONS, and that is the one real decision in this
+    // file. They are imperative rather than state, so they are wrong as parameters -- and the
+    // stage already answers `play`, `pause` and `resume` at
+    // `/v1/.../channel/{n}/layer/{m}/{verb}`. Those pause the LAYER where these pause the
+    // PIPELINE, which is a real difference and an argument for a producer-level action route
+    // one day; it is not an argument for pretending an action is a value. See
+    // `docs/plans/PRODUCER_TRANSPORT_API_PLAN.md` D4 and §7.
+    std::vector<core::param_desc> parameters() override
+    {
+        using core::transport_param;
+
+        std::vector<core::param_desc> out;
+        int                           idx = 0;
+
+        const auto total = query_duration_frames();
+
+        {
+            auto p = core::make_transport_param(transport_param::position, idx++);
+            p.min  = 0.0;
+            if (total > 0)
+                p.max = static_cast<double>(total - 1);
+            p.default_value.push_back(static_cast<int64_t>(0));
+
+            p.get = [this] {
+                core::monitor::vector_t v;
+                v.push_back(static_cast<int64_t>(query_position_frames()));
+                return v;
+            };
+            p.set = [this](const core::monitor::vector_t& v) {
+                std::vector<double> n;
+                if (v.size() != 1 || !core::as_numbers(v, n) || n[0] < 0)
+                    return false;
+                // The same call `CALL SEEK` makes, so the two facades cannot drift -- and it
+                // returns a bool, which is exactly what `param_desc::set` wants: a pipeline
+                // that refuses the seek reports a refusal rather than a silent success.
+                return seek_to_frame(static_cast<uint32_t>(n[0]));
+            };
+            out.push_back(std::move(p));
+        }
+
+        if (total > 0) {
+            auto p = core::make_transport_param(transport_param::length, idx++);
+            p.get  = [this] {
+                core::monitor::vector_t v;
+                v.push_back(static_cast<int64_t>(query_duration_frames()));
+                return v;
+            };
+            out.push_back(std::move(p));
+        }
+
+        return out;
+    }
+
     std::future<std::wstring> call(const std::vector<std::wstring>& params) override
     {
         if (params.empty())

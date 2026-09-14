@@ -5918,6 +5918,8 @@ AVProducer& AVProducer::duration(int64_t duration)
 
 int64_t AVProducer::duration() const { return impl_->duration().value_or(std::numeric_limits<int64_t>::max()); }
 
+std::optional<int64_t> AVProducer::file_duration() const { return impl_->file_duration(); }
+
 AVProducer& AVProducer::set_vfilter(const std::string& filter)
 {
     impl_->set_vfilter(filter);

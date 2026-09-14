@@ -31,6 +31,7 @@
 #include <core/frame/draw_frame.h>
 #include <core/monitor/monitor.h>
 #include <core/video_format.h>
+#include <core/producer/transport_params.h>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/asio.hpp>
@@ -447,6 +448,67 @@ struct dmx_file_producer : public core::frame_producer
     bool is_ready() override { return true; }
 
     uint32_t nb_frames() const override { return total_frames_; }
+
+    // ── THE TRANSPORT CONTRACT, the two rows this producer actually has ────────────────
+    //
+    // `core/producer/transport_params.h`. `position` and `length` only -- `call()` here
+    // implements `SEEK` and nothing else, and **a producer declares only what it IMPLEMENTS**.
+    //
+    // Worth recording because the plan's own survey got it wrong: this producer was listed as
+    // having `in` and `out`, and it does not. Those are ARGUMENTS to `SEEK` (`SEEK in`,
+    // `SEEK out`), and a grep for the words found them in the argument position. Same shape as
+    // the `PREVIZ MAP` note in `CLAUDE.md`: a grep for a two-word form matches the wrong half
+    // of the grammar. **Read the dispatch, not the strings.**
+    std::vector<core::param_desc> parameters() override
+    {
+        using core::transport_param;
+
+        std::vector<core::param_desc> out;
+        int                           idx = 0;
+
+        {
+            auto p = core::make_transport_param(transport_param::position, idx++);
+            p.min  = 0.0;
+            if (total_frames_ > 0)
+                p.max = static_cast<double>(total_frames_ - 1);
+            p.default_value.push_back(static_cast<int64_t>(0));
+
+            p.get = [this] {
+                core::monitor::vector_t v;
+                v.push_back(static_cast<int64_t>(position_us_ / 1000000.0 * format_desc_.hz));
+                return v;
+            };
+            p.set = [this](const core::monitor::vector_t& v) {
+                std::vector<double> n;
+                if (v.size() != 1 || !core::as_numbers(v, n) || n[0] < 0)
+                    return false;
+                // The same three stores `CALL SEEK` ends with, including `last_idx_ = -1`:
+                // without it the producer holds the universe it last sent and the seek is
+                // invisible on the wire until the next CHANGE. A seek that moves the reported
+                // position and not the output is exactly the defect this contract is meant to
+                // make impossible.
+                int64_t off = static_cast<int64_t>((n[0] / format_desc_.hz) * 1000000.0);
+                off         = std::clamp(off, int64_t(0), recording_.duration_us);
+                seek_offset_us_.store(off);
+                frame_at_seek_.store(frame_number());
+                last_idx_ = -1;
+                return true;
+            };
+            out.push_back(std::move(p));
+        }
+
+        if (total_frames_ > 0) {
+            auto p = core::make_transport_param(transport_param::length, idx++);
+            p.get  = [this] {
+                core::monitor::vector_t v;
+                v.push_back(static_cast<int64_t>(total_frames_));
+                return v;
+            };
+            out.push_back(std::move(p));
+        }
+
+        return out;
+    }
 
     std::future<std::wstring> call(const std::vector<std::wstring>& params) override
     {

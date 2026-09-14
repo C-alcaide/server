@@ -1,7 +1,7 @@
 # Plan: the producer control surface reaches the API — a declared transport contract
 
-> **Status:** PARTIAL — 2026-09-14 — P1 shipped (the contract, and `replay` implementing it); P2-P5 open
-> **Falsifier:** none — PARTIAL carries its outcomes in §4, which marks each phase
+> **Status:** SHIPPED — 2026-09-14 — P1-P5 all landed; §4 marks each phase and §6 what is still owed
+> **Falsifier:** none — SHIPPED carries its outcomes in §4, which marks each phase
 
 Arose from the replay work of the same day (`docs/features/replay.md` §4.1), which found a module
 whose entire interaction is scrubbing and whose entire control surface is AMCP.
@@ -31,7 +31,7 @@ almost none of them.
 | `hap_producer` | `loop` `speed` `in` `out` `length` `seek` `pingpong` |
 | `replay_producer` | `loop` `speed` `in` `out` `seek` (+ `export`) |
 | `gst_producer` | `seek` `position` `length` `play` `pause` `resume` |
-| `dmx_producer` | `in` `out` `seek` |
+| `dmx_producer` | `seek` only — **this row was WRONG when written**, and the correction is the useful half: `in` and `out` here are ARGUMENTS to `SEEK` (`SEEK in`, `SEEK out`), and the survey grep found the words in the argument position. Same shape as the `PREVIZ MAP` note in `CLAUDE.md`, where a grep for a two-word form matched the wrong half of the grammar. **Read the dispatch, not the strings** |
 | `image_scroll_producer` | `speed` |
 
 **Eight producers share one transport vocabulary, hand-written eight times, reachable only over
@@ -144,7 +144,7 @@ is the one this plan came out of, and — since 2026-09-14 — it is the only on
 a battery at all. Starting where the coverage is is the difference between a measured change and
 a plausible one.
 
-### P2 — `ffmpeg_producer`, the reference implementation
+### P2 — `ffmpeg_producer`, the reference implementation — **SHIPPED 2026-09-14**
 
 The highest-traffic producer and the one whose `call()` the other three copied. `loop`, `speed`,
 `in`, `out`, `length`, `position`, `pingpong` — the full contract, and the row that proves the
@@ -154,7 +154,7 @@ contract is general rather than shaped around replay.
   transport parameter that a timeline can keyframe and §3's ownership decision is only testable
   here. And a `flat-decoded` run, because `in`/`out`/`length` touch the trim path.
 
-### P3 — the GPU-direct trio: `notchlc`, `prores`, `hap`
+### P3 — the GPU-direct trio: `notchlc`, `prores`, `hap` — **SHIPPED 2026-09-14**
 
 Three near-identical `call()` implementations. Mechanical once P2 exists, and the phase where the
 contract earns its keep — if it needs bending for any of the three, the bend belongs in P1's
@@ -162,14 +162,35 @@ header rather than in the producer.
 
 * **Gate:** `producer-params` arms for each; the existing decode batteries for the trim path.
 
-### P4 — the stragglers: `gst`, `dmx`, `image_scroll`
+### P4 — the stragglers: `gst`, `dmx`, `image_scroll` — **SHIPPED 2026-09-14**
 
 `gst_producer` is the interesting one: its `play`/`pause`/`resume` are genuine **actions** on the
 producer rather than on the stage, and the stage already has verbs by those names. Decide whether
 they map onto the existing stage verbs or need their own — this phase is small but it is not
 mechanical, and it is the one that tells us whether D4 holds.
 
-### P5 — docs
+**What P2-P4 found.**
+
+* **The GPU-direct trio needed no adaptation at all**, which is the strongest evidence the
+  contract is general: `hap`, `cuda_prores` and `cuda_notchlc` keep their transport state under
+  eight identically-named members, so ONE implementation applies to all three verbatim. Two of
+  them were written from the third, which is exactly the duplication the contract replaces.
+* **`ffmpeg` needed one thing exposed.** `file_duration()` — the MATERIAL length, as against
+  `duration()`'s clip length — existed on the impl and was published inside `file/frame`, but had
+  no public accessor. `length` means the material, so it is public now.
+* **`dmx`'s survey row was wrong** (see the table above), and `gst` settled D4 in its favour: its
+  `PAUSE`/`RESUME` are imperative and stay on `CALL`, because a stage `pause` pauses the LAYER
+  and these pause the PIPELINE. A real difference, an argument for a producer action route one
+  day, and not an argument for modelling an action as a value.
+* **And a HARNESS defect that cost real coverage.** `producer-params` gated its OFX arm with
+  `if not ofx_plugins: rep.add(...); return rep` — a RETURN, so on a box with no OFX plugins
+  installed every check after it silently did not run, including six `/v1/catalog` checks, while
+  the headline read 18/19 as though that were the whole story. The catalogue section now sits
+  above the gate with only its two plug-in-naming checks guarded. 18/19 → 30/31 on this box, and
+  the eleven newly-running checks were all green — so this cost coverage rather than hiding a
+  defect, which is the good version of that discovery and not a reason to have left it.
+
+### P5 — docs — **SHIPPED 2026-09-14**
 
 `docs/features/` gains the contract's own page or a section in the producer doc that owns it;
 `OPERATIONS_GUIDE.md` gains the parameter paths beside the AMCP verbs they mirror; the harness
@@ -196,7 +217,20 @@ change"* rather than *"`position` reads back what was written"*.
 
 ---
 
-## 6. Explicitly out of scope
+## 6. What is still owed, and what was explicitly out of scope
+
+**Owed: a PICTURE gate for the GPU-direct trio.** `ffmpeg` and `replay` are measured to the
+decoded frame; `hap`, `cuda_prores` and `cuda_notchlc` are verified only as DECLARING the
+contract. That check catches a producer that declares nothing — the realistic failure when five
+producers are given the same treatment in one pass — and cannot catch one that declares a row it
+does not drive, which is the `MIXER EXPOSURE` class. Closing it needs a frame-identifying fixture
+in each codec, and there is no NotchLC or Hap encoder on this box to build one with. Stated in
+the battery's own text rather than left for a reader to infer.
+
+**Owed: `gstreamer` and `artnet` are declared but undriven** by any battery, for the same reason
+and with less excuse.
+
+### Explicitly out of scope
 
 * **`isf` and `ofx`** — they already declare `parameters()`, and `producer-params` covers them.
 * **`remotewall`, `html`, `flash`** — configuration and CG verbs, not transport. A CG API is its
