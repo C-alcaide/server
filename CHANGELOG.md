@@ -1,6 +1,28 @@
 CasparVP — Unreleased
 ==========================================
 
+### `UNBIND` honours the `.N` component suffix its own grammar advertises
+
+`BIND` is per-component — its replace predicate compares `b.component`, so two bindings can drive
+the two halves of a `point2D` from different sources. `UNBIND` was per-**field**: it split the
+suffix off the address and then matched on the field alone, so `UNBIND 1-10 producer/pos.0`
+removed the binding on component 1 as well. The pair could be created and not taken apart.
+
+`UNBIND`'s own documented grammar says *"optionally with a `.N` component suffix (`midtone.1`)"*,
+so this is the command doing less than it claims rather than a new capability. A target with no
+suffix still removes every component, which is what `UNBIND 1-10 opacity` has always meant.
+
+Found by a probe whose **cleanup** failed: the second `UNBIND` answered `404 no matching binding`
+because the first had already taken both.
+
+Measured alongside it, and worth recording because it was assembled from two separately-gated
+halves and never checked as a whole: **a posted mouse move drives an ISF shader's own input, to
+the picture, at 1 LSB.** `isf_producer` does not override `frame_producer::input()` — only
+`html_producer` does — so a shader never sees a pointer event directly; its route is
+`input_source` → a binding → a producer parameter. Driving both components of a `point2D` from
+`mouse/x` and `mouse/y`, with the two deliberately different at every step, the red and green
+channels track the pointer to within half a code value.
+
 ### Two `PREVIZ` commands stop accepting a mistake and reporting success
 
 **`EYEMODE` accepted any word as `CAMERA`.** The test was `== "FIXED"`, so `EYEMODE FIEXD` — or

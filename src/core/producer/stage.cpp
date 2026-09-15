@@ -2711,7 +2711,17 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
     std::future<int> remove_bindings(int layer, const std::string& target)
     {
-        return executor_.begin_invoke([this, layer, target] {
+        // Whether the caller WROTE a component, which `address::split` cannot say: it reports
+        // 0 both for `pos.0` and for a bare `pos`. Decided here, on the raw string, once.
+        bool       had_component = false;
+        {
+            const auto dot = target.rfind('.');
+            if (dot != std::string::npos && dot + 1 < target.size()) {
+                const auto tail = target.substr(dot + 1);
+                had_component   = tail.find_first_not_of("0123456789") == std::string::npos;
+            }
+        }
+        return executor_.begin_invoke([this, layer, target, had_component] {
             const auto before = bindings_.size();
             bindings_.erase(std::remove_if(bindings_.begin(), bindings_.end(),
                                            [&](const binding::binding_def& b) {
@@ -2722,7 +2732,29 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                                                std::string field;
                                                uint8_t     comp = 0;
                                                address::split(target, field, comp);
-                                               return b.target == field;
+                                               if (b.target != field)
+                                                   return false;
+                                               // ── A `.N` SUFFIX NARROWS THE REMOVAL ──────
+                                               //
+                                               // `UNBIND`'s own grammar advertises the suffix
+                                               // -- *"optionally with a `.N` component suffix
+                                               // (`midtone.1`)"* -- and this ignored it, so
+                                               // `UNBIND ... pos.0` removed the binding on
+                                               // component 1 as well. `BIND` is per-component
+                                               // (its replace predicate compares
+                                               // `b.component`), so the pair could be created
+                                               // and not taken apart: an operator driving a
+                                               // `point2D` from two sources could not release
+                                               // one of them.
+                                               //
+                                               // Found 2026-09-15 by a probe whose CLEANUP
+                                               // failed -- the second `UNBIND` answered 404
+                                               // because the first had already taken both.
+                                               //
+                                               // No suffix still removes every component, which
+                                               // is what `UNBIND 1-10 opacity` has always meant
+                                               // and what an operator clearing a target wants.
+                                               return !had_component || b.component == comp;
                                            }),
                             bindings_.end());
             return static_cast<int>(before - bindings_.size());

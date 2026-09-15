@@ -263,6 +263,23 @@ No `<configuration>` elements. Entirely runtime.
 
 ---
 
+**A binding drives ONE component, and both halves of that are load-bearing.** `add_binding`'s
+replace predicate compares `b.component`, so two bindings on different components of one target
+coexist — which is how a `point2D` ISF input is driven from `mouse/x` and `mouse/y`. Measured
+2026-09-15 at 1 LSB, with the two pointer axes deliberately different at every step so that "both
+components followed" is distinguishable from "one source wrote both".
+
+`UNBIND` matches the same way since 2026-09-15: a `.N` suffix removes that component only, and no
+suffix removes every component. It used to ignore the suffix, so a pair could be created and not
+taken apart — and its grammar had advertised the suffix all along.
+
+**And the route matters for ISF specifically**: `isf_producer` does not override
+`frame_producer::input()` — `html_producer` is the only producer that does — so a shader never
+receives a pointer event. Its entire interactivity is this path: `input_source` → binding →
+producer parameter.
+
+---
+
 ## 3. Verification — what is measured, and what is not
 
 ### 3.1 Two self-tests at every server start
