@@ -206,15 +206,6 @@ struct draw_params final
     /// plausible and wrong, and nothing downstream could tell.
     bool node_uv_valid = false;
 
-    /// This draw's destination is an **fp16** attachment.
-    ///
-    /// Vulkan-only, and it exists because a pipeline carries its colour-attachment format in
-    /// its own creation info: writing fp16 through a unorm pipeline is a format MISMATCH rather
-    /// than a conversion. The kernel reads this and hands back the matching pipeline through
-    /// the existing per-layer hook, which OCIO already uses for the same reason.
-    ///
-    /// OpenGL needs no equivalent: a GL program does not carry its target's format.
-    bool node_fp16 = false;
 };
 
 }}} // namespace caspar::accelerator::vulkan

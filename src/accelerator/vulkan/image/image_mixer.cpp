@@ -1112,10 +1112,9 @@ class image_renderer
                 // AND ON THIS BACKEND THE ATTACHMENT FORMAT IS HALF THE CHANGE: the pipeline
                 // carries the colour-attachment format in its own creation info, so writing
                 // fp16 through a unorm pipeline is a format mismatch rather than a conversion.
-                // `apply_node` sets `draw_params.node_fp16` and the kernel hands back the
-                // matching pipeline through the existing per-layer hook.
+                // The kernel reads the format off `draw_params.background` -- this attachment --
+                // and hands back the matching pipeline through the existing per-layer hook.
                 head_texture           = pass->create_attachment_as(common::render_format::fp16);
-                draw_params.node_fp16  = true;
                 draw_params.background = head_texture;
             } else {
                 draw_params.background = target_texture;
@@ -1720,9 +1719,6 @@ class image_renderer
         draw_params.isf_rendersize[1]       = isf_rh;
         if (isf_targets)
             draw_params.isf_targets = *isf_targets;
-        // The destination is an fp16 attachment, so this draw needs the fp16 pipeline. See the
-        // head pass above for why the format is not just a property of the image here.
-        draw_params.node_fp16               = true;
         // Per-LAYER, the same for every node pass of this layer. The kernel ANDs it with the
         // mask's own `space` port, so a `frame`-space mask is unaffected by its presence.
         draw_params.node_uv_inv             = node_uv_inv;
@@ -1831,10 +1827,11 @@ class image_renderer
         tail.target_height = format_desc.square_height;
 
         // The PLANE geometry is the attachment's; the COLOUR metadata is the item's, so every
-        // branch in the kernel decides exactly as it did for the head. `node_fp16` stays FALSE:
-        // the tail READS the fp16 attachment and WRITES the channel's own format, and on this
-        // backend that flag selects the pipeline's colour-attachment format rather than the
-        // sampler's.
+        // branch in the kernel decides exactly as it did for the head. And the tail needs no
+        // declaration of its own: it READS the fp16 attachment and WRITES whatever attachment
+        // it is given, which is what the kernel now asks `background` for. Under a `node_fp16`
+        // flag this was a comment explaining why the flag stayed false -- the case the flag
+        // could state, next to the one it could not.
         tail.pix_desc.format = (source_texture->depth() == common::bit_depth::bit8)
                                    ? core::pixel_format::bgra
                                    : core::pixel_format::rgba;

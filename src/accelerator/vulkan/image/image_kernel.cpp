@@ -1376,19 +1376,34 @@ struct image_kernel::impl
             current_ocio_pipeline_  = ocio->pipeline;
         }
 
-        // ── A NODE PASS WRITING fp16 NEEDS THE fp16 PIPELINE ───────────────────────
+        // ── THE PIPELINE MUST MATCH THE ATTACHMENT THIS DRAW ACTUALLY WRITES ────────────
         //
         // A pipeline carries its colour-attachment format in its own creation info, so a draw
-        // into an fp16 attachment through a unorm pipeline is a FORMAT MISMATCH -- not a
-        // conversion, and not something the API reports as a value you could read back.
+        // whose pipeline and attachment disagree is a FORMAT MISMATCH -- not a conversion, and
+        // not something the API reports as a value you could read back. The pass-wide fallback
+        // (`get_pipeline()`) is built for the CHANNEL's render format, which is right for every
+        // draw into the channel's own attachment and wrong for every draw into another one.
+        //
+        // THIS REPLACES A `node_fp16` FLAG, and the flag is why the defect below existed. It
+        // said "this draw writes fp16", which covered the node pass that writes an fp16
+        // attachment under a unorm channel -- and had no way to express the OPPOSITE case. So
+        // `apply_passthrough`, which resolves an fp16 working space INTO a unorm attachment,
+        // declared nothing and drew through the channel's fp16 pipeline:
+        // `VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08910`, twenty times a run under
+        // `<render-format>fp16`, found by `vk-validation` on the first run after that battery
+        // was repaired on 2026-09-15.
+        //
+        // Asking the ATTACHMENT closes the class rather than the instance: `texture::format()`
+        // is the format the image was created with and is immutable in Vulkan, so it cannot
+        // disagree with what the draw will do. A flag can, and this one did.
         //
         // Through the SAME per-layer hook OCIO uses, which is why that hook is per layer rather
-        // than per pass: a pass composites layers that may each need a different pipeline.
-        // Checked after the OCIO assignment above and not before, because a node pass never
-        // carries an OCIO transform -- both conversion halves are off on it by construction --
-        // so there is nothing here to overwrite.
-        if (params.node_fp16)
-            current_ocio_pipeline_ = vulkan_->get_pipeline(depth_, common::render_format::fp16);
+        // than per pass: a pass composites layers that may each need a different pipeline. Only
+        // when nothing else claimed the hook -- an OCIO transform and an ISF variant are built
+        // for the format they know they write, and the ISF assignment below deliberately wins.
+        const auto target_format = params.background ? params.background->format() : render_format_;
+        if (!current_ocio_pipeline_ && target_format != render_format_)
+            current_ocio_pipeline_ = vulkan_->get_pipeline(depth_, target_format);
 
         // ── AN ISF NODE IS A VARIANT PIPELINE, THROUGH THE SAME HOOK ────────────────────
         //
