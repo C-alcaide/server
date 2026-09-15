@@ -2621,6 +2621,29 @@ std::future<std::wstring> mixer_projection_icvfx_command(command_context& ctx)
     double       outer_dim = has_dim ? std::stod(ctx.parameters[3]) : 1.0;
     bool         has_inner = ctx.parameters.size() > 4;
     double       inner_dim = has_inner ? std::stod(ctx.parameters[4]) : 1.0;
+
+    // ── AN inner_fov ABOVE PI IS DEGREES, AND THAT IS THE ONE MISTAKE THIS COMMAND INVITES ──
+    //
+    // `MIXER PROJECTION` takes DEGREES and this takes RADIANS. The inconsistency is real, it is
+    // in this parameter's own name (`inner_fov_rad`), and it is not fixed here: flipping the
+    // unit would silently change every existing show file by a factor of 57, which needs a
+    // deprecation path rather than an edit.
+    //
+    // What IS fixed is the harm. A planar projection's field of view cannot exceed 180 degrees,
+    // so a value above PI is invalid in radians whatever the operator meant -- there is no
+    // correct usage to break. Before this, `PROJECTION_ICVFX 1 30` was accepted raw and gave an
+    // inner frustum 57x too wide, and `inner_fov` is used by the shader with no clamp.
+    //
+    // The message names the conversion, because the operator who hits this has just typed
+    // degrees into the one command that does not take them.
+    if (has_fov && inner_fov > 3.14159265358979) {
+        std::wostringstream w;
+        w << L"400 MIXER ERROR inner_fov is in RADIANS and " << inner_fov
+          << L" exceeds pi, which no field of view can. `MIXER PROJECTION` takes degrees and this "
+             L"does not -- " << inner_fov << L" degrees is "
+          << (inner_fov * 3.14159265358979 / 180.0) << L" radians\r\n";
+        return make_ready_future<std::wstring>(w.str());
+    }
     int          duration  = ctx.parameters.size() > 5 ? std::stoi(ctx.parameters[5]) : 0;
     std::wstring tween     = ctx.parameters.size() > 6 ? ctx.parameters[6] : L"linear";
 

@@ -1,6 +1,21 @@
 CasparVP — Unreleased
 ==========================================
 
+### `PROJECTION_ICVFX` refuses a field of view that can only be degrees
+
+`MIXER PROJECTION` takes degrees and `MIXER PROJECTION_ICVFX` takes radians — an inconsistency
+that is in the parameter's own name (`inner_fov_rad`) and is **not** changed here: flipping the
+unit would alter every existing show file by a factor of 57, which needs a deprecation path.
+
+What is fixed is the harm. A planar field of view cannot exceed 180°, so a value above **π** is
+invalid in radians whatever was meant — there is no correct usage to break. `PROJECTION_ICVFX 1
+30` was previously accepted raw and produced an inner frustum 57× too wide, `inner_fov` reaching
+the shader with no clamp. It now answers `400` and names the conversion, since an operator who
+hits this has just typed degrees into the one command that does not take them.
+
+Verified: `0.52` (30° in radians) and `3.0` still accepted, `30` and `90` refused.
+`icvfx-parity` unchanged at 0 LSB.
+
 ### Four `MIXER` commands stop swallowing a typo and answering `202`
 
 An unrecognised keyword used to fall through to whatever the variable was initialised to, so a

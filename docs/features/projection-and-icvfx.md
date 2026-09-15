@@ -150,9 +150,19 @@ of samples — which is the fingerprint of a red/blue exchange and of almost not
    colour comparison.
 2. **No tweened-form coverage** for any of the twelve commands. `duration`/`tween` are accepted
    and untested throughout the fork, not only here.
-3. **The degrees/radians inconsistency** between `PROJECTION` and `PROJECTION_ICVFX` is documented
-   above rather than fixed. Changing it would break every existing show file; it needs a
-   deprecation path, not an edit.
+3. **The degrees/radians inconsistency** between `PROJECTION` and `PROJECTION_ICVFX` is still
+   there, and still deliberately: flipping the unit would change every existing show file by a
+   factor of 57, which needs a deprecation path rather than an edit.
+
+   **The HARM is fixed, 2026-09-15.** A planar field of view cannot exceed 180°, so a value above
+   **π** is invalid in radians whatever the operator meant — there is no correct usage to break.
+   `PROJECTION_ICVFX 1 30` used to be accepted raw and gave an inner frustum 57× too wide, with
+   `inner_fov` reaching the shader unclamped. It is now refused with a `400` that names the
+   conversion, because whoever hits it has just typed degrees into the one command that does not
+   take them.
+
+   That leaves the inconsistency as a documentation problem rather than a silent-wrong-picture
+   one, which is the part that could be fixed without a migration.
 4. ~~**`PROJECTION_LENS` accepts only three keywords.**~~ **FIXED 2026-09-15, and this entry
    understated it.** It did not keep the previous value: `screen_curve_type lens =
    screen_curve_type::flat` is the initialiser, so an unrecognised keyword silently selected
