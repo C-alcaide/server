@@ -1,6 +1,23 @@
 CasparVP — Unreleased
 ==========================================
 
+### Two `PREVIZ` commands stop accepting a mistake and reporting success
+
+**`EYEMODE` accepted any word as `CAMERA`.** The test was `== "FIXED"`, so `EYEMODE FIEXD` — or
+any other typo — returned `202 PREVIZ OK` and silently selected the other mode. It now refuses
+anything that is neither `CAMERA` nor `FIXED` with a `400` naming what was passed. `FIXED` with a
+partial coordinate triple is refused too: `EYEMODE FIXED 1 2`, a dropped argument, used to put the
+eye at the default (0, 1.5, 3) and report success.
+
+**`SCREEN ADD … CURVED` silently ignored its `radius_m`.** Width, radius and arc are
+over-determined — `width = 2r·sin(arc/2)` — so one must lose, and width and arc are the two an
+operator measures with a tape. The radius is still derived from them; what changed is that a
+supplied radius contradicting the geometry by more than 1% or 1 mm now logs a warning naming both
+values, instead of being replaced in silence. `CURVED 10 3 99 60` reports *"radius 99 m
+contradicts width 10 m over 60 deg, which gives 10 m"*; the consistent `CURVED 10 3 10 60` is
+silent, and a layout-file reload passes the stored — therefore derived — radius, so a round trip
+cannot trip it.
+
 ### Eight ISF blur and glow shaders rendered wrongly — the host drew the wrong primitive
 
 `isf_vertShaderInit()` drew a full-screen **triangle**, so `isf_FragNormCoord` was **0 or 2** at

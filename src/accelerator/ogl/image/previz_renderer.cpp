@@ -1462,12 +1462,33 @@ void previz_renderer::add_screen_curved(const std::string& name, float width_m, 
     sm.height_m  = height_m;
     sm.arc_deg   = arc_deg;
 
-    // Derive actual radius from width and arc
+    // ── WIDTH, RADIUS AND ARC ARE OVER-DETERMINED, AND THE ODD ONE OUT IS SAID ─────────
+    //
+    // A circular screen satisfies `width = 2 * r * sin(arc/2)`, so the three arguments the
+    // grammar takes cannot all be independent. This derives the radius from width and arc,
+    // which is the right choice -- they are the two an operator measures with a tape -- but it
+    // used to do so SILENTLY: `SCREEN ADD s CURVED 10 3 99 60` accepted the 99, stored 10.0,
+    // and answered `202`. The argument was in the grammar, accepted, and almost never the
+    // value used.
+    //
+    // It is now derived AND checked. A caller who passes a consistent triple is unaffected; one
+    // who passes a radius that contradicts the geometry is told, rather than having it quietly
+    // replaced. The layout-file reload path passes the STORED radius, which is the derived one
+    // by construction, so a round trip cannot trip this.
     float arc_rad  = arc_deg * static_cast<float>(M_PI) / 180.0f;
     float half_arc = arc_rad * 0.5f;
-    sm.radius_m = (std::abs(std::sin(half_arc)) > 1e-6f)
-                ? (width_m * 0.5f / std::sin(half_arc))
-                : radius_m;
+    const bool     derivable = std::abs(std::sin(half_arc)) > 1e-6f;
+    const float    derived   = derivable ? (width_m * 0.5f / std::sin(half_arc)) : radius_m;
+    // 1% or 1 mm, whichever is larger: a tolerance tight enough to catch a wrong number and
+    // loose enough for a value that was itself derived and printed to a few decimals.
+    const float    tol       = std::max(0.001f, std::abs(derived) * 0.01f);
+    if (derivable && radius_m > 0.0f && std::abs(radius_m - derived) > tol) {
+        CASPAR_LOG(warning) << L"[previz] screen '" << u16(name) << L"': radius " << radius_m
+                            << L" m contradicts width " << width_m << L" m over " << arc_deg
+                            << L" deg, which gives " << derived
+                            << L" m. Using the derived radius; width and arc win.";
+    }
+    sm.radius_m = derived;
     impl_->scene_.screens[name] = sm;
 
     auto mesh = generate_curved_screen(name, width_m, height_m, sm.radius_m, arc_deg);

@@ -6450,9 +6450,24 @@ std::wstring previz_screen_command(command_context& ctx)
             // SCREEN <name> EYEMODE CAMERA | FIXED [x y z]
             if (ctx.parameters.size() < 3)
                 return L"400 PREVIZ ERROR usage: SCREEN <name> EYEMODE CAMERA|FIXED [x y z]\r\n";
+            // ── A WORD THAT IS NEITHER `CAMERA` NOR `FIXED` IS A MISTAKE, NOT `CAMERA` ──
+            //
+            // This was `(mode_arg == L"FIXED") ? 1 : 0`, so `EYEMODE FIEXD` -- or any other
+            // typo -- returned `202 PREVIZ OK` and silently selected the OTHER mode. An
+            // operator who mistypes gets a success and a stage that does not do what they
+            // asked, with nothing anywhere to say so.
             auto mode_arg = boost::to_upper_copy(ctx.parameters.at(2));
+            if (mode_arg != L"CAMERA" && mode_arg != L"FIXED")
+                return L"400 PREVIZ ERROR eye mode must be CAMERA or FIXED, not '" +
+                       ctx.parameters.at(2) + L"'\r\n";
             int  mode     = (mode_arg == L"FIXED") ? 1 : 0;
             float x = 0.0f, y = 1.5f, z = 3.0f;
+            // FIXED WITH A PARTIAL COORDINATE TRIPLE IS ALSO A MISTAKE. It used to fall back to
+            // the defaults, so `EYEMODE FIXED 1 2` -- a dropped argument -- put the eye at
+            // (0, 1.5, 3) and reported success.
+            if (mode == 1 && ctx.parameters.size() > 3 && ctx.parameters.size() < 6)
+                return L"400 PREVIZ ERROR FIXED takes three coordinates, or none for the "
+                       L"default eye position\r\n";
             if (mode == 1 && ctx.parameters.size() >= 6) {
                 x = std::stof(u8(ctx.parameters.at(3)));
                 y = std::stof(u8(ctx.parameters.at(4)));

@@ -741,12 +741,21 @@ below — and the rest are recorded so the next reader does not have to rediscov
 that were fixed are the two the addressable stage made *worse*: they had been silent, and once
 screens were published they became wrong in writing.
 
-1. **`ADD … CURVED` discards the `radius_m` argument** — it is recomputed from width and arc. The
-   parameter is in the grammar, is accepted, and is almost never the value stored. The layout file
-   round-trips through the same path, so a saved curved screen reloads with a re-derived radius.
-2. **`EYEMODE` accepts any word as `CAMERA`.** The test is `== "FIXED"`, so a typo returns `202`
-   and silently selects the other mode. And `FIXED` with fewer than three coordinates uses the
-   defaults rather than refusing.
+1. ~~**`ADD … CURVED` discards the `radius_m` argument.**~~ **FIXED 2026-09-15 — it is still
+   derived, and the contradiction is now SAID.** Width, radius and arc are over-determined
+   (`width = 2r·sin(arc/2)`), so one of the three must lose, and width and arc are the two an
+   operator measures with a tape. What was wrong was the silence: `SCREEN ADD s CURVED 10 3 99 60`
+   accepted the 99, stored 10.0, and answered `202`. A radius contradicting the geometry by more
+   than 1% or 1 mm now logs a warning naming both values. Measured: `CURVED 10 3 10 60` (the
+   consistent triple) is silent; `CURVED 10 3 99 60` logs *"radius 99 m contradicts width 10 m over
+   60 deg, which gives 10 m"*. The layout-file reload passes the stored — therefore derived —
+   radius, so a round trip cannot trip it.
+2. ~~**`EYEMODE` accepts any word as `CAMERA`.**~~ **FIXED 2026-09-15.** The test was
+   `== "FIXED"`, so `EYEMODE FIEXD` — or any other typo — returned `202 PREVIZ OK` and silently
+   selected the other mode. Anything that is neither `CAMERA` nor `FIXED` is now refused with a
+   `400` naming what was passed, and `FIXED` with a partial coordinate triple is refused too
+   rather than falling back to the default eye position: `EYEMODE FIXED 1 2`, a dropped argument,
+   used to put the eye at (0, 1.5, 3) and report success.
 3. ~~**A scene reload keeps the old screens.**~~ **FIXED 2026-09-06.** `PREVIZ SCENE <path>`
    cleared `meshes` but not `screens` or `mesh_to_channel` — only `SCENE NONE` cleared those. So
    after loading a second model, `screens` still described screens whose meshes were gone, and
@@ -784,7 +793,12 @@ screens were published they became wrong in writing.
    arrives** — which it does. The fork's best-covered previz command was covered on exactly the
    half that worked. `api-stage` covers the other half now, **shown failing first**: `channel`
    read `-1` before the fix and `2` after, on both mixers.
-6. **Tracker-driven previz is OpenGL-only, and fails silently.** `tracking_commands.cpp`'s
+6. ~~**Tracker-driven previz is OpenGL-only, and fails silently.**~~ **ALREADY FIXED — this entry
+   was stale, checked 2026-09-15.** `tracking_commands.cpp` has carried the Vulkan branch and a
+   warning on the null case for some time; the text below describes the code before that.
+   Kept struck through rather than deleted because the reasoning still reads well.
+
+   *The original entry:* **Tracker-driven previz is OpenGL-only, and fails silently.** `tracking_commands.cpp`'s
    `mode_previz` branch does `dynamic_cast<accelerator::ogl::image_mixer*>` and nothing else, so on
    a Vulkan channel `ogl_mix` is null, the `if` is skipped, `previz_camera_fn` is never installed
    — and the command still answers `202 TRACKING OK`. The tracker binds, samples arrive, and the
