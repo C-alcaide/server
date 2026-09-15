@@ -225,13 +225,30 @@ blind reading wins when the module already has that reputation. Moved to the per
 reads 20 planted / 0 reverted. Before concluding a check cannot see, confirm the mutated line
 executes under that check's own scenario.
 
-**What it found on its first honest run**: `--render-format fp16` reports 20 ×
-`VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08910` — `apply_passthrough` resolves an fp16
-working space into a **unorm** attachment while the pipeline bound is the channel's **fp16** one,
-so a draw declares `R16G16B16A16_SFLOAT` and writes `R8G8B8A8_UNORM`. The kernel already has the
-hook for this (`draw_params.node_fp16` switches the pipeline for a node pass writing fp16); the
-passthrough that goes the other way sets no counterpart. Default scenario and `--scenario encode`
-report 0.
+**What it found on its first honest run, since FIXED in `787120c74`**: `--render-format fp16`
+reported 20 × `VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08910` — `apply_passthrough`
+resolves an fp16 working space into a **unorm** attachment while the pipeline bound was the
+channel's **fp16** one, so a draw declared `R16G16B16A16_SFLOAT` and wrote `R8G8B8A8_UNORM`.
+Now 0, with the default scenario and `--scenario encode` 0 either side.
+
+**And the shape of the declaration was the cause, which is the part that generalises.**
+`draw_params::node_fp16` said *"this draw writes fp16"*. It covered the node head and the mask
+scratch — fp16 attachments under a unorm channel — and **had no way to express the opposite**, a
+unorm attachment under an fp16 channel. A boolean that can name one of two directions is not a
+narrower version of the general fix; it is the general fix with a side missing, and the missing
+side is unreachable rather than merely untested. The kernel now reads the format off
+`params.background` — the attachment the draw actually writes — because `texture::format()` is
+immutable in Vulkan and so cannot disagree with what the draw will do. A flag can, and this one
+did. **When a fact is already carried by an object the code holds, a field restating it is a
+second table that will drift.**
+
+**It measured clean on the picture, and that is not reassurance.** `conformance` and `grading`
+pass at 1 LSB on both mixers before and after: this NVIDIA driver takes the export conversion
+from the render-target descriptor, so the mismatch cost nothing. That is a property of the
+driver, not of the API — a driver free to drive the conversion from the pipeline's compiled
+export format would write garbage rather than a rounding difference. **A portability and
+driver-update hazard is invisible to every picture battery by construction**, which is the whole
+reason this one exists.
 
 **The claims that rested on the broken battery are withdrawn rather than deleted.** The
 exportable-texture layout fix in `0f1c5fb38` is still argued from reading the code: the battery
