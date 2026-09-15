@@ -1317,7 +1317,32 @@ struct notchlc_producer_impl final : public core::frame_producer
                 // The decode thread picks this up, exactly as it does for `CALL SEEK`. Writing
                 // `frame_count_` directly would move the REPORTED position without moving the
                 // decoder, which is the shape of a parameter that looks like it works.
-                seek_request_.store(static_cast<int64_t>(n));
+                // ── STORE AND THEN WAKE, WHICH IS WHAT `CALL SEEK` HAS ALWAYS DONE ──────
+                //
+                // The store alone is not a seek. The threads that service `seek_request_` are
+                // asleep on these condition variables whenever the pipeline is not advancing,
+                // and their wait predicates DO test `seek_request_` -- so the request is seen
+                // the moment something wakes them, and never if nothing does.
+                //
+                // That made the parameter work while PLAYING, where frames keep flowing and
+                // something wakes them anyway, and do nothing at all while PAUSED. Measured
+                // 2026-09-16 against a marked clip: `PAUSE` then writing `position` 42/137/7
+                // left the picture on frame 49 for all three, while `CALL SEEK` on the same
+                // paused layer landed on 42 and 137 exactly. `av_producer` is exact both ways,
+                // so it was also a parity split between this path and ffmpeg.
+                //
+                // **A partly-working parameter is what made this survive review.** It is not
+                // the `MIXER EXPOSURE` shape of "accepted and wholly inert" -- it moved the
+                // picture whenever anyone tried it on a playing clip, which is the obvious way
+                // to try it. Pausing first is the case it was FOR, and the case nobody drove.
+                // The clamp comes over for the same reason: `CALL SEEK` bounds the target and
+                // the parameter did not, so the two routes disagreed past the last frame.
+                int64_t target = static_cast<int64_t>(n);
+                if (total_frames_ > 0)
+                    target = std::min(target, total_frames_ - 1);
+                seek_request_.store(target);
+                queue_cv_.notify_one();
+                raw_cv_.notify_one();   // wake io_loop which owns the demuxer
                 return true;
             };
             out.push_back(std::move(p));
