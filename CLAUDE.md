@@ -560,6 +560,38 @@ Three rules follow, and each was paid for here:
 real cost: it is not a weaker signal than a red check, it is a signal that actively teaches the
 wrong reflex.
 
+## A command that accepts a typo and answers OK is this tree's most repeated defect
+
+Five instances found on 2026-09-14/15 in five unrelated modules, by five different routes, none
+of them looking for it:
+
+| where | what an unrecognised value gave |
+| :--- | :--- |
+| `LTC LOAD <device>` | the DEFAULT input opened, and the REQUESTED name reported back as if open |
+| `ADD … PORTAUDIO DEVICE=` | the default device, and the whole default path was dead besides |
+| `PREVIZ … EYEMODE` | the other mode, silently |
+| `MIXER PROJECTION_LENS` / `PROJECTION_CURVE` | RECTILINEAR / **FLAT -- the curve disabled** |
+| `MIXER FLIP` | no flip, so a typo un-mirrored an output |
+
+**The shape is always the same**: a variable initialised to one of the valid values, an
+`if/else if` chain over the others, and no `else`. The initialiser is then indistinguishable from
+a mistake, and the reply is `202`. `MIXER SHAPE` is the variant worth knowing -- its option loop
+tests `keyword && enough arguments follow`, so a correctly spelled option with its value left off
+falls into the same silence as a misspelled one, and the two need different messages.
+
+**The sweep is one grep and worth re-running after any new command lands:**
+
+    grep -nE '^\s*(else )?if\s*\(\s*boost::iequals\(' src/protocol/amcp/AMCPCommandsImpl.cpp
+
+Thirteen handlers had a chain with no `400`; four were real and nine were fine (`OCIO`,
+`OCIO_LOOK`, `COLORSPACE`, `CALIBRATION` refuse with `404`/`403`, and the file-path ones fail with
+`502`). **So the grep is a candidate list, not a defect list** -- read each one, because a
+`404` somewhere else in the body is invisible to it.
+
+**Write the "off" value out explicitly.** `RECTILINEAR`, `FLAT`, `NONE`, `0` -- every one of these
+commands had a legitimate way to turn the feature off, and in every case it was the leftover
+branch. Naming it is what separates "the operator cleared it" from "the operator mistyped".
+
 ## A check whose expected value IS its failure mode cannot fail
 
 Measured 2026-09-11 on the node graph's fp16 intermediates. The check was `exposure 4.0` followed

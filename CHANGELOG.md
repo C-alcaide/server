@@ -1,6 +1,37 @@
 CasparVP — Unreleased
 ==========================================
 
+### Four `MIXER` commands stop swallowing a typo and answering `202`
+
+An unrecognised keyword used to fall through to whatever the variable was initialised to, so a
+misspelling selected a real mode and the command reported success:
+
+| command | a typo silently gave |
+| :--- | :--- |
+| `PROJECTION_LENS` | RECTILINEAR |
+| `PROJECTION_CURVE` | FLAT — **it disabled the curve** |
+| `FLIP` | no flip — `FLIP HH` un-mirrored an output |
+| `SHAPE` | the option skipped entirely |
+
+All four now refuse with a `400` naming the valid set. The "off" spellings are written out
+explicitly rather than being the leftover case — `RECTILINEAR`, `FLAT`/`NONE`, `NONE`/`0` — which
+is what made the typo indistinguishable from a deliberate clear.
+
+`SHAPE` is the subtle one: every arm of its option loop tests *keyword and enough arguments*, so
+the same `else` catches a misspelled option **and** a correctly spelled one whose value was left
+off. The two get different messages, because they need different corrections — `SOFTNES 0.2`
+answers *"unknown shape option"* and `CORNER_RADIUS` with nothing after it answers *"needs its
+value(s)"*.
+
+**Found by sweeping rather than by report.** Thirteen AMCP handlers have a keyword chain with no
+refusal; nine of them turned out to be fine (`OCIO`, `OCIO_LOOK`, `COLORSPACE` and `CALIBRATION`
+refuse with `404`/`403`; `MESH` and `PROJECTION_BLEND_MASK` take a file path and fail with `502`).
+The sweep was prompted by the same shape appearing in four unrelated modules in one session —
+`LTC LOAD`, `ADD PORTAUDIO DEVICE=`, `PREVIZ … EYEMODE` — which makes it a house habit rather than
+four accidents.
+
+Verified over sixteen cases: every valid spelling still accepted, every mistake refused.
+
 ### `UNBIND` honours the `.N` component suffix its own grammar advertises
 
 `BIND` is per-component — its replace predicate compares `b.component`, so two bindings can drive

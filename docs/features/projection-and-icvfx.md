@@ -153,8 +153,18 @@ of samples — which is the fingerprint of a red/blue exchange and of almost not
 3. **The degrees/radians inconsistency** between `PROJECTION` and `PROJECTION_ICVFX` is documented
    above rather than fixed. Changing it would break every existing show file; it needs a
    deprecation path, not an edit.
-4. **`PROJECTION_LENS` accepts only three keywords** and silently keeps the previous value for
-   anything else — worth a `400` instead, but that is a behaviour change.
+4. ~~**`PROJECTION_LENS` accepts only three keywords.**~~ **FIXED 2026-09-15, and this entry
+   understated it.** It did not keep the previous value: `screen_curve_type lens =
+   screen_curve_type::flat` is the initialiser, so an unrecognised keyword silently selected
+   **RECTILINEAR**. `PROJECTION_CURVE` had the identical shape and was worse — its initialiser is
+   `flat` too, so `PROJECTION_CURVE SPEHRE 90` **flattened a curved screen** and answered `202`.
+
+   Both now name all four values and refuse anything else with a `400`; `RECTILINEAR` and
+   `FLAT`/`NONE` are spelled out rather than being whatever is left over, which is exactly what
+   made the typo invisible. `MIXER FLIP` was swept in the same pass — its own comment read
+   *"else NONE / 0 / anything unrecognised -> both false"*, so `FLIP HH` quietly un-flipped a
+   mirrored output — as was `MIXER SHAPE`, whose option loop skipped an unknown keyword **and** a
+   known one whose value had been left off.
 
 ---
 

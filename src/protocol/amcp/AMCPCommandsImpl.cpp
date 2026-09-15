@@ -1385,6 +1385,22 @@ static std::wstring rgba_to_hex(const std::array<double, 4>& c)
     return buf;
 }
 
+/// Is this a shape option this build knows, regardless of whether its value followed?
+///
+/// Exists so the refusal can tell a TYPO from a DROPPED ARGUMENT -- the loop's arms test the
+/// keyword and the argument count together, so without this both land in the same `else` and
+/// an operator is told "unknown option" for a word that is perfectly valid.
+bool is_shape_keyword(const std::wstring& kw)
+{
+    static const wchar_t* kws[] = {L"CORNER_RADIUS", L"SOFTNESS", L"FILL",   L"COLOR1",
+                                   L"COLOR2",        L"ANGLE",    L"GRADIENT_CENTER",
+                                   L"STROKE",        L"DURATION", L"TWEEN"};
+    for (const auto* k : kws)
+        if (boost::iequals(kw, k))
+            return true;
+    return false;
+}
+
 std::future<std::wstring> mixer_shape_command(command_context& ctx)
 {
     // --- Query mode ---
@@ -1465,6 +1481,21 @@ std::future<std::wstring> mixer_shape_command(command_context& ctx)
             duration = std::stoi(ctx.parameters[++i]);
         else if (boost::iequals(kw, L"TWEEN") && i + 1 < ctx.parameters.size())
             tween = ctx.parameters[++i];
+        else
+            // ── AN OPTION THIS LOOP DOES NOT RECOGNISE IS A MISTAKE ────────────────────
+            //
+            // Every arm above is `keyword && enough arguments follow`, so the `else` catches
+            // BOTH a misspelled option and a correctly spelled one whose value was left off.
+            // Silently skipping either meant `SHAPE ... CORNER_RADIUS` with no number, or
+            // `SOFTNES 0.2`, applied the rest of the line and answered `202` -- the shape
+            // changes, just not the way the operator wrote.
+            //
+            // The two are worth distinguishing in the reply, because they need different
+            // corrections: one is a typo, the other a dropped argument.
+            return make_ready_future<std::wstring>(
+                (is_shape_keyword(kw)
+                     ? L"400 MIXER ERROR shape option '" + kw + L"' needs its value(s)\r\n"
+                     : L"400 MIXER ERROR unknown shape option '" + kw + L"'\r\n"));
     }
 
     transforms_applier transforms(ctx);
@@ -2463,10 +2494,27 @@ std::future<std::wstring> mixer_projection_curve_command(command_context& ctx)
     using core::screen_curve_type;
     transforms_applier transforms(ctx);
     const auto&  type_arg = ctx.parameters.at(0);
+    // ── AN UNRECOGNISED KEYWORD IS A MISTAKE, NOT A DEFAULT ────────────────────────────
+    //
+    // The chain below used to fall through to the initialiser, so a typo selected a real mode
+    // and answered `202`. Swept 2026-09-15 across the AMCP layer after the same shape turned up
+    // in four unrelated modules in one session -- `LTC LOAD`, `ADD PORTAUDIO DEVICE=`,
+    // `PREVIZ ... EYEMODE` and here -- which makes it a house habit rather than four accidents.
+    //
+    // **This one silently DISABLED the curve.** `flat` is the initialiser, so
+    // `PROJECTION_CURVE SPEHRE 90` flattened a curved screen and answered `202` -- the picture
+    // changes, the command reports success, and nothing says which of the two the operator got.
+    // `FLAT` is spelled out so that clearing a curve stays possible.
     screen_curve_type curve_type = screen_curve_type::flat;
     if      (boost::iequals(type_arg, L"CYLINDER")) curve_type = screen_curve_type::cylinder;
     else if (boost::iequals(type_arg, L"SPHERE"))   curve_type = screen_curve_type::sphere;
     else if (boost::iequals(type_arg, L"FISHEYE"))  curve_type = screen_curve_type::fisheye;
+    else if (boost::iequals(type_arg, L"FLAT") || boost::iequals(type_arg, L"NONE"))
+        curve_type = screen_curve_type::flat;
+    else
+        return make_ready_future<std::wstring>(
+            L"400 MIXER ERROR curve must be FLAT, CYLINDER, SPHERE or FISHEYE, not '" +
+            type_arg + L"'\r\n");
     double screen_arc    = std::stod(ctx.parameters.at(1)) * DEG2RAD;
     // Optional: type arc [arc_v] [eye_distance] [duration] [tween]
     double       screen_arc_v = ctx.parameters.size() > 2 ? std::stod(ctx.parameters[2]) * DEG2RAD : 0.0;
@@ -2513,10 +2561,25 @@ std::future<std::wstring> mixer_projection_lens_command(command_context& ctx)
     using core::screen_curve_type;
     transforms_applier transforms(ctx);
     const auto&  lens_arg  = ctx.parameters.at(0);
+    // ── AN UNRECOGNISED KEYWORD IS A MISTAKE, NOT A DEFAULT ────────────────────────────
+    //
+    // The chain below used to fall through to the initialiser, so a typo selected a real mode
+    // and answered `202`. Swept 2026-09-15 across the AMCP layer after the same shape turned up
+    // in four unrelated modules in one session -- `LTC LOAD`, `ADD PORTAUDIO DEVICE=`,
+    // `PREVIZ ... EYEMODE` and here -- which makes it a house habit rather than four accidents.
+    //
+    // `RECTILINEAR` is now spelled out rather than being whatever is left over, which is what
+    // made the typo invisible: `PROJECTION_LENS SPEHRE` silently selected it. The read form has
+    // always reported all four names, so the write accepting only three was the asymmetry.
     screen_curve_type lens = screen_curve_type::flat;  // flat = rectilinear
-    if      (boost::iequals(lens_arg, L"CYLINDER")) lens = screen_curve_type::cylinder;
-    else if (boost::iequals(lens_arg, L"SPHERE"))   lens = screen_curve_type::sphere;
-    else if (boost::iequals(lens_arg, L"FISHEYE"))  lens = screen_curve_type::fisheye;
+    if      (boost::iequals(lens_arg, L"CYLINDER"))    lens = screen_curve_type::cylinder;
+    else if (boost::iequals(lens_arg, L"SPHERE"))      lens = screen_curve_type::sphere;
+    else if (boost::iequals(lens_arg, L"FISHEYE"))     lens = screen_curve_type::fisheye;
+    else if (boost::iequals(lens_arg, L"RECTILINEAR")) lens = screen_curve_type::flat;
+    else
+        return make_ready_future<std::wstring>(
+            L"400 MIXER ERROR lens must be RECTILINEAR, CYLINDER, SPHERE or FISHEYE, not '" +
+            lens_arg + L"'\r\n");
 
     transforms.add(stage::transform_tuple_t(
         ctx.layer_index(),
@@ -2896,11 +2959,25 @@ std::future<std::wstring> mixer_flip_command(command_context& ctx)
     bool flip_h = false;
     bool flip_v = false;
     const auto& arg = ctx.parameters.at(0);
-    if (boost::iequals(arg, L"H"))                                    { flip_h = true; }
-    else if (boost::iequals(arg, L"V"))                               { flip_v = true; }
+    // ── AN UNRECOGNISED KEYWORD IS A MISTAKE, NOT A DEFAULT ────────────────────────────
+    //
+    // The chain below used to fall through to the initialiser, so a typo selected a real mode
+    // and answered `202`. Swept 2026-09-15 across the AMCP layer after the same shape turned up
+    // in four unrelated modules in one session -- `LTC LOAD`, `ADD PORTAUDIO DEVICE=`,
+    // `PREVIZ ... EYEMODE` and here -- which makes it a house habit rather than four accidents.
+    //
+    // The comment this replaces said it outright: *"else NONE / 0 / anything unrecognised ->
+    // both false"*. Clearing the flip is a real operation and stays; lumping a typo in with it
+    // is what meant `FLIP HH` quietly un-flipped a mirrored output.
+    if (boost::iequals(arg, L"H"))                                     { flip_h = true; }
+    else if (boost::iequals(arg, L"V"))                                { flip_v = true; }
     else if (boost::iequals(arg, L"HV") || boost::iequals(arg, L"VH")) { flip_h = true; flip_v = true; }
-    else if (arg == L"1")                                             { flip_h = true; }  // 1 = H-flip (mirror)
-    // else NONE / 0 / anything unrecognised -> both false
+    else if (arg == L"1")                                              { flip_h = true; }  // 1 = H-flip (mirror)
+    else if (arg == L"0" || boost::iequals(arg, L"NONE") || boost::iequals(arg, L"OFF")) {
+        // both false -- the explicit clear
+    } else
+        return make_ready_future<std::wstring>(
+            L"400 MIXER ERROR flip must be H, V, HV, VH, NONE or 0, not '" + arg + L"'\r\n");
 
     transforms_applier transforms(ctx);
     transforms.add(stage::transform_tuple_t(
