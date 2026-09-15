@@ -2,8 +2,9 @@
 
 > **Status:** SURVEY — verified 2026-09-08, extended 2026-09-15. **Five items are measured and the
 > rest are not.** `vgpu` 0.4.0 (§3.1), three.js r185 (§3.2) and PlayCanvas 2.22.0 rendering 3DGS
-> (§3.3) were run in a channel on 2026-09-07; **three.js r186's own 3DGS (§3.8) and the KEY
-> question for every WebGPU item here (§3.9) were measured 2026-09-15**. Every other project was
+> (§3.3) were run in a channel on 2026-09-07; **three.js r186's own 3DGS (§3.8) was measured 2026-09-15,
+> and §3.9 -- the KEY question -- was measured, got the WRONG ANSWER, and was corrected the
+> same day; read it for the control that failed as much as for the result**. Every other project was
 > assessed from its repository and documentation and **has never been started in this server**. Star counts and dates are from the
 > GitHub API on 2026-09-07 and go stale.
 > **Falsifier:** if `docs/features/html-gpu-direct.md` §2 stops listing three gates for WebGPU,
@@ -342,43 +343,50 @@ used here: it produced a **0-byte** `cadence.mkv` on this page, its FFmpeg consu
 initialised without error. So "25.1 against 21" is a comparison between two engines measured
 identically, not an absolute claim about either.
 
-### 3.9 WebGPU content cannot produce a KEY today — and this is not about splats
+### 3.9 WebGPU DOES produce a key — and the first version of this section said the opposite
 
-The question that decides whether any of §3 is more than a background generator, given that this
-deployment's HTML work is alpha lower thirds into a DeckLink fill+key. Measured 2026-09-15.
+**Corrected 2026-09-15, the same day it was written.** The first version of §3.9 concluded that
+WebGPU content is fill-only in this producer, that `gpu-direct` and alpha are mutually exclusive,
+and that every WebGPU item in this document is therefore disqualified from the alpha lower thirds
+this deployment actually runs. **All of that was wrong**, and the cause was in the test page.
 
-| configuration | result |
-| :--- | :--- |
-| DOM page, transparent, `gpu-direct` on | **α = 0 / 128 / 255** exactly as authored |
-| three.js WebGPU **splats**, `alpha: true`, `gpu-direct` on | colour correct, **α = 255 everywhere** |
-| three.js WebGPU **plain mesh**, `alpha: true`, `gpu-direct` on | **α = 255 everywhere** |
-| three.js WebGPU splats, `alpha: true`, `gpu-direct` **off** | **entirely empty frame** — rgb 0, α 0 |
+**What is true.** three.js r186 rendering 3DGS on WebGPU, `gpu-direct` on, keys correctly:
 
-Read in order those four rule out every explanation but one. The DOM control proves the **IMAGE
-consumer carries alpha faithfully**, so 255 is not the instrument flattening it — without that
-control the whole finding would have been a false negative. The plain-mesh row proves it is **not
-`GaussianSplat`**: the same opacity appears with no splats in the scene. And three.js is
-configured correctly — `WebGPUBackend.js` maps `alpha: true` to `alphaMode: 'premultiplied'`, and
-`alpha` defaults to true.
+| splat | alpha | rgb |
+| :--- | ---: | :--- |
+| (−1,+1) | **255** | (229, 51, 26) |
+| (+1,+1) | **255** | (26, 178, 64) |
+| (−1,−1) | **255** | (38, 89, 217) |
+| (+1,−1) | **255** | (204, 191, 38) |
+| empty frame corner | **0** | — |
 
-The last row is the bind. **WebGPU needs `gpu-direct`** — §2's third prerequisite — and with it
-off the page still rendered 76 frames while the channel received nothing at all. So the two
-requirements are mutually exclusive: the only configuration in which WebGPU reaches the channel
-is the one in which alpha arrives at 255.
+And a raw WebGPU canvas with no library tracks the requested alpha exactly — **0.25 → 64,
+0.75 → 191, 1.0 → 255** — so the transport carries WebGPU alpha faithfully all the way through
+CEF's shared texture, the GPU bridge, the mixer and the IMAGE consumer.
 
-**It is not this fork discarding it.** `html_producer.cpp` passes CEF's shared-texture handle
-through to the GPU bridge with the channel order CEF reports (`CEF_COLOR_TYPE_RGBA_8888` →
-`rgba8`, else `bgra8`), and nothing on that path touches the alpha channel. The opacity is in
-what CEF composites into the shared texture for a page containing a GPU canvas.
+**What was actually wrong: the test page's own CSS.** `page.html` carried
+`html,body{background:#101014}`, an opaque page background *behind* the canvas. A transparent
+canvas composites over it and the result is opaque, exactly as authored. Nothing in CEF,
+`gpu-direct`, three.js or `GaussianSplat` was involved.
 
-**What this costs, stated plainly:** every WebGPU item in this document — vgpu, three.js,
-PlayCanvas, the splats above — is a **fill-only source** today. For a full-frame background that
-is no limitation at all. For a lower third it is disqualifying, and no amount of page-side
-configuration changes it, because the page is not where it is being lost.
+**Why the controls did not catch it, which is the part worth keeping.** Two were run and both
+looked convincing: a transparent DOM page returned α = 0/128/255, and a plain three.js mesh
+returned α = 255 like the splats. The first appeared to clear the instrument, the second appeared
+to clear `GaussianSplat`. But the DOM control was a *different page* — `alpha_control.html`, which
+sets `background:transparent` — so it differed from the subject in precisely the variable that
+mattered, and the mesh control shared the subject's page and therefore its bug. **A control that
+differs from the test in more than the thing under test is not a control**, and two of them
+agreeing is not corroboration when they share the defect. What finally isolated it was dropping
+every library and testing a raw canvas per API on a page written from scratch.
 
-**Not established:** whether a newer CEF, a different `background_color`, or an off-screen render
-target read back through a 2D canvas recovers the key. Each is a real candidate and none was
-tried — this section establishes *that* the key is lost and *where*, not that it is unrecoverable.
+**Still true from the first version:** WebGPU needs `gpu-direct`. With it off, the page rendered
+76 frames and the channel received an entirely empty one. And a WebGL2 canvas keys correctly too
+(255 / 127 / 0), so this is not a WebGPU-only capability.
+
+**Still not established:** whether the key survives at high splat counts — the 4M rung was
+measured for cost, not for alpha — and whether a premultiplied/straight mismatch shows on soft
+edges, which is the failure mode `casparvp-html-is-fill-key-lower-thirds` warns is invisible in
+an RGB comparison and visible on air.
 
 ---
 
