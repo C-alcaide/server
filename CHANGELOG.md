@@ -1,6 +1,28 @@
 CasparVP — Unreleased
 ==========================================
 
+### BREAKING: the legacy `projection/*` published block is retired
+
+Every projection value has been published twice — under its historical `projection/*` names and
+under its registry names in `mixer/proj_*`. The first is gone.
+
+**The duplicate was also the expensive one.** `mixer/*` is sparse, emitting a key only where the
+value differs from its default; the legacy block published the **whole** set on every tick,
+defaults included, forever after a layer first touched a projection.
+
+| | before | after |
+| :--- | ---: | ---: |
+| a layer with `MIXER PROJECTION` set | 52 leaves | **22** |
+| the same layer with ICVFX as well | 56 | **26** |
+| each additional projected layer | **+41** | **+11** |
+
+A 73% cut per projected layer, against a ceiling of ~600 leaves per channel per tick where 596
+costs 13% late frames — so on a four-layer projected wall this returns ~120 leaves of budget.
+
+**Any OSC consumer reading `/channel/N/stage/layer/M/projection/*` must move to
+`mixer/proj_*`.** Nothing in this tree read the old names — not the server, not a battery, not a
+test — and the values are identical, but it is a published interface being removed.
+
 ### BREAKING: `MIXER PROJECTION_ICVFX` now takes DEGREES
 
 `MIXER PROJECTION` took degrees and `MIXER PROJECTION_ICVFX` took radians — an inconsistency that

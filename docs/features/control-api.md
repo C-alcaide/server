@@ -1302,9 +1302,31 @@ Numbers taken by hand and not by a battery, kept because nothing re-runs them:
     config lives in the accelerator layer, which this library does not link.
 14. **No discovery.** There is no mDNS/Zeroconf anywhere in the fork, so a client is told where the
     server is rather than finding it.
-15. **The projection block is published twice**, under its historical `projection/*` names for
-    existing OSC consumers and under its registry names in `mixer/proj_*`. Both are live and they
-    agree; retiring the first changes a published interface and is deliberately not done here.
+15. ~~**The projection block is published twice.**~~ **RETIRED 2026-09-15.** Every projection
+    value is published under its registry name in `mixer/proj_*`; the historical `projection/*`
+    copy is gone. Nothing read it — not the server, not a battery, not a test — and no OSC
+    consumer of the old names exists.
+
+    **The duplicate was also the expensive one**, which is what makes this a saving rather than
+    tidying. `mixer/*` is SPARSE, emitting a key only where the value differs from its default;
+    the legacy block published the WHOLE set every tick, defaults included, forever after a layer
+    first touched a projection. Measured on this box:
+
+    | | before | after |
+    | :--- | ---: | ---: |
+    | a layer with `MIXER PROJECTION` set | 52 leaves | **22** |
+    | the same layer with ICVFX as well | 56 | **26** |
+    | each additional projected layer | +41 | **+11** |
+
+    A 73% cut per projected layer, against a ceiling of roughly 600 leaves per channel per tick
+    where 596 costs 13% late frames. On a four-layer projected wall that is ~120 leaves of the
+    budget returned.
+
+    The rule the block carried is worth keeping in mind even though it is gone: it published the
+    whole set because *"a projection is read as a coherent set of angles and offsets, and half of
+    one is worse than none."* That holds for a consumer reading `projection/*` as one object; a
+    client reading `mixer/proj_*` gets the registry's sparse contract, which it already gets for
+    every other field.
 
 ---
 

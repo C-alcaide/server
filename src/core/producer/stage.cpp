@@ -337,8 +337,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         //: `MIXER VOLUME` and by nothing else -- not readable, not bindable, not animatable.
         core::audio_transform built_from_audio;
         bool                  valid = false;
-        bool                  projection_ever = false;
-        //: relative key ("mixer/opacity", "projection/yaw") and its value
+        //: relative key ("mixer/opacity", "mixer/proj_yaw") and its value
         std::vector<std::pair<std::string, monitor::vector_t>> keys;
     };
     std::map<int, layer_publication> layer_publications_;
@@ -2268,57 +2267,26 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 pub.keys.emplace_back(std::string("mixer/") + fs[i].path, std::move(v));
         }
 
-        // The projection block keeps its own rule rather than following the sparse one
-        // above: once a layer has ever had a non-default projection it publishes the WHOLE
-        // block, defaults included. That is what the existing OSC consumers of
-        // `layer/N/projection/*` were written against -- a projection is read as a
-        // coherent set of angles and offsets, and half of one is worse than none.
-        static const core::projection projection_defaults{};
-        const auto&                   pr = tf.projection;
-        if (!pub.projection_ever) {
-            if (pr == projection_defaults)
-                return;
-            pub.projection_ever = true;
-        }
-
-        const auto add = [&pub](const char* key, monitor::vector_t v) {
-            pub.keys.emplace_back(std::string("projection/") + key, std::move(v));
-        };
-        add("enable", {pr.enable});
-        add("yaw", {pr.yaw});
-        add("pitch", {pr.pitch});
-        add("roll", {pr.roll});
-        add("fov", {pr.fov});
-        add("offset_x", {pr.offset_x});
-        add("offset_y", {pr.offset_y});
-        add("frustum_h", {pr.frustum_h});
-        add("frustum_v", {pr.frustum_v});
-        add("lens_k1", {pr.lens_k1});
-        add("lens_k2", {pr.lens_k2});
-        add("lens_k3", {pr.lens_k3});
-        add("lens_p1", {pr.lens_p1});
-        add("lens_p2", {pr.lens_p2});
-        add("source_lens", {static_cast<int32_t>(pr.source_lens)});
-        add("curve_enable", {pr.curve_enable});
-        add("curve_auto", {pr.curve_auto});
-        add("icvfx_auto", {pr.icvfx_auto});
-        add("curve_type", {static_cast<int32_t>(pr.curve_type)});
-        add("screen_arc", {pr.screen_arc});
-        add("screen_arc_v", {pr.screen_arc_v});
-        add("eye_distance", {pr.eye_distance});
-        add("edge_blend",
-            {pr.edge_blend_left,
-             pr.edge_blend_right,
-             pr.edge_blend_top,
-             pr.edge_blend_bottom,
-             pr.edge_blend_gamma});
-        add("icvfx_enable", {pr.icvfx_enable});
-        add("inner_fov", {pr.inner_fov});
-        add("icvfx_feather", {pr.icvfx_feather});
-        add("icvfx_outer_dim", {pr.icvfx_outer_dim});
-        add("icvfx_inner_dim", {pr.icvfx_inner_dim});
-        add("icvfx_inner_gain", {pr.icvfx_inner_gain_r, pr.icvfx_inner_gain_g, pr.icvfx_inner_gain_b});
-        add("icvfx_outer_gain", {pr.icvfx_outer_gain_r, pr.icvfx_outer_gain_g, pr.icvfx_outer_gain_b});
+        // ── THE LEGACY `projection/*` BLOCK IS GONE, 2026-09-15 ────────────────────────
+        //
+        // Every projection value is published under its registry name in `mixer/proj_*`, and
+        // was ALSO published here under the historical `projection/*` names that predated the
+        // registry. Both were live and they agreed; the duplicate was kept for OSC consumers
+        // written against the old names and is retired now that none exist.
+        //
+        // **The duplicate was also the expensive one.** `mixer/*` above is SPARSE -- it emits a
+        // key only when the value differs from the default -- while this block published the
+        // WHOLE set on every tick, defaults included, forever after a layer first touched a
+        // projection. Measured on this box: a projected layer cost 41 leaves per tick, and
+        // `state_leaves` matters because `monitor::state` is a flat_map rebuilt every tick
+        // whose cost grows with the whole channel's tree (CLAUDE.md: ~600 leaves per channel is
+        // the ceiling, 596 costs 13% late frames).
+        //
+        // The rule it carried is worth remembering even though the block is gone: it published
+        // the whole set because *"a projection is read as a coherent set of angles and offsets,
+        // and half of one is worse than none"*. That argument applies to a consumer reading
+        // `projection/*` as one object; a client reading `mixer/proj_*` gets the registry's
+        // sparse contract, which it already gets for every other field.
     }
 
     core::draw_frame wrap_layer_frames_for_route(std::vector<core::draw_frame> frames)
