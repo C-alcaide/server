@@ -89,7 +89,7 @@ catch its mutation cannot fail*.
 | **the replay module** — the recorder, the segmented store, the growing-file producer, the factory probe | `replay`, **both mixers**. And note what makes it runnable at all: both segmentation parameters are per-recording, so `?segment=1&max_duration=4` rolls the retention path in about ten seconds where the DEFAULTS need **24 hours**. A battery that needed a day to exercise its own subject would never be run. **Its load-bearing check is "the reported timeline does not exceed what is on disk", and the first version of it could not fail**: the reader's error is proportional to how long the PRODUCER has been open, so reading the timeline two seconds after `PLAY` gave 82 frames on the un-pruned build against 78 on the fixed one and a 125-frame gate — **5/5 green on the mutation it was written to catch**. Holding playback for 20 s while the writer keeps rolling makes the same mutation report **624 against 125**. **And its COST arm is what closed gap 0**, the record path running on the channel thread: `send()` encoded and called `WriteFrame` -- `fwrite` + `fflush` twice -- inline, and `output.cpp` measures the wait on that future as the channel's headroom, so one recording spent an eighth of the frame budget of the channel it was recording. The arm runs a SECOND server at **1080p50** because the main arm's 1080p25 is half the flush rate and half the bytes, and gates on LATE FRAMES rather than on the load -- a load figure is a number to track, a late frame is the cadence actually missed. `consume_load` **0.127 before, 0.0475 (ogl) / 0.041 (vulkan) after**, 0 late frames either side. Still measured by nothing: interrupted-recording recovery, `400 EXPORT BUSY`, and `LIVE` freshness and tearing |
 | consumer **metadata** — colour signalling, HDR static data | `signalling` (DeckLink), `signalling --stream` (FFmpeg). **Vulkan output has no coverage — see below** |
 | consumer **pixels** | `sdi-output` (`--hdr-metadata` for the DeckLink HDR block), `consumer-view`, or `cli.py run --consumer <name>` |
-| Vulkan API usage rather than picture | `vk-validation` — **but it cannot currently fail; see below** |
+| Vulkan API usage rather than picture | `vk-validation`, **working again since 2026-09-15** — it needed the server's own `CASPARVP_VK_VALIDATION=1`, which is what creates the messenger core findings are delivered through. Discrimination shown both ways: a negative per-layer `setScissor` offset reads 20 findings planted, 0 reverted. And run it with `--render-format fp16` as well as the default — that arm found a real VUID the moment it could see |
 | a per-channel colour uniform, on either mixer | `icvfx-parity` for ICVFX, `grading` and `conformance` for the rest — and **the values must be asymmetric**. A red/blue exchange is invariant under equal per-channel values, so a neutral white balance or a grey ramp is a check that cannot fail. This is the trap that hid the ICVFX gain exchange until 2026-08-26 |
 | a GPU interop path — CUDA external memory, an FFmpeg Vulkan decoder, a D3D11 bridge, the encode exporter | `coexistence`, because these now share one `VkDevice` and one graphics queue. A route measured alone says nothing about it running beside the others, and `av_vulkan_import.cpp`'s device-lost at four concurrent producers is what that costs |
 | geometry, rasters, projection | `geometry`, `mixer-parity` |
@@ -197,19 +197,47 @@ Still uncovered, and now the priority order for coverage rather than for docs:
 `register_command`/`register_channel_command` names from both trees, subtract upstream's, and grep
 `docs/**/*.md` for each. It went stale in one day of doc work and read as current for ten.
 
-**Known gap, 2026-08-26: `vk-validation` reports clean whatever you do.** A deliberate
-`mipLevels = 0` in `device::create_exportable_texture` — an unambiguous stateless VUID, verified
-compiled into the binary and verified reached — came back "0 VUID findings" with no layer output
-at all. So no Vulkan API-usage claim can currently be supported by this battery: a finding it
-reports is real, silence means nothing. Two causes are fixed (deprecated layer-setting names
-that the layer ignores without falling back, and a finding regex blind to `kVUID_Core_*` ids);
-the third is open — core validation emits nothing after device creation, though the layer is in
-the chain and best-practices findings do appear. Tracked in the harness module's docstring.
+**CLOSED 2026-09-15: `vk-validation` can fail again, and its first working run found something.**
+It had reported clean whatever you did since 2026-08-26, when a deliberate `mipLevels = 0` in
+`device::create_exportable_texture` came back "0 VUID findings" with no layer output at all.
 
-This is also why the exportable-texture layout fix in `0f1c5fb38` is argued from reading the
-code rather than from a validation run: nothing anywhere issued a barrier for images the mixer
-binds with a descriptor declaring `eShaderReadOnlyOptimal`. The battery was run before and after
-and reported 0 both times, which — now — is exactly what it would report either way.
+**The cause was in the harness, and it was not any of the three things that were suspected.** The
+battery forced the validation layer in through the loader, which inserts it and logs that it did
+— but the *application* never enabled validation, so no `VkDebugUtilsMessengerEXT` existed and
+core device-level findings had nowhere to be delivered. Best-practices messages still arrived on
+the layer's own stdout fallback, which is what made it look like "loaded, working, nothing to
+say". The server has had `CASPARVP_VK_VALIDATION=1` the whole time, for exactly this reason
+(validation is otherwise `_DEBUG`-only, and everything here is measured on RelWithDebInfo).
+A/B: **20 findings with it, 0 without.**
+
+**Two of the three "causes" recorded here were false, and that is the part to carry forward.**
+The loader force-enable and the deprecated layer settings were both written up as suppressing
+core checks; A/B'd against a planted defect they read 40 findings either way. They were removed
+as redundant, not as a fix. A mechanism that explains the symptom is not evidence that it caused
+it, and once written down it is read as measured fact.
+
+**And the mutation that "proved" the battery blind was in a branch the battery never runs.** A
+negative `setScissor` offset was planted in `renderpass::commit()`'s `layers_.empty()` path — the
+clear for a channel with nothing on air. A hand probe found it 40 times (a fixture that plays one
+colour is idle most of its life); the battery found it 0, because its scenario keeps a layer up
+throughout. **A mutation in an undriven branch is indistinguishable from a blind check**, and the
+blind reading wins when the module already has that reputation. Moved to the per-layer path it
+reads 20 planted / 0 reverted. Before concluding a check cannot see, confirm the mutated line
+executes under that check's own scenario.
+
+**What it found on its first honest run**: `--render-format fp16` reports 20 ×
+`VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08910` — `apply_passthrough` resolves an fp16
+working space into a **unorm** attachment while the pipeline bound is the channel's **fp16** one,
+so a draw declares `R16G16B16A16_SFLOAT` and writes `R8G8B8A8_UNORM`. The kernel already has the
+hook for this (`draw_params.node_fp16` switches the pipeline for a node pass writing fp16); the
+passthrough that goes the other way sets no counterpart. Default scenario and `--scenario encode`
+report 0.
+
+**The claims that rested on the broken battery are withdrawn rather than deleted.** The
+exportable-texture layout fix in `0f1c5fb38` is still argued from reading the code: the battery
+was run before and after and reported 0 both times, which is what it would have reported either
+way. The harness's own "0 VUIDs across four colour spaces" and "0 VUIDs at `--render-format
+fp16`" are marked in place as pre-fix and are not evidence — the second is now known to be 20.
 
 **Closed 2026-08-27: Vulkan output consumer metadata is measured** — `cli.py
 vulkan-output-signalling`. It was carried as a missing battery from 2026-08-17, and that was the
