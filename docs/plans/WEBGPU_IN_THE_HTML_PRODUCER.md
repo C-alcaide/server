@@ -1,8 +1,9 @@
 # WebGPU in the HTML producer — what could run, and what including it costs
 
-> **Status:** SURVEY — verified 2026-09-08. **Three items are measured and the rest are not.** `vgpu` 0.4.0 (§3.1),
-> three.js r185 (§3.2) and PlayCanvas 2.22.0 rendering 3DGS (§3.3) were run in a channel on
-> 2026-09-07; every other project here was
+> **Status:** SURVEY — verified 2026-09-08, extended 2026-09-15. **Five items are measured and the
+> rest are not.** `vgpu` 0.4.0 (§3.1), three.js r185 (§3.2) and PlayCanvas 2.22.0 rendering 3DGS
+> (§3.3) were run in a channel on 2026-09-07; **three.js r186's own 3DGS (§3.8) and the KEY
+> question for every WebGPU item here (§3.9) were measured 2026-09-15**. Every other project was
 > assessed from its repository and documentation and **has never been started in this server**. Star counts and dates are from the
 > GitHub API on 2026-09-07 and go stale.
 > **Falsifier:** if `docs/features/html-gpu-direct.md` §2 stops listing three gates for WebGPU,
@@ -283,6 +284,101 @@ single-image. Treat any frame-rate claim as unproven until `coexistence` says ot
   Worth knowing about when writing WGSL by hand. **NOASSERTION licence — check before shipping.**
 * **cables** — a node-based patching environment, WebGL. Conceptually close to what
   `GRADING_NODE_GRAPH_STUDY.md` explores, and worth a look for that reason rather than for output.
+
+---
+
+### 3.8 three.js r186 ships 3DGS — measured 2026-09-15, and it beats PlayCanvas on cost
+
+**r186 (2026-09-08) added Gaussian splatting to the addons**, which postdates every other
+measurement in this file. Not a core class — `three/addons/objects/GaussianSplat.js` — but addons
+ship with the package under the same MIT licence. Four loaders came with it:
+`GaussianSplatPLYLoader`, `SPLATLoader`, `SPZLoader`, `KSPLATLoader`, plus a glTF extension. The
+PLY loader matters here: §3.3's hand-written INRIA fixture loads **with no conversion**, so both
+engines were measured on a byte-identical scene rather than on two scenes that merely resemble
+each other.
+
+Same camera as §3.3 (perspective, fov 60, at z = 12), same 1920×640 canvas, `NoColorSpace` and
+`NoToneMapping` set up front on the strength of §3.2.
+
+**Colour — 0.5 LSB at the splat centre.** Expected values decoded from the `.ply` that was
+actually rendered, through the same `c = 0.5 + C0·f_dc` relation the generator used, so the
+oracle stands on its own rather than on §3.3 having been right.
+
+| splat | measured (centre) | expected | Δ |
+| :--- | :--- | :--- | ---: |
+| (−1,+1) | (229, 51, 26) | (229.5, 51.0, 25.5) | 0.5 |
+| (+1,+1) | (26, 178, 64) | (25.5, 178.5, 63.7) | 0.5 |
+| (−1,−1) | (38, 89, 217) | (38.3, 89.3, 216.7) | 0.3 |
+| (+1,−1) | (204, 191, 38) | (204.0, 191.3, 38.3) | 0.3 |
+
+*The sampling window is the whole story of an earlier wrong number here*, and it is worth
+recording because it looks like measurement noise and is not: averaging a 13×13 patch reported
+**7.5 LSB**, and the error scales monotonically with the radius — 0.5 at r=0, 1.8 at r=2, 7.5 at
+r=6, 17.7 at r=10. A gaussian falls off to the background at its edge, so a patch mean measures
+the falloff, not the colour. An even earlier version split the frame into quadrants around the
+FRAME centre and reported **147 LSB with two splats "MISSING"** — the four gaussians sit within
+about 90 px of the CANVAS centre, the canvas is 1920×640 inside a 1920×1080 frame, and the page's
+own debug text is also non-background. Three wrong inputs, one plausible number.
+
+**Cost — it holds where PlayCanvas did not.** Same ladder scenes, same box, same 1080p2500
+channel on the OpenGL mixer, page rate from the page's own counter over an 8 s window after a
+warm-up, exactly as §3.3 did it.
+
+| gaussians | load | channel period | late | page fps | PlayCanvas (§3.3) |
+| ---: | ---: | :--- | ---: | ---: | ---: |
+| 4 | 6 ms | 40.0 / 40 ms | 0 | 25 | 25 |
+| 1 000 000 | 1 513 ms | 40.0 / 40 ms | 0 | 25 | 25 |
+| 4 000 000 | 5 796 ms | 40.0 / 40 ms | 0 | **25.1** | **21** |
+
+**The 4M rung was verified to be rendering something**, because a page that renders NOTHING also
+reports 25: the capture has 127 510 non-background pixels over 2619 distinct colours, and 6.1% of
+the frame is exactly what the geometry predicts — the scene spans x ∈ [−6, 6] and y ∈ [−2, 2],
+which at fov 60 from z = 12 is ≈ 8.4% of a canvas covering 59% of the frame.
+
+**Both page-fps figures share one weakness and it is not symmetric with the rest of this file.** A
+page's own counter cannot see a frame the CHANNEL repeated — the correction that took the orb from
+a claimed 22 to a measured 25.0. `html-cadence` is the instrument that can, and it could not be
+used here: it produced a **0-byte** `cadence.mkv` on this page, its FFmpeg consumer having
+initialised without error. So "25.1 against 21" is a comparison between two engines measured
+identically, not an absolute claim about either.
+
+### 3.9 WebGPU content cannot produce a KEY today — and this is not about splats
+
+The question that decides whether any of §3 is more than a background generator, given that this
+deployment's HTML work is alpha lower thirds into a DeckLink fill+key. Measured 2026-09-15.
+
+| configuration | result |
+| :--- | :--- |
+| DOM page, transparent, `gpu-direct` on | **α = 0 / 128 / 255** exactly as authored |
+| three.js WebGPU **splats**, `alpha: true`, `gpu-direct` on | colour correct, **α = 255 everywhere** |
+| three.js WebGPU **plain mesh**, `alpha: true`, `gpu-direct` on | **α = 255 everywhere** |
+| three.js WebGPU splats, `alpha: true`, `gpu-direct` **off** | **entirely empty frame** — rgb 0, α 0 |
+
+Read in order those four rule out every explanation but one. The DOM control proves the **IMAGE
+consumer carries alpha faithfully**, so 255 is not the instrument flattening it — without that
+control the whole finding would have been a false negative. The plain-mesh row proves it is **not
+`GaussianSplat`**: the same opacity appears with no splats in the scene. And three.js is
+configured correctly — `WebGPUBackend.js` maps `alpha: true` to `alphaMode: 'premultiplied'`, and
+`alpha` defaults to true.
+
+The last row is the bind. **WebGPU needs `gpu-direct`** — §2's third prerequisite — and with it
+off the page still rendered 76 frames while the channel received nothing at all. So the two
+requirements are mutually exclusive: the only configuration in which WebGPU reaches the channel
+is the one in which alpha arrives at 255.
+
+**It is not this fork discarding it.** `html_producer.cpp` passes CEF's shared-texture handle
+through to the GPU bridge with the channel order CEF reports (`CEF_COLOR_TYPE_RGBA_8888` →
+`rgba8`, else `bgra8`), and nothing on that path touches the alpha channel. The opacity is in
+what CEF composites into the shared texture for a page containing a GPU canvas.
+
+**What this costs, stated plainly:** every WebGPU item in this document — vgpu, three.js,
+PlayCanvas, the splats above — is a **fill-only source** today. For a full-frame background that
+is no limitation at all. For a lower third it is disqualifying, and no amount of page-side
+configuration changes it, because the page is not where it is being lost.
+
+**Not established:** whether a newer CEF, a different `background_color`, or an off-screen render
+target read back through a 2D canvas recovers the key. Each is a real candidate and none was
+tried — this section establishes *that* the key is lost and *where*, not that it is unrecoverable.
 
 ---
 
