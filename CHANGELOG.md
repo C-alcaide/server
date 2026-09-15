@@ -1,19 +1,25 @@
 CasparVP — Unreleased
 ==========================================
 
-### `PROJECTION_ICVFX` refuses a field of view that can only be degrees
+### BREAKING: `MIXER PROJECTION_ICVFX` now takes DEGREES
 
-`MIXER PROJECTION` takes degrees and `MIXER PROJECTION_ICVFX` takes radians — an inconsistency
-that is in the parameter's own name (`inner_fov_rad`) and is **not** changed here: flipping the
-unit would alter every existing show file by a factor of 57, which needs a deprecation path.
+`MIXER PROJECTION` took degrees and `MIXER PROJECTION_ICVFX` took radians — an inconsistency that
+lived in the parameter's own name (`inner_fov_rad`) and nowhere else, so an operator who had just
+set a projection got an inner frustum 57× too wide and a `202`.
 
-What is fixed is the harm. A planar field of view cannot exceed 180°, so a value above **π** is
-invalid in radians whatever was meant — there is no correct usage to break. `PROJECTION_ICVFX 1
-30` was previously accepted raw and produced an inner frustum 57× too wide, `inner_fov` reaching
-the shader with no clamp. It now answers `400` and names the conversion, since an operator who
-hits this has just typed degrees into the one command that does not take them.
+**`inner_fov` is now degrees**, multiplied by `DEG2RAD` at parse exactly where `MIXER PROJECTION`
+does it — and where auto-projection already did (`inner_fov_deg * I2R`). A value outside 0..180 is
+refused with a `400`.
 
-Verified: `0.52` (30° in radians) and `3.0` still accepted, `30` and `90` refused.
+**This breaks any show file that passed radians.** `PROJECTION_ICVFX 1 0.52` now means 0.52° and
+is silently a much narrower frustum than it was. Nothing consumes the command yet, which is why
+the unit was changed rather than guarded — the shape is picked on merit instead of compatibility.
+
+The transform and the field registry keep radians, deliberately: that is what the shader wants,
+and every projection field is labelled `"rad"` (`proj_yaw`, `proj_fov`, `proj_inner_fov`). The
+conversion belongs at the operator boundary, which is the only place it was missing.
+
+Verified: 30/60/90° arrive as 0.5236/1.0472/1.5708 rad in `proj_inner_fov`; 180, 0 and −5 refused;
 `icvfx-parity` unchanged at 0 LSB.
 
 ### Four `MIXER` commands stop swallowing a typo and answering `202`

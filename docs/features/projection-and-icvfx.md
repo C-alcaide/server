@@ -48,9 +48,15 @@ All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cp
 
 **Three details that surprise people, all verified:**
 
-- **`PROJECTION` takes degrees, `PROJECTION_ICVFX` takes radians.** `inner_fov_rad` is used as
-  given; `PROJECTION`'s four angles are multiplied by `DEG2RAD`. Inconsistent, and load-bearing —
-  it is in the parameter name for `ICVFX` and nowhere else.
+- ~~**`PROJECTION` takes degrees, `PROJECTION_ICVFX` takes radians.**~~ **BOTH TAKE DEGREES since
+  2026-09-15.** `PROJECTION_ICVFX`'s `inner_fov` is now multiplied by `DEG2RAD` at parse, exactly
+  where `PROJECTION` does it and where auto-projection already did (`inner_fov_deg * I2R`). The
+  argument is `inner_fov_deg` in the grammar now, and a value outside 0..180 is refused.
+
+  **The transform and the field registry keep RADIANS, deliberately** — that is what the shader
+  wants, and every projection field is labelled `"rad"` (`proj_yaw`, `proj_fov`,
+  `proj_inner_fov`). The conversion belongs at the operator boundary, which is the only place it
+  was missing.
 - **`PROJECTION_CURVE` and `PROJECTION_LENS` are different things.** `CURVE` is the shape of the
   *screen* you are projecting onto; `LENS` is the projection the *source material* was shot or
   rendered with. Both take the same three keywords, which is why they get confused.
@@ -150,19 +156,16 @@ of samples — which is the fingerprint of a red/blue exchange and of almost not
    colour comparison.
 2. **No tweened-form coverage** for any of the twelve commands. `duration`/`tween` are accepted
    and untested throughout the fork, not only here.
-3. **The degrees/radians inconsistency** between `PROJECTION` and `PROJECTION_ICVFX` is still
-   there, and still deliberately: flipping the unit would change every existing show file by a
-   factor of 57, which needs a deprecation path rather than an edit.
+3. ~~**The degrees/radians inconsistency.**~~ **FIXED 2026-09-15 by changing the unit**, which
+   was possible because nothing consumes this command yet — the shape is chosen on merit rather
+   than on compatibility. **It IS a breaking change** for any show file that passed radians; the
+   CHANGELOG says so plainly.
 
-   **The HARM is fixed, 2026-09-15.** A planar field of view cannot exceed 180°, so a value above
-   **π** is invalid in radians whatever the operator meant — there is no correct usage to break.
-   `PROJECTION_ICVFX 1 30` used to be accepted raw and gave an inner frustum 57× too wide, with
-   `inner_fov` reaching the shader unclamped. It is now refused with a `400` that names the
-   conversion, because whoever hits it has just typed degrees into the one command that does not
-   take them.
+   An earlier pass the same day guarded the symptom instead — refusing a value above π on the
+   grounds that no field of view can exceed 180° — which was the right fix while back-compat was
+   assumed and the wrong one once it was not. Recorded because the difference was a question
+   about the deployment, not about the code.
 
-   That leaves the inconsistency as a documentation problem rather than a silent-wrong-picture
-   one, which is the part that could be fixed without a migration.
 4. ~~**`PROJECTION_LENS` accepts only three keywords.**~~ **FIXED 2026-09-15, and this entry
    understated it.** It did not keep the previous value: `screen_curve_type lens =
    screen_curve_type::flat` is the initialiser, so an unrecognised keyword silently selected
