@@ -25,12 +25,15 @@
 #include "vrpn_receiver.h"
 
 #include "../camera_data.h"
+
+#include <common/log.h>
 #include "../tracker_registry.h"
 
 #include <atomic>
 #include <cmath>
 #include <iostream>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -171,9 +174,27 @@ struct vrpn_receiver::impl
             analog_.reset();
         });
 #else
-        std::cerr << "[tracking/vrpn] VRPN support was not compiled in "
-                  << "(rebuild with -DBUILD_TRACKING_VRPN=ON)\n";
+        // ── A BUILD WITHOUT VRPN MUST REFUSE THE BIND, NOT ACCEPT IT ────────────────────
+        //
+        // This used to print to `std::cerr` and clear `running_`, and `start()` returns void --
+        // so `TRACKING ... BIND VRPN` answered **202 TRACKING OK** on a build where the
+        // receiver is a no-op. The operator binds a tracker, is told it worked, and no sample
+        // ever arrives; nothing in the server's log says why, because `std::cerr` is not the
+        // log. Measured 2026-09-17 on this build, where `BUILD_TRACKING_VRPN` is OFF.
+        //
+        // THROWING IS THE HOUSE PATTERN HERE, not an escalation: `freed_receiver::start()`
+        // reports a port it cannot take by letting `socket_.bind` throw, and
+        // `tracking_bind_command` catches it into `400 TRACKING ERROR bind: ...`. A feature
+        // that is not in the binary is the same kind of answer as a port that is not available
+        // -- the bind did not happen -- so it is reported the same way.
+        //
+        // The log line stays as well as the throw, through CASPAR_LOG so it reaches the
+        // server's own log rather than a stream nobody is reading.
+        CASPAR_LOG(error) << L"[tracking/vrpn] VRPN support was not compiled into this build "
+                             L"(rebuild with -DBUILD_TRACKING_VRPN=ON)";
         running_.store(false);
+        throw std::runtime_error("VRPN support was not compiled into this build "
+                                 "(rebuild with -DBUILD_TRACKING_VRPN=ON)");
 #endif
     }
 
