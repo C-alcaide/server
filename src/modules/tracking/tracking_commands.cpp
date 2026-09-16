@@ -653,12 +653,31 @@ static std::wstring tracking_genlock_command(command_context& ctx)
         if (frames < 0.0)
             return L"400 TRACKING ERROR GENLOCK frames must be >= 0\r\n";
 
+        // ── AN UNRECOGNISED FLAG IS A MISTAKE, NOT A DEFAULT ────────────────────────────
+        //
+        // This chain used to fall through to its initialiser, so `GENLOCK 2 BANANA` silently
+        // ENABLED genlock and answered `202 TRACKING OK`. Measured 2026-09-16 while sweeping
+        // TRACKING for the shape: every other verb in this file refuses its bad input, and
+        // this was the one that did not.
+        //
+        // **The sixth instance of the same defect in a sixth module** -- after `LTC LOAD`,
+        // `ADD ... PORTAUDIO DEVICE=`, `PREVIZ ... EYEMODE`, `MIXER PROJECTION_LENS` /
+        // `PROJECTION_CURVE` and `MIXER FLIP`. The house habit is an `if/else if` over the
+        // valid values with the variable initialised to one of them, which makes the
+        // initialiser indistinguishable from a typo.
+        //
+        // `ON` is spelled out rather than being whatever is left over, for the same reason
+        // `RECTILINEAR` and `FLAT` were: naming the value is what separates "the operator asked
+        // for it" from "the operator mistyped".
         bool enable = true;
         if (ctx.parameters.size() > 1) {
             if (boost::iequals(ctx.parameters.at(1), L"OFF"))
                 enable = false;
             else if (boost::iequals(ctx.parameters.at(1), L"ON"))
                 enable = true;
+            else
+                return L"400 TRACKING ERROR GENLOCK takes ON or OFF, not '" +
+                       ctx.parameters.at(1) + L"'\r\n";
         }
 
         tracker_registry::instance().update_genlock(
