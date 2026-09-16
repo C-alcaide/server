@@ -1735,16 +1735,30 @@ struct notchlc_producer_impl final : public core::frame_producer
 
     uint32_t frame_number() const override
     {
+        // **THE PLAYHEAD, AND ITS TWO CALLERS BOTH NEED IT TO BE.** `frame_count_` is the IO
+        // clock and runs ahead of the picture by whatever is queued, so reporting it here was
+        // not merely inconsistent with `params/position` -- it moved behaviour:
+        //
+        //   `layer.cpp` computes an AUTO transition's start as
+        //   `nb_frames() - frame_number() - auto_play_delta`, so a read clock fires the
+        //   transition EARLY by the queue depth;
+        //   and the same file derives `eof` as `frame_number() >= nb_frames()`, so a layer
+        //   reported itself finished while the viewer still had queued frames to see.
+        //
+        // `av_producer` has always reported the playhead here -- its `frame_time_` is set from
+        // the frame `next_frame()` hands out -- so this was a parity split as well, and the two
+        // producer families disagreed about when a transition should start.
         if (file_fps_ > 0.0 && format_desc_.fps > 0.0 && file_fps_ != format_desc_.fps) {
-            double scaled = static_cast<double>(frame_count_.load()) * (format_desc_.fps / file_fps_);
+            double scaled = static_cast<double>(display_frame_.load()) * (format_desc_.fps / file_fps_);
             return static_cast<uint32_t>(std::llround(scaled));
         }
-        return static_cast<uint32_t>(frame_count_.load());
+        return static_cast<uint32_t>(display_frame_.load());
     }
 
     core::monitor::state state() const override
     {
-        const double cur_sec = (file_fps_ > 0.0) ? static_cast<double>(frame_count_) / file_fps_ : 0.0;
+        // `file/time` is where the VIEWER is, for the same reason `frame_number()` above is.
+        const double cur_sec = (file_fps_ > 0.0) ? static_cast<double>(display_frame_) / file_fps_ : 0.0;
         monitor_state_["file/name"]     = u8(boost::filesystem::path(path_).filename().wstring());
         monitor_state_["file/path"]     = u8(path_);
         monitor_state_["file/time"]     = {cur_sec, total_seconds_};
