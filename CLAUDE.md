@@ -174,16 +174,29 @@ Still uncovered, and now the priority order for coverage rather than for docs:
 
   §4 lists the first three checks worth writing, in the order that would have caught the ICVFX
   class. (Thirteen, not twelve: the old count was short by one.)
-* **NINE of the eighteen `TRACKING` commands, and four of the five protocols.**
+* **ALL EIGHTEEN `TRACKING` commands are driven now — but four of the five protocols are not.**
   `tracking-previz` landed 2026-09-06 and is the first coverage this family ever had: a synthetic
   29-byte FreeD D1 packet through `BIND ... MODE PREVIZ`, gated on the camera's resulting position
   and rotation VALUES on both mixers. It covers `BIND` and `UNBIND` over FreeD and nothing else.
 
-  Still verified by nothing: **`ZOOM_LUT`, `DELAY`, `GENLOCK`, `NODAL`, `WORLDALIGN`, `DOF`,
-  `LENS`, `TARGET_CAMERA`, `TARGET_MAP`** -- nine -- plus the FreeD+, OSC, VRPN, PSN and
-  OpenTrackIO receivers, the 2D and TARGET modes, and lens distortion. **And the composition
-  ORDER out of `CAMERA_TRACKING_TRANSFORM.md`, which is the one no arm can see**: every check
-  moves ONE setting at a time, so two settings composing in the wrong sequence passes all nine.
+  **The split matters more than the count.** TWELVE are gated on the previz camera's VALUES —
+  `BIND`, `UNBIND`, `OFFSET`, `SCALE`, `POSITION_SCALE`, `DEFAULT_FOV`, `ZERO`, `ZOOM_LUT`,
+  `NODAL`, `WORLDALIGN`, `INFO`, `LIST`. SIX are gated only on `INFO` reporting what was stored
+  — `DELAY`, `GENLOCK`, `DOF`, `LENS`, `TARGET_CAMERA`, `TARGET_MAP` — because none of them
+  moves the previz camera in a settled reading. **Those six catch "refused or dropped" and
+  cannot catch "stored and inert"**, which is the `MIXER EXPOSURE` class, and the battery says
+  so in its own message rather than leaving a reader to infer it.
+
+  Still uncovered entirely: the **FreeD+, OSC, VRPN, PSN and OpenTrackIO** receivers, the 2D and
+  TARGET modes, lens distortion, and **the composition ORDER** out of
+  `CAMERA_TRACKING_TRANSFORM.md` — every arm moves ONE setting, so two composing in the wrong
+  sequence passes all eighteen.
+
+  *And sweeping it found the house defect for the sixth time.* `GENLOCK 2 BANANA` answered
+  `202 TRACKING OK` and **enabled** genlock: `bool enable = true` was the initialiser of an
+  `if/else if` with no `else`, so an unrecognised flag selected the ON case. Fixed in
+  `f8d256354`; the battery now sweeps twelve bad inputs across every verb that takes an
+  argument, and the other eleven already refused.
 
   *Nine landed 2026-09-16, and each expectation was MEASURED before it was written -- which is
   the part worth copying.* A check written from a guess about a verb passes whenever the guess
@@ -628,8 +641,9 @@ wrong reflex.
 
 ## A command that accepts a typo and answers OK is this tree's most repeated defect
 
-Five instances found on 2026-09-14/15 in five unrelated modules, by five different routes, none
-of them looking for it:
+Six instances in six unrelated modules, by six different routes, and only the last was found
+by anyone LOOKING for it — the TRACKING sweep of 2026-09-16 went hunting for this shape
+specifically, which is the first time that has worked:
 
 | where | what an unrecognised value gave |
 | :--- | :--- |
@@ -638,6 +652,7 @@ of them looking for it:
 | `PREVIZ … EYEMODE` | the other mode, silently |
 | `MIXER PROJECTION_LENS` / `PROJECTION_CURVE` | RECTILINEAR / **FLAT -- the curve disabled** |
 | `MIXER FLIP` | no flip, so a typo un-mirrored an output |
+| `TRACKING GENLOCK` | genlock **ENABLED** — the initialiser was the ON case, so a typo switched it on rather than leaving it alone |
 
 **The shape is always the same**: a variable initialised to one of the valid values, an
 `if/else if` chain over the others, and no `else`. The initialiser is then indistinguishable from
