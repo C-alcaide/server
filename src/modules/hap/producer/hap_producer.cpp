@@ -277,6 +277,20 @@ struct hap_producer_impl final : public core::frame_producer
     std::atomic_bool                          eof_paused_{false};
 
     std::atomic<int64_t>                      frame_count_{0};
+
+    /// The frame the viewer is actually looking at, as opposed to how far the READER has got.
+    ///
+    /// `frame_count_` is the IO clock -- this producer's own reverse-turnaround comment says so
+    /// in as many words -- and it runs ahead of the picture by whatever is queued. That is the
+    /// right quantity for the decode side and the wrong one to answer "where is the playhead",
+    /// which is what the `position` transport parameter is asked. Measured 2026-09-16: a paused
+    /// layer showing frame 42 reported 43, so a client could write 42, read back 43, and never
+    /// get agreement -- `position` was not idempotent.
+    ///
+    /// Written at the two places a frame becomes visible, which is what makes it the DISPLAY
+    /// clock rather than a second copy of the decode one.
+    std::atomic<int64_t>                      display_frame_{0};
+
     int64_t                                   total_frames_   = -1;
     double                                    total_seconds_  = 0.0;
     double                                    file_fps_       = 0.0;
@@ -1416,7 +1430,10 @@ struct hap_producer_impl final : public core::frame_producer
                 p.max = static_cast<double>(total - 1);
             p.default_value.push_back(static_cast<int64_t>(0));
 
-            p.get = [this, scalar] { return scalar(frame_count_.load()); };
+            // THE PLAYHEAD, NOT THE READ HEAD. See `display_frame_`: reporting `frame_count_`
+            // here answered a different question from the one `position` asks, and made the
+            // parameter non-idempotent -- write 42, read 43.
+            p.get = [this, scalar] { return scalar(display_frame_.load()); };
             p.set = [this, one_number](const core::monitor::vector_t& v) {
                 double n = 0;
                 if (!one_number(v, n) || n < 0)
@@ -1716,6 +1733,12 @@ struct hap_producer_impl final : public core::frame_producer
 
         auto fc = (frame_count_ += (spd >= 0.0) ? actually_consumed : -actually_consumed);
 
+        // The frame now in `cached_frame_` is the LAST one this tick consumed, and `fc` names
+        // the NEXT one to consume -- so the visible frame is one behind, or one ahead playing
+        // in reverse. Derived from `fc` rather than counted separately so a batch pop
+        // (`actually_consumed` > 1, the catch-up skip) cannot drift the two apart.
+        display_frame_.store((spd >= 0.0) ? fc - 1 : fc + 1, std::memory_order_relaxed);
+
         fps_frame_acc_ += actually_consumed;
         const double fps_elapsed = fps_window_timer_.elapsed();
         if (fps_elapsed >= 1.0) {
@@ -1790,6 +1813,10 @@ struct hap_producer_impl final : public core::frame_producer
                 seek_done_.store(false, std::memory_order_relaxed);
                 cached_frame_ = std::move(ready_queue_.front().df);
                 ready_queue_.pop();
+                // No advance happens on this path, so the frame just made visible is the one
+                // `frame_count_` already names -- not one behind it as in `receive_impl`.
+                display_frame_.store(frame_count_.load(std::memory_order_relaxed),
+                                     std::memory_order_relaxed);
                 lk.unlock();
                 queue_cv_.notify_all();
 
