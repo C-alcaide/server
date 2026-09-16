@@ -174,16 +174,37 @@ Still uncovered, and now the priority order for coverage rather than for docs:
 
   §4 lists the first three checks worth writing, in the order that would have caught the ICVFX
   class. (Thirteen, not twelve: the old count was short by one.)
-* **sixteen of the eighteen `TRACKING` commands, and four of the five protocols.**
+* **NINE of the eighteen `TRACKING` commands, and four of the five protocols.**
   `tracking-previz` landed 2026-09-06 and is the first coverage this family ever had: a synthetic
   29-byte FreeD D1 packet through `BIND ... MODE PREVIZ`, gated on the camera's resulting position
   and rotation VALUES on both mixers. It covers `BIND` and `UNBIND` over FreeD and nothing else.
 
-  Still verified by nothing: `OFFSET`, `SCALE`, `ZERO`, `DEFAULT_FOV`, `ZOOM_LUT`,
-  `POSITION_SCALE`, `DELAY`, `GENLOCK`, `NODAL`, `WORLDALIGN`, `DOF`, `LENS`, `TARGET_CAMERA`,
-  `TARGET_MAP`, `INFO`, `LIST`; the FreeD+, OSC, VRPN, PSN and OpenTrackIO receivers; the 2D and
-  TARGET modes; and the composition order read out of the source in
-  `architecture/CAMERA_TRACKING_TRANSFORM.md`.
+  Still verified by nothing: **`ZOOM_LUT`, `DELAY`, `GENLOCK`, `NODAL`, `WORLDALIGN`, `DOF`,
+  `LENS`, `TARGET_CAMERA`, `TARGET_MAP`** -- nine -- plus the FreeD+, OSC, VRPN, PSN and
+  OpenTrackIO receivers, the 2D and TARGET modes, and lens distortion. **And the composition
+  ORDER out of `CAMERA_TRACKING_TRANSFORM.md`, which is the one no arm can see**: every check
+  moves ONE setting at a time, so two settings composing in the wrong sequence passes all nine.
+
+  *Nine landed 2026-09-16, and each expectation was MEASURED before it was written -- which is
+  the part worth copying.* A check written from a guess about a verb passes whenever the guess
+  and the code are wrong in the same direction, and two readings needed correcting before any
+  of these could be trusted: **`OFFSET` is a ROTATION offset in DEGREES**, not a position one,
+  and **`SCALE`'s third argument is `zoom_full_range`, not roll** -- sending 1 there collapses
+  the zoom calibration and moves `fov`, which looks exactly like a defect in SCALE.
+
+  *And one wrong expectation survived into a run, which is the more useful lesson.*
+  `DEFAULT_FOV` was first gated at 45 from a probe reading of 45 -- taken while
+  `zoom_full_range` was still 1 from the trial before it, where a raw zoom of 0 is the full
+  range by accident. The real anchor is the registry's own comment: *at `zoom_raw ==
+  zoom_full_range`, `FOV == zoom_default_fov`*. **A measurement carries the state it was taken
+  in**, and generalising from one is how a check ends up asserting a coincidence.
+
+  *`POSITION_SCALE` is pinned rather than filed as a defect, deliberately.* Its default is
+  `0.001` because it CARRIES THE MILLIMETRE-TO-METRE CONVERSION -- so an operator reading the
+  command as "scale the translation" and sending `POSITION_SCALE 2` gets 2000x, and
+  `POSITION_SCALE 1` reports millimetres. `CAMERA_TRACKING_TRANSFORM.md` says exactly this, and
+  the guide's own `INFO` sample shows `0.001`, so the behaviour is intended and now has a check
+  holding it still.
 
   *The reason it had no coverage was structural, not neglect, and worth remembering for the next
   surface like it:* a tracker needs a wire protocol on one side and something observable on the
