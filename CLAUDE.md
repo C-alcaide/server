@@ -187,10 +187,17 @@ Still uncovered, and now the priority order for coverage rather than for docs:
   cannot catch "stored and inert"**, which is the `MIXER EXPOSURE` class, and the battery says
   so in its own message rather than leaving a reader to infer it.
 
+  **The composition ORDER is covered too (2026-09-17), by one arm.** It is checkable because the
+  documented sequence contains a NON-COMMUTING PAIR: the rotation is step 1 and the nodal offset
+  is step 3, and step 3 expresses its lens-local vector through the camera-frame basis — so a
+  forward offset swings round the world axes as the composed pan turns, `nodal · (sin, 0, cos)`,
+  measured at four angles. **Driven by `OFFSET` rather than by the packet**, which is what makes
+  it a test of step 1 FEEDING step 3: both plausible wrong orders — nodal before the rotation, or
+  nodal against the RAW sample pan — leave the delta on +Z at every angle. Mutation-verified:
+  forcing the basis to ignore the composed pan turns exactly that arm red, 21/22.
+
   Still uncovered entirely: the **FreeD+, OSC, VRPN, PSN and OpenTrackIO** receivers, the 2D and
-  TARGET modes, lens distortion, and **the composition ORDER** out of
-  `CAMERA_TRACKING_TRANSFORM.md` — every arm moves ONE setting, so two composing in the wrong
-  sequence passes all eighteen.
+  TARGET modes, and lens distortion.
 
   *And sweeping it found the house defect for the sixth time.* `GENLOCK 2 BANANA` answered
   `202 TRACKING OK` and **enabled** genlock: `bool enable = true` was the initialiser of an
