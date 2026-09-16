@@ -1760,6 +1760,43 @@ std::vector<pass_info> describe_passes(const std::wstring& path, std::string& ou
     return out;
 }
 
+std::vector<imported_info>
+describe_imported(const std::wstring& path, std::wstring& out_base, std::string& out_error)
+{
+    std::vector<imported_info> out;
+
+    std::string source;
+    if (!load_shader_source(path, source, out_base, out_error))
+        return out;
+
+    const auto json = extract_json(source);
+    if (json.empty())
+        return out; // a plain GLSL fragment imports nothing
+
+    boost::property_tree::ptree pt;
+    try {
+        std::istringstream is(json);
+        boost::property_tree::read_json(is, pt);
+    } catch (const std::exception& e) {
+        out_error = std::string("the ISF header of '") + u8(path) + "' is not valid JSON: " + e.what();
+        return out;
+    }
+
+    // The same walk `shader::parse` does for the producer, kept deliberately identical: an entry
+    // missing either half is skipped rather than refused, because the producer has behaved that
+    // way for years and a node must not reject a file the producer plays.
+    if (auto imp = pt.get_child_optional("IMPORTED")) {
+        for (const auto& kv : *imp) {
+            imported_info d;
+            d.name = kv.first;
+            d.path = kv.second.get<std::string>("PATH", "");
+            if (!d.name.empty() && !d.path.empty())
+                out.push_back(std::move(d));
+        }
+    }
+    return out;
+}
+
 shader_features describe_features(const std::wstring& path, std::string& out_error)
 {
     shader_features f;

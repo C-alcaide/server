@@ -172,6 +172,40 @@ using isf_vulkan_source_fn = std::function<isf_vulkan_source(const std::string& 
 void                        set_isf_vulkan_source(isf_vulkan_source_fn f);
 const isf_vulkan_source_fn& get_isf_vulkan_source();
 
+/// One `IMPORTED` image, decoded on the CPU, as the Vulkan mixer needs it.
+///
+/// PIXELS RATHER THAN A TEXTURE, for the same reason `isf_node_request` carries GL ids: this
+/// struct crosses a link boundary with no shared texture type. The module decodes the file --
+/// it already owns an image loader, for the producer route -- and the mixer owns the upload.
+///
+/// The OpenGL node path needs none of this: it delegates to `isf::shader`, which has loaded
+/// IMPORTED images for years. This hook exists because the Vulkan node path runs GENERATED GLSL
+/// against the mixer's own descriptor sets, so nothing of the producer's texture handling
+/// applies to it.
+struct isf_imported_image
+{
+    /// The sampler name, exactly as the header declares it.
+    std::string name;
+    int         width  = 0;
+    int         height = 0;
+    /// `width * height * 4`, RGBA8, top-down.
+    std::vector<std::uint8_t> rgba;
+    /// False when the file could not be read. The pixels are then a single transparent black
+    /// texel and the module has logged which file and which name.
+    ///
+    /// **NOT AN ERROR PATH**, and that is deliberate: it is what the producer already does, and
+    /// the registry's rule for a dead branch is that the pass renders UNCHANGED rather than
+    /// black. A missing import samples as empty and the shader still runs.
+    bool loaded = false;
+};
+
+/// A shader's IMPORTED images, decoded. In the header's declaration order -- the generated GLSL
+/// binds them by index, so the two orderings must be one ordering.
+using isf_imported_fn = std::function<std::vector<isf_imported_image>(const std::string& path)>;
+
+void                     set_isf_imported_images(isf_imported_fn f);
+const isf_imported_fn&   get_isf_imported_images();
+
 /// Injected once at boot by `shell/server.cpp`, for the same reason `set_port_resolver` is: the
 /// dependency runs module -> core, so core holds a hook and the module fills it.
 void set_isf_node_renderer(isf_node_renderer r);

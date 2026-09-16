@@ -406,6 +406,26 @@ struct pass_info
 /// A shader's passes, in declaration order. One entry for a single-pass shader.
 std::vector<pass_info> describe_passes(const std::wstring& path, std::string& out_error);
 
+/// One `IMPORTED` entry, as the JSON header declares it.
+struct imported_info
+{
+    /// The sampler name the shader refers to it by.
+    std::string name;
+    /// `PATH`, as written -- relative to the shader's own directory, or absolute.
+    std::string path;
+};
+
+/// A shader's `IMPORTED` images, in declaration order, with the directory to resolve them
+/// against.
+///
+/// DECLARATION ORDER IS PART OF THE CONTRACT, not an implementation detail: the generated
+/// Vulkan GLSL binds these into descriptor set 1 by index, and the mixer fills the same indices
+/// from this list. Two independent orderings of the same JSON would put the wrong picture in the
+/// wrong sampler -- and the shader would still compile and still render, which is the failure
+/// this codebase has paid for twice.
+std::vector<imported_info>
+describe_imported(const std::wstring& path, std::wstring& out_base, std::string& out_error);
+
 /// Evaluate one `WIDTH`/`HEIGHT` expression.
 ///
 /// **THE SAME EVALUATOR BOTH BACKENDS USE.** ISF sizes are arbitrary arithmetic over `$WIDTH`,

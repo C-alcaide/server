@@ -291,6 +291,64 @@ class image_renderer
         std::uint64_t marked = 0;
     };
     std::map<std::string, isf_instance> isf_instances_;
+
+    /// IMPORTED images, uploaded once and keyed by SHADER PATH -- not per node instance.
+    ///
+    /// **THE OPPOSITE CHOICE FROM `isf_instances_` ABOVE, ON PURPOSE.** A persistent buffer is
+    /// per instance because two nodes running one shader must not accumulate into each other's
+    /// history. An IMPORTED image is an immutable file: two nodes naming one shader want the
+    /// same pixels, and giving them a copy each would upload the same picture twice and hold it
+    /// twice. The ISF spec draws the same line -- persistence is a property of the effect
+    /// instance, an import is a property of the file.
+    ///
+    /// Loaded on the first draw that needs them, which costs one synchronous upload on the
+    /// render thread. That is the same shape as the variant pipeline compile that has to happen
+    /// on the same frame, and for the same reason: it is once per path, not once per frame.
+    std::map<std::string, std::vector<std::shared_ptr<texture>>> isf_imported_;
+
+    /// This shader's imported images as textures, uploading them if this is the first ask.
+    const std::vector<std::shared_ptr<texture>>& imported_textures_for(const std::string& path)
+    {
+        auto it = isf_imported_.find(path);
+        if (it != isf_imported_.end())
+            return it->second;
+
+        std::vector<std::shared_ptr<texture>> out;
+        const auto&                           fn = core::graph::get_isf_imported_images();
+        if (fn) {
+            for (const auto& img : fn(path)) {
+                if (img.width <= 0 || img.height <= 0 ||
+                    img.rgba.size() < static_cast<std::size_t>(img.width) * img.height * 4)
+                    continue;
+                // ── R AND B EXCHANGED ON THE WAY IN, WHICH IS A CONVENTION AND NOT A BUG ──
+                //
+                // The module decodes to RGBA -- it is feeding an OpenGL path that wants exactly
+                // that -- and this mixer labels the bytes of its `eR8G8B8A8Unorm` textures
+                // BGRA. Handing the same buffer to both therefore cannot be right for both.
+                //
+                // Measured 2026-09-16 with an import of (204, 102, 51): OpenGL rendered it
+                // exactly and Vulkan rendered (51, 102, 204). A grey import would have passed on
+                // both, which is why the fixture's colour is asymmetric per channel -- the same
+                // trap that hid the ICVFX gain exchange for months.
+                auto buf = vulkan_->create_array(static_cast<int>(img.rgba.size()));
+                {
+                    const auto* src = img.rgba.data();
+                    auto*       dst = buf.data();
+                    for (std::size_t px = 0; px + 3 < img.rgba.size(); px += 4) {
+                        dst[px + 0] = src[px + 2];
+                        dst[px + 1] = src[px + 1];
+                        dst[px + 2] = src[px + 0];
+                        dst[px + 3] = src[px + 3];
+                    }
+                }
+                out.push_back(vulkan_
+                                  ->copy_async(std::move(buf), img.width, img.height, 4,
+                                               common::bit_depth::bit8)
+                                  .get());
+            }
+        }
+        return isf_imported_.emplace(path, std::move(out)).first->second;
+    }
     std::uint64_t                       isf_sweep_frame_ = 0;
 
     /// The slot for one `isf` step, created on its first drawn frame.
@@ -1417,6 +1475,38 @@ class image_renderer
                         }
                     }
 
+                    // ── THE IMPORTED IMAGES, FOR EITHER PATH ───────────────────────
+                    //
+                    // ABOVE THE BRANCH, and that is the whole point: a single-pass shader with
+                    // an IMPORTED image takes the `else` below, and the first version of this
+                    // filled the slots inside the multi-pass arm only. Measured 2026-09-16 --
+                    // OpenGL rendered the imported colour exactly and Vulkan rendered BLACK,
+                    // which is the backend divergence the old refusal existed to prevent,
+                    // caught by the check written for it.
+                    //
+                    // The generated shader numbers its imported samplers from `targets.size()`,
+                    // so the offset is the FINAL target count, taken from the pass plan up
+                    // front rather than from a running count inside the loop -- which is still
+                    // zero on the first pass and would bind an import where a target belongs on
+                    // that pass and correctly on the last: wrong only sometimes, the hardest
+                    // kind to attribute.
+                    std::array<std::shared_ptr<texture>, 8> isf_slots{};
+                    if (isf_path && !isf_path->empty()) {
+                        std::vector<std::string> seen;
+                        for (const auto& pp : isf_plan) {
+                            if (pp.target.empty())
+                                continue;
+                            if (std::find(seen.begin(), seen.end(), pp.target) == seen.end())
+                                seen.push_back(pp.target);
+                        }
+                        const auto n_tg = (std::min)(seen.size(), isf_slots.size());
+
+                        const auto& imps = imported_textures_for(*isf_path);
+                        for (std::size_t imp_i = 0;
+                             imp_i < imps.size() && n_tg + imp_i < isf_slots.size(); ++imp_i)
+                            isf_slots[n_tg + imp_i] = imps[imp_i];
+                    }
+
                     if (isf_plan.size() > 1) {
                         // Named targets, in DECLARATION ORDER -- the order the generated shader
                         // declares its samplers in, so the two walk one list.
@@ -1430,8 +1520,11 @@ class image_renderer
                         // in both APIs, so the alternative to a pair is not "slower" but
                         // "whatever the driver did today".
                         std::vector<std::string>                tgt_names;
-                        std::array<std::shared_ptr<texture>, 8> tgt_read{};
+                        // Seeded with the imports already placed at their slots -- the pass
+                        // loop below only ever fills the TARGET slots, which sit before them.
+                        std::array<std::shared_ptr<texture>, 8> tgt_read = isf_slots;
                         std::array<std::shared_ptr<texture>, 8> tgt_write{};
+
                         for (const auto& pp : isf_plan) {
                             if (pp.target.empty())
                                 continue;
@@ -1570,7 +1663,7 @@ class image_renderer
                                    nd.has_in1 ? outputs[alias[st.in1]] : src0,
                                    dst, format_desc, pass, nd, node_uv_inv, node_uv_valid,
                                    mask_texture, isf_path, isf_t, isf_dt,
-                                   isf_frame, isf_to_display);
+                                   isf_frame, isf_to_display, 0, 0.f, 0.f, &isf_slots);
                     }
                     outputs[i] = dst;
 

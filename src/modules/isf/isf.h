@@ -43,6 +43,9 @@ bool render_node(const core::graph::isf_node_request& req);
 /// seam rather than a call is the same one as above: core cannot link this module.
 core::graph::isf_vulkan_source vulkan_source_for(const std::string& path);
 
+/// This shader's IMPORTED images, decoded to RGBA8, in the header's declaration order.
+std::vector<core::graph::isf_imported_image> imported_images_for(const std::string& path);
+
 /// A shader's passes, sized for one frame. Injected at boot; see `core::graph::set_isf_pass_planner`.
 std::vector<core::graph::isf_pass_plan>
 plan_passes_for(const std::string&                                     path,

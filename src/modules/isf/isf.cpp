@@ -10,9 +10,11 @@
 
 #include "isf.h"
 #include "isf_producer.h"
+#include "isf_image_load.h"
 #include "isf_shader.h"
 
 #include <algorithm>
+#include <filesystem>
 #include "isf_vulkan_glsl.h"
 
 #include <common/log.h>
@@ -129,37 +131,20 @@ std::vector<core::graph::port_desc> resolve_node_ports(const std::string& select
     // is exactly the message an editor wants -- the shader is unusable, rather than a dozen
     // parameters having gone missing.
     //
-    // **AND ON BOTH BACKENDS, EVEN THOUGH OPENGL COULD RUN IT.** `isf::shader` has handled
-    // PASSES, persistent buffers and IMPORTED images for years, so the OpenGL node path would
-    // render a multi-pass shader correctly today. The Vulkan node path is a single generated
-    // fragment shader and would silently render only the LAST pass -- a plausible picture, on
-    // one backend, from a document that is valid on the other. The operator's rule for this
-    // feature is that a document must not render differently depending on the mixer, so the
-    // answer is to refuse it everywhere until the Vulkan pass loop exists, not to let OpenGL
-    // race ahead.
+    // **AND THE REFUSAL IS GONE, ALL OF IT.** It listed `PASSES`, `PERSISTENT` and `IMPORTED`
+    // in turn, and each left as its implementation landed on BOTH backends -- which was the
+    // condition it was written to enforce. `isf::shader` had handled all three for the PRODUCER
+    // for years, so the OpenGL node path could always have run them; the Vulkan node path is a
+    // single generated fragment shader and would have rendered only the last pass, sampled an
+    // unbound target, or sampled an unbound import. A plausible picture on one backend from a
+    // document that is valid on the other is the one outcome the operator's rule forbids, and
+    // refusing everywhere until both could render was how that was held.
     //
-    // This costs nothing that ever worked: the `isf` NODE class is new, and multi-pass has
-    // never rendered through it on either mixer. The PRODUCER is untouched and still runs all
-    // of this.
-    std::string feat_error;
-    const auto  feats = describe_features(u16(selector), feat_error);
-    if (feat_error.empty()) {
-        // `multipass` and `persistent` ARE NO LONGER REFUSED -- both backends draw N passes and
-        // both keep a per-instance ping-pong pair. `imported` still is, so nothing is ever
-        // half-rendered: a shader declaring one is unusable as a node until the commit that
-        // implements it. Descriptor set 1 is where an imported image would bind, beside the
-        // pass targets, so the hook exists.
-        const char* missing = feats.imported ? "an IMPORTED image" : nullptr;
-        if (missing) {
-            out_reason = std::string("'") + selector + "' declares " + missing +
-                         ", which an ISF NODE does not implement yet -- the ISF PRODUCER does, so "
-                         "`[ISF] " + selector +
-                         "` still plays it. Refused rather than half-rendered: the OpenGL node "
-                         "path would run it and the Vulkan one would silently render only the "
-                         "last pass, so the same document would look different on the two mixers";
-            return {};
-        }
-    }
+    // What replaced it is not trust: the limit below still refuses, and it now counts PASSES
+    // targets and IMPORTED images TOGETHER, because they bind into one pool of eight. Six
+    // targets and three imports passed a pair of separate checks and overflowed the set --
+    // which renders a wrong picture rather than refusing, which is the thing the refusal was
+    // for. One budget, one check.
 
     // ── AND THE BINDING LIMIT, REFUSED ON BOTH BACKENDS FOR THE SAME REASON ─────────────
     //
@@ -184,12 +169,24 @@ std::vector<core::graph::port_desc> resolve_node_ports(const std::string& select
                 if (std::find(targets.begin(), targets.end(), pi.target) == targets.end())
                     targets.push_back(pi.target);
             }
-            if (static_cast<int>(targets.size()) > max_isf_targets) {
+            // **TARGETS AND IMPORTS SHARE THE POOL, SO THEY SHARE THE CHECK.** Both bind
+            // into descriptor set 1's `OCIO_MAX_TEXTURES` slots -- the generator numbers the
+            // imports from where the targets stop -- so counting them apart lets six targets
+            // and three imports through two checks that each pass, and the ninth sampler then
+            // binds nothing. That renders a wrong picture instead of refusing, which is the
+            // one outcome this refusal exists to prevent.
+            std::wstring imp_base;
+            std::string  imp_err;
+            const auto   imports = describe_imported(u16(selector), imp_base, imp_err);
+            const auto   total   = targets.size() + imports.size();
+            if (static_cast<int>(total) > max_isf_targets) {
                 out_reason = std::string("'") + selector + "' declares " +
-                             std::to_string(targets.size()) + " PASSES targets and a node can " +
+                             std::to_string(targets.size()) + " PASSES targets and " +
+                             std::to_string(imports.size()) + " IMPORTED images, and a node can " +
                              "sample " + std::to_string(max_isf_targets) +
-                             " -- the mixer binds them into one descriptor set. The ISF PRODUCER "
-                             "has no such limit, so `[ISF] " + selector + "` still plays it";
+                             " in total -- the mixer binds them into one descriptor set. The ISF "
+                             "PRODUCER has no such limit, so `[ISF] " + selector +
+                             "` still plays it";
                 return {};
             }
         }
@@ -442,6 +439,58 @@ plan_passes_for(const std::string&                                     path,
         pp.width  = eval_pass_size(pi.w_expr, render_w, render_w, render_h, value);
         pp.height = eval_pass_size(pi.h_expr, render_h, render_w, render_h, value);
         out.push_back(std::move(pp));
+    }
+    return out;
+}
+
+std::vector<core::graph::isf_imported_image> imported_images_for(const std::string& path)
+{
+    std::vector<core::graph::isf_imported_image> out;
+
+    std::wstring base;
+    std::string  err;
+    const auto   decls = describe_imported(u16(path), base, err);
+    if (!err.empty()) {
+        CASPAR_LOG(warning) << L"[isf] IMPORTED could not be read from '" << u16(path)
+                            << L"': " << u16(err);
+        return out;
+    }
+
+    namespace fs = std::filesystem;
+    for (const auto& d : decls) {
+        core::graph::isf_imported_image img;
+        img.name = d.name;
+
+        // RESOLVED AGAINST THE SHADER'S OWN DIRECTORY FIRST, then taken as given -- the exact
+        // order `shader::ensure_imported` uses for the producer. A file that loads for `[ISF]
+        // foo.fs` must load for an `isf` NODE naming the same file, and two resolution orders
+        // would make that untrue for any relative path.
+        std::vector<unsigned char> rgba;
+        int                        w = 0, h = 0;
+        bool                       ok = false;
+        if (!base.empty())
+            ok = load_rgba_image((fs::path(base) / fs::path(d.path)).wstring(), rgba, w, h);
+        if (!ok)
+            ok = load_rgba_image(u16(d.path), rgba, w, h);
+
+        if (ok) {
+            img.width  = w;
+            img.height = h;
+            img.rgba.assign(rgba.begin(), rgba.end());
+            img.loaded = true;
+        } else {
+            // ONE TRANSPARENT BLACK TEXEL, not a failure. The producer has done exactly this
+            // since IMPORTED landed, and the registry's rule for a dead branch is that the pass
+            // renders UNCHANGED rather than black -- so a missing import samples as empty and
+            // the shader still runs. The log names the file and the sampler.
+            img.width  = 1;
+            img.height = 1;
+            img.rgba.assign(4, 0);
+            img.loaded = false;
+            CASPAR_LOG(warning) << L"[isf] IMPORTED '" << u16(d.name) << L"' could not be loaded from '"
+                                << u16(d.path) << L"' -- the node samples it as empty";
+        }
+        out.push_back(std::move(img));
     }
     return out;
 }

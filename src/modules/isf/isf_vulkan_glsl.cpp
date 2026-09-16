@@ -96,7 +96,8 @@ int components_of(const std::string& t)
 vulkan_source build_vulkan_fragment(const std::vector<input>&       inputs,
                                     const std::string&              body,
                                     const std::string&              cache_key,
-                                    const std::vector<std::string>& targets)
+                                    const std::vector<std::string>& targets,
+                                    const std::vector<std::string>& imported)
 {
     vulkan_source out;
     out.cache_id = "isf:" + cache_key;
@@ -115,9 +116,15 @@ vulkan_source build_vulkan_fragment(const std::vector<input>&       inputs,
         return out;
     }
 
-    if (static_cast<int>(targets.size()) > max_isf_targets) {
+    // **ONE BUDGET, NOT TWO.** Pass targets and IMPORTED images bind into the SAME eight
+    // slots of descriptor set 1, so counting them separately lets 6 targets and 3 imports
+    // through a pair of checks that each pass -- and the ninth sampler then binds nothing.
+    // That renders a wrong picture rather than refusing, which is the single outcome this
+    // refusal exists to prevent.
+    if (static_cast<int>(targets.size() + imported.size()) > max_isf_targets) {
         out.error = "this shader declares " + std::to_string(targets.size()) +
-                    " PASSES targets and the mixer can sample " + std::to_string(max_isf_targets) +
+                    " PASSES targets and " + std::to_string(imported.size()) +
+                    " IMPORTED images, and the mixer can sample " + std::to_string(max_isf_targets) +
                     ". Refused rather than bound to whatever is in the spare slots";
         return out;
     }
@@ -255,6 +262,24 @@ vulkan_source build_vulkan_fragment(const std::vector<input>&       inputs,
         f << "#define " << targets[k] << " _isf_tgt_" << k << "\n";
         f << "#define _" << targets[k] << "_imgSize vec2(textureSize(_isf_tgt_" << k << ", 0))\n";
     }
+
+    // ---- the IMPORTED images, CONTINUING THE SAME BINDING RUN ----------------------------
+    //
+    // After the targets and numbered from where they stop, because the two share one pool of
+    // eight. The mixer fills `draw_params.isf_targets` the same way -- targets first, then
+    // imports -- so the index a sampler is declared at is the index the picture arrives at.
+    // Nothing reconciles the two lists at run time; they are the same list, walked twice.
+    //
+    // An imported image is an ordinary sampler2D like a target, and for the shader's purposes
+    // it is one: ISF gives IMPORTED and TARGET the same `IMG_PIXEL`/`IMG_THIS_PIXEL` treatment,
+    // which is why they can share both the slot pool and the macro shape.
+    for (std::size_t k = 0; k < imported.size(); ++k) {
+        const auto slot = targets.size() + k;
+        f << "layout(set = 1, binding = " << (slot + 1) << ") uniform sampler2D _isf_imp_" << k
+          << ";\n";
+        f << "#define " << imported[k] << " _isf_imp_" << k << "\n";
+        f << "#define _" << imported[k] << "_imgSize vec2(textureSize(_isf_imp_" << k << ", 0))\n";
+    }
     f << "\n";
 
     // ---- the image inputs as macros over the bound slots ---------------------------------
@@ -384,7 +409,22 @@ vulkan_source build_vulkan_fragment_for(const std::string& path)
         return out;
     }
 
-    return build_vulkan_fragment(inputs, source, path, targets);
+    // THE IMPORTED IMAGES, in the header's declaration order -- the same list
+    // `imported_images_for` returns to the mixer, produced by the same parse. One ordering,
+    // read twice, for the reason `describe_imported` states.
+    std::vector<std::string> imported;
+    {
+        std::wstring base;
+        std::string  imp_err;
+        for (const auto& d : describe_imported(u16(path), base, imp_err))
+            imported.push_back(d.name);
+        if (!imp_err.empty()) {
+            out.error = imp_err;
+            return out;
+        }
+    }
+
+    return build_vulkan_fragment(inputs, source, path, targets, imported);
 }
 
 void isf_vulkan_self_test()

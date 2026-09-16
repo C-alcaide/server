@@ -1314,8 +1314,7 @@ half-rendering it:
 
 | refused | why, and why on both |
 | :--- | :--- |
-| `IMPORTED` | no route for an external image into a node's descriptor set yet. Set 1 could carry one |
-| more than **8** pass `TARGET`s | a node's targets bind into descriptor set 1, which has eight sampler bindings — a limit of the pipeline layout, not a policy. Vidvox's own Gaussian blur needs six. The OpenGL path has no such limit and refuses anyway |
+| more than **8** pass `TARGET`s **and `IMPORTED` images TOGETHER** | a node's targets bind into descriptor set 1, which has eight sampler bindings — a limit of the pipeline layout, not a policy. Vidvox's own Gaussian blur needs six. The OpenGL path has no such limit and refuses anyway |
 | a sibling **`.vs`** | **the one refusal that is NOT a parity fault.** Both node paths ignore a custom vertex shader, so they agree — and agree on a wrong picture: the ISF primer puts a convolution's neighbour offsets in the `.vs`, so the fragment stage reads varyings nothing wrote. 38 of Vidvox's 327 shaders ship one. *Unchanged or refused, never wrong* — and parity is necessary, not sufficient |
 
 The **ISF PRODUCER** implements all four and is untouched: `[ISF] <shader>` still plays anything

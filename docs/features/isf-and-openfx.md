@@ -147,9 +147,9 @@ capabilities**, and the difference is documented rather than discovered:
 | | the PRODUCER | the NODE |
 | :--- | :--- | :--- |
 | backends | OpenGL only (it is a producer; the mixer composites its output) | OpenGL **and** Vulkan, gated against one closed-form model on both |
-| `PASSES` | yes | yes, up to **8** distinct `TARGET`s — a node's targets bind into one descriptor set |
+| `PASSES` | yes | yes — `TARGET`s and `IMPORTED` images share **8** bindings in one descriptor set |
 | `PERSISTENT` | yes | yes, per node INSTANCE, with a `reset` port |
-| `IMPORTED` | yes | **refused at PUT** |
+| `IMPORTED` | yes | yes — decoded by the module, bound into descriptor set 1 **after** the pass targets, and sharing their budget of 8 |
 | a sibling `.vs` | yes | **refused at PUT** |
 | `FLOAT` targets | 32-bit | **fp16**, like every other node intermediate |
 

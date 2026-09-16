@@ -79,7 +79,10 @@ vulkan_source build_vulkan_fragment(const std::vector<input>&       inputs,
                                     const std::string&              cache_key,
                                     /// `PASSES` target names, in declaration order, deduped, empty
                                     /// ones dropped. A pass may sample any of them by name.
-                                    const std::vector<std::string>& targets = {});
+                                    const std::vector<std::string>& targets  = {},
+                                    /// IMPORTED image names, numbered from where the targets
+                                    /// stop: the two share descriptor set 1's eight slots.
+                                    const std::vector<std::string>& imported = {});
 
 /// Generate from a shader named the way a document names it -- relative to the media folder,
 /// through the same `load_shader_source` the port resolver uses, so a path cannot mean two
