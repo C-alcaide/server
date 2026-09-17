@@ -174,7 +174,7 @@ Still uncovered, and now the priority order for coverage rather than for docs:
 
   §4 lists the first three checks worth writing, in the order that would have caught the ICVFX
   class. (Thirteen, not twelve: the old count was short by one.)
-* **ALL EIGHTEEN `TRACKING` commands are driven now — but four of the five protocols are not.**
+* **ALL EIGHTEEN `TRACKING` commands AND every wire protocol this build contains are driven now.**
   `tracking-previz` landed 2026-09-06 and is the first coverage this family ever had: a synthetic
   29-byte FreeD D1 packet through `BIND ... MODE PREVIZ`, gated on the camera's resulting position
   and rotation VALUES on both mixers. It covers `BIND` and `UNBIND` over FreeD and nothing else.
@@ -196,8 +196,24 @@ Still uncovered, and now the priority order for coverage rather than for docs:
   nodal against the RAW sample pan — leave the delta on +Z at every angle. Mutation-verified:
   forcing the basis to ignore the composed pan turns exactly that arm red, 21/22.
 
-  Still uncovered entirely: the **FreeD+, OSC, VRPN, PSN and OpenTrackIO** receivers, the 2D and
-  TARGET modes, and lens distortion.
+  **Five of the six protocols carry a sample to the camera under check** (2026-09-17): FreeD,
+  FreeD+, OSC, OpenTrackIO and PSN, each built from its own receiver source — or, for PSN, from
+  the vendored VYV definitions. The sixth is **VRPN, which is not in this build at all** and now
+  refuses the bind saying so.
+
+  *Three protocol traps, each of which would have produced a silent pass:* **FreeD+ uses a
+  different checksum from FreeD** (XOR-to-zero over 41 bytes, not sum-to-`0x40`), and a packet
+  with the wrong rule is dropped silently. **OSC's message ORDER is part of the protocol** — the
+  receiver commits the frame when `z` arrives, so another order delivers the previous sample's
+  other axes. **OpenTrackIO takes METRES** where the rest send millimetres.
+
+  *And a rule sharpened by PSN:* the LTC precedent is not "never hand-write an encoder", it is
+  *do not write a second implementation that could be wrong in the same direction as the one
+  under test*. LTC needed libltc's own encoder because the server links libltc to DECODE. PSN is
+  the opposite case — the server does not parse PSN, it hands the datagram to the protocol
+  author's reference decoder — so an independent builder's acceptance IS proof.
+
+  Still uncovered: the 2D and TARGET modes, and lens distortion.
 
   *And sweeping it found the house defect for the sixth time.* `GENLOCK 2 BANANA` answered
   `202 TRACKING OK` and **enabled** genlock: `bool enable = true` was the initialiser of an
