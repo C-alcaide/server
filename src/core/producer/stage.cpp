@@ -78,6 +78,11 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     // the timeline state above.
     std::map<std::string, std::shared_ptr<binding::source>> sources_;
     std::vector<binding::binding_def>                       bindings_;
+    // Outbound (DECISIONS L392). `sinks_` shares `binding_lock_` with `sources_`; `outbound_`
+    // is touched on the stage thread only, like `bindings_`.
+    std::map<std::string, std::shared_ptr<binding::sink>>   sinks_;
+    std::vector<binding::outbound_def>                      outbound_;
+    int                                                     next_outbound_id_ = 1;
     int                                                     next_binding_id_ = 1;
     mutable std::mutex                                      binding_lock_;
 
@@ -823,6 +828,19 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                         fp += ';';
                     }
                     fp += '|';
+                    for (const auto& o : outbound_) {
+                        fp += std::to_string(o.id);
+                        fp += ';';
+                    }
+                    fp += '|';
+                    {
+                        std::lock_guard<std::mutex> lock(binding_lock_);
+                        for (const auto& kv : sinks_) {
+                            fp += kv.first;
+                            fp += ';';
+                        }
+                    }
+                    fp += '|';
                     {
                         std::lock_guard<std::mutex> lock(binding_lock_);
                         for (const auto& kv : sources_) {
@@ -892,6 +910,36 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 // `value` is the last value WRITTEN, after the transform and the lag -- not the
                 // source's raw sample. It is what a client needs to draw the parameter moving,
                 // and it is the number a battery can fit a waveform to.
+                // -- Outbound bindings: evaluated here, after every rank has resolved, so what
+                //    goes out is what is on air; then published. Seven leaves each (L383 measured
+                //    the inbound row at thirteen), and only while the binding exists.
+                if (!outbound_.empty()) {
+                    double fps_for_dt = 25.0;
+                    if (format_desc_.framerate.numerator() > 0 && format_desc_.framerate.denominator() > 0)
+                        fps_for_dt = static_cast<double>(format_desc_.framerate.numerator()) /
+                                     format_desc_.framerate.denominator();
+                    evaluate_outbound(1000.0 / fps_for_dt);
+                    for (const auto& o : outbound_) {
+                        auto node         = state["outbound"][std::to_string(o.id)];
+                        node["layer"]     = o.layer;
+                        node["target"]    = o.target;
+                        node["component"] = static_cast<int>(o.component);
+                        node["to"]        = o.sink_name + "/" + o.address;
+                        node["value"]     = o.held;
+                        node["sends"]     = static_cast<std::int64_t>(o.sends);
+                        node["broken"]    = o.broken;
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> lock(binding_lock_);
+                    for (const auto& kv : sinks_) {
+                        auto node        = state["sink"][kv.first];
+                        node["kind"]     = kv.second->kind();
+                        node["describe"] = kv.second->describe();
+                        node["ready"]    = kv.second->ready();
+                    }
+                }
+
                 for (const auto& b : bindings_) {
                     auto node = state["binding"][std::to_string(b.id)];
                     node["layer"]   = b.layer;
@@ -2568,6 +2616,87 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         });
     }
 
+    /// Does `t` name something on `layer` a binding may drive -- either way round? The one
+    /// place this is decided, shared by `add_binding` and `add_outbound`: the same target
+    /// grammar, the same existence checks, so an address that binds inbound binds outbound.
+    bool target_resolves(int layer, const address::target& t, uint8_t component)
+    {
+        switch (t.kind) {
+                case address::target_kind::producer_param: {
+                    auto it = layers_.find(layer);
+                    if (it == layers_.end())
+                        return false;
+                    auto producer = it->second.foreground();
+                    if (producer == frame_producer::empty())
+                        return false;
+                    bool found = false;
+                    for (const auto& p : producer->parameters())
+                        if (p.name == t.field)
+                            found = true;
+                    if (!found)
+                        return false;
+                    break;
+                }
+                case address::target_kind::image:
+                case address::target_kind::audio: {
+                    // `set` is the arm a binding needs: a derived or blob field is describable
+                    // and readable and cannot take a number every tick.
+                    const auto* img = fields::find(t.field);
+                    if (img ? !img->set : !fields::find_audio_field(t.field)->set)
+                        return false;
+                    if (component >= t.meta->arity)
+                        return false;
+                    break;
+                }
+                case address::target_kind::node: {
+                    // VALIDATED AGAINST THE ATTACHED DOCUMENT, not merely against the registry.
+                    // A node id is a property of one document, so "does this port exist" cannot
+                    // be answered by the class table alone -- and a binding to a node that is
+                    // not on this layer is exactly the accepted-and-does-nothing case this
+                    // switch exists to refuse.
+                    if (!graphs_)
+                        return false;
+                    std::string name;
+                    {
+                        std::lock_guard<std::mutex> lock(binding_lock_);
+                        const auto                  it = graph_attach_.find(layer);
+                        if (it == graph_attach_.end())
+                            return false;
+                        name = it->second;
+                    }
+                    const auto entry = graphs_->get(name);
+                    if (!entry)
+                        return false;
+                    const auto n =
+                        std::find_if(entry->document.nodes.begin(), entry->document.nodes.end(),
+                                     [&](const graph::graph_node& x) { return x.id == t.object; });
+                    if (n == entry->document.nodes.end())
+                        return false;
+                    const auto* c = graph::find_node_class(n->cls);
+                    if (!c)
+                        return false;
+                    const auto* port = graph::find_port(*c, t.field);
+                    if (!port)
+                        return false;
+                    // A BINDING DRIVES A NUMBER, so the port has to be a writable value input
+                    // whose component the binding names. An image or mask port takes an EDGE,
+                    // and refusing it here is the difference between a client being told and a
+                    // binding that runs forever writing into nothing.
+                    if (port->domain != graph::port_domain::value ||
+                        port->direction != graph::port_direction::input)
+                        return false;
+                    if (component >= port->param.arity)
+                        return false;
+                    break;
+                }
+                default:
+                    // The previz registries resolve as targets (commit 10 gives them a writer);
+                    // a binding to one is refused here rather than accepted and dropped.
+                    return false;
+            }
+        return true;
+    }
+
     std::future<int> add_binding(binding::binding_def def)
     {
         return executor_.begin_invoke([this, def]() mutable {
@@ -2578,79 +2707,8 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             // This used to be an if/else that knew about two of them, which is why `volume` was
             // unbindable: it is not in the image table and nothing here looked anywhere else.
             const auto t = address::parse(def.target);
-            switch (t.kind) {
-                case address::target_kind::producer_param: {
-                    auto it = layers_.find(def.layer);
-                    if (it == layers_.end())
-                        return 0;
-                    auto producer = it->second.foreground();
-                    if (producer == frame_producer::empty())
-                        return 0;
-                    bool found = false;
-                    for (const auto& p : producer->parameters())
-                        if (p.name == t.field)
-                            found = true;
-                    if (!found)
-                        return 0;
-                    break;
-                }
-                case address::target_kind::image:
-                case address::target_kind::audio: {
-                    // `set` is the arm a binding needs: a derived or blob field is describable
-                    // and readable and cannot take a number every tick.
-                    const auto* img = fields::find(t.field);
-                    if (img ? !img->set : !fields::find_audio_field(t.field)->set)
-                        return 0;
-                    if (def.component >= t.meta->arity)
-                        return 0;
-                    break;
-                }
-                case address::target_kind::node: {
-                    // VALIDATED AGAINST THE ATTACHED DOCUMENT, not merely against the registry.
-                    // A node id is a property of one document, so "does this port exist" cannot
-                    // be answered by the class table alone -- and a binding to a node that is
-                    // not on this layer is exactly the accepted-and-does-nothing case this
-                    // switch exists to refuse.
-                    if (!graphs_)
-                        return 0;
-                    std::string name;
-                    {
-                        std::lock_guard<std::mutex> lock(binding_lock_);
-                        const auto                  it = graph_attach_.find(def.layer);
-                        if (it == graph_attach_.end())
-                            return 0;
-                        name = it->second;
-                    }
-                    const auto entry = graphs_->get(name);
-                    if (!entry)
-                        return 0;
-                    const auto n =
-                        std::find_if(entry->document.nodes.begin(), entry->document.nodes.end(),
-                                     [&](const graph::graph_node& x) { return x.id == t.object; });
-                    if (n == entry->document.nodes.end())
-                        return 0;
-                    const auto* c = graph::find_node_class(n->cls);
-                    if (!c)
-                        return 0;
-                    const auto* port = graph::find_port(*c, t.field);
-                    if (!port)
-                        return 0;
-                    // A BINDING DRIVES A NUMBER, so the port has to be a writable value input
-                    // whose component the binding names. An image or mask port takes an EDGE,
-                    // and refusing it here is the difference between a client being told and a
-                    // binding that runs forever writing into nothing.
-                    if (port->domain != graph::port_domain::value ||
-                        port->direction != graph::port_direction::input)
-                        return 0;
-                    if (def.component >= port->param.arity)
-                        return 0;
-                    break;
-                }
-                default:
-                    // The previz registries resolve as targets (commit 10 gives them a writer);
-                    // a binding to one is refused here rather than accepted and dropped.
-                    return 0;
-            }
+            if (!target_resolves(def.layer, t, def.component))
+                return 0;
 
             {
                 std::lock_guard<std::mutex> lock(binding_lock_);
@@ -2675,6 +2733,180 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             bindings_.push_back(def);
             return def.id;
         });
+    }
+
+    // ── OUTBOUND ─────────────────────────────────────────────────────────────────────────
+    std::future<void> add_sink(const std::string& name, std::shared_ptr<binding::sink> snk)
+    {
+        return executor_.begin_invoke([this, name, snk] {
+            std::lock_guard<std::mutex> lock(binding_lock_);
+            sinks_[name] = snk;
+        });
+    }
+    std::future<bool> remove_sink(const std::string& name)
+    {
+        return executor_.begin_invoke([this, name] {
+            std::lock_guard<std::mutex> lock(binding_lock_);
+            return sinks_.erase(name) > 0;
+        });
+    }
+    std::future<std::vector<stage_base::sink_info>> list_sinks()
+    {
+        return executor_.begin_invoke([this] {
+            std::vector<stage_base::sink_info> out;
+            std::lock_guard<std::mutex>        lock(binding_lock_);
+            for (const auto& kv : sinks_)
+                out.push_back({kv.first, kv.second->kind(), kv.second->describe(), kv.second->ready()});
+            return out;
+        });
+    }
+    std::future<int> add_outbound(binding::outbound_def def)
+    {
+        return executor_.begin_invoke([this, def]() mutable {
+            const auto t = address::parse(def.target);
+            if (!target_resolves(def.layer, t, def.component))
+                return 0;
+            if (def.address.empty() || def.address[0] != '/')
+                return 0;
+            {
+                std::lock_guard<std::mutex> lock(binding_lock_);
+                if (sinks_.find(def.sink_name) == sinks_.end())
+                    return 0;
+            }
+            outbound_.erase(std::remove_if(outbound_.begin(), outbound_.end(),
+                                           [&](const binding::outbound_def& o) {
+                                               return o.layer == def.layer && o.target == def.target &&
+                                                      o.component == def.component &&
+                                                      o.sink_name == def.sink_name && o.address == def.address;
+                                           }),
+                            outbound_.end());
+            def.id       = next_outbound_id_++;
+            def.held     = 0.0;
+            def.primed   = false;
+            def.has_sent = false;
+            def.sends    = 0;
+            outbound_.push_back(def);
+            return def.id;
+        });
+    }
+    std::future<int> remove_outbound(int layer, const std::string& target)
+    {
+        bool had_component = false;
+        {
+            const auto dot = target.rfind('.');
+            if (dot != std::string::npos && dot + 1 < target.size()) {
+                const auto tail = target.substr(dot + 1);
+                had_component   = tail.find_first_not_of("0123456789") == std::string::npos;
+            }
+        }
+        return executor_.begin_invoke([this, layer, target, had_component] {
+            const auto before = outbound_.size();
+            outbound_.erase(std::remove_if(outbound_.begin(), outbound_.end(),
+                                           [&](const binding::outbound_def& o) {
+                                               if (layer >= 0 && o.layer != layer)
+                                                   return false;
+                                               if (target.empty())
+                                                   return true;
+                                               std::string field;
+                                               uint8_t     comp = 0;
+                                               address::split(target, field, comp);
+                                               if (o.target != field)
+                                                   return false;
+                                               return !had_component || o.component == comp;
+                                           }),
+                            outbound_.end());
+            return static_cast<int>(before - outbound_.size());
+        });
+    }
+    std::future<std::vector<binding::outbound_def>> list_outbound()
+    {
+        return executor_.begin_invoke([this] { return outbound_; });
+    }
+
+    /// The EFFECTIVE value of a target's component -- what is on air after every rank has
+    /// resolved -- or false if it cannot be read. The same three routes `hold_field` reads.
+    bool read_target_value(int layer, const address::target& t, uint8_t component, double& out)
+    {
+        monitor::vector_t v;
+        if (t.kind == address::target_kind::node) {
+            std::lock_guard<std::mutex> lock(binding_lock_);
+            v = graph_effective_unlocked(layer, t.path);
+        } else if (t.kind == address::target_kind::producer_param) {
+            auto it = layers_.find(layer);
+            if (it == layers_.end())
+                return false;
+            auto producer = it->second.foreground();
+            if (producer == frame_producer::empty())
+                return false;
+            bool found = false;
+            for (const auto& p : producer->parameters()) {
+                if (p.name != t.field || !p.get)
+                    continue;
+                v     = p.get();
+                found = true;
+                break;
+            }
+            if (!found)
+                return false;
+        } else if (t.kind == address::target_kind::image || t.kind == address::target_kind::audio) {
+            const auto eff = effective_transform(layer);
+            if (const auto* f = fields::find(t.field)) {
+                if (!f->get)
+                    return false;
+                v = f->get(eff.image_transform);
+            } else if (const auto* a = fields::find_audio_field(t.field)) {
+                if (!a->get)
+                    return false;
+                v = a->get(eff.audio_transform);
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+        if (v.empty() || component >= v.size())
+            return false;
+        return as_number(v[component], out);
+    }
+
+    /// Once per tick, after the ranks resolved and before the state is published: read every
+    /// outbound target, map it, and send it if the mapped value moved. A target or sink that
+    /// cannot be read marks the binding BROKEN rather than sending a stale number.
+    void evaluate_outbound(double dt_ms)
+    {
+        for (auto& o : outbound_) {
+            const auto t = address::parse(o.target);
+            double     raw = 0.0;
+            if (!read_target_value(o.layer, t, o.component, raw)) {
+                o.broken = true;
+                continue;
+            }
+            std::shared_ptr<binding::sink> snk;
+            {
+                std::lock_guard<std::mutex> lock(binding_lock_);
+                auto                        it = sinks_.find(o.sink_name);
+                if (it != sinks_.end())
+                    snk = it->second;
+            }
+            if (!snk || !snk->ready()) {
+                o.broken = true;
+                continue;
+            }
+            o.broken            = false;
+            const double target = binding::map_value(o.tf, raw);
+            double       next   = target;
+            if (o.primed && o.tf.lag_ms > 0.0)
+                next = binding::apply_lag(target, o.held, o.tf.lag_ms, dt_ms);
+            o.primed = true;
+            // Change-only, compared as the float32 that goes on the wire: a value that moved
+            // by less than one float32 step would send a byte-identical message.
+            if (!o.has_sent || static_cast<float>(next) != static_cast<float>(o.held)) {
+                if (snk->send(o.address, next))
+                    ++o.sends;
+                o.has_sent = true;
+            }
+            o.held = next;
+        }
     }
 
     std::future<int> remove_bindings(int layer, const std::string& target)
@@ -3818,6 +4050,18 @@ std::future<int>  stage::remove_bindings(int layer, const std::string& target)
 }
 std::future<std::vector<binding::binding_def>> stage::list_bindings() { return impl_->list_bindings(); }
 bool stage::is_bound(int layer, const std::string& target) const { return impl_->is_bound(layer, target); }
+std::future<void> stage::add_sink(const std::string& name, std::shared_ptr<binding::sink> snk)
+{
+    return impl_->add_sink(name, std::move(snk));
+}
+std::future<bool>                                stage::remove_sink(const std::string& name) { return impl_->remove_sink(name); }
+std::future<std::vector<stage_base::sink_info>>  stage::list_sinks() { return impl_->list_sinks(); }
+std::future<int>                                 stage::add_outbound(const binding::outbound_def& def) { return impl_->add_outbound(def); }
+std::future<int>                                 stage::remove_outbound(int layer, const std::string& target)
+{
+    return impl_->remove_outbound(layer, target);
+}
+std::future<std::vector<binding::outbound_def>> stage::list_outbound() { return impl_->list_outbound(); }
 void stage::feed_sources(const input_event& event) { impl_->feed_sources(event); }
 
 // ── Keyframe management (stage wrappers) ─────────────────────────────────

@@ -17,6 +17,7 @@ set(SOURCES
 
 		osc/client.cpp
 		osc/osc_source.cpp
+		osc/osc_sink.cpp
 		midi/midi_source.cpp
 
 		util/AsyncEventServer.cpp
@@ -48,6 +49,7 @@ set(HEADERS
 
 		osc/client.h
 		osc/osc_source.h
+		osc/osc_sink.h
 		midi/midi_source.h
 
 		util/AsyncEventServer.h

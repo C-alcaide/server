@@ -195,6 +195,36 @@ class stage_base
     /// REFUSE rather than be silently overwritten one frame later.
     virtual bool is_bound(int layer, const std::string& target) const { return false; }
 
+    // ── OUTBOUND bindings (DECISIONS L392): a target's effective value, sent to a sink ──
+    //
+    // Sinks are registered like sources -- by the protocol layer, which owns the sockets --
+    // and named; an outbound binding pairs a target with `<sink>/<address>`. Evaluated on the
+    // tick after every rank has resolved, so what goes out is what is on air.
+    virtual std::future<void> add_sink(const std::string& name, std::shared_ptr<binding::sink> snk)
+    {
+        return make_ready_future();
+    }
+    virtual std::future<bool> remove_sink(const std::string& name) { return make_ready_future(false); }
+    struct sink_info
+    {
+        std::string name;
+        std::string kind;
+        std::string description;
+        bool        ready = false;
+    };
+    virtual std::future<std::vector<sink_info>> list_sinks() { return make_ready_future(std::vector<sink_info>()); }
+    /// Create an outbound binding. Returns its id, or 0 if the target does not resolve or the
+    /// sink does not exist. One outbound binding per (layer, target, component, sink, address);
+    /// a second replaces the first.
+    virtual std::future<int> add_outbound(const binding::outbound_def& def) { return make_ready_future(0); }
+    /// Remove the outbound bindings on a target (every component unless `.N` is given), or
+    /// every one on the layer if `target` is empty. Returns how many.
+    virtual std::future<int> remove_outbound(int layer, const std::string& target) { return make_ready_future(0); }
+    virtual std::future<std::vector<binding::outbound_def>> list_outbound()
+    {
+        return make_ready_future(std::vector<binding::outbound_def>());
+    }
+
     /// WHO IS DRIVING `path` on `layer`, and everyone else who wanted it.
     ///
     /// `first` is the effective owner -- the strongest rank writing that path -- and `second` is
@@ -391,6 +421,12 @@ class stage final : public stage_base
     std::future<int>                     remove_bindings(int layer, const std::string& target) override;
     std::future<std::vector<binding::binding_def>> list_bindings() override;
     bool                                 is_bound(int layer, const std::string& target) const override;
+    std::future<void>                    add_sink(const std::string& name, std::shared_ptr<binding::sink> snk) override;
+    std::future<bool>                    remove_sink(const std::string& name) override;
+    std::future<std::vector<sink_info>>  list_sinks() override;
+    std::future<int>                     add_outbound(const binding::outbound_def& def) override;
+    std::future<int>                     remove_outbound(int layer, const std::string& target) override;
+    std::future<std::vector<binding::outbound_def>> list_outbound() override;
     void                                 feed_sources(const input_event& event) override;
 
 

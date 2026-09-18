@@ -215,6 +215,51 @@ class function_source final : public source
 
 /// Split `<source>/<channel>` -- `lfo1/value`, `input/x`. A missing channel is an error rather
 /// than a default: `input` has four and picking one for the operator would be a guess.
+/// The other end of an OUTBOUND binding: somewhere a value goes when it changes.
+///
+/// The inverse of `source`, and deliberately smaller: a source is polled every tick for every
+/// channel it has, a sink is handed one address and one value only when that value moved.
+/// `send` must never block the caller -- it runs on the stage tick -- and returns false when
+/// the message was dropped, so the binding can count that rather than believe it.
+class sink
+{
+  public:
+    virtual ~sink() = default;
+    virtual bool        send(const std::string& address, double value) = 0;
+    virtual std::string kind() const                                   = 0;
+    virtual std::string describe() const { return kind(); }
+    /// False when the sink could not be set up (address refused, socket failed); the binding
+    /// then reports BROKEN, exactly as one whose source is missing.
+    virtual bool ready() const { return true; }
+};
+
+/// `BIND <ch>-<layer> <target> OUT <sink>/<address> [IN MIN MAX GAIN LAG CURVE]`.
+///
+/// The same target grammar and the same transform as an inbound binding, read the other way:
+/// the target's EFFECTIVE value (whatever rank is driving it -- an explicit write, a timeline,
+/// an inbound binding) is mapped through `tf` and sent to `sink_name` at `address` whenever the
+/// mapped value changes. DECISIONS L392: the server half of a binding matrix whose columns can
+/// carry an out-arrow, and L367's multiplicity -- a value that comes in over MIDI can go out
+/// over OSC, because the two are separate bindings on one target.
+struct outbound_def
+{
+    int         id    = 0;
+    int         layer = 0;
+    std::string target;
+    uint8_t     component = 0;
+    std::string sink_name;
+    std::string address;
+    transform   tf;
+
+    // Runtime, published: the last value sent, whether the target or the sink is unreadable,
+    // and how many messages went out -- a DELTA a client (or a battery) can watch.
+    double        held     = 0.0;
+    bool          primed   = false;
+    bool          has_sent = false;
+    bool          broken   = false;
+    std::uint64_t sends    = 0;
+};
+
 bool split_source_ref(const std::string& ref, std::string& source, std::string& channel);
 
 }}} // namespace caspar::core::binding

@@ -77,6 +77,7 @@
 #include "../midi/midi_source.h"
 #include <modules/ltc/ltc_input.h>
 #include <modules/tracking/tracker_registry.h>
+#include "../osc/osc_sink.h"
 #include "../osc/osc_source.h"
 #include <core/video_channel.h>
 
@@ -6181,6 +6182,133 @@ std::wstring source_command(command_context& ctx)
 // applied and silently overwritten on the next tick. That is the `icvfx_auto` lesson as a rule:
 // auto-projection used to overwrite a hand-set ICVFX block on every camera move, and the
 // precedence had never been chosen by anybody. `UNBIND` hands the target back.
+// The IN/MIN/MAX/GAIN/LAG/CURVE tail of a BIND, in either direction. Returns the 400 reply for a
+// malformed option, or nothing when every option from `i` on was understood.
+static std::optional<std::wstring>
+parse_transform_options(const command_context& ctx, std::size_t i, core::binding::transform& tf)
+{
+    while (i < ctx.parameters.size()) {
+        const auto key = [&] {
+            auto k = ctx.parameters.at(i);
+            boost::to_upper(k);
+            return k;
+        }();
+        const auto number = [&](std::size_t at, double& out) {
+            if (ctx.parameters.size() <= at)
+                return false;
+            try {
+                out = boost::lexical_cast<double>(ctx.parameters.at(at));
+                return std::isfinite(out);
+            } catch (...) {
+                return false;
+            }
+        };
+        if (key == L"MIN" && number(i + 1, tf.out_lo)) {
+            i += 2;
+        } else if (key == L"MAX" && number(i + 1, tf.out_hi)) {
+            i += 2;
+        } else if (key == L"GAIN" && number(i + 1, tf.gain)) {
+            i += 2;
+        } else if (key == L"LAG" && number(i + 1, tf.lag_ms)) {
+            i += 2;
+        } else if (key == L"IN" && number(i + 1, tf.in_lo) && number(i + 2, tf.in_hi)) {
+            i += 3;
+        } else if (key == L"CURVE" && ctx.parameters.size() > i + 1) {
+            if (!core::binding::parse_curve(u8(ctx.parameters.at(i + 1)), tf.curve))
+                return std::wstring(L"400 BIND ERROR unknown curve, expected LINEAR, EASE_IN, EASE_OUT, EASE, "
+                                    L"STEP or INVERT\r\n");
+            i += 2;
+        } else {
+            return L"400 BIND ERROR unrecognised option: " + ctx.parameters.at(i) + L"\r\n";
+        }
+    }
+    return std::nullopt;
+}
+
+// SINK <ch> ADD <name> OSC <host> <port> | REMOVE <name> | LIST -- where an OUTBOUND binding
+// sends. The mirror of SOURCE (DECISIONS L392). The host must be numeric: a hostname typo
+// that resolved to nothing would be a sink that silently drops everything.
+std::wstring sink_command(command_context& ctx)
+{
+    auto stage = ctx.channel.stage;
+    if (!stage)
+        return L"501 SINK FAILED\r\n";
+    if (ctx.parameters.empty())
+        return L"400 SINK ERROR expected ADD, REMOVE or LIST\r\n";
+    const auto verb = boost::to_upper_copy(ctx.parameters.at(0));
+    if (verb == L"LIST") {
+        std::wstring result;
+        for (const auto& k : stage->list_sinks().get())
+            result += u16(k.name) + L" " + u16(k.kind) + L" " + u16(k.description) + (k.ready ? L"" : L" NOT OPEN") +
+                      L"\r\n";
+        return L"201 SINK OK\r\n" + result;
+    }
+    if (verb == L"REMOVE") {
+        if (ctx.parameters.size() < 2)
+            return L"400 SINK ERROR REMOVE needs a name\r\n";
+        return stage->remove_sink(u8(ctx.parameters.at(1))).get() ? L"202 SINK OK\r\n"
+                                                                     : L"404 SINK ERROR no such sink\r\n";
+    }
+    if (verb != L"ADD")
+        return L"400 SINK ERROR expected ADD, REMOVE or LIST, not " + ctx.parameters.at(0) + L"\r\n";
+    if (ctx.parameters.size() < 3)
+        return L"400 SINK ERROR ADD needs <name> <kind> ...\r\n";
+    const auto name = u8(ctx.parameters.at(1));
+    const auto kind = boost::to_upper_copy(ctx.parameters.at(2));
+    if (kind == L"OSC") {
+        if (ctx.parameters.size() < 5)
+            return L"400 SINK ERROR OSC needs <host> <port>\r\n";
+        const auto host = u8(ctx.parameters.at(3));
+        boost::system::error_code ec;
+        boost::asio::ip::make_address(host, ec);
+        if (ec)
+            return L"400 SINK ERROR the host must be a numeric address, not " + ctx.parameters.at(3) + L"\r\n";
+        long port = 0;
+        try {
+            port = boost::lexical_cast<long>(ctx.parameters.at(4));
+        } catch (...) {
+            return L"400 SINK ERROR the port is not a number\r\n";
+        }
+        if (port < 1 || port > 65535)
+            return L"400 SINK ERROR the port must be 1..65535\r\n";
+        auto snk = std::make_shared<protocol::osc::osc_sink>(name, host, static_cast<unsigned short>(port));
+        stage->add_sink(name, snk).get();
+        if (!snk->ready())
+            return L"202 SINK OK (the socket could not be opened -- see the log; bindings to this sink "
+                   L"will report BROKEN)\r\n";
+        return L"202 SINK OK\r\n";
+    }
+    return L"400 SINK ERROR unknown sink kind " + ctx.parameters.at(2) + L", expected OSC\r\n";
+}
+
+// BIND <ch>-<layer> <target> OUT <sink>/<address> [options] -- the outbound direction.
+static std::wstring bind_out_command(command_context& ctx, const std::shared_ptr<core::stage_base>& stage)
+{
+    if (ctx.parameters.size() < 3)
+        return L"400 BIND ERROR OUT needs <sink>/<address>, e.g. desk//fader/1\r\n";
+    core::binding::outbound_def def;
+    def.layer = ctx.layer_index();
+    core::address::split(u8(ctx.parameters.at(0)), def.target, def.component);
+    const auto ref   = u8(ctx.parameters.at(2));
+    const auto slash = ref.find('/');
+    if (slash == std::string::npos || slash == 0 || slash + 1 >= ref.size())
+        return L"400 BIND ERROR the destination must be <sink>/<address>, e.g. desk//fader/1 -- the "
+               L"address is everything from the first slash\r\n";
+    // `desk//fader`: the sink, a separator, then the OSC address WITH its own leading slash.
+    // `desk/fader` therefore yields the address `fader`, which add_outbound refuses -- an OSC
+    // address starts with a slash, and a silently prefixed one would hide the typo.
+    def.sink_name = ref.substr(0, slash);
+    def.address   = ref.substr(slash + 1);
+    if (auto err = parse_transform_options(ctx, 3, def.tf))
+        return *err;
+    const int id = stage->add_outbound(def).get();
+    if (id == 0)
+        return L"404 BIND ERROR the target or the sink does not resolve. A target is a mixer field's "
+               L"registry name, optionally with a .N component, producer/<name> or node/...; the sink "
+               L"must already exist (SINK LIST) and the address must start with /\r\n";
+    return L"202 BIND OK\r\n";
+}
+
 std::wstring bind_command(command_context& ctx)
 {
     auto stage = ctx.channel.stage;
@@ -6204,12 +6332,25 @@ std::wstring bind_command(command_context& ctx)
                 result += L" BROKEN";
             result += L"\r\n";
         }
+        for (const auto& o : stage->list_outbound().get()) {
+            result += std::to_wstring(o.id) + L" " + std::to_wstring(o.layer) + L"-" + u16(o.target);
+            if (o.component)
+                result += L"." + std::to_wstring(o.component);
+            result += L" -> " + u16(o.sink_name) + L"/" + u16(o.address);
+            result += L" min=" + std::to_wstring(o.tf.out_lo) + L" max=" + std::to_wstring(o.tf.out_hi) +
+                      L" gain=" + std::to_wstring(o.tf.gain) + L" lag=" + std::to_wstring(o.tf.lag_ms) +
+                      L" curve=" + u16(core::binding::curve_name(o.tf.curve)) + L" sends=" +
+                      std::to_wstring(o.sends);
+            if (o.broken)
+                result += L" BROKEN";
+            result += L"\r\n";
+        }
         return L"201 BIND OK\r\n" + result;
     }
-
     if (ctx.parameters.size() < 2)
-        return L"400 BIND ERROR needs <target> <source>/<channel>\r\n";
-
+        return L"400 BIND ERROR needs <target> <source>/<channel>, or <target> OUT <sink>/<address>\r\n";
+    if (boost::iequals(ctx.parameters.at(1), L"OUT"))
+        return bind_out_command(ctx, stage);
     core::binding::binding_def def;
     def.layer = ctx.layer_index();
 
@@ -6220,44 +6361,8 @@ std::wstring bind_command(command_context& ctx)
 
     // The option pairs. Parsed by name rather than by position so the command reads the way the
     // documentation writes it, and so a caller can give only the two they care about.
-    for (std::size_t i = 2; i < ctx.parameters.size();) {
-        const auto key = [&] {
-            auto k = ctx.parameters.at(i);
-            boost::to_upper(k);
-            return k;
-        }();
-
-        const auto number = [&](std::size_t at, double& out) {
-            if (ctx.parameters.size() <= at)
-                return false;
-            try {
-                out = boost::lexical_cast<double>(ctx.parameters.at(at));
-                return std::isfinite(out);
-            } catch (...) {
-                return false;
-            }
-        };
-
-        if (key == L"MIN" && number(i + 1, def.tf.out_lo)) {
-            i += 2;
-        } else if (key == L"MAX" && number(i + 1, def.tf.out_hi)) {
-            i += 2;
-        } else if (key == L"GAIN" && number(i + 1, def.tf.gain)) {
-            i += 2;
-        } else if (key == L"LAG" && number(i + 1, def.tf.lag_ms)) {
-            i += 2;
-        } else if (key == L"IN" && number(i + 1, def.tf.in_lo) && number(i + 2, def.tf.in_hi)) {
-            i += 3;
-        } else if (key == L"CURVE" && ctx.parameters.size() > i + 1) {
-            if (!core::binding::parse_curve(u8(ctx.parameters.at(i + 1)), def.tf.curve))
-                return L"400 BIND ERROR unknown curve, expected LINEAR, EASE_IN, EASE_OUT, EASE, "
-                       L"STEP or INVERT\r\n";
-            i += 2;
-        } else {
-            return L"400 BIND ERROR unrecognised option: " + ctx.parameters.at(i) + L"\r\n";
-        }
-    }
-
+    if (auto err = parse_transform_options(ctx, 2, def.tf))
+        return *err;
     const int id = stage->add_binding(def).get();
     if (id == 0)
         return L"404 BIND ERROR the target or the source does not resolve. A target is a mixer "
@@ -6276,10 +6381,16 @@ std::wstring unbind_command(command_context& ctx)
 
     // No layer and no target clears the whole channel, which is the state an operator wants
     // after an experiment. `-1` for the layer means "any", not "layer -1".
-    const int  layer  = ctx.layer_id;
-    const auto target = ctx.parameters.empty() ? std::string() : u8(ctx.parameters.at(0));
-
-    const int removed = stage->remove_bindings(layer, target).get();
+    const int layer = ctx.layer_id;
+    // UNBIND <ch>[-<layer>] [<target>] [OUT] -- the trailing OUT removes outbound bindings only;
+    // without it only inbound ones go, so taking a source off a parameter never also silences
+    // what the parameter was reporting to a desk.
+    std::vector<std::wstring> params = ctx.parameters;
+    const bool                out    = !params.empty() && boost::iequals(params.back(), L"OUT");
+    if (out)
+        params.pop_back();
+    const auto target  = params.empty() ? std::string() : u8(params.at(0));
+    const int  removed = out ? stage->remove_outbound(layer, target).get() : stage->remove_bindings(layer, target).get();
     return removed > 0 ? L"202 UNBIND OK\r\n" : L"404 UNBIND ERROR no matching binding\r\n";
 }
 
@@ -7059,6 +7170,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Binding Commands", L"BIND",             bind_command,             1);
     repo->register_channel_command(L"Binding Commands", L"UNBIND",           unbind_command,           0);
     repo->register_channel_command(L"Binding Commands", L"SOURCE",           source_command,           1);
+    repo->register_channel_command(L"Binding Commands", L"SINK",             sink_command,             1);
 
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SCENE",     previz_scene_command,     0);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ MAP",       previz_map_command,       2);

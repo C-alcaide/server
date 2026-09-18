@@ -1,6 +1,25 @@
 CasparVP — Unreleased
 ==========================================
 
+### Outbound bindings: a parameter reported OUT over OSC -- `SINK`, `BIND ... OUT`
+
+Bindings had one direction. `SINK <ch> ADD <name> OSC <host> <port>` names an endpoint and
+`BIND <ch>-<layer> <target> OUT <sink>/<address> [IN MIN MAX GAIN LAG CURVE]` sends the target's
+EFFECTIVE value -- after every rank has resolved, whoever is driving it -- through the same
+transform as an inbound binding, as one OSC float32, only when the mapped value changes. The two
+directions are separate bindings on one target, so an LFO or a MIDI knob can drive a parameter a
+lighting desk is receiving (DECISIONS L367's multiplicity, L392's server half). `UNBIND ... OUT`
+removes only the outbound half. Published as `stage/outbound/{id}/` (seven leaves, against the
+inbound row's thirteen -- L383 measured a binding's cost as its publication) and
+`stage/sink/{name}/`. The host must be numeric; a sink that cannot open or a target that cannot be
+read reads `BROKEN` rather than sending stale numbers.
+
+Verified: `binding-out` (new) 8/8 on both mixers, listening on the far end -- a `MIXER` write
+arrives exactly, `IN 0 2 MIN 0 MAX 100` maps 1.5 to 75.0, nothing is sent while the value holds
+and one change moves `sends` by one, an LFO's writes reach the desk, `UNBIND OUT` leaves the LFO
+driving, a removed sink reads BROKEN, and 32 outbound bindings at 1080p50 on a looping clip cost
+OpenGL 1 -> 1, Vulkan 3 -> 3 (over 600 frames) late frames against none. One sink kind (OSC); no remote host measured.
+
 ### Scopes: the channel's output reduced on the GPU to a histogram, published as data -- opt-in, `SCOPES <ch> ON`
 
 The first scope (DECISIONS L163/L166/L394). Both mixers reduce the frame the consumers

@@ -176,6 +176,13 @@ BIND <ch>-<layer> <target> <source>/<channel>
      [IN <lo> <hi>] [MIN <a>] [MAX <b>] [GAIN <g>] [LAG <ms>] [CURVE <name>]
 UNBIND <ch>[-<layer>] [<target>]
 BIND <ch> LIST
+
+SINK <ch> ADD <name> OSC <host> <port>                 (host must be a numeric address)
+SINK <ch> REMOVE <name>
+SINK <ch> LIST
+BIND <ch>-<layer> <target> OUT <sink>/<address>        (the address keeps its leading slash:
+     [IN <lo> <hi>] [MIN <a>] [MAX <b>] [GAIN <g>] [LAG <ms>] [CURVE <name>]   desk//fader/1)
+UNBIND <ch>[-<layer>] [<target>] OUT
 ```
 
 ```
@@ -242,13 +249,46 @@ and wrong for "there is no tracker on camera 9" — a fact, not a fault. So the 
 reports the fact and the value channels stay absent, which also stops a binding from quietly
 driving a parameter to zero forever.
 
+### 2.3b Outbound — the same parameter, reported to a protocol
+
+The other direction (DECISIONS L367/L392, shipped 2026-09-18). An inbound binding says *this
+parameter follows that source*; an outbound one says *whatever this parameter is doing, tell
+that endpoint*. The target grammar is identical, the transform is identical and runs the other
+way round, and the two are separate bindings — so a parameter driven from an LFO or a MIDI knob
+can be reported to a lighting desk over OSC at the same time, which is the multiplicity the old
+exclusive model could not express.
+
+```
+SINK 1 ADD desk OSC 192.168.1.20 9000
+BIND 1-10 opacity OUT desk//fader/1
+BIND 1-10 brightness OUT desk//bright IN 0 2 MIN 0 MAX 100
+```
+
+What goes out is the target's **effective** value — after every rank has resolved on the tick,
+so it is what is on air, whoever is driving it — mapped through the transform and sent as one
+OSC float32 **only when the mapped value changes** (compared as the float32 that goes on the
+wire). A static parameter costs nothing on the network; a client wanting a heartbeat will not
+get one. A sink that could not open, or a target that cannot be read, marks the binding
+`BROKEN` rather than sending a stale number, and `SINK LIST` reports `sent`/`dropped` so
+"nothing arrived" and "nothing was sent" are different readings.
+
+`osc` is the only sink kind. The server already has Art-Net and sACN senders in the DMX
+consumer and no MIDI output at all; a `DMX` sink is the natural second and is not written.
+
 ### 2.4 What is published
 
 ```
 /channel/{n}/stage/binding/{id}/{layer,target,component,source,in_min,in_max,min,max,
                                  gain,lag,curve,value,broken}
 /channel/{n}/stage/source/{name}/{kind,<each channel>}
+/channel/{n}/stage/outbound/{id}/{layer,target,component,to,value,sends,broken}
+/channel/{n}/stage/sink/{name}/{kind,describe,ready}
 ```
+
+An outbound row is **seven** leaves against the inbound row's thirteen, deliberately: L383
+measured a binding's cost as its publication, so `to` folds sink and address into one string
+and the transform is not republished (`BIND LIST` shows it). `sends` is cumulative, a DELTA a
+client can watch.
 
 `value` is the value **written**, after the transform and the lag — not the source's raw sample.
 It is what a client needs to draw the parameter moving, and it is the number a battery can fit a
@@ -398,7 +438,9 @@ cannot rise until the thread overruns, so the late count is the discriminator.
    the group size and read an eighth of its magnitude at 64 bins. The reduction now takes each
    group's peak. Only a check that compared the SAME tone at two bin counts could catch that, and
    the self-test now does.
-6. **One binding per target, and no way to combine two sources.** A parameter driven by "audio
+6. ~~**Bindings are inbound only.**~~ **CLOSED 2026-09-18** — `SINK` and `BIND ... OUT`, §2.3b;
+   `cli.py binding-out` measures the far end on both mixers. Still one sink kind (OSC).
+7. **One binding per target, and no way to combine two sources.** A parameter driven by "audio
    band 0 *times* an LFO" needs either a second transform stage or an expression language, and
    §1.2 declines both for now.
 

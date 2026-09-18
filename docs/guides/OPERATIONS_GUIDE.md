@@ -603,6 +603,20 @@ it and hands the parameter back.
 OpenFX plug-in on that layer. `BIND 1 LIST` shows what is attached; `SOURCE 1 LIST` shows what is
 available and whether it is receiving anything.
 
+**Reporting a parameter OUT** — the other direction, for a desk or a client that wants to draw
+what the server is doing:
+
+```
+SINK 1 ADD desk OSC 192.168.1.20 9000
+BIND 1-10 opacity OUT desk//fader/1
+UNBIND 1-10 opacity OUT
+```
+
+Layer 10's opacity — whatever is driving it — arrives at `/fader/1` on that desk as a float
+whenever it changes. The same `IN`/`MIN`/`MAX`/`GAIN`/`LAG`/`CURVE` options shape the value on the
+way out. The host must be a numeric address; `SINK 1 LIST` shows what was sent and dropped, and
+`BIND 1 LIST` shows outbound bindings with `->`.
+
 **Shaping the response** — these are the only five, and between them they are what the VJ tools
 offer:
 
