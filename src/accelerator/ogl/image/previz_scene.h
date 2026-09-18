@@ -100,6 +100,7 @@ struct previz_scene
     bool                             show_grid      = true;
     bool                             show_wireframe = false;
     bool                             show_gizmo     = true;
+    bool                             show_camera    = true;
     bool                             active         = false;
     bool                             auto_projection = false;
     std::string                      scene_path;

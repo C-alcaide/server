@@ -5697,6 +5697,24 @@ std::wstring previz_camera_command(command_context& ctx)
     }
 
     // RESET
+    // SHOW is a display toggle on the camera rather than a placement argument, so it sits
+    // with the camera it draws rather than in the GIZMO family: an operator asking to see the
+    // shot looks for it under CAMERA.
+    if (boost::iequals(ctx.parameters.at(0), L"SHOW")) {
+        bool on = true;
+        if (ctx.parameters.size() > 1) {
+            const auto& arg = ctx.parameters.at(1);
+            if (arg == L"1" || boost::iequals(arg, L"ON") || boost::iequals(arg, L"TRUE"))
+                on = true;
+            else if (arg == L"0" || boost::iequals(arg, L"OFF") || boost::iequals(arg, L"FALSE"))
+                on = false;
+            else
+                return L"400 PREVIZ ERROR CAMERA SHOW takes 1, 0, ON, OFF, TRUE or FALSE, not " + arg +
+                       L"\r\n";
+        }
+        ogl_mix->set_show_camera(on);
+        return L"202 PREVIZ OK\r\n";
+    }
     if (boost::iequals(ctx.parameters.at(0), L"RESET")) {
         ogl_mix->reset_camera();
         return L"202 PREVIZ OK\r\n";

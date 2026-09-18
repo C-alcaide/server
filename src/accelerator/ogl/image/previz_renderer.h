@@ -102,6 +102,12 @@ class previz_renderer
     void set_wireframe(bool on);
     void set_gizmo(bool on);
 
+    /// Draw the PRODUCTION camera in the viewport: a small body and its frustum, out to the
+    /// far edge of whatever it is pointing at. Distinct from the viewport camera, which is the
+    /// eye this is drawn FROM -- so an operator orbiting the stage watches the shot rather
+    /// than becoming it.
+    void set_show_camera(bool on);
+
     /// Camera presets.
     void save_camera_preset(const std::string& name);
     /// False when there is no preset by that name -- the command answers 404 rather than 202.

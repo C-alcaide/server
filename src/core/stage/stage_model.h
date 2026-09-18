@@ -126,6 +126,10 @@ struct previz_flags
     bool show_grid         = true;
     bool show_wireframe    = false;
     bool show_gizmo        = true; // PREVIZ GIZMO; draws the world-origin axis triad since 2026-09-18
+    // The PRODUCTION camera, drawn in the viewport as a body and a frustum. On by default:
+    // an operator looking at a virtual stage wants to see where the shot is, and previz that
+    // does not show it is a floor plan rather than a pre-visualisation.
+    bool show_camera       = true;
     bool camera_locked     = false;
     bool has_view_override = false;
 };

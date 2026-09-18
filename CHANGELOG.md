@@ -1,6 +1,33 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: previz draws the production camera, and shows which screen is selected
+
+Two more things the stage knew and never drew -- found by the question that caught `PREVIZ GIZMO`
+drawing nothing: what does the server store that no render path reads?
+
+**The production camera is in the viewport** -- `PREVIZ <ch> CAMERA SHOW 1|0`, a body box and its
+frustum four metres down the lens, in magenta. Previz showed where the screens were and never
+where the SHOT was, which for a virtual production is the half that matters: a tracked camera
+moved and nothing in the view said what it was covering. Drawn FROM the viewport camera, so an
+operator orbiting the stage watches the shot instead of becoming it. Skipped when the viewport is
+not overridden, because the two cameras are then one eye and a frustum drawn from inside its own
+apex reads as a rendering fault. The top edge carries a tick so the camera's roll is legible.
+
+**The selection is visible** -- the selected screen outlined in cyan, the hovered one in amber.
+`scene_.selected` and `scene_.hover` had been written by the pick on every click and every move,
+published in the control API, and read by no draw path, so an operator could select a screen and
+see nothing change. The outline is the screen's PERIMETER: the first version drew the mesh again
+in wireframe, which on a curved wall is every triangle edge -- a grid of verticals over the
+picture being judged.
+
+Verified: `previz-gizmo` 12/12 on both mixers, five new arms. The frustum appears on `SHOW 1`
+(3563 px) and is gone on `SHOW 0`; it MOVES when the camera moves (centroid 1055 -> 838 for 2 m in
+-X), because one drawn from a hardcoded pose would pass "it appeared"; it is absent with no view
+override; `CAMERA SHOW BANANA` is refused; and a click outlines the screen (0 -> 702 px) while the
+tree names the same one. `previz-place`, `previz-picture`, `api-stage` and `previz-interact` re-run
+green.
+
 ### BEHAVIOUR: a previz screen can be resized and bent in place, and RESOLUTION means something
 
 Two functional holes in the 3D stage, both found by auditing what is UNIMPLEMENTED rather than

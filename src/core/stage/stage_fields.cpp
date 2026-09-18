@@ -388,7 +388,8 @@ bool same_stage(const stage_snapshot& a, const stage_snapshot& b)
     const auto& fb = b.flags;
     if (fa.active != fb.active || fa.auto_projection != fb.auto_projection ||
         fa.show_grid != fb.show_grid || fa.show_wireframe != fb.show_wireframe ||
-        fa.show_gizmo != fb.show_gizmo || fa.camera_locked != fb.camera_locked ||
+        fa.show_gizmo != fb.show_gizmo || fa.show_camera != fb.show_camera ||
+        fa.camera_locked != fb.camera_locked ||
         fa.has_view_override != fb.has_view_override)
         return false;
 
@@ -475,6 +476,7 @@ void stage_publisher::refresh(const stage_snapshot& snap)
     st["show_grid"]       = snap.flags.show_grid;
     st["show_wireframe"]  = snap.flags.show_wireframe;
     st["show_gizmo"]      = snap.flags.show_gizmo;
+    st["show_camera"]     = snap.flags.show_camera;
     st["camera_locked"]   = snap.flags.camera_locked;
     st["view_override"]   = snap.flags.has_view_override;
     st["scene_path"]      = snap.scene_path;

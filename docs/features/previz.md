@@ -128,6 +128,7 @@ Both are families of four, and both were listed in §1 as *"placement arguments"
 
 | form | `CAMERA` | `VIEW` |
 | :--- | :--- | :--- |
+| `SHOW [1\|0\|ON\|OFF\|TRUE\|FALSE]` | draw the production camera in the viewport — a body and its frustum. No argument means ON; anything else is `400` | — |
 | *(no parameters)* | query: `201` then `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | query: `201` then `<override 1\|0> <x> <y> <z> <yaw> <pitch> <roll> <fov>` |
 | `RESET` | camera back to its default, projections recomputed | same as `CLEAR` |
 | `CLEAR` | — | drops the view override |
@@ -489,6 +490,20 @@ literally — fails five arms while the tree goes on reporting (0, 0, −2).
 
 **Still uncovered**: a curved screen's geometry, roll and pitch, and the production camera
 (previz renders from the viewport one).
+
+**The production camera is drawn in the viewport since 2026-09-19** — `PREVIZ <ch> CAMERA SHOW
+1|0`, a body and its frustum, out four metres down the lens. Previz showed where the screens were
+and never where the SHOT was, which for a virtual production is the half that matters: a tracked
+camera moved and nothing in the view said what it was covering.
+
+It is drawn FROM the viewport camera, so an operator orbiting the stage watches the shot instead
+of becoming it — the two-camera split of §1.2, made visible. **Deliberately skipped when the
+viewport is not overridden**: the two cameras are then one eye, and a frustum drawn from inside
+its own apex is a few lines radiating out of the corners of the frame, which reads as a rendering
+fault. Lines rather than the gizmo's ribbons, and the opposite choice for the opposite reason: a
+frustum is a large sparse outline at stage scale, and a ribbon cage would occlude the screens it
+exists to explain. The top edge carries a tick so the camera's ROLL is readable — a symmetric
+outline is the same picture upside down.
 
 **`GIZMO` and `PRESET`, the last two commands driven by nothing, are driven since 2026-09-18** —
 `cli.py previz-gizmo`, 7/7 on both mixers. All thirteen `PREVIZ` commands have coverage now.
@@ -886,6 +901,15 @@ Two limits and one that closed, each a consequence of a decision rather than an 
   does not name a type`. Nothing here could see it: no Linux build on this machine and no CI
   running one. It took `g++ -fsyntax-only` under WSL, which is now the cheapest available check
   on anything this file's guards touch.
+* ~~**Selecting a screen shows nothing.**~~ **CLOSED 2026-09-19.** `scene_.selected` and
+  `scene_.hover` were written by the pick on every click and every move, published in the control
+  API, and read by no draw path — so an operator could select a screen and see the picture not
+  change. The same shape as `show_gizmo`, and found by asking the same question: what does the
+  stage store that nothing renders? The selected screen is outlined in cyan and the hovered one in
+  amber, as its **perimeter** — the first version drew the mesh again in wireframe, which on a
+  curved wall is every triangle edge, a grid of verticals over the very picture the operator is
+  judging. An outline is the rim and nothing else, built from the same local geometry the mesh
+  generators use.
 * **Only screens are pickable.** `compute_pick` intersects the `screen_meta` quads. A venue mesh
   loaded from glTF is drawn and cannot be selected or dragged, so a scene whose walls are geometry
   rather than screens is look-only.

@@ -346,6 +346,12 @@ struct previz_renderer::impl
     GLuint                      depth_rbo_ = 0;
     int                         fbo_w_     = 0;
     int                         fbo_h_     = 0;
+    GLuint                      outline_vao_ = 0;
+    GLuint                      outline_vbo_ = 0;
+    int                         outline_vert_count_ = 0;
+    GLuint                      camera_vao_ = 0;
+    GLuint                      camera_vbo_ = 0;
+    int                         camera_vert_count_ = 0;
     GLuint                      gizmo_vao_ = 0;
     GLuint                      gizmo_vbo_ = 0;
     int                         gizmo_vert_count_ = 0;
@@ -367,6 +373,16 @@ struct previz_renderer::impl
                 glDeleteFramebuffers(1, &fbo_);
             if (depth_rbo_)
                 glDeleteRenderbuffers(1, &depth_rbo_);
+            if (outline_vao_) {
+                glDeleteVertexArrays(1, &outline_vao_);
+                glDeleteBuffers(1, &outline_vbo_);
+                outline_vao_ = 0;
+            }
+            if (camera_vao_) {
+                glDeleteVertexArrays(1, &camera_vao_);
+                glDeleteBuffers(1, &camera_vbo_);
+                camera_vao_ = 0;
+            }
             if (gizmo_vao_) {
                 glDeleteVertexArrays(1, &gizmo_vao_);
                 glDeleteBuffers(1, &gizmo_vbo_);
@@ -427,6 +443,159 @@ struct previz_renderer::impl
     ///
     /// The normal is the LIGHT DIRECTION, so `NdotL` is 1 and the colour arrives at full
     /// intensity: a diagnostic aid should not be dimmed by where the sun is.
+    /// A screen's PERIMETER as a closed line loop, in world space.
+    ///
+    /// Drawing the mesh again in wireframe was the first version and it is what a selection
+    /// highlight must not be: on a curved wall it draws every triangle edge -- a dense grid of
+    /// verticals over the picture the operator is judging -- and even on a flat one it shows
+    /// the quad's diagonal. An outline is the perimeter and nothing else, so it is built here
+    /// from the same local geometry `generate_flat_screen` / `generate_curved_screen` use:
+    /// the bottom edge left to right, up the right end, the top edge back, down the left end.
+    void build_screen_outline(const screen_meta& meta)
+    {
+        std::vector<previz_vertex> verts;
+        const auto rot = mat4::rotate_y(meta.rot_yaw) * mat4::rotate_x(meta.rot_pitch) *
+                         mat4::rotate_z(meta.rot_roll);
+        auto put = [&](float x, float y, float z) {
+            verts.push_back({rot.m[0] * x + rot.m[4] * y + rot.m[8] * z + meta.pos_x,
+                             rot.m[1] * x + rot.m[5] * y + rot.m[9] * z + meta.pos_y,
+                             rot.m[2] * x + rot.m[6] * y + rot.m[10] * z + meta.pos_z,
+                             0, 1, 0, 0, 0});
+        };
+
+        // The local rim, bottom edge first. A flat screen is the degenerate case of the curved
+        // one with two samples, so there is one loop rather than two paths to disagree.
+        const bool  curved   = meta.radius_m > 0.0f && meta.arc_deg > 0.0f;
+        const int   segments = curved ? std::max(8, static_cast<int>(meta.arc_deg / 2.0f)) : 1;
+        const float half_arc = meta.arc_deg * static_cast<float>(M_PI) / 360.0f;
+        std::vector<std::pair<float, float>> rim; // (x, z) along the bottom, left to right
+        for (int i = 0; i <= segments; ++i) {
+            const float t = static_cast<float>(i) / static_cast<float>(segments);
+            if (curved) {
+                const float a = -half_arc + t * (half_arc * 2.0f);
+                rim.emplace_back(meta.radius_m * std::sin(a), meta.radius_m * std::cos(a) - meta.radius_m);
+            } else {
+                rim.emplace_back(-meta.width_m * 0.5f + t * meta.width_m, 0.0f);
+            }
+        }
+
+        auto edge = [&](float y, bool forward) {
+            for (std::size_t i = 0; i + 1 < rim.size(); ++i) {
+                const auto& a = forward ? rim[i] : rim[rim.size() - 1 - i];
+                const auto& b = forward ? rim[i + 1] : rim[rim.size() - 2 - i];
+                put(a.first, y, a.second);
+                put(b.first, y, b.second);
+            }
+        };
+        edge(0.0f, true);                                   // bottom, left to right
+        put(rim.back().first, 0.0f, rim.back().second);     // up the right end
+        put(rim.back().first, meta.height_m, rim.back().second);
+        edge(meta.height_m, false);                         // top, right to left
+        put(rim.front().first, meta.height_m, rim.front().second); // down the left end
+        put(rim.front().first, 0.0f, rim.front().second);
+
+        outline_vert_count_ = static_cast<int>(verts.size());
+        if (!outline_vao_) {
+            glGenVertexArrays(1, &outline_vao_);
+            glGenBuffers(1, &outline_vbo_);
+        }
+        glBindVertexArray(outline_vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, outline_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(previz_vertex)),
+                     verts.data(), GL_DYNAMIC_DRAW);
+        auto stride  = static_cast<GLsizei>(sizeof(previz_vertex));
+        auto pos_loc = shader_->get_attrib_location("a_Position");
+        glEnableVertexAttribArray(pos_loc);
+        glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
+        auto nrm_loc = shader_->get_attrib_location("a_Normal");
+        glEnableVertexAttribArray(nrm_loc);
+        glVertexAttribPointer(nrm_loc, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(3 * sizeof(float)));
+        auto uv_loc = shader_->get_attrib_location("a_TexCoord");
+        glEnableVertexAttribArray(uv_loc);
+        glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(6 * sizeof(float)));
+        glBindVertexArray(0);
+    }
+
+    /// The production camera's body and frustum, in WORLD space, rebuilt whenever its pose
+    /// changes -- which with a tracker bound is every sample, so this is a dynamic buffer
+    /// rather than a static one like the grid and the gizmo.
+    ///
+    /// Lines rather than ribbons here, deliberately, and the opposite choice from the gizmo:
+    /// a frustum is a large, sparse shape an operator reads as an outline, and a ribbon cage
+    /// at stage scale would occlude the very screens it is drawn to explain. It is also the
+    /// one overlay that must not be mistaken for geometry.
+    void build_camera_lines(const previz_camera& cam, float aspect)
+    {
+        const float depth  = 4.0f;  // metres down the lens; long enough to reach a near wall
+        const float half_v = std::tan(cam.fov * static_cast<float>(M_PI) / 360.0f) * depth;
+        const float half_h = half_v * aspect;
+        const float body   = 0.12f; // half-size of the little box at the apex
+
+        // The camera's own basis, from the documented Ry*Rx*Rz order: an unrotated camera
+        // looks along -Z.
+        const auto rot = mat4::rotate_y(cam.yaw) * mat4::rotate_x(cam.pitch) *
+                         mat4::rotate_z(cam.roll);
+        auto to_world = [&](float x, float y, float z) {
+            return std::array<float, 3>{
+                rot.m[0] * x + rot.m[4] * y + rot.m[8] * z + cam.x,
+                rot.m[1] * x + rot.m[5] * y + rot.m[9] * z + cam.y,
+                rot.m[2] * x + rot.m[6] * y + rot.m[10] * z + cam.z};
+        };
+
+        std::vector<previz_vertex> verts;
+        auto line = [&](std::array<float, 3> a, std::array<float, 3> b) {
+            verts.push_back({a[0], a[1], a[2], 0, 1, 0, 0, 0});
+            verts.push_back({b[0], b[1], b[2], 0, 1, 0, 0, 0});
+        };
+
+        const auto apex = to_world(0, 0, 0);
+        const auto tl   = to_world(-half_h, half_v, -depth);
+        const auto tr   = to_world(half_h, half_v, -depth);
+        const auto br   = to_world(half_h, -half_v, -depth);
+        const auto bl   = to_world(-half_h, -half_v, -depth);
+        line(apex, tl);
+        line(apex, tr);
+        line(apex, br);
+        line(apex, bl);
+        line(tl, tr);
+        line(tr, br);
+        line(br, bl);
+        line(bl, tl);
+        // A tick on the TOP edge, so the frustum's roll is readable: a symmetric outline is
+        // the same picture upside down, and a camera rolled 180 degrees is not a detail.
+        line(to_world(0, half_v, -depth), to_world(0, half_v * 1.25f, -depth));
+        // The body: a small box at the apex, so the camera is findable when it points away.
+        const float o[8][3] = {{-body, -body, -body}, {body, -body, -body}, {body, body, -body},
+                               {-body, body, -body},  {-body, -body, body}, {body, -body, body},
+                               {body, body, body},    {-body, body, body}};
+        const int edges[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6},
+                                  {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+        for (const auto& e : edges)
+            line(to_world(o[e[0]][0], o[e[0]][1], o[e[0]][2]),
+                 to_world(o[e[1]][0], o[e[1]][1], o[e[1]][2]));
+
+        camera_vert_count_ = static_cast<int>(verts.size());
+        if (!camera_vao_) {
+            glGenVertexArrays(1, &camera_vao_);
+            glGenBuffers(1, &camera_vbo_);
+        }
+        glBindVertexArray(camera_vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, camera_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(previz_vertex)),
+                     verts.data(), GL_DYNAMIC_DRAW);
+        auto stride  = static_cast<GLsizei>(sizeof(previz_vertex));
+        auto pos_loc = shader_->get_attrib_location("a_Position");
+        glEnableVertexAttribArray(pos_loc);
+        glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
+        auto nrm_loc = shader_->get_attrib_location("a_Normal");
+        glEnableVertexAttribArray(nrm_loc);
+        glVertexAttribPointer(nrm_loc, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(3 * sizeof(float)));
+        auto uv_loc = shader_->get_attrib_location("a_TexCoord");
+        glEnableVertexAttribArray(uv_loc);
+        glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(6 * sizeof(float)));
+        glBindVertexArray(0);
+    }
+
     void ensure_gizmo()
     {
         if (gizmo_vao_)
@@ -709,6 +878,64 @@ struct previz_renderer::impl
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, 0);
             }
+        }
+
+        // ── THE SELECTION, WHICH THE STAGE HAS ALWAYS KNOWN AND NEVER SHOWN ────────────
+        //
+        // `scene_.selected` and `scene_.hover` are written by the pick on every click and every
+        // move, published in the control API, and read by no draw path until 2026-09-19: an
+        // operator could select a screen and see nothing change. The same shape as `show_gizmo`,
+        // and found the same way -- by asking what the stage stores that nothing renders.
+        //
+        // An OUTLINE rather than a tint, because a screen is emissive and textured with a live
+        // channel: tinting it would corrupt the very picture the operator is judging, and
+        // `previz-picture` gates that picture at a colour. Drawing the mesh again in wireframe
+        // costs one more draw per highlighted screen and touches no pixel of the fill.
+        {
+            const std::string* marks[2] = {&scene_.hover, &scene_.selected};
+            const double       cols[2][3] = {{0.95, 0.75, 0.15}, {0.15, 0.9, 0.95}};
+            for (int m = 0; m < 2; ++m) {
+                if (marks[m]->empty())
+                    continue;
+                const auto sit = scene_.screens.find(*marks[m]);
+                if (sit == scene_.screens.end())
+                    continue; // a plain mesh can be hovered; only a screen has a rim to draw
+                build_screen_outline(sit->second);
+                // LEQUAL so the outline sits ON the surface it belongs to rather than
+                // z-fighting with it: the fill was drawn at the same depth a moment ago.
+                glDepthFunc(GL_LEQUAL);
+                glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_mvp"), 1, GL_FALSE, mvp.m);
+                glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_model"), 1, GL_FALSE, model.m);
+                shader_->set("u_is_screen", false);
+                shader_->set("u_has_texture", false);
+                shader_->set("u_base_color", cols[m][0], cols[m][1], cols[m][2]);
+                glBindVertexArray(outline_vao_);
+                glDrawArrays(GL_LINES, 0, outline_vert_count_);
+                glBindVertexArray(0);
+                glDepthFunc(GL_LESS);
+            }
+        }
+
+        // ── THE PRODUCTION CAMERA ──────────────────────────────────────────────────────
+        //
+        // Drawn FROM the viewport camera, so an operator orbiting the stage watches the shot
+        // instead of becoming it -- which is the whole point of the two-camera split, made
+        // visible. With a tracker bound this moves every sample, so the geometry is rebuilt
+        // each frame rather than cached: it is 46 lines.
+        //
+        // Skipped when the viewport is not overridden, because then the two cameras are the
+        // same eye and the frustum would be drawn from inside its own apex: a few lines
+        // radiating out of the corners of the screen, which reads as a rendering fault.
+        if (scene_.show_camera && scene_.has_view_override) {
+            build_camera_lines(scene_.camera, aspect);
+            glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_mvp"), 1, GL_FALSE, mvp.m);
+            glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_model"), 1, GL_FALSE, model.m);
+            shader_->set("u_is_screen", false);
+            shader_->set("u_has_texture", false);
+            shader_->set("u_base_color", 0.95, 0.35, 0.85);
+            glBindVertexArray(camera_vao_);
+            glDrawArrays(GL_LINES, 0, camera_vert_count_);
+            glBindVertexArray(0);
         }
 
         if (scene_.show_wireframe)
@@ -1334,6 +1561,12 @@ void previz_renderer::set_gizmo(bool on)
     impl_->scene_.show_gizmo = on;
 }
 
+void previz_renderer::set_show_camera(bool on)
+{
+    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+    impl_->scene_.show_camera = on;
+}
+
 void previz_renderer::save_camera_preset(const std::string& name)
 {
     std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
@@ -1829,6 +2062,7 @@ core::stage_snapshot previz_renderer::stage_snapshot() const
     out.flags.show_grid         = sc.show_grid;
     out.flags.show_wireframe    = sc.show_wireframe;
     out.flags.show_gizmo        = sc.show_gizmo;
+    out.flags.show_camera       = sc.show_camera;
     out.flags.camera_locked     = sc.camera_locked;
     out.flags.has_view_override = sc.has_view_override;
     out.camera                  = sc.camera;

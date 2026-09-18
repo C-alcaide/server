@@ -530,6 +530,7 @@ on, the tab pushes `PREVIZ <channel> …` commands as you work:
 | `PREVIZ <ch> VIEW …` | Navigation view sync. |
 | `PREVIZ <ch> SCREEN …` | A screen's geometry / parameters change. |
 | `PREVIZ <ch> SHOW …` | A node's visibility changes. |
+| `PREVIZ <ch> CAMERA SHOW <0\|1>` | Draw the **production camera** in the viewport — its body and the frustum it is covering. Needs a viewport of its own (`PREVIZ <ch> VIEW ...`), because from the camera's own eye there is nothing to see. Clicking a screen outlines it. |
 | `PREVIZ <ch> GRID / WIREFRAME / GIZMO <0\|1>` | Display toggles in the toolbar. `GIZMO` draws the world-origin axis triad — +X red, +Y green, +Z blue — which is how you tell which way the stage is facing. All three take `ON`/`OFF` too, and refuse anything else. |
 
 Turning Live Link **off** sends `PREVIZ <ch> VIEW CLEAR` to drop the server-side
