@@ -1,6 +1,34 @@
 CasparVP — Unreleased
 ==========================================
 
+### A file with two same-height video streams is playable again
+
+Ported from upstream (`a2a8e228b`, `e25c5936e`, Jacob Lifshay). The producer deduced
+"two video streams of the same HEIGHT means colour + alpha" and inserted `alphamerge`.
+A 1920x1080 stream beside a 1280x1080 one matched that rule, and the filter then refused
+the graph:
+
+    [Parsed_alphamerge_0] Input frame sizes do not match (1920x1080 vs 1280x1080).
+    [Parsed_alphamerge_0] Failed to configure output pad
+
+So the clip did not render at all — measured, both halves reading the background with
+nothing on air. It now plays opaque, and a genuine colour+alpha pair still merges.
+
+The rule now requires width, height, sample aspect ratio and field order to match, and
+refuses when a third stream matches as well, since that is no longer a pair.
+
+Two other things came with it. Video and audio streams are now collected separately and
+the filter's inputs are taken from those queues in order, replacing a search that tested
+a POSITION in the combined vector against `sources`, which is keyed by STREAM INDEX — two
+different key spaces, so the "already used" guard was reading the wrong one. And the
+`stable_sort` comparator was `lhs->codec_type == VIDEO && lhs->height > rhs->height`,
+which is not a strict weak ordering and is therefore undefined behaviour; it now sorts a
+video-only queue by height.
+
+Verified: `flat-decoded` 29/29 measured patches, `decoded-alpha` PASS on both mixers, a
+video+audio file and a two-audio-stream file both play with `amerge` applied and no errors.
+
+
 ### BEHAVIOUR: decoded media is assumed PREMULTIPLIED again, and it is now configurable
 
 Since 2026-08-20 decoded media was assumed **straight**, which fixed NLE-authored clips and
