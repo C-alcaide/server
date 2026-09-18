@@ -530,7 +530,7 @@ on, the tab pushes `PREVIZ <channel> …` commands as you work:
 | `PREVIZ <ch> VIEW …` | Navigation view sync. |
 | `PREVIZ <ch> SCREEN …` | A screen's geometry / parameters change. |
 | `PREVIZ <ch> SHOW …` | A node's visibility changes. |
-| `PREVIZ <ch> GRID / WIREFRAME / GIZMO <0\|1>` | Display toggles in the toolbar. |
+| `PREVIZ <ch> GRID / WIREFRAME / GIZMO <0\|1>` | Display toggles in the toolbar. `GIZMO` draws the world-origin axis triad — +X red, +Y green, +Z blue — which is how you tell which way the stage is facing. All three take `ON`/`OFF` too, and refuse anything else. |
 
 Turning Live Link **off** sends `PREVIZ <ch> VIEW CLEAR` to drop the server-side
 nav view. The whole scene also exports to glTF (`.glb`) for upload to the server
@@ -988,7 +988,7 @@ sub-command reaches the server.
 | Grade | `MIXER <ch>-<l> BRIGHTNESS/CONTRAST/SATURATION/LEVELS/CURVES/HUECURVE/QUALIFIER/COLORSPACE` |
 | OCIO | `MIXER <ch>-<l> OCIO/CDL_FILE`, `OCIO_DISPLAY <ch>`, `OCIO_LOOK <ch>`, `AMF <ch>-<l>`, `INFO OCIO [COLORSPACES\|DISPLAYS\|LOOKS]` |
 | Geometry | `MIXER <ch>-<l> PERSPECTIVE/PROJECTION/PROJECTION_DISTORTION/PROJECTION_BLEND/PROJECTION_BLEND_MASK/MESH` |
-| Previz | `PREVIZ <ch> CAMERA/VIEW/SCREEN/SHOW/GRID/WIREFRAME/GIZMO` |
+| Previz | `PREVIZ <ch> CAMERA/VIEW/SCREEN/SHOW/GRID/WIREFRAME/GIZMO`, `PREVIZ <ch> PRESET SAVE\|RECALL\|LIST <name>` (camera presets; `RECALL` of a name never saved is a 404) |
 | Tracking | `TRACKING <ch>-<l> BIND/UNBIND/OFFSET/SCALE/ZERO/INFO`, `TRACKING LIST` |
 | Calibration | `CALIBRATION <ch> LUT/BYPASS/CLEAR/INFO` |
 | Effects | `PLAY <ch>-<l> [ISF] <shader>`, `PLAY <ch>-<l> [OFX] <plugin-id>`, and `INFO ISF` / `INFO OFX` to find out **what is installed** — `CLS` lists media and `TLS` lists templates, and a `.fs` and an `.ofx` bundle are neither, so without these two an operator has to know the name already |

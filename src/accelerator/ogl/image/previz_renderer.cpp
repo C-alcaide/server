@@ -346,6 +346,9 @@ struct previz_renderer::impl
     GLuint                      depth_rbo_ = 0;
     int                         fbo_w_     = 0;
     int                         fbo_h_     = 0;
+    GLuint                      gizmo_vao_ = 0;
+    GLuint                      gizmo_vbo_ = 0;
+    int                         gizmo_vert_count_ = 0;
     GLuint                      grid_vao_  = 0;
     GLuint                      grid_vbo_  = 0;
     int                         grid_vert_count_ = 0;
@@ -364,6 +367,11 @@ struct previz_renderer::impl
                 glDeleteFramebuffers(1, &fbo_);
             if (depth_rbo_)
                 glDeleteRenderbuffers(1, &depth_rbo_);
+            if (gizmo_vao_) {
+                glDeleteVertexArrays(1, &gizmo_vao_);
+                glDeleteBuffers(1, &gizmo_vbo_);
+                gizmo_vao_ = 0;
+            }
             if (grid_vao_) {
                 glDeleteVertexArrays(1, &grid_vao_);
                 glDeleteBuffers(1, &grid_vbo_);
@@ -407,6 +415,58 @@ struct previz_renderer::impl
 
         fbo_w_ = w;
         fbo_h_ = h;
+    }
+
+    /// The world-origin axis triad: +X red, +Y green, +Z blue, one metre each.
+    ///
+    /// RIBBONS RATHER THAN LINES, deliberately. `glLineWidth` above 1.0 is not required of a
+    /// core profile and NVIDIA clamps it, so a line gizmo is one pixel wide at any distance --
+    /// invisible on a 1080p frame at four metres, and unmeasurable by a battery. A ribbon is
+    /// geometry, so it scales with the projection like everything else and can be found by
+    /// colour: about 1600 px per axis from the default camera.
+    ///
+    /// The normal is the LIGHT DIRECTION, so `NdotL` is 1 and the colour arrives at full
+    /// intensity: a diagnostic aid should not be dimmed by where the sun is.
+    void ensure_gizmo()
+    {
+        if (gizmo_vao_)
+            return;
+        const float len = 1.2f;
+        const float hw  = 0.05f; // half-width, metres -- about 12 px at the default camera
+        const float nx = 0.32934f, ny = 0.76847f, nz = 0.54891f; // == u_light_dir
+        std::vector<previz_vertex> verts;
+        // One ribbon per axis: a constant-width quad from the origin to the axis end, offset
+        // along `p`. Two triangles, six vertices, so each axis is a fixed block of the buffer
+        // and can be drawn with its own colour.
+        auto ribbon = [&](float ax, float ay, float az, float px, float py, float pz) {
+            const previz_vertex a0{-px * hw, -py * hw, -pz * hw, nx, ny, nz, 0, 0};
+            const previz_vertex a1{px * hw, py * hw, pz * hw, nx, ny, nz, 0, 0};
+            const previz_vertex b0{ax - px * hw, ay - py * hw, az - pz * hw, nx, ny, nz, 0, 0};
+            const previz_vertex b1{ax + px * hw, ay + py * hw, az + pz * hw, nx, ny, nz, 0, 0};
+            verts.insert(verts.end(), {a0, a1, b1, a0, b1, b0});
+        };
+        ribbon(len, 0, 0, 0, 0, 1);   // +X, offset in Z: a strip lying on the floor
+        ribbon(0, len, 0, 1, 0, 0);   // +Y, offset in X: a strip standing in the XY plane
+        ribbon(0, 0, len, 1, 0, 0);   // +Z, offset in X: a strip lying on the floor
+        gizmo_vert_count_ = static_cast<int>(verts.size());
+        glGenVertexArrays(1, &gizmo_vao_);
+        glGenBuffers(1, &gizmo_vbo_);
+        glBindVertexArray(gizmo_vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, gizmo_vbo_);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(verts.size() * sizeof(previz_vertex)),
+                     verts.data(), GL_STATIC_DRAW);
+        auto stride = static_cast<GLsizei>(sizeof(previz_vertex));
+        auto pos_loc = shader_->get_attrib_location("a_Position");
+        glEnableVertexAttribArray(pos_loc);
+        glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
+        auto nrm_loc = shader_->get_attrib_location("a_Normal");
+        glEnableVertexAttribArray(nrm_loc);
+        glVertexAttribPointer(nrm_loc, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(3 * sizeof(float)));
+        auto uv_loc = shader_->get_attrib_location("a_TexCoord");
+        glEnableVertexAttribArray(uv_loc);
+        glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(6 * sizeof(float)));
+        glBindVertexArray(0);
     }
 
     void ensure_grid()
@@ -563,6 +623,25 @@ struct previz_renderer::impl
             shader_->set("u_base_color", 0.35, 0.35, 0.35);
             glBindVertexArray(grid_vao_);
             glDrawArrays(GL_LINES, 0, grid_vert_count_);
+            glBindVertexArray(0);
+        }
+
+        // The origin gizmo. `show_gizmo` was written by `PREVIZ GIZMO` and read by NOTHING
+        // until 2026-09-18 -- the flag, its publication and its persistence all worked, and
+        // the command drew nothing. Three draws rather than one because each axis needs its
+        // own `u_base_color`.
+        if (scene_.show_gizmo) {
+            ensure_gizmo();
+            glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_mvp"), 1, GL_FALSE, mvp.m);
+            glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_model"), 1, GL_FALSE, model.m);
+            shader_->set("u_is_screen", false);
+            shader_->set("u_has_texture", false);
+            glBindVertexArray(gizmo_vao_);
+            const double axis_rgb[3][3] = {{0.9, 0.1, 0.1}, {0.1, 0.9, 0.1}, {0.1, 0.35, 0.95}};
+            for (int a = 0; a < 3; ++a) {
+                shader_->set("u_base_color", axis_rgb[a][0], axis_rgb[a][1], axis_rgb[a][2]);
+                glDrawArrays(GL_TRIANGLES, a * 6, 6);
+            }
             glBindVertexArray(0);
         }
 
@@ -1262,16 +1341,24 @@ void previz_renderer::save_camera_preset(const std::string& name)
     CASPAR_LOG(info) << L"[previz] Saved camera preset: " << u8(name);
 }
 
-void previz_renderer::recall_camera_preset(const std::string& name)
+bool previz_renderer::recall_camera_preset(const std::string& name)
 {
-    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
-    auto it = impl_->scene_.camera_presets.find(name);
-    if (it != impl_->scene_.camera_presets.end()) {
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto                        it = impl_->scene_.camera_presets.find(name);
+        if (it == impl_->scene_.camera_presets.end()) {
+            CASPAR_LOG(warning) << L"[previz] Camera preset not found: " << u8(name);
+            return false;
+        }
         impl_->scene_.camera = it->second;
         CASPAR_LOG(info) << L"[previz] Recalled camera preset: " << u8(name);
-    } else {
-        CASPAR_LOG(warning) << L"[previz] Camera preset not found: " << u8(name);
     }
+    // `set_camera` recomputes and this did not, so a recalled preset moved the PRODUCTION
+    // camera and left every auto-projected screen's frustum aimed where the old one was --
+    // a stale projection that only a camera move by another route would clear. Outside the
+    // lock, as every other caller does: `update_projections()` takes it itself.
+    update_projections();
+    return true;
 }
 
 std::vector<std::string> previz_renderer::list_camera_presets() const

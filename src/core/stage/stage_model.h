@@ -119,7 +119,7 @@ struct previz_flags
     bool auto_projection   = false;
     bool show_grid         = true;
     bool show_wireframe    = false;
-    bool show_gizmo        = true; // written by PREVIZ GIZMO and read by nothing -- see stage.md
+    bool show_gizmo        = true; // PREVIZ GIZMO; draws the world-origin axis triad since 2026-09-18
     bool camera_locked     = false;
     bool has_view_override = false;
 };

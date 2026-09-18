@@ -6566,7 +6566,19 @@ std::wstring previz_gizmo_command(command_context& ctx)
     auto* ogl_mix = get_ogl_mixer(ctx);
     if (!ogl_mix)
         return L"501 PREVIZ FAILED\r\n";
-    bool on = ctx.parameters.empty() || ctx.parameters.at(0) != L"0";
+    // NO ARGUMENT MEANS ON, and everything else must NAME itself. This was
+    // `at(0) != L"0"`, so `PREVIZ 1 GIZMO OFF` turned the gizmo ON and so did a typo -- the
+    // house defect, in the same shape as `PREVIZ CAMERA OVERRIDE` and `TRACKING GENLOCK`.
+    bool on = true;
+    if (!ctx.parameters.empty()) {
+        const auto& arg = ctx.parameters.at(0);
+        if (arg == L"1" || boost::iequals(arg, L"ON") || boost::iequals(arg, L"TRUE"))
+            on = true;
+        else if (arg == L"0" || boost::iequals(arg, L"OFF") || boost::iequals(arg, L"FALSE"))
+            on = false;
+        else
+            return L"400 PREVIZ ERROR GIZMO takes 1, 0, ON, OFF, TRUE or FALSE, not " + arg + L"\r\n";
+    }
     ogl_mix->set_gizmo(on);
     return L"202 PREVIZ OK\r\n";
 }
@@ -6593,7 +6605,12 @@ std::wstring previz_preset_command(command_context& ctx)
     } else if (sub == L"RECALL") {
         if (ctx.parameters.size() < 2)
             return L"400 PREVIZ ERROR missing preset name\r\n";
-        ogl_mix->recall_camera_preset(u8(ctx.parameters.at(1)));
+        // A preset that does not exist is a 404, not an OK. It logged a warning and
+        // answered 202, so a client recalling a name it had never saved was told the camera
+        // had moved.
+        if (!ogl_mix->recall_camera_preset(u8(ctx.parameters.at(1))))
+            return L"404 PREVIZ ERROR no camera preset named " + ctx.parameters.at(1) +
+                   L" (PREVIZ <ch> PRESET LIST)\r\n";
         return L"202 PREVIZ OK\r\n";
     } else if (sub == L"LIST") {
         auto names = ogl_mix->list_camera_presets();

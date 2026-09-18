@@ -45,7 +45,7 @@ the verb, as it does for `MIXER`. The layer index parses and **no previz command
 | `PREVIZ SHOW` | `<mesh_name> [1\|0]` | `previz_show_command` |
 | `PREVIZ GRID` | `[1\|0]` | `previz_grid_command` |
 | `PREVIZ WIREFRAME` | `[1\|0]` | `previz_wireframe_command` |
-| `PREVIZ GIZMO` | `[1\|0]` | `previz_gizmo_command` |
+| `PREVIZ GIZMO` | `[1\|0\|ON\|OFF\|TRUE\|FALSE]`, no argument means ON; anything else is `400` | `previz_gizmo_command` |
 | `PREVIZ PRESET` | `SAVE <name>` \| `RECALL <name>` \| `LIST` | `previz_preset_command` |
 | `PREVIZ SCREEN` | a family of twelve — see below | `previz_screen_command` |
 | `PREVIZ AUTOPROJECTION` | `[1\|0] [SOURCE <ch>-<layer>]` — defaults to **on** when no parameter is given | `previz_autoprojection_command` |
@@ -488,6 +488,16 @@ literally — fails five arms while the tree goes on reporting (0, 0, −2).
 **Still uncovered**: a curved screen's geometry, roll and pitch, and the production camera
 (previz renders from the viewport one).
 
+**`GIZMO` and `PRESET`, the last two commands driven by nothing, are driven since 2026-09-18** —
+`cli.py previz-gizmo`, 7/7 on both mixers. All thirteen `PREVIZ` commands have coverage now.
+Driving them found three defects, all fixed in the same commit: the gizmo drew nothing (item 4 of
+§5 above), `GIZMO OFF` turned it **on**, and `PRESET RECALL` of a name that was never saved
+answered `202` while a successful recall moved the production camera **without recomputing
+projections**. The battery gates the gizmo by its three axis colours separately, pairs every
+refusal with the documented value in the same run, and drives the preset round trip through an
+intermediate camera pose that differs in every component — so "the recall did nothing" and "the
+recall worked" cannot read the same.
+
 
 **Cost is measured, and since 2026-09-05 so is the picture — for `MAP`.** `preview-cost`'s three
 previz arms drive `PREVIZ SCENE`, `MAP`, `SHOW`, `GRID` and `WIREFRAME` against a generated scene
@@ -800,9 +810,15 @@ screens were published they became wrong in writing.
 
    Gated by `api-stage`'s "a scene reload leaves no phantom screens", **shown failing first**:
    three screens survived the reload before the fix, zero after, on both mixers.
-4. **`show_gizmo` is written and never read**, and `res_w`/`res_h` are stored, persisted and never
-   read. `PREVIZ GIZMO` and `SCREEN … RESOLUTION` both answer `202` and change nothing that
-   renders.
+4. ~~**`show_gizmo` is written and never read**~~ — **FIXED 2026-09-18.** `PREVIZ GIZMO` drew
+   nothing for its whole life: the flag was written by the command, published in the tree and
+   persisted in the layout file, and no renderer path read it, so every state check passed on a
+   command with no effect. It now draws the **world-origin axis triad** — +X red, +Y green, +Z
+   blue, 1.2 m ribbons rather than lines, because `glLineWidth` above 1.0 is not required of a
+   core profile and a one-pixel gizmo is neither visible at four metres nor measurable.
+   `cli.py previz-gizmo` gates it on the picture, by the three axis colours separately.
+   **`res_w`/`res_h` are still stored, persisted and read by nothing** — `SCREEN … RESOLUTION`
+   answers `202` and changes nothing that renders.
 5. ~~**`PREVIZ MAP` and `PREVIZ SCREEN … CHANNEL` are not the same operation.**~~ **FIXED
    2026-09-06.** `map_mesh` wrote `mesh_to_channel[name]` and `mesh.is_screen` and never touched
    `screens[name].channel`, while `update_projections` iterates `screens` and skips any whose

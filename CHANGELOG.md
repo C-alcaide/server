@@ -1,6 +1,35 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: `PREVIZ GIZMO` draws something, `GIZMO OFF` turns it off, and `PRESET RECALL` can fail
+
+The last two previz commands driven by nothing, and driving them found three defects.
+
+**The gizmo drew nothing.** `show_gizmo` was written by `PREVIZ GIZMO`, published in the control
+API and persisted in the layout file, and read by no renderer path — `stage_model.h` carried a
+comment saying so and `previz.md` §5 listed it, so every state check passed on a command with no
+effect. It now draws the **world-origin axis triad**: +X red, +Y green, +Z blue, 1.2 m ribbons
+rather than lines, because `glLineWidth` above 1.0 is not required of a core profile and a
+one-pixel gizmo is neither visible at four metres nor measurable.
+
+**`PREVIZ GIZMO OFF` turned the gizmo ON.** The test was `on = parameters.empty() || at(0) != "0"`,
+so only the exact string `0` meant off and `OFF`, `false` and every typo selected ON — the same
+shape as `PREVIZ CAMERA OVERRIDE` and `TRACKING GENLOCK`. It takes `1/0/ON/OFF/TRUE/FALSE` now
+and answers `400` to anything else; no argument still means ON.
+
+**`PREVIZ PRESET RECALL <name-never-saved>` answered `202`** and did nothing, and a recall that
+DID find its preset moved the production camera **without recomputing projections** — `set_camera`
+recomputes and this did not, so every auto-projected screen kept a frustum aimed at where the
+camera used to be until something else moved it. It answers `404` for an unknown name now and
+recomputes on success.
+
+Verified: `previz-gizmo` (new) 7/7 on both mixers — the gizmo found by its three axis colours
+SEPARATELY (about 3.7k, 10.8k and 8.0k pixels), gone on `GIZMO 0`, `BANANA` refused with the state
+left where it was, a preset round trip through an intermediate pose that differs in every
+component, `LIST` naming exactly what was saved, a 404 with the camera asserted not to have moved,
+and an unknown subcommand refused. `previz-place`, `previz-picture` and `api-stage` re-run green
+with the gizmo now drawing by default.
+
 ### Measured, not changed: where a previz screen actually renders (A16)
 
 No behaviour change. The previz renderer agrees with its own documented convention to **0.7 px**

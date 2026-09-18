@@ -104,7 +104,8 @@ class previz_renderer
 
     /// Camera presets.
     void save_camera_preset(const std::string& name);
-    void recall_camera_preset(const std::string& name);
+    /// False when there is no preset by that name -- the command answers 404 rather than 202.
+    bool recall_camera_preset(const std::string& name);
     std::vector<std::string> list_camera_presets() const;
 
     /// Procedural screen creation.
