@@ -1,6 +1,108 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: a GPU-direct producer scrubs while paused, lands on the frame asked for, and reports the frame on screen
+
+`hap`, `cuda_prores` and `cuda_notchlc` all changed in three ways on 2026-09-16, and each one
+changes what an operator sees.
+
+**A `position` write on a PAUSED layer does something now.** The transport parameter stored a
+seek request without notifying the condition variables `CALL SEEK` notifies, so the decode
+thread was never woken: on a PLAYING clip the pipeline is woken by its own frames and the seek
+went through; on a paused one -- which is what scrubbing is -- nothing happened and the reply was
+202. Measured against a marked clip: paused, targets 42/137/7, all three producers sat on frame 49
+while `CALL SEEK` on the same layer landed exactly. `2637a9460`.
+
+**`cuda_prores` and `cuda_notchlc` landed ONE FRAME PAST the target** when paused via
+`speed = 0`, and exact via `PAUSE`. The seek resets the speed accumulator to 0 and then deducted
+the seek-FORCED advance from it, leaving -1.0; the early-out tested `== 0`, so a negative advance
+walked through it and popped one more frame. 42 -> 43, 137 -> 138, 7 -> 8, deterministic, both
+mixers. `c027a93dd`.
+
+**`position`, `frame_number()` and `file/time` all report the PLAYHEAD now.** They reported the
+decode clock -- how far the IO thread had read -- so a layer showing frame 42 answered 43 and a
+client could write a value and never read it back. And it was behaviour, not reporting:
+`layer.cpp` computes an AUTO transition's start from `nb_frames() - frame_number() - delta`
+and `eof` from `frame_number() >= nb_frames()`, so **AUTO transitions on these producers fired
+EARLY by the queue depth** and a layer reported itself finished while frames were still queued.
+`av_producer` always reported the playhead, so the two producer families disagreed about when a
+transition should start. `c027a93dd`, `2229346f3`.
+
+Verified: `producer-params` 63/63 on both mixers -- every GPU-direct producer now has picture-
+gated arms (landed frame, read-back, `file/time`), each guarded by an assertion on
+`foreground/producer` because the previous check had been reading ffmpeg's declaration under
+their names. `seek` 7/7 fixtures, `loop-boundary` 16/16, `gpu-direct-parity` identical.
+
+### An `isf` node can use `IMPORTED` images, on both mixers
+
+The last of the three ISF header features a node refused at PUT. `PASSES` and `PERSISTENT` had
+already landed; `IMPORTED` was turned away because the Vulkan node path had no route for an
+external image into its descriptor sets. It does now: the module decodes the file and the mixer
+binds it into descriptor set 1 after the pass targets, continuing the same binding run, so a
+shader declaring `IMPORTED` renders identically on both backends. The binding limit counts
+targets and imports TOGETHER, because they share one pool of eight -- six targets plus three
+imports used to pass two separate checks and would have overflowed the set.
+
+Two defects found while landing it, both by a fixture whose colour is asymmetric per channel: a
+single-pass shader took a branch that passed no slots (OpenGL exact, Vulkan black), and the
+import then arrived with red and blue exchanged (the module decodes RGBA, the Vulkan mixer labels
+its texture bytes BGRA). A grey import would have passed both. `221872d09`; `grade-graph` 60/60
+both mixers, with a new arm gated at 1 LSB against the file's own values.
+
+### BEHAVIOUR: eight more commands stop accepting a typo, and an unknown `CALL` verb gets a reply
+
+The accept-a-typo defect -- an `if/else if` over the valid values, no `else`, the initialiser
+indistinguishable from a mistake, reply 202 -- was swept across the five modules that register
+their own AMCP commands. Eight instances, all now `4xx`:
+
+    ADD ... REPLAY <path> <quality>     BANANA recorded at SQ
+    ADD ... SCREEN TONE_MAP=<op>        a misspelled operator left tone mapping at its default
+    PLAY ... [DMX] ... PROTOCOL=<p>     ARTNET was the leftover branch
+    ADD ... VULKAN_OUTPUT [MODE|DELAY]  DELAY with its value missing was as silent as BANANA
+    TRACKING ... GENLOCK <n> <flag>     a flag that was neither ON nor OFF ENABLED genlock
+    CALL <layer> <verb>                 replay answered "OK"; hap/cuda_prores/cuda_notchlc
+                                        warned and answered 202
+
+`none` and `ARTNET` are written out as values rather than left as initialisers, so "the
+operator turned it off" and "the operator mistyped" are different replies.
+
+**And `CALL <layer> <unknown>` on an ffmpeg layer produced NO REPLY AT ALL.** The producer
+correctly throws; the AMCP queue sent a deferred command's reply from a separate `std::async`,
+outside the try/catch that maps exceptions to codes, so `res.get()` rethrew into nothing and
+the client waited for ever. Every command returning a `std::future<std::wstring>` was exposed.
+Both paths now map through one table. `bf0773b71`, `f8d256354`, `d9eb31be1`.
+
+Verified: `refusals` (new) 18/18 on both mixers -- each refusal paired with a positive control,
+and the `CALL` arms distinguish refused / accepted / no-reply, because the harness client raises
+on a timeout too and a lost reply would otherwise have counted as a refusal.
+
+### `TRACKING BIND VRPN` refuses on a build without VRPN, instead of answering OK over a no-op
+
+`BUILD_TRACKING_VRPN` defaults OFF, and the compiled-out receiver printed to `std::cerr`,
+cleared a flag, and returned -- `start()` is void, so `BIND` answered `202 TRACKING OK` and no
+sample ever arrived. It throws now, as `freed_receiver` does for a port it cannot take, and
+the message names the build flag. `734717827`. And that flag had never worked either: it did
+not configure, then did not compile, four ways -- fixed in `2d569f86d`. `tracking-previz` 27/27
+both mixers, driving all eighteen `TRACKING` commands and every protocol this build contains.
+
+### The Vulkan mixer's fp16 resolve draws with a pipeline that matches its attachment
+
+Under `<render-format>fp16`, `apply_passthrough` resolved the float working space into a UNORM
+attachment while the bound pipeline was built for the channel's fp16 format --
+`VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08910`, twenty times a run. The picture was
+right on this NVIDIA driver, which takes the export conversion from the render-target
+descriptor; a driver that compiles it into the pipeline would have written garbage. The kernel
+now takes the pipeline from the attachment the draw actually writes. `787120c74`;
+`vk-validation --render-format fp16` 20 findings before, 0 after, and that battery can fail
+again for the first time since 2026-08-26 -- it needed the server's own `CASPARVP_VK_VALIDATION=1`.
+
+### Build: `-DENABLE_OFX=OFF` and `-DBUILD_TRACKING_VRPN=ON` produce a binary for the first time
+
+Neither ever had. `ENABLE_OFX` gated only the openfx fetch while the module's host sources were
+listed unconditionally; the module is a real stub now, and the shell and `INFO OFX` both know
+when OFX is absent (`INFO OFX` refuses with a reason). `ENABLE_VULKAN=OFF` and
+`BUILD_CUDA_MODULES=OFF` remain unbuildable and are recorded as such in `CLAUDE.md`.
+
 ### A file with two same-height video streams is playable again
 
 Ported from upstream (`a2a8e228b`, `e25c5936e`, Jacob Lifshay). The producer deduced

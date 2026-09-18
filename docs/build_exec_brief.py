@@ -237,16 +237,19 @@ FEATURES = [
         ],
         earns="It is what any moving-camera virtual production needs — and the input without "
               "which the inner frustum is worth nothing.",
-        gap="No test drives any of the eighteen commands, and none has been run against real "
-            "tracking hardware here. The composition order was undocumented until this week; it "
-            "is now written down, read from the source, and verified by nothing.",
+        gap="All eighteen commands and every wire protocol in this build are driven, from "
+            "synthetic packets built to each receiver's own layout -- and the composition order "
+            "is measured through a non-commuting pair. What is not: any real tracking hardware, "
+            "the 2D and TARGET modes, and lens distortion. Six commands are checked only for "
+            "storing their value, because nothing they set is visible on the previz camera.",
         market="Elsewhere, Mo-Sys, stYpe, Vicon, OptiTrack and Ncam supply the tracking and "
                "this is the consumer of it. The comparable integration in disguise and Unreal "
                "is mature and supported, which is the gap to be honest about.",
-        next='A trial against real tracking hardware, then a test for the 18 commands',
+        next='A trial against real tracking hardware; then the 2D and TARGET modes',
         covers=['camera-tracking'],
-        status=UNTESTED,
-        evidence="18 commands registered · no automated test · no hardware trial recorded",
+        status=PARTIAL,
+        evidence="tracking-previz 27/27 both mixers · 18 of 18 commands driven, 12 to the camera "
+                 "· FreeD, FreeD+, OSC, PSN, OpenTrackIO · no hardware trial recorded",
     ),
     dict(
         n=7, title="3D pre-visualisation of the stage",
@@ -261,15 +264,19 @@ FEATURES = [
         ],
         earns="Its value is in quoting and de-risking a job. A design error found in previz "
               "costs an afternoon; the same error found at load-in costs a day of crew.",
-        gap="Thirteen commands, and no coverage of any kind — the largest untested surface "
-            "here. It also renders through one graphics API on both renderers, and the "
-            "consequence of that for colour has not been measured.",
+        gap="Twelve of the thirteen commands are driven and the screens and cameras are "
+            "addressable through the control API, gated on both renderers. What no test does is "
+            "look at WHERE a screen is: the picture check proves the right channel lands on the "
+            "right mesh, and the state check reads every property back, but a screen that "
+            "stores its position perfectly and renders in the wrong place passes both. GIZMO "
+            "and PRESET are driven by nothing.",
         market="Elsewhere, disguise's Designer previz is the benchmark and a large part of why "
                "that platform is standard. This is a smaller capability in the same shape.",
-        next='Any coverage at all — 13 commands are driven by nothing',
+        next='A spatial check — where a screen is, not only that it renders',
         covers=['previz'],
-        status=UNTESTED,
-        evidence="13 commands registered · no automated test references PREVIZ at all",
+        status=PARTIAL,
+        evidence="api-stage 22/22, previz-interact, previz-picture, tracking-previz, both "
+                 "mixers · 12 of 13 commands driven · nothing checks placement",
     ),
     dict(
         n=8, title="Playback that never touches the CPU",
@@ -350,11 +357,12 @@ FEATURES = [
                "replay controller below it — purpose-built, operationally mature, and a separate "
                "box. The difference here is that it is a consumer and a producer on a channel "
                "that is already doing something else.",
-        next='Test LIVE playback of an open recording — the distinguishing behaviour',
+        next='Interrupted-recording recovery, 400 EXPORT BUSY, and LIVE freshness',
         covers=['replay'],
-        status=UNTESTED,
-        evidence="segmented store, LIVE mode and the asynchronous EXPORT with its 400 EXPORT BUSY "
-                 "refusal all read from the source · no automated test records to a replay store",
+        status=PARTIAL,
+        evidence="replay 11/11 both mixers · records, plays a growing file, scrubs from the "
+                 "control API, and the record path is measured off the channel thread · "
+                 "recovery and EXPORT BUSY still unmeasured",
     ),
     dict(
         n=11, title="GPU-native intermediate codecs",
@@ -544,12 +552,11 @@ FEATURES = [
                "ASIO is Steinberg's low-latency interface, and LTC is SMPTE 12M — all of them "
                "things a building already speaks. Many media servers offer a stereo pair and "
                "nothing else.",
-        next='Rebuild with the ASIO SDK, then cover the enumeration and one device open',
+        next='Drop-frame, 24/30/60 fps and jam-sync on signal loss for LTC',
         covers=['portaudio', 'ltc-timecode'],
-        status=UNTESTED,
-        evidence="PortAudio consumer and producer with channel mapping and shared ASIO capture, "
-                 "and the LTC clock with three dependents, all read from the source · "
-                 "PA_USE_ASIO=OFF in this build · no automated test",
+        status=PARTIAL,
+        evidence="portaudio 4/4 and ltc 4/4 both mixers · ASIO builds (GPLv3 SDK) · LTC decoded "
+                 "end to end over a virtual cable · drop-frame and other rates unmeasured",
     ),
     dict(
         n=18, title="Fitting into the room",
@@ -567,9 +574,8 @@ FEATURES = [
         ],
         earns="It matters on any job where this is one tool among several. The alternative is a "
               "capture card and a conversion between every pair of applications.",
-        gap="This is mostly a coverage gap rather than a capability one: texture sharing has no "
-            "test in either direction and the plug-in hosts are unmeasured, while GStreamer is "
-            "measured.",
+        gap="Texture sharing OUT and both plug-in hosts are measured; texture sharing IN and "
+            "remote tile-wall input are driven by no test.",
         market="Elsewhere, Spout is the Windows standard and what Resolume and TouchDesigner "
                "use; OpenFX is the Open Effects Association's plug-in standard, hosted by "
                "Resolve and Nuke; ISF is Vidvox's shader format. Speaking the standards that "
