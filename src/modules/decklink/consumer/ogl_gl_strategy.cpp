@@ -671,7 +671,12 @@ struct ogl_gl_strategy::impl
         }
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, ssbo_);
 
-        bool dvp_ready = false;
+        // `maybe_unused` rather than moved inside the guard: its only reader is also guarded,
+        // so without CUDA-DVP this is initialised and never referenced -- C4189, and this tree
+        // builds with /WX, so `-DENABLE_VULKAN=OFF` (which is what takes DVP out) did not
+        // compile at all. The declaration stays out here so the two guarded blocks read as one
+        // optional path rather than as a variable that appears and disappears.
+        [[maybe_unused]] bool dvp_ready = false;
 #ifdef DECKLINK_CUDA_DVP_ENABLED
         if (use_dvp_)
             dvp_ready = dvp_prepare(ssbo_, out, out_sz);

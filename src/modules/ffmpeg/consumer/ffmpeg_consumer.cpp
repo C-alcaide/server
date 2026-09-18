@@ -96,7 +96,10 @@ extern "C" {
 #include <libavutil/hwcontext_cuda.h>
 #endif
 
-#if LIBAVUTIL_VERSION_MAJOR >= 60
+// ENABLE_VULKAN as well as the version, as `av_producer.cpp` already had it: this header
+// includes <vulkan/vulkan.h>, and the SDK's include path is added to this module only when
+// the option is on -- so without it the file did not compile at all.
+#if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
 
 #include <libavutil/hwcontext_vulkan.h>
 
@@ -1266,7 +1269,7 @@ struct Stream
     /// driver with nothing in the log to say why.
     static bool fill_vk_plane_dest(const AVFrame* frame, accelerator::vulkan::av_plane_dest& dest)
     {
-#if LIBAVUTIL_VERSION_MAJOR >= 60
+#if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
         auto* vk = reinterpret_cast<AVVkFrame*>(frame->data[0]);
         if (!vk || !vk->img[0] || !vk->sem[0])
             return false;
@@ -1283,7 +1286,7 @@ struct Stream
     /// Writes back what the exporter did to the AVVkFrame, so FFmpeg's own submits stay legal.
     static bool store_vk_plane_result(AVFrame* frame, const accelerator::vulkan::av_plane_dest& dest)
     {
-#if LIBAVUTIL_VERSION_MAJOR >= 60
+#if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
         auto* vk = reinterpret_cast<AVVkFrame*>(frame->data[0]);
         if (!vk)
             return false;

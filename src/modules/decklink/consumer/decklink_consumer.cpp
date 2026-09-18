@@ -285,7 +285,10 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
 
     bool is_hdr     = config.hdr;
     bool use_bt2020 = config.color_space == core::color_space::bt2020;
-    bool needs_v210 = (config.pixel_format == configuration::pixel_format_t::yuv);
+    // `maybe_unused` on both of these: every reader is inside a `DECKLINK_CUDA_VK_ENABLED`
+    // or DVP guard, so a build without CUDA initialises them and never refers to them --
+    // C4189, which is an error under /WX and is why `-DENABLE_VULKAN=OFF` did not compile.
+    [[maybe_unused]] bool needs_v210 = (config.pixel_format == configuration::pixel_format_t::yuv);
     (void)is_hdr;
     (void)use_bt2020;
     auto strategy   = config.gpu_readback_mode;
@@ -304,7 +307,7 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
     // The GPU strategies hand their output buffers straight to the driver, which
     // keeps up to buffer_depth() frames scheduled, so they need to know how deep
     // that queue is to size their pools.
-    const int buffer_depth = config.buffer_depth();
+    [[maybe_unused]] const int buffer_depth = config.buffer_depth();
 
     if (strategy == configuration::gpu_readback_mode_t::cuda) {
 #ifdef DECKLINK_CUDA_VK_ENABLED

@@ -584,13 +584,22 @@ cmake --build d:\Github\CasparVP\build --target casparcg
   measure. `-DBUILD_TRACKING_VRPN=ON` did not configure (fixed, `2d569f86d`); `-DENABLE_OFX=OFF`
   did not compile, because the option gated only the openfx FETCH while the module's host
   sources were listed unconditionally (fixed, `bf0773b71` — it is a real stub module now).
-  **Two are recorded rather than fixed, because each is an engineering task, and the option
-  is a false claim until someone does it:** `-DENABLE_VULKAN=OFF` fails in `modules/ffmpeg`
-  (hwdevice, consumer and producer all include the Vulkan headers unconditionally) and trips
-  an unused-variable `/WX` in decklink; `-DBUILD_CUDA_MODULES=OFF` cannot produce a CUDA-free
-  build, because `remotewall` and `decklink` declare `LANGUAGES CXX CUDA` regardless. **An
-  option nobody exercises is not a supported option, it is a claim** — and one of these was
-  being quoted in an error message telling operators to rebuild with it.
+  **All twelve build now (2026-09-18).** `-DENABLE_VULKAN=OFF -DBUILD_CUDA_MODULES=OFF
+  -DENABLE_OFX=OFF` produces a binary that starts and passes `api-tree` **23/23** on the
+  OpenGL mixer. **And the reason the last two were recorded rather than fixed was itself
+  wrong**, which is the lesson worth keeping: the entry here said `-DBUILD_CUDA_MODULES=OFF`
+  *"cannot produce a CUDA-free build, because `remotewall` and `decklink` declare `LANGUAGES
+  CXX CUDA` regardless"* — `modules/CMakeLists.txt` adds `remotewall` **inside**
+  `if (BUILD_CUDA_MODULES)`, and `decklink` declares CUDA only when `ENABLE_VULKAN` is on and
+  the toolkit is found. Neither claim survived being compiled. **A recorded blocker is a claim
+  like any other and goes stale like any other** — this is the same rule the GPU-direct
+  producers taught, reached from the other direction, and the whole fix was **six guards**:
+  three `#if LIBAVUTIL_VERSION_MAJOR >= 60` in `modules/ffmpeg` that also needed
+  `defined(ENABLE_VULKAN)` (the Vulkan SDK's include path is added to that module only when
+  the option is on, so `AVVkFrame` and `hwcontext_vulkan.h` were unreachable), one
+  `#ifndef ENABLE_VULKAN` around `dxgi_adapter_for_vk_device` (no Vulkan means no adapter to
+  match, so the default one is the only answer), and three `[[maybe_unused]]` in decklink
+  where a variable's only readers sit inside CUDA guards — C4189, which `/WX` makes an error.
 
   *A null result from the same sweep, kept so it is not re-run:* `NVAPI_SDK_PATH` reads EMPTY
   in `build/CMakeCache.txt` while `CASPAR_NVAPI_ENABLED` is compiled into thirteen objects in

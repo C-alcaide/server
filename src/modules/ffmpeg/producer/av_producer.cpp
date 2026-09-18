@@ -1039,16 +1039,22 @@ int resolve_decode_adapter(const core::frame_factory* factory)
         return -1; // OpenGL has no affinity, so its mixer is always the default adapter
 
     // The lookup lives in the accelerator: matching a VkPhysicalDevice to a DXGI
-    // adapter needs the Vulkan headers, which this module does not carry.
+    // adapter needs the Vulkan headers, which this module does not carry -- and in a build
+    // without Vulkan it does not exist at all, so there is no adapter to match and the
+    // default one is the only answer.
+#ifndef ENABLE_VULKAN
+    return -1;
+#else
     const int index = accelerator::vulkan::dxgi_adapter_for_vk_device(factory->gpu_device_handle());
     if (index < 0) {
         CASPAR_LOG(warning) << L"[av_producer] no DXGI adapter matches the mixer's GPU; hardware decode will use "
                                L"the default adapter and GPU-direct may decline";
     }
     return index;
+#endif // ENABLE_VULKAN
 #else
     return -1;
-#endif
+#endif // _WIN32
 }
 
 #ifdef _WIN32

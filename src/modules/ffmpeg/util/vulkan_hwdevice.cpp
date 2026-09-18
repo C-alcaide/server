@@ -30,7 +30,11 @@
 
 extern "C" {
 #include <libavutil/hwcontext.h>
-#if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8: the compute decoders this exists for
+// The ENABLE_VULKAN half matters as much as the version: the header pulls in
+// <vulkan/vulkan.h>, whose include path this module only gets when the option is on. The
+// body below is already `#if defined(ENABLE_VULKAN) && ...` with an `#else`; only the
+// include was missing it.
+#if defined(ENABLE_VULKAN) && LIBAVUTIL_VERSION_MAJOR >= 60
 #include <libavutil/hwcontext_vulkan.h>
 #endif
 }

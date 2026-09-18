@@ -1,6 +1,27 @@
 CasparVP — Unreleased
 ==========================================
 
+### Build: `-DENABLE_VULKAN=OFF` and `-DBUILD_CUDA_MODULES=OFF` produce a binary for the first time
+
+The last two build options that were claims rather than options. `-DENABLE_VULKAN=OFF
+-DBUILD_CUDA_MODULES=OFF -DENABLE_OFX=OFF` now configures, compiles, links, starts and passes the
+control API's `api-tree` battery 23/23 on the OpenGL mixer. No behaviour change to a build with
+the options on -- the full build and `api-diag` on the Vulkan mixer are unchanged.
+
+Six guards, no restructuring: three `#if LIBAVUTIL_VERSION_MAJOR >= 60` in `modules/ffmpeg` that
+also needed `defined(ENABLE_VULKAN)` -- the module gets the Vulkan SDK's include path only when
+the option is on, so `hwcontext_vulkan.h` and `AVVkFrame` were unreachable and the version alone
+was never the whole test; one `#ifndef ENABLE_VULKAN` around `dxgi_adapter_for_vk_device`, since
+a build without Vulkan has no adapter to match and the default one is the only answer; and three
+`[[maybe_unused]]` in the DeckLink consumer, where a variable's only readers sit inside CUDA
+guards -- C4189, which `/WX` turns into an error.
+
+**The recorded reason the CUDA option could not work was wrong**, which is worth more than the
+fix: `CLAUDE.md` said `remotewall` and `decklink` declare `LANGUAGES CXX CUDA` regardless.
+`modules/CMakeLists.txt` adds `remotewall` inside `if (BUILD_CUDA_MODULES)`, and `decklink`
+declares CUDA only under `ENABLE_VULKAN` with the toolkit found. A recorded blocker is a claim
+like any other.
+
 ### BEHAVIOUR: `PREVIZ GIZMO` draws something, `GIZMO OFF` turns it off, and `PRESET RECALL` can fail
 
 The last two previz commands driven by nothing, and driving them found three defects.
