@@ -424,6 +424,7 @@ class image_renderer
     mutable std::mutex                               scopes_mutex_;
     mutable std::future<device::histogram_readback>  scopes_pending_;
     mutable core::monitor::state                     scopes_state_;
+    mutable std::vector<std::uint32_t>               scopes_counts_;
     int                                              scopes_width_  = 0;
     int                                              scopes_height_ = 0;
     mutable std::optional<device::histogram_readback> scopes_readback_;
@@ -605,6 +606,7 @@ class image_renderer
             std::lock_guard<std::mutex> lock(scopes_mutex_);
             scopes_pending_ = {};
             scopes_state_   = {};
+            scopes_counts_.clear();
             scopes_readback_.reset();
         }
     }
@@ -613,28 +615,44 @@ class image_renderer
     /// The newest COMPLETED histogram, folded into `scopes/`. Never waits on the GPU: a frame
     /// whose reduction has not landed yet republishes the previous one, so a tick is late by
     /// at most one publication and never by a readback.
+    std::vector<std::uint32_t> scopes_counts() const
+    {
+        if (!scopes_enabled_.load(std::memory_order_relaxed))
+            return {};
+        std::lock_guard<std::mutex> lock(scopes_mutex_);
+        collect_locked();
+        return scopes_counts_;
+    }
+
     core::monitor::state scopes_state() const
     {
         if (!scopes_enabled_.load(std::memory_order_relaxed))
             return {};
         std::lock_guard<std::mutex> lock(scopes_mutex_);
+        collect_locked();
+        return scopes_state_;
+    }
+
+    /// Take whatever the GPU has finished, once, for both readers. Called under the lock.
+    void collect_locked() const
+    {
         if (scopes_pending_.valid() &&
             scopes_pending_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             try {
                 scopes_readback_ = scopes_pending_.get();
             } catch (const std::exception& e) {
-                CASPAR_LOG(warning) << L"[scopes] histogram submit failed: " << e.what();
+                CASPAR_LOG(warning) << L"[scopes] submit failed: " << e.what();
             }
         }
         if (scopes_readback_ && scopes_readback_->buffer &&
             vulkan_->readback_complete(scopes_readback_->signal_value)) {
             scopes_readback_->buffer->invalidate();
-            std::vector<std::uint32_t> counts(core::scopes::histogram_counts);
-            std::memcpy(counts.data(), scopes_readback_->buffer->data(), counts.size() * sizeof(std::uint32_t));
-            scopes_state_ = core::scopes::fold_histogram(counts, scopes_width_, scopes_height_);
+            scopes_counts_.resize(core::scopes::counts_total);
+            std::memcpy(scopes_counts_.data(), scopes_readback_->buffer->data(),
+                        scopes_counts_.size() * sizeof(std::uint32_t));
+            scopes_state_ = core::scopes::fold_histogram(scopes_counts_, scopes_width_, scopes_height_);
             scopes_readback_.reset();
         }
-        return scopes_state_;
     }
 
     std::future<core::render_output>
@@ -2755,6 +2773,7 @@ core::monitor::state image_mixer::state() const { return impl_->stage_state(); }
 void image_mixer::set_scopes_enabled(bool enabled) { impl_->renderer_.set_scopes_enabled(enabled); }
 bool image_mixer::scopes_enabled() const { return impl_->renderer_.scopes_enabled(); }
 core::monitor::state image_mixer::scopes_state() const { return impl_->renderer_.scopes_state(); }
+std::vector<std::uint32_t> image_mixer::scopes_counts() const { return impl_->renderer_.scopes_counts(); }
 
 bool image_mixer::input(const core::input_event& event) { return impl_->stage_input(event); }
 

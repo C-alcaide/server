@@ -42,6 +42,7 @@ word "API".
 | `throttle_ms`, `repetition_filter`, revert events | implemented | same |
 | `/diag` -- every DIAG-window graph as `[last, max]`, its tags as `[count, severity]`, in the tree, `/v1/value` and `/v1/events`; **opt-in, off by default** | implemented | `state_graph.cpp` (core), `publish_root` in `state_hub.cpp`, `diag_publish_command` in `AMCPCommandsImpl.cpp` |
 | `channel/{n}/mixer/scopes/` -- the channel's output frame reduced on the GPU to a 256-bin RGB histogram, published every tick; **opt-in, off by default** | implemented | `histogram_async` in both `device.cpp`s, `fold_histogram` in `core/mixer/image/scopes.h`, `scopes_command` in `AMCPCommandsImpl.cpp` |
+| `GET /v1/scopes/{n}/{waveform\|parade\|vectorscope}` -- the same frame as a scope IMAGE, pulled | implemented | the `/v1/scopes/` route in `http_server.cpp`, `grid_for` in `scopes.h`, `scope_image` wired in `server.cpp` |
 
 **Three sources are joined to build the tree**, and none of them alone describes the address space:
 
@@ -663,7 +664,34 @@ channel/1/mixer/scopes/pixels          width * height   -- sum(bins) == pixels, 
 channel/1/mixer/scopes/bins            256
 ```
 
-Three things about it, each a choice:
+**The other three scopes are PULLED as images, not published.** A waveform is 256 columns x 256
+levels, a parade three of those and a vectorscope another 65,536 cells -- eighty times the
+histogram's data, and the per-tick tree is this server's known cost centre. So they are served
+on request, as PNGs, at whatever rate the client draws at:
+
+```
+GET /v1/scopes/1/waveform      256 x 256 grayscale: x is the output column, y is Rec.709 luma
+GET /v1/scopes/1/parade        256 x 256 RGB: the three channels' waveforms in the three planes
+GET /v1/scopes/1/vectorscope   256 x 256 grayscale: x is Cb, y is Cr, both Rec.709
+```
+
+**0 is at the BOTTOM** in all three, which is how every scope in the industry is drawn and the
+opposite of an image raster, so a client draws the PNG as a texture and gets the picture the
+right way up with no transform of its own. Cell intensity is `log(1 + count)` normalised against
+the whole grid's peak -- the log because a flat area puts a whole column in one cell and
+everything a grade is judged by sits three orders of magnitude below it; the shared peak because
+a per-column normalisation would make an empty sky as bright as a face.
+
+The parade is ONE image with the three waveforms in the three colour planes rather than three
+images side by side. That is not a shortcut: a parade IS the three channels on one axis, and one
+texture can be drawn as three panels, as an overlay, or one plane at a time, where three separate
+images force the choice on the server.
+
+An unknown kind is `unknown_path` and names the three; a channel with scopes off says so and how
+to turn them on. Both are envelopes -- only a successful pull leaves the envelope behind, exactly
+as a single node preview does.
+
+Three things about the histogram, each a choice:
 
 * **Off by default** (L394). Three 256-element vectors per tick is three heap allocations
   in the per-tick tree, which `state_leaves` above explains is the cost centre, so the
@@ -1196,7 +1224,7 @@ success.
 | `api-roundtrip` | every writable field, with a value **derived from its own descriptor** | **8/8** on both mixers. **172 of 177 fields written with a non-default value; 0 refused, 0 failed to store, 0 disagreed between the API and `MIXER FIELD`, 0 failed to restore** | 2026-09-05 |
 | `api-events` | 3 subscriptions | **10/10** on both mixers. AMCP-originated and API-originated changes both arrive; revert reported; throttle at 400 ms gave gaps of **401, 438, 400 ms** and still ended on the final value; `SUBSCRIPTIONS` back to 0 on close | 2026-09-05 |
 | `api-diag` | the `/diag` publication: toggle, tree, events, a provoked tag, removal, cost | **11/11** on both mixers. OFF by default on both facades; `DIAG PUBLISH BANANA` -> 403 with the state unchanged; 6 graphs captioned, 4 publishing `frame-time` as `[last, max]`; a `/diag` subscriber receives values, a `/channel/1` subscriber receives none of them with a positive control; `CALL SEEK` moves `tag/seek` from `[2, "info"]` to `[3, "info"]`; OFF reverts `/diag/interval` and the root is gone; late frames over 8 s at 2x1080p25, OFF then ON: ogl 0/0 -> 0/0, vulkan 3/1 -> 1/0 -- noise in both directions at this load, so the arm gates on "ON adds none", not on a figure | 2026-09-18 |
-| `scopes` | one 1080p50 channel: toggle, oracle, change, cost, removal | **7/7** on both mixers. OFF by default on both facades; `SCOPES 1 BANANA` -> 403 with the state unchanged; two flat asymmetric layers -> the published 3 x 256 counts equal the IMAGE consumer PNG's histogram bin for bin, 2,073,600 pixels, exactly two populated bins per channel; a colour change moves the counts; late frames over 8 s on a looping clip, OFF then ON: ogl 0 -> 0, vulkan 1 -> 1 | 2026-09-18 |
+| `scopes` | one 1080p50 channel: toggle, oracle, change, cost, removal, and the three pulled scopes | **11/11** on both mixers. OFF by default on both facades; `SCOPES 1 BANANA` -> 403 with the state unchanged; two flat asymmetric layers -> the published 3 x 256 counts equal the IMAGE consumer PNG's histogram bin for bin, 2,073,600 pixels, exactly two populated bins per channel; a colour change moves the counts; the three pulled scopes checked against a SPLIT-SCREEN fixture, which is what makes them able to fail: with one colour on each half the waveform must put two known levels in two known COLUMN RANGES, so a reduction that ignored x cannot pass; measured exact on both mixers (luma levels 115 and 84, parade R 60/30, G 140/90, B 30/180, vectorscope exactly two cells at (82, 162) and (179, 162)); late frames over 8 s on a looping clip, OFF then ON: ogl 0 -> 0, vulkan 1 -> 1 | 2026-09-18 |
 | `api-write` | validation, contention, batches | **9/9** on both mixers. Eight refusals each with their own code and **the value read back unchanged after all eight**; **200 concurrent toggles forming one unbroken chain**; a failed batch applied nothing; a two-channel batch landed on **frame 215 on both** | 2026-09-05 |
 | `api-atframe` | 10 scheduled batches | **7/7** on both mixers. **Spread between channels 0 frames on all ten**; offset from `at_frame` **2 frames on all ten** | 2026-09-05 |
 | `api-readiness` | a 75-frame clip | **7/7** on both mixers. Readiness observable **113-133 ms after PLAY**; transport followed pause/resume/stop; `file/frame` **(22, 75)** against **ffprobe's 75** | 2026-09-05 |

@@ -119,6 +119,13 @@ struct api_context
                                                    std::string&                    out_reason)>
         node_preview;
 
+    /// A SCOPE AS A PNG: `channel` is 1-based, `kind` is one of waveform / parade /
+    /// vectorscope. Empty means the reason says why -- scopes off, no such channel, nothing
+    /// reduced yet. Injected for the same reason `node_preview` is: the encode is FFmpeg and
+    /// this layer neither links it nor should.
+    std::function<std::vector<std::uint8_t>(int channel, const std::string& kind, std::string& out_reason)>
+        scope_image;
+
     /// The stage for a 1-based channel index, or nullptr if there is no such channel.
     std::function<std::shared_ptr<core::stage_base>(int)> stage;
 

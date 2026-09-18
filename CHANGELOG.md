@@ -1,6 +1,36 @@
 CasparVP — Unreleased
 ==========================================
 
+### Scopes: a luma waveform, an RGB parade and a vectorscope, pulled as images
+
+The other three scopes DECISIONS L163 named; the histogram shipped first. All four are now ONE
+compute pass over the finished frame on both mixers, into one buffer whose layout lives in
+`core/mixer/image/scopes.h` -- which also GENERATES the shader both backends run, so the offsets
+exist in exactly one place and the two backends cannot disagree with themselves.
+
+The histogram stays published per tick. The other three are **pulled**:
+
+```
+GET /v1/scopes/{channel}/waveform      256 x 256 grayscale, x = output column, y = Rec.709 luma
+GET /v1/scopes/{channel}/parade        256 x 256 RGB, the three channels' waveforms in the planes
+GET /v1/scopes/{channel}/vectorscope   256 x 256 grayscale, x = Cb, y = Cr
+```
+
+raw `image/png`, as a single node preview is, at whatever rate the client draws at. That is
+L166's "decide the bulk-data rate before building" answered by not choosing a rate: an idle
+client costs nothing and the per-tick tree does not gain a leaf. **0 is at the bottom** in all
+three, the industry orientation, so a client draws the texture without a transform of its own;
+intensity is `log(1 + count)` against the whole grid's peak.
+
+Verified: `scopes` 11/11 on both mixers. The three new arms use a SPLIT-SCREEN fixture, which is
+what makes them able to fail -- a full-frame flat colour cannot tell a waveform that maps x to a
+column from one that ignores x. With one colour per half: luma levels 115 and 84 in their own
+column ranges, parade R 60/30, G 140/90, B 30/180 in their own planes, and the vectorscope
+exactly two cells at (82, 162) and (179, 162), every one predicted from BT.709-6 before the run.
+`vk-validation --scenario scopes` 0 findings. Cost unchanged at 1080p50 on a looping clip --
+OpenGL 0 late frames off and on, Vulkan 1 and 1 -- although the readback grew from 3 KB to 1.3 MB
+per frame.
+
 ### Build: `-DENABLE_VULKAN=OFF` and `-DBUILD_CUDA_MODULES=OFF` produce a binary for the first time
 
 The last two build options that were claims rather than options. `-DENABLE_VULKAN=OFF

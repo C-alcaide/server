@@ -105,7 +105,8 @@ class image_mixer final : public core::image_mixer
     /// Scopes, see `core::image_mixer::set_scopes_enabled`.
     void                 set_scopes_enabled(bool enabled) override;
     bool                 scopes_enabled() const override;
-    core::monitor::state scopes_state() const override;
+    core::monitor::state       scopes_state() const override;
+    std::vector<std::uint32_t> scopes_counts() const override;
     bool                 input(const core::input_event& event) override;
 
     // Previz 3D rendering

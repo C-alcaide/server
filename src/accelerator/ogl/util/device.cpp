@@ -20,6 +20,8 @@
  */
 #include "device.h"
 
+#include <core/mixer/image/scopes.h>
+
 #include <cstring>
 
 #include "buffer.h"
@@ -422,23 +424,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
     {
         if (hist_program_)
             return;
-        static const char* src = R"GLSL(#version 450
-layout(local_size_x = 16, local_size_y = 16) in;
-layout(binding = 0) uniform sampler2D img;
-layout(std430, binding = 0) buffer Hist { uint bins[768]; };
-void main()
-{
-    ivec2 sz = textureSize(img, 0);
-    ivec2 p  = ivec2(gl_GlobalInvocationID.xy);
-    if (p.x >= sz.x || p.y >= sz.y)
-        return;
-    vec4  c = texelFetch(img, p, 0);
-    uvec3 b = uvec3(clamp(c.rgb, 0.0, 1.0) * 255.0 + 0.5);
-    atomicAdd(bins[b.r], 1u);
-    atomicAdd(bins[256u + b.g], 1u);
-    atomicAdd(bins[512u + b.b], 1u);
-}
-)GLSL";
+        // ONE source for both backends and for the offsets it writes into -- see
+        // `core/mixer/image/scopes.h`. No swizzle here: the OpenGL readback hands back the
+        // channel order this shader expects.
+        const auto  source_str = core::scopes::compute_glsl("binding = 0", "binding = 0", "rgb");
+        const char* src        = source_str.c_str();
         GLint  ok     = 0;
         GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
         GL(glShaderSource(shader, 1, &src, nullptr));
@@ -465,7 +455,8 @@ void main()
         }
         hist_program_ = program;
         GL(glCreateBuffers(1, &hist_ssbo_));
-        GL(glNamedBufferStorage(hist_ssbo_, 768 * sizeof(GLuint), nullptr, GL_DYNAMIC_STORAGE_BIT));
+        GL(glNamedBufferStorage(hist_ssbo_, core::scopes::counts_total * sizeof(GLuint), nullptr,
+                                GL_DYNAMIC_STORAGE_BIT));
         CASPAR_LOG(info) << L"[scopes] histogram compute program built";
     }
 
@@ -507,13 +498,14 @@ void main()
                                  1));
             GL(glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT));
             GL(glUseProgram(0));
-            auto buf = create_buffer(static_cast<int>(768 * sizeof(GLuint)), false);
-            GL(glCopyNamedBufferSubData(hist_ssbo_, static_cast<GLuint>(buf->id()), 0, 0, 768 * sizeof(GLuint)));
+            const auto bytes = static_cast<int>(core::scopes::counts_total * sizeof(GLuint));
+            auto       buf   = create_buffer(bytes, false);
+            GL(glCopyNamedBufferSubData(hist_ssbo_, static_cast<GLuint>(buf->id()), 0, 0, bytes));
             auto fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
             GL(glFlush());
             wait_for_fence(fence, yield, "scopes histogram");
-            std::vector<std::uint32_t> out(768);
-            std::memcpy(out.data(), buf->data(), 768 * sizeof(GLuint));
+            std::vector<std::uint32_t> out(core::scopes::counts_total);
+            std::memcpy(out.data(), buf->data(), out.size() * sizeof(GLuint));
             return out;
         });
     }

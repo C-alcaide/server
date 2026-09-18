@@ -37,6 +37,7 @@
 #include <core/diagnostics/call_context.h>
 #include <core/diagnostics/log_graph.h>
 #include <core/diagnostics/state_graph.h>
+#include <core/mixer/image/scopes.h>
 #include <core/diagnostics/osd_graph.h>
 #include <core/frame/pixel_format.h>
 #include <core/mixer/image/image_mixer.h>
@@ -1090,6 +1091,38 @@ struct server::impl
                 // mixer that HAS the graph is the one whose evaluator will see the request.
                 // Channels that do not have it refuse immediately -- no frame is waited for --
                 // so the cost of asking is a few comparisons.
+                // A SCOPE AS A PNG. The reduction is the mixer's; the encode is FFmpeg's and
+                // lives in `modules/image`, which `protocol_http` neither links nor should --
+                // the same injection the node preview uses one block down.
+                api_ctx.scope_image = [channels](int channel, const std::string& kind,
+                                                 std::string& reason) -> std::vector<std::uint8_t> {
+                    if (channel < 1 || channel > static_cast<int>(channels->size())) {
+                        reason = "no channel " + std::to_string(channel);
+                        return {};
+                    }
+                    auto mixer = channels->at(channel - 1).raw_channel->mixer().get_image_mixer();
+                    if (!mixer->scopes_enabled()) {
+                        reason = "scopes are off on channel " + std::to_string(channel) +
+                                 " -- SCOPES " + std::to_string(channel) + " ON, or <scopes>true</scopes>";
+                        return {};
+                    }
+                    const auto counts = mixer->scopes_counts();
+                    if (counts.empty()) {
+                        reason = "no reduction has landed yet on channel " + std::to_string(channel) +
+                                 " -- is it rendering?";
+                        return {};
+                    }
+                    const auto grid = core::scopes::grid_for(kind, counts);
+                    if (grid.empty()) {
+                        reason = "the reduction is the wrong size for a " + kind;
+                        return {};
+                    }
+                    auto png = caspar::image::encode_png_bgra8(grid.bgra.data(), grid.width, grid.height);
+                    if (png.empty())
+                        reason = "the scope could not be encoded";
+                    return png;
+                };
+
                 api_ctx.node_preview =
                     [channels](const std::string&              graph,
                                const std::vector<std::string>& nodes,

@@ -11,6 +11,8 @@
 
 #include "http_server.h"
 
+#include <core/mixer/image/scopes.h>
+
 #include "api_action.h"
 #include "api_auth.h"
 #include "api_catalog.h"
@@ -750,6 +752,66 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         // actually named `connections` would be unreachable here; it is not refused at PUT
         // because that would be a rule invented for one route's convenience, and the collision
         // is stated instead.
+        // A SCOPE, AS AN IMAGE. `GET /v1/scopes/{channel}/{waveform|parade|vectorscope}`.
+        //
+        // Beside the node preview and for the same reasons: the payload is a PNG rather than
+        // JSON, so it leaves the envelope behind and is served straight; and it is PULLED at
+        // the client's own rate rather than published, because these three are eighty times
+        // the histogram's data and the per-tick tree is this server's known cost centre
+        // (DECISIONS L166). The histogram stays in the tree, where it is small and useful to
+        // a client that is not drawing a scope at all.
+        if (starts_with(target.path, "/v1/scopes/") &&
+            (method == bhttp::verb::get || method == bhttp::verb::head)) {
+            const auto rest  = target.path.substr(std::string("/v1/scopes/").size());
+            const auto slash = rest.find('/');
+            const auto ch_s  = rest.substr(0, slash);
+            const auto kind  = slash == std::string::npos ? std::string() : rest.substr(slash + 1);
+            api_executor_.begin_invoke([self, stream, buffer, ch_s, kind, method, keep, ver, authorization,
+                                        path = target.path]() {
+                api_reply                 refusal;
+                std::vector<std::uint8_t> png;
+                std::string               reason;
+                const bool                numeric =
+                    !ch_s.empty() && ch_s.find_first_not_of("0123456789") == std::string::npos;
+                if (!self->auth_.check(authorization))
+                    refusal = api_reply::fail(api_code::unauthorized, "authentication required");
+                else if (!numeric)
+                    refusal = api_reply::fail(api_code::bad_request,
+                                              "a scope path is /v1/scopes/{channel}/{kind}");
+                else if (!core::scopes::is_scope_kind(kind))
+                    refusal = api_reply::fail(api_code::unknown_path,
+                                              "no such scope: '" + kind +
+                                                  "' -- waveform, parade or vectorscope");
+                else if (!self->context_.scope_image)
+                    refusal = api_reply::fail(api_code::internal, "scopes are not wired into this build");
+                else {
+                    png = self->context_.scope_image(std::atoi(ch_s.c_str()), kind, reason);
+                    if (png.empty())
+                        refusal = api_reply::fail(api_code::bad_request,
+                                                  reason.empty() ? "the scope produced nothing" : reason);
+                }
+                // Raw `image/png`, as a single node preview is and for the same reason: this
+                // is what an `<img src=...>` points at, and JSON around the bytes would make
+                // them unusable in the one client they exist for.
+                if (!png.empty()) {
+                    std::string body(reinterpret_cast<const char*>(png.data()), png.size());
+                    asio::post(stream->get_executor(),
+                               [self, stream, buffer, body = std::move(body), method, keep, ver]() mutable {
+                                   self->write(stream, buffer, bhttp::status::ok, std::move(body), method,
+                                               keep, ver, "image/png");
+                               });
+                    return;
+                }
+                const auto status = http_status_for(refusal, path);
+                auto       body   = json::serialize(json::value(envelope(refusal, self->server_name_)));
+                asio::post(stream->get_executor(),
+                           [self, stream, buffer, status, body = std::move(body), method, keep, ver]() mutable {
+                               self->write(stream, buffer, status, std::move(body), method, keep, ver);
+                           });
+            });
+            return;
+        }
+
         if (starts_with(target.path, "/v1/graph/") && ends_with(target.path, "/preview") &&
             target.path != "/v1/graph/connections/preview" &&
             (method == bhttp::verb::get || method == bhttp::verb::head)) {

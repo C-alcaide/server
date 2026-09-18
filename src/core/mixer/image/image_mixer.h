@@ -281,6 +281,14 @@ class image_mixer
     virtual bool           scopes_enabled() const { return false; }
     virtual monitor::state scopes_state() const { return {}; }
 
+    /// The newest completed reduction, whole: histogram, waveform, parade and vectorscope, in
+    /// the layout `core/mixer/image/scopes.h` defines. Empty when scopes are off or nothing has
+    /// landed yet. PULLED rather than published -- the three big ones are eighty times the
+    /// histogram's data and become images on request, so an idle client costs nothing and the
+    /// per-tick tree does not grow (DECISIONS L166's bulk-data question, answered by not
+    /// choosing a rate).
+    virtual std::vector<std::uint32_t> scopes_counts() const { return {}; }
+
     /// Offer this backend a pointer or keyboard event. Returns true if it consumed it.
     ///
     /// The WRITE direction of the `state()` seam directly above, and it exists for the same

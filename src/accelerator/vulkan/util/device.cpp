@@ -31,6 +31,8 @@
 #include <map>
 #include "glsl_compiler.h"
 
+#include <core/mixer/image/scopes.h>
+
 #pragma warning(push)
 #pragma warning(disable : 4838 4309)
 #include "vk_image_fragment_src.h"
@@ -2179,7 +2181,7 @@ struct device::impl : public std::enable_shared_from_this<impl>
         VkBuffer          ssbo  = VK_NULL_HANDLE;
         VmaAllocation     alloc = VK_NULL_HANDLE;
     };
-    static constexpr vk::DeviceSize hist_bytes = 768 * sizeof(std::uint32_t);
+    static constexpr vk::DeviceSize hist_bytes = core::scopes::counts_total * sizeof(std::uint32_t);
     vk::ShaderModule                hist_module_{};
     vk::DescriptorSetLayout         hist_set_layout_{};
     vk::PipelineLayout              hist_pipeline_layout_{};
@@ -2194,27 +2196,12 @@ struct device::impl : public std::enable_shared_from_this<impl>
     {
         if (hist_ready_)
             return;
-        static const char* src = R"GLSL(#version 450
-layout(local_size_x = 16, local_size_y = 16) in;
-layout(set = 0, binding = 0) uniform sampler2D img;
-layout(std430, set = 0, binding = 1) buffer Hist { uint bins[768]; };
-void main()
-{
-    ivec2 sz = textureSize(img, 0);
-    ivec2 p  = ivec2(gl_GlobalInvocationID.xy);
-    if (p.x >= sz.x || p.y >= sz.y)
-        return;
-    vec4  c = texelFetch(img, p, 0);
-    // The mixer's images carry BGRA bytes under an RGBA format label, so the sampled .r is
-    // blue. Measured, not assumed: with .rgb the histogram matched the consumer's PNG only
-    // under a red/blue exchange (harness `scopes`, 2026-09-18); OpenGL needs no swizzle.
-    uvec3 b = uvec3(clamp(c.bgr, 0.0, 1.0) * 255.0 + 0.5);
-    atomicAdd(bins[b.r], 1u);
-    atomicAdd(bins[256u + b.g], 1u);
-    atomicAdd(bins[512u + b.b], 1u);
-}
-)GLSL";
-        auto spirv = compile_glsl_compute_to_spirv(src, "scopes_histogram");
+        // ONE source for both backends -- see `core/mixer/image/scopes.h`. The `.bgr` swizzle
+        // is this backend's alone: the mixer's images carry BGRA bytes under an RGBA format
+        // label, so the sampled `.r` is blue. Measured, not assumed -- with `.rgb` the
+        // histogram matched the consumer's PNG only under a red/blue exchange.
+        const auto source_str = core::scopes::compute_glsl("set = 0, binding = 0", "set = 0, binding = 1", "bgr");
+        auto spirv = compile_glsl_compute_to_spirv(source_str, "scopes");
         if (spirv.empty())
             CASPAR_THROW_EXCEPTION(caspar_exception()
                                    << msg_info("scopes: the histogram compute shader did not compile"));
