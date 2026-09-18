@@ -235,6 +235,57 @@ screen_projection compute_frustum(const previz_camera& cam, const screen_meta& m
     return result;
 }
 
+double ring_radius(const screen_meta& meta)
+{
+    // Outside the screen's own footprint, so the ring is grabbable on a wall seen face-on, and
+    // never smaller than a value a pointer can find on a small screen.
+    return std::max(0.6, static_cast<double>(std::max(meta.width_m, meta.height_m)) * 0.6);
+}
+
+std::optional<ring_hit> compute_ring_hit(const previz_camera& view,
+                                         double               aspect,
+                                         double               sx,
+                                         double               sy,
+                                         const screen_meta&   meta,
+                                         double               band)
+{
+    // The same ray `compute_pick` builds, and the comment there explains the y flip.
+    const auto   cam_rot = mat4::rotate_y(view.yaw) * mat4::rotate_x(view.pitch) * mat4::rotate_z(view.roll);
+    const double rgt[3]  = {cam_rot.m[0], cam_rot.m[1], cam_rot.m[2]};
+    const double up[3]   = {cam_rot.m[4], cam_rot.m[5], cam_rot.m[6]};
+    const double fwd[3]  = {-cam_rot.m[8], -cam_rot.m[9], -cam_rot.m[10]};
+    const double half_v  = std::tan(view.fov * 0.5 * M_PI / 180.0);
+    const double xc      = (2.0 * sx - 1.0) * aspect * half_v;
+    const double yc      = (1.0 - 2.0 * sy) * half_v;
+    double       dir[3];
+    for (int i = 0; i < 3; ++i)
+        dir[i] = fwd[i] + rgt[i] * xc + up[i] * yc;
+
+    // The ring lies in the horizontal plane through the screen's base -- its origin is
+    // centre-BOTTOM, so that plane is the floor the screen stands on.
+    if (std::abs(dir[1]) < 1e-9)
+        return std::nullopt;
+    const double t = (static_cast<double>(meta.pos_y) - view.y) / dir[1];
+    if (t <= 0.0)
+        return std::nullopt;
+
+    const double hx = view.x + dir[0] * t - meta.pos_x;
+    const double hz = view.z + dir[2] * t - meta.pos_z;
+    const double r  = std::sqrt(hx * hx + hz * hz);
+    const double rr = ring_radius(meta);
+    if (std::abs(r - rr) > band)
+        return std::nullopt;
+
+    // The SAME sense as `rot_yaw`, which rotates about +Y by `mat4::rotate_y`: that maps local
+    // +Z (a screen's facing direction) towards +X as the angle grows, so the angle of a world
+    // point is atan2(x, z). Writing it as atan2(z, x) would be off by 90 degrees and mirrored,
+    // and a rotation handle that turns the wrong way is worse than none.
+    ring_hit out;
+    out.angle_deg = std::atan2(hx, hz) * 180.0 / M_PI;
+    out.radius    = rr;
+    return out;
+}
+
 std::optional<pick> compute_pick(const previz_camera&                     view,
                                  double                                    aspect,
                                  double                                    sx,

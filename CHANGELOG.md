@@ -1,6 +1,27 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: a previz screen can be turned by hand -- the selected screen carries a yaw ring
+
+The window manipulated POSITION alone; `INTERACTIVE_PREVIZ_SCOPE.md` named a rotation handle as
+the next step and this is it. The selected screen carries a ring in the horizontal plane through
+its base, with a spoke at its current facing so the handle reads as an angle. Grab it anywhere on
+the annulus and drag: the yaw follows the pointer's angle about the screen's own origin.
+
+`core::compute_ring_hit` is the pure half, beside `compute_pick` and gated at boot with it -- the
+stage math self-test is 90 checks now rather than 83. It is an ANNULUS rather than a disc, so a
+click on the floor near a screen is still a click on the floor; the band widens once grabbed,
+because snapping back when the pointer strays off a 20 cm ring is what every 3D tool is careful
+not to do; and the ring is tested BEFORE the screen pick, since it lies in the plane the screen
+stands on and a screen seen from above covers part of it.
+
+Verified: `previz-gizmo` 14/14 on both mixers. The drag's expectation is a NUMBER decided before
+the run -- grab the ring at 90 degrees, drop at 150, and the yaw must move +60: measured 60.03.
+The pixels are computed from `previz-place`'s projection model rather than by hunting for the
+handle's own colour, so the click lands where an operator's would. A drag that starts INSIDE the
+ring must not rotate, which is what makes the annulus an annulus. `previz-interact`,
+`previz-place`, `api-stage` and `previz-picture` re-run green.
+
 ### BEHAVIOUR: previz draws the production camera, and shows which screen is selected
 
 Two more things the stage knew and never drew -- found by the question that caught `PREVIZ GIZMO`

@@ -346,6 +346,9 @@ struct previz_renderer::impl
     GLuint                      depth_rbo_ = 0;
     int                         fbo_w_     = 0;
     int                         fbo_h_     = 0;
+    GLuint                      ring_vao_ = 0;
+    GLuint                      ring_vbo_ = 0;
+    int                         ring_vert_count_ = 0;
     GLuint                      outline_vao_ = 0;
     GLuint                      outline_vbo_ = 0;
     int                         outline_vert_count_ = 0;
@@ -373,6 +376,11 @@ struct previz_renderer::impl
                 glDeleteFramebuffers(1, &fbo_);
             if (depth_rbo_)
                 glDeleteRenderbuffers(1, &depth_rbo_);
+            if (ring_vao_) {
+                glDeleteVertexArrays(1, &ring_vao_);
+                glDeleteBuffers(1, &ring_vbo_);
+                ring_vao_ = 0;
+            }
             if (outline_vao_) {
                 glDeleteVertexArrays(1, &outline_vao_);
                 glDeleteBuffers(1, &outline_vbo_);
@@ -443,6 +451,55 @@ struct previz_renderer::impl
     ///
     /// The normal is the LIGHT DIRECTION, so `NdotL` is 1 and the colour arrives at full
     /// intensity: a diagnostic aid should not be dimmed by where the sun is.
+    /// The yaw RING on the selected screen: a circle in the horizontal plane through its base,
+    /// with a spoke at the screen's current facing so the handle says which way it is pointing.
+    ///
+    /// Its radius comes from `core::ring_radius`, the same function the hit-test uses -- two
+    /// copies of that number would be a handle you can see and cannot grab, which is the
+    /// silent-failure shape this repository keeps finding in other guises.
+    void build_ring(const screen_meta& meta)
+    {
+        const double       r        = core::ring_radius(meta);
+        constexpr int      segments = 72;
+        std::vector<previz_vertex> verts;
+        auto put = [&](double x, double z) {
+            verts.push_back({static_cast<float>(meta.pos_x + x), meta.pos_y,
+                             static_cast<float>(meta.pos_z + z), 0, 1, 0, 0, 0});
+        };
+        for (int i = 0; i < segments; ++i) {
+            const double a0 = 2.0 * M_PI * i / segments;
+            const double a1 = 2.0 * M_PI * (i + 1) / segments;
+            put(r * std::sin(a0), r * std::cos(a0));
+            put(r * std::sin(a1), r * std::cos(a1));
+        }
+        // The spoke: from the centre out along the screen's own facing, which is local +Z
+        // turned by its yaw -- so the ring reads as an angle rather than as a decoration.
+        const double fa = meta.rot_yaw * M_PI / 180.0;
+        put(0.0, 0.0);
+        put(r * std::sin(fa), r * std::cos(fa));
+
+        ring_vert_count_ = static_cast<int>(verts.size());
+        if (!ring_vao_) {
+            glGenVertexArrays(1, &ring_vao_);
+            glGenBuffers(1, &ring_vbo_);
+        }
+        glBindVertexArray(ring_vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, ring_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(previz_vertex)),
+                     verts.data(), GL_DYNAMIC_DRAW);
+        auto stride  = static_cast<GLsizei>(sizeof(previz_vertex));
+        auto pos_loc = shader_->get_attrib_location("a_Position");
+        glEnableVertexAttribArray(pos_loc);
+        glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
+        auto nrm_loc = shader_->get_attrib_location("a_Normal");
+        glEnableVertexAttribArray(nrm_loc);
+        glVertexAttribPointer(nrm_loc, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(3 * sizeof(float)));
+        auto uv_loc = shader_->get_attrib_location("a_TexCoord");
+        glEnableVertexAttribArray(uv_loc);
+        glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(6 * sizeof(float)));
+        glBindVertexArray(0);
+    }
+
     /// A screen's PERIMETER as a closed line loop, in world space.
     ///
     /// Drawing the mesh again in wireframe was the first version and it is what a selection
@@ -913,6 +970,16 @@ struct previz_renderer::impl
                 glDrawArrays(GL_LINES, 0, outline_vert_count_);
                 glBindVertexArray(0);
                 glDepthFunc(GL_LESS);
+
+                // The yaw handle, on the SELECTED screen only -- a ring under every screen the
+                // pointer crosses would be a field of circles.
+                if (m == 1) {
+                    build_ring(sit->second);
+                    shader_->set("u_base_color", 0.95, 0.55, 0.1);
+                    glBindVertexArray(ring_vao_);
+                    glDrawArrays(GL_LINES, 0, ring_vert_count_);
+                    glBindVertexArray(0);
+                }
             }
         }
 
@@ -1139,6 +1206,9 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
         bool          orbiting  = false;
         bool          panning   = false;
         bool          dragging  = false;
+        bool          rotating  = false;
+        double        grab_angle = 0.0; ///< where on the ring the grab started, degrees
+        double        grab_yaw   = 0.0; ///< the screen's yaw at that moment
         std::string   drag_name;
         double        last_x = 0.0, last_y = 0.0;
         // Where on the screen the grab started, in the screen's own axes, so the screen moves
@@ -1183,6 +1253,30 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                     g.last_x  = event.x;
                     g.last_y  = event.y;
                 } else if (event.button == 0) { // left: select, and maybe start a drag
+                    // THE HANDLE IS TESTED FIRST, and it has to be: the ring lies in the plane
+                    // the screen stands on and a screen seen from above covers part of it, so a
+                    // pick-first order would make the handle unreachable exactly where an
+                    // operator looks down at the stage to use it.
+                    if (!impl_->scene_.selected.empty()) {
+                        std::optional<core::ring_hit> rh;
+                        screen_meta                   sel{};
+                        {
+                            std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                            const auto it = impl_->scene_.screens.find(impl_->scene_.selected);
+                            if (it != impl_->scene_.screens.end()) {
+                                sel = it->second;
+                                rh  = core::compute_ring_hit(view, aspect, event.x, event.y, sel,
+                                                             core::ring_radius(sel) * 0.18);
+                            }
+                        }
+                        if (rh) {
+                            g.rotating   = true;
+                            g.drag_name  = sel.name;
+                            g.grab_angle = rh->angle_deg;
+                            g.grab_yaw   = sel.rot_yaw;
+                            return true;
+                        }
+                    }
                     const auto hit = pick_at(event.x, event.y);
                     {
                         std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
@@ -1202,6 +1296,7 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                     g.panning = false;
                 else if (event.button == 0) {
                     g.dragging = false;
+                    g.rotating = false;
                     g.drag_name.clear();
                 }
             }
@@ -1241,6 +1336,35 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                 return true;
             }
 
+            if (g.rotating && !g.drag_name.empty()) {
+                screen_meta sel{};
+                bool        have = false;
+                {
+                    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                    const auto                  it = impl_->scene_.screens.find(g.drag_name);
+                    if (it != impl_->scene_.screens.end()) {
+                        sel  = it->second;
+                        have = true;
+                    }
+                }
+                // The band is wide open while dragging: once the handle is grabbed the pointer
+                // owns the angle, and snapping back because it strayed off a 20 cm annulus is
+                // the behaviour every 3D tool is careful NOT to have.
+                if (have) {
+                    const auto rh = core::compute_ring_hit(view, aspect, event.x, event.y, sel, 1e9);
+                    if (rh) {
+                        double yaw = g.grab_yaw + (rh->angle_deg - g.grab_angle);
+                        while (yaw > 180.0)
+                            yaw -= 360.0;
+                        while (yaw < -180.0)
+                            yaw += 360.0;
+                        set_screen_rotation(g.drag_name, static_cast<float>(yaw), sel.rot_pitch, sel.rot_roll);
+                    }
+                }
+                g.last_x = event.x;
+                g.last_y = event.y;
+                return true;
+            }
             if (g.dragging && !g.drag_name.empty()) {
                 // Move the screen so the point the operator grabbed stays under the pointer.
                 // Re-cast against the screen's CURRENT plane, then offset by the grab point --

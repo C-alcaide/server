@@ -496,6 +496,76 @@ stage_math_report stage_math_self_test()
             check("icvfx/away/quad", p.icvfx_q[i], 0.0, 1e-9);
     }
 
+    // ---- 13. compute_ring_hit: the rotation handle ------------------------------------
+    //
+    // The gate on a gesture that WRITES a rotation, so a sign or an axis wrong here turns a
+    // screen the wrong way under the operator's hand. Three properties, each chosen because a
+    // plausible mistake fails exactly one of them:
+    //
+    //   a. a point ON the ring is accepted and reports the angle it is at, in the SAME sense
+    //      as `rot_yaw` -- `atan2(x, z)`, not `atan2(z, x)`, which is 90 degrees out and
+    //      mirrored;
+    //   b. the centre and the far field are REJECTED, so the handle is an annulus rather than
+    //      a disc -- a disc would swallow every click on the floor near a screen;
+    //   c. a drag from one ring point to another gives the angle DIFFERENCE the renderer adds
+    //      to the yaw, which is the number an operator actually sees.
+    {
+        auto wall     = flat();          // 2 x 2 m at the origin, facing +Z
+        wall.name     = "wall";
+        wall.pos_y    = 0.0f;
+        const double r = ring_radius(wall);
+        ++rep.checks;
+        if (std::abs(r - 1.2) > 1e-6)
+            rep.failures.emplace_back("ring/radius: expected 1.2 for a 2 m screen, got " + std::to_string(r));
+
+        // Straight down from above, so the ray meets the floor plane cleanly and the geometry
+        // is checkable by hand: the eye is over the ring's +X point, looking -Y.
+        const previz_camera top{0.0f, 8.0f, 0.0f, 0.0f, -90.0f, 0.0f, 60.0f, 0.1f, 100.0f};
+        const double        aspect = 16.0 / 9.0;
+
+        // 13a. the ring's +X point. Looking down with no yaw, the camera's right is +X and its
+        // up is -Z, so a point at (+r, 0, 0) sits to the RIGHT of centre and level with it.
+        {
+            const double half_v = std::tan(rad(top.fov) * 0.5);
+            const double sx     = (r / 8.0 / (aspect * half_v) + 1.0) * 0.5;
+            const auto   hit    = compute_ring_hit(top, aspect, sx, 0.5, wall, 0.2);
+            ++rep.checks;
+            if (!hit)
+                rep.failures.emplace_back("ring/+x: the ring's own +X point was not a hit");
+            else
+                check("ring/+x/angle", hit->angle_deg, 90.0, 1e-3); // atan2(x=r, z=0) = 90 deg
+        }
+
+        // 13b. the centre is NOT a hit, and neither is a point well outside.
+        {
+            ++rep.checks;
+            if (compute_ring_hit(top, aspect, 0.5, 0.5, wall, 0.2))
+                rep.failures.emplace_back("ring/centre: the middle of the ring was accepted -- "
+                                          "the handle is an annulus, not a disc");
+            const double half_v = std::tan(rad(top.fov) * 0.5);
+            const double sx_far = (3.0 * r / 8.0 / (aspect * half_v) + 1.0) * 0.5;
+            ++rep.checks;
+            if (compute_ring_hit(top, aspect, sx_far, 0.5, wall, 0.2))
+                rep.failures.emplace_back("ring/outside: a point three radii out was accepted");
+        }
+
+        // 13c. a drag: grab at +X (90 deg) and move to -Z (180 deg) is +90 degrees of yaw.
+        // Measured through the same call the renderer makes, so the two cannot disagree.
+        {
+            const double half_v = std::tan(rad(top.fov) * 0.5);
+            const double sx_x   = (r / 8.0 / (aspect * half_v) + 1.0) * 0.5;
+            // Looking down, the camera's up is -Z, so world -Z is ABOVE centre in the image.
+            const double sy_z   = (1.0 - (r / 8.0) / half_v) * 0.5;
+            const auto   a      = compute_ring_hit(top, aspect, sx_x, 0.5, wall, 0.2);
+            const auto   b      = compute_ring_hit(top, aspect, 0.5, sy_z, wall, 0.2);
+            ++rep.checks;
+            if (!a || !b)
+                rep.failures.emplace_back("ring/drag: one end of the drag missed the ring");
+            else
+                check("ring/drag/delta", b->angle_deg - a->angle_deg, 90.0, 1e-3);
+        }
+    }
+
     return rep;
 }
 

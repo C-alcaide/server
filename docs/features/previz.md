@@ -913,7 +913,18 @@ Two limits and one that closed, each a consequence of a decision rather than an 
 * **Only screens are pickable.** `compute_pick` intersects the `screen_meta` quads. A venue mesh
   loaded from glTF is drawn and cannot be selected or dragged, so a scene whose walls are geometry
   rather than screens is look-only.
-* **Nothing is manipulated except position** *in the window*. No rotation handle and no resize
+* ~~**No rotation handle.**~~ **CLOSED 2026-09-19.** The selected screen carries a **yaw ring**
+  in the horizontal plane through its base, with a spoke at its current facing so the handle
+  reads as an angle rather than a decoration. Grab it anywhere on the annulus and drag: the yaw
+  follows the pointer's angle about the screen's own origin. The hit-test is
+  `core::compute_ring_hit`, pure and gated at boot beside `compute_pick` — an ANNULUS rather than
+  a disc, so a click on the floor near a screen is still a click on the floor, and the band
+  widens to infinity once grabbed, because snapping back when the pointer strays off a 20 cm ring
+  is what every 3D tool is careful not to do. The ring is tested BEFORE the screen pick: it lies
+  in the plane the screen stands on, and a screen seen from above covers part of it, so a
+  pick-first order would make the handle unreachable exactly where an operator looks down to use
+  it.
+* **Nothing is manipulated except position and yaw** *in the window*. No resize
   handle — but the lower-level blocker is gone: `SCREEN … SIZE` and `SCREEN … ARC` resize and
   bend a screen **in place** since 2026-09-18, keeping its position, rotation, channel, eye mode,
   ICVFX, vertical arc and resolution. Until then the only route was to `ADD` it again, which

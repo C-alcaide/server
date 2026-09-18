@@ -177,6 +177,40 @@ struct pick
 /// approximation `casparcg-360-client`'s `frustum_check.py` documents for the same reason, and
 /// it means a pick near the edge of a deeply curved panel can be off by the sagitta. Named
 /// here rather than discovered later.
+/// THE ROTATION RING, as a pure question: where does the pointer meet the horizontal plane a
+/// screen stands on, and is that on the screen's yaw ring?
+///
+/// Separate from `compute_pick` and deliberately so. A pick asks "which screen is under the
+/// pointer" and answers with a surface; this asks "is the pointer on the HANDLE", which is a
+/// different plane (horizontal, through the screen's base) and a different acceptance (an
+/// annulus, not a rectangle). Folding them together would make the handle a property of the
+/// screen's surface, and the handle is deliberately reachable where the screen is not -- that
+/// is what a handle is for.
+///
+/// Returns the angle in DEGREES measured the same way `rot_yaw` is, so a drag is
+/// `yaw0 + (angle_now - angle_grab)` with no conversion in between and no chance of the two
+/// conventions drifting. Empty when the ray runs parallel to the plane, meets it behind the
+/// eye, or lands outside the ring's band.
+struct ring_hit
+{
+    double angle_deg = 0.0; ///< where on the ring, in the same sense as `screen_meta::rot_yaw`
+    double radius    = 0.0; ///< the ring's own radius, in metres
+};
+
+/// `band` is the half-width of the annulus that counts as a hit, in metres. A handle needs a
+/// tolerance an operator can actually hit with a mouse; the caller sizes it from the ring.
+std::optional<ring_hit> compute_ring_hit(const previz_camera& view,
+                                         double               aspect,
+                                         double               sx,
+                                         double               sy,
+                                         const screen_meta&   meta,
+                                         double               band);
+
+/// The ring's radius for a screen: big enough to clear the surface, small enough to stay in
+/// frame. One function so the renderer draws exactly what the hit-test accepts -- two copies of
+/// this number is a handle you can see and cannot grab.
+double ring_radius(const screen_meta& meta);
+
 std::optional<pick> compute_pick(const previz_camera&                      view,
                                  double                                     aspect,
                                  double                                     sx,
