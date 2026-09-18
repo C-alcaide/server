@@ -63,6 +63,10 @@ set(HEADERS
 )
 
 casparcg_add_library(protocol SOURCES ${SOURCES} ${HEADERS})
+# `INFO OFX` reaches into the OFX host; the module's own `CASPAR_OFX_ENABLED` is PRIVATE to it.
+if (TARGET openfx_host)
+	target_compile_definitions(protocol PRIVATE CASPAR_OFX_ENABLED)
+endif()
 target_include_directories(protocol  PRIVATE
     ..
     )

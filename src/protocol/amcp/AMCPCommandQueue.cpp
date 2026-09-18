@@ -39,6 +39,37 @@ AMCPCommandQueue::AMCPCommandQueue(const std::wstring&                          
 
 AMCPCommandQueue::~AMCPCommandQueue() {}
 
+// Map the exception in flight to the reply the client is owed. ONE table, used from both the
+// synchronous path below and the asynchronous one -- because until 2026-09-18 only the first had
+// it, and a command whose FUTURE threw sent nothing at all. `CALL <layer> BANANA` on an ffmpeg
+// layer -- whose `call()` correctly throws `invalid_argument` -- produced no reply line of any
+// kind: the client waited for ever, the log recorded nothing, and the channel went on serving
+// every other command. A lost reply is worse than a wrong one, because a wrong one can be read.
+static void reply_failure(const std::shared_ptr<AMCPCommand>& cmd, bool reply_without_req_id)
+{
+    try {
+        std::rethrow_exception(std::current_exception());
+    } catch (file_not_found&) {
+        CASPAR_LOG(error) << " File not found.";
+        cmd->SendReply(L"404 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+    } catch (expected_user_error&) {
+        cmd->SendReply(L"403 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+    } catch (user_error&) {
+        CASPAR_LOG(error) << " Check syntax.";
+        cmd->SendReply(L"403 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+    } catch (std::out_of_range&) {
+        CASPAR_LOG(error) << L"Missing parameter. Check syntax.";
+        cmd->SendReply(L"402 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+    } catch (boost::bad_lexical_cast&) {
+        CASPAR_LOG(error) << L"Invalid parameter. Check syntax.";
+        cmd->SendReply(L"403 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+    } catch (...) {
+        CASPAR_LOG_CURRENT_EXCEPTION();
+        CASPAR_LOG(error) << "Failed to execute command: " << cmd->name();
+        cmd->SendReply(L"501 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+    }
+}
+
 std::future<bool> exec_cmd(std::shared_ptr<AMCPCommand>                         cmd,
                            const spl::shared_ptr<std::vector<channel_context>>& channels,
                            bool                                                 reply_without_req_id)
@@ -52,7 +83,17 @@ std::future<bool> exec_cmd(std::shared_ptr<AMCPCommand>                         
 
             auto res = cmd->Execute(channels).share();
             return std::async(std::launch::async, [cmd, res, reply_without_req_id, timer, name]() -> bool {
-                cmd->SendReply(res.get(), reply_without_req_id);
+                // `res.get()` RETHROWS whatever the deferred command threw, and this lambda runs
+                // outside the try/catch below -- so without this the exception left the reply
+                // unsent. Same table as the synchronous path, by construction.
+                std::wstring reply;
+                try {
+                    reply = res.get();
+                } catch (...) {
+                    reply_failure(cmd, reply_without_req_id);
+                    return false;
+                }
+                cmd->SendReply(reply, reply_without_req_id);
 
                 CASPAR_LOG(debug) << "Executed command (" << timer.elapsed() << "s): " << name;
                 return true;

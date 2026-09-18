@@ -5267,6 +5267,13 @@ std::wstring info_portaudio_command(command_context& ctx)
 /// available to a client that connected afterwards, and its format is free to change.
 std::wstring info_ofx_command(command_context& ctx)
 {
+#ifndef CASPAR_OFX_ENABLED
+    // The second consumer of the OFX host outside its module (the shell's catalogue is the
+    // first). Found by the 2026-09-18 all-options-OFF build, at LINK: the stub module has no
+    // `global_host`. Refused with a reason rather than compiled out, so the command still
+    // exists and says why it cannot answer.
+    CASPAR_THROW_EXCEPTION(not_supported() << msg_info("OFX is not in this build (ENABLE_OFX=OFF)"));
+#else
     boost::property_tree::wptree info;
 
     const auto& plugins = caspar::ofx::global_host().plugins();
@@ -5296,6 +5303,7 @@ std::wstring info_ofx_command(command_context& ctx)
 
     replyString << L"\r\n";
     return replyString.str();
+#endif
 }
 
 std::wstring info_isf_command(command_context& ctx)

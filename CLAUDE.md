@@ -558,6 +558,26 @@ cmake --build d:\Github\CasparVP\build --target casparcg
   python -c "import pathlib; pathlib.Path('src/core/...').touch()"
   ```
 
+- **Three of the twelve `BUILD_*`/`ENABLE_*` options had never been exercised OFF (or ON), and
+  every one of them was broken.** Measured 2026-09-18 by configuring each combination in a
+  SEPARATE build directory — never the shared `build/`, which the harness and other sessions
+  measure. `-DBUILD_TRACKING_VRPN=ON` did not configure (fixed, `2d569f86d`); `-DENABLE_OFX=OFF`
+  did not compile, because the option gated only the openfx FETCH while the module's host
+  sources were listed unconditionally (fixed, `bf0773b71` — it is a real stub module now).
+  **Two are recorded rather than fixed, because each is an engineering task, and the option
+  is a false claim until someone does it:** `-DENABLE_VULKAN=OFF` fails in `modules/ffmpeg`
+  (hwdevice, consumer and producer all include the Vulkan headers unconditionally) and trips
+  an unused-variable `/WX` in decklink; `-DBUILD_CUDA_MODULES=OFF` cannot produce a CUDA-free
+  build, because `remotewall` and `decklink` declare `LANGUAGES CXX CUDA` regardless. **An
+  option nobody exercises is not a supported option, it is a claim** — and one of these was
+  being quoted in an error message telling operators to rebuild with it.
+
+  *A null result from the same sweep, kept so it is not re-run:* `NVAPI_SDK_PATH` reads EMPTY
+  in `build/CMakeCache.txt` while `CASPAR_NVAPI_ENABLED` is compiled into thirteen objects in
+  that same build. The auto-search in `vulkan_output/CMakeLists.txt` finds `../nvapi-main` and
+  sets a LOCAL variable that shadows the cache entry, so the cache lies about it. The branch is
+  compiled; the cache is not evidence either way.
+
 - A wrong `vcvars` path fails as `C1083: cannot open include file 'cstdint'` on every
   translation unit. Missing *standard library* headers means the environment was never
   initialised — don't go looking at the includes.
@@ -664,9 +684,13 @@ wrong reflex.
 
 ## A command that accepts a typo and answers OK is this tree's most repeated defect
 
-Six instances in six unrelated modules, by six different routes, and only the last was found
-by anyone LOOKING for it — the TRACKING sweep of 2026-09-16 went hunting for this shape
-specifically, which is the first time that has worked:
+**Fifteen instances in eleven modules.** The first six were each found by accident, by a different
+route, and only the sixth by anyone looking. The last eight came from the audit of 2026-09-18,
+which extended the grep below to the FIVE MODULES THAT REGISTER THEIR OWN AMCP COMMANDS —
+`AMCPCommandsImpl.cpp` had been swept and they never had — and found three in one pass plus the
+variant. **The sweep is now a battery**, `cli.py refusals` in the harness: each arm sends a value
+that names nothing and requires a refusal, then sends the documented value and requires success,
+because a module that refused everything would pass the refusal half alone. 11/11 both mixers:
 
 | where | what an unrecognised value gave |
 | :--- | :--- |
@@ -676,6 +700,12 @@ specifically, which is the first time that has worked:
 | `MIXER PROJECTION_LENS` / `PROJECTION_CURVE` | RECTILINEAR / **FLAT -- the curve disabled** |
 | `MIXER FLIP` | no flip, so a typo un-mirrored an output |
 | `TRACKING GENLOCK` | genlock **ENABLED** — the initialiser was the ON case, so a typo switched it on rather than leaving it alone |
+| `ADD … REPLAY <path> <quality>` | recorded at **SQ**, the initialiser |
+| `ADD … SCREEN TONE_MAP=` | tone mapping stayed at its default, and there was no named `none` |
+| `PLAY … [DMX] … PROTOCOL=` | **ARTNET** — the leftover branch, so any typo selected it |
+| `ADD … VULKAN_OUTPUT [MODE\|DELAY\|DELAY_MS]` | the `MIXER SHAPE` variant: `DELAY` with its value missing fell into the same silence as `BANANA` |
+| `CALL … <verb>` on `replay` | **"OK"** — the fall-through return, for any verb it does not implement |
+| `CALL … <verb>` on `hap` / `cuda_prores` / `cuda_notchlc` | a log warning, and **202** on the wire |
 
 **The shape is always the same**: a variable initialised to one of the valid values, an
 `if/else if` chain over the others, and no `else`. The initialiser is then indistinguishable from
@@ -686,6 +716,7 @@ falls into the same silence as a misspelled one, and the two need different mess
 **The sweep is one grep and worth re-running after any new command lands:**
 
     grep -nE '^\s*(else )?if\s*\(\s*boost::iequals\(' src/protocol/amcp/AMCPCommandsImpl.cpp
+    grep -rnE '^\s*(else )?if\s*\(\s*boost::iequals\(' src/modules --include=*.cpp   # 115 chains; read each
 
 Thirteen handlers had a chain with no `400`; four were real and nine were fine (`OCIO`,
 `OCIO_LOOK`, `COLORSPACE`, `CALIBRATION` refuse with `404`/`403`, and the file-path ones fail with
@@ -695,6 +726,33 @@ Thirteen handlers had a chain with no `400`; four were real and nine were fine (
 **Write the "off" value out explicitly.** `RECTILINEAR`, `FLAT`, `NONE`, `0` -- every one of these
 commands had a legitimate way to turn the feature off, and in every case it was the leftover
 branch. Naming it is what separates "the operator cleared it" from "the operator mistyped".
+
+## A command whose reply is sent from another thread can lose it, and a lost reply is worse than a wrong one
+
+`CALL <layer> BANANA` on an ffmpeg layer produced **no reply line of any kind** until 2026-09-18.
+Not a 4xx, not a 501 — nothing. The client waited for ever, the log recorded nothing, and the
+channel went on serving every other command, so the connection did not even look broken.
+
+The producer was RIGHT: `ffmpeg_producer::call` throws `invalid_argument` on a verb it does not
+know, which is what the table above asks every command to do. The defect was in
+`AMCPCommandQueue::exec_cmd`, which sends a **deferred** command's reply from a separate
+`std::async` — `cmd->SendReply(res.get(), …)` — and the try/catch that maps exceptions to
+codes wraps `exec_cmd`'s body, not that lambda. So `res.get()` rethrew into a future nobody
+inspects for exceptions, and `SendReply` never ran. Every command that returns a
+`std::future<std::wstring>` was exposed; `CALL` is the one with a throwing producer under it.
+
+**Found by fixing the accept-a-typo defect one layer down.** Four producers' `call()` answered
+202 for an unknown verb — `replay` by returning "OK", the three GPU-direct ones by warning and
+returning — and the obvious fix was to throw as ffmpeg does. Probing ffmpeg first, as the model
+to copy, is what exposed that its correct throw was being swallowed. **Had the four been fixed
+without that probe, four working refusals would have become four hangs, and the battery would
+have read the timeouts as refusals and passed.** The `refusals` battery therefore distinguishes
+THREE outcomes — refused, accepted, no reply — because the harness client raises on a timeout too.
+
+Both paths now map through one `reply_failure` table. And a design question is written down
+rather than settled: `CALL` on an **empty** layer answers `202 CALL OK` for any verb, because
+`frame_producer::empty()` returns a ready future. Whether calling nothing should fail is not
+this fix's to decide.
 
 ## A check whose expected value IS its failure mode cannot fail
 

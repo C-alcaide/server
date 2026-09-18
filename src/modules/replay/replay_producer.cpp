@@ -29,6 +29,8 @@
  */
 
 #include "replay_producer.h"
+
+#include <common/except.h>
 #include <iostream>
 #include <vector>
 #include <cstring>
@@ -712,7 +714,11 @@ std::future<std::wstring> replay_producer::call(const std::vector<std::wstring>&
         return caspar::make_ready_future(std::wstring(L"Export Started"));
     }
 
-    return caspar::make_ready_future(std::wstring(L"OK"));
+    // The fall-through used to answer "OK" for ANY verb this producer does not implement, so
+    // `CALL <layer> BANANA` on a replay layer was 202 while the same call on an ffmpeg layer is
+    // 403 (`invalid_argument`). Twelfth instance of the accept-a-typo defect, 2026-09-18 audit.
+    CASPAR_THROW_EXCEPTION(invalid_argument() << msg_info(
+        u8(L"CALL: unknown '" + command + L"'. Supported: SEEK, IN, OUT, LOOP, SPEED, EXPORT")));
 }
 
 void replay_producer::configure(const std::vector<std::wstring>& params)

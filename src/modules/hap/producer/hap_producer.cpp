@@ -45,6 +45,7 @@
 #include <common/env.h>
 #include <common/filesystem.h>
 #include <common/log.h>
+#include <common/except.h>
 #include <common/memory.h>
 #include <common/os/thread.h>
 #include <common/timer.h>
@@ -1637,8 +1638,10 @@ struct hap_producer_impl final : public core::frame_producer
                 result = std::to_wstring(target);
 
             } else {
-                CASPAR_LOG(warning) << L"[hap_producer] CALL: unknown '" << cmd
-                                    << L"'. Supported: loop, pingpong, speed, seek";
+                // An unknown CALL verb is REFUSED, as `ffmpeg_producer::call` refuses it (`invalid_argument`
+                // -> 403). Until 2026-09-18 this branch logged a warning and the wire still said 202 --
+                // the same accept-a-typo shape as the ADD/PLAY factories, one layer down. Twelfth instance.
+                CASPAR_THROW_EXCEPTION(invalid_argument() << msg_info(u8(L"[hap_producer] CALL: unknown '" + cmd + L"'. Supported: loop, pingpong, speed, seek")));
             }
         }
         std::promise<std::wstring> p;
