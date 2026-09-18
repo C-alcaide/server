@@ -476,8 +476,11 @@ caught the bogus −90% too, because its control would have shown only one produ
   `--target casparcg_copy_dependencies`; the cause and the standing check are in
   `BUILDING_WORKFLOW.md` pitfall #7. It was not only a probe hazard — `scanner.exe` shells
   out to the `ffprobe` beside it, so the media scanner was probing files with 7.0.2 while
-  the server decoded them with 8.1.2. The whole 7.x DLL set is quarantined in
-  `build/shell/_stale_ffmpeg7/`; a running server was verified to load only the 8.x set. The
+  the server decoded them with 8.1.2. The whole 7.x DLL set was quarantined in
+  `build/shell/_stale_ffmpeg7/` and a running server was verified to load only the 8.x set;
+  **that folder was deleted on 2026-09-18** during a clean-out of `build/shell`, so do not go
+  looking for it — `--target casparcg_copy_dependencies` is the thing that puts the right set
+  in place, and `tools/use_local_ffmpeg.sh status` is what reports which one is there. The
   8.1.2 CLI also lives at `build/ffmpeg-lib-prefix/src/ffmpeg-lib/bin/ffmpeg.exe`.
 
 #### 6.1.2 All three ProRes routes, measured (Phase 3.1) — and why both stay opt-in
