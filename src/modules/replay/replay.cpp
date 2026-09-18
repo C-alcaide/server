@@ -26,6 +26,7 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
 #include <common/env.h>
+#include <common/except.h>
 #include <common/utf.h>
 
 namespace caspar { namespace replay {
@@ -163,6 +164,12 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
         else if (boost::iequals(q, L"OMT_LQ")) quality = VMX_PROFILE_OMT_LQ;
         else if (boost::iequals(q, L"OMT_SQ")) quality = VMX_PROFILE_OMT_SQ;
         else if (boost::iequals(q, L"OMT_HQ")) quality = VMX_PROFILE_OMT_HQ;
+        else
+            // The initialiser above is SQ, so until this `else` a mistyped quality silently
+            // recorded at SQ and answered 202 -- the seventh instance of this tree's most
+            // repeated defect, found by the 2026-09-18 sweep of module-registered commands.
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                "REPLAY quality must be LQ, SQ, HQ, OMT_LQ, OMT_SQ or OMT_HQ, not '" + u8(q) + "'"));
     }
     
     return spl::make_shared<replay_consumer>(path, quality);

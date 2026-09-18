@@ -1,27 +1,39 @@
 cmake_minimum_required (VERSION 3.28)
 project (ofx)
 
+# ── WITHOUT OpenFX THIS MODULE IS A STUB, AND UNTIL 2026-09-18 THE STUB DID NOT COMPILE ────
+#
+# `ENABLE_OFX` gates the openfx FETCH in `Bootstrap_Windows.cmake`; this directory is added
+# unconditionally and `ofx.cpp` already guards everything behind `CASPAR_OFX_ENABLED`. The
+# design was a stub module when the fetch is off -- but the host, bridge and producer sources
+# were listed unconditionally, and every one of them includes `ofxCore.h` or `GL/glew.h`, so
+# `-DENABLE_OFX=OFF` failed with C1083 on the first of them. The option had never produced a
+# binary. An option nobody exercises is not a supported option, it is a claim.
+if (TARGET openfx_host)
+	set(OFX_HOST_SOURCES
+		bridge/ofx_image_bridge.cpp
+		bridge/ofx_image_bridge.h
+		host/ofx_clip_instance.cpp
+		host/ofx_clip_instance.h
+		host/ofx_cuda_render.cpp
+		host/ofx_cuda_render.h
+		host/ofx_effect_instance.cpp
+		host/ofx_effect_instance.h
+		host/ofx_gl_render.cpp
+		host/ofx_gl_render.h
+		host/ofx_host.cpp
+		host/ofx_includes.h
+		host/ofx_param_instance.cpp
+		host/ofx_param_instance.h
+		producer/ofx_producer.cpp
+		producer/ofx_producer.h)
+else()
+	set(OFX_HOST_SOURCES)
+endif()
+
 set(SOURCES
-	bridge/ofx_image_bridge.cpp
-	bridge/ofx_image_bridge.h
-
-	host/ofx_clip_instance.cpp
-	host/ofx_clip_instance.h
-	host/ofx_cuda_render.cpp
-	host/ofx_cuda_render.h
-	host/ofx_effect_instance.cpp
-	host/ofx_effect_instance.h
-	host/ofx_gl_render.cpp
-	host/ofx_gl_render.h
-	host/ofx_host.cpp
+	${OFX_HOST_SOURCES}
 	host/ofx_host.h
-	host/ofx_includes.h
-	host/ofx_param_instance.cpp
-	host/ofx_param_instance.h
-
-	producer/ofx_producer.cpp
-	producer/ofx_producer.h
-
 	ofx.cpp
 	ofx.h
 )

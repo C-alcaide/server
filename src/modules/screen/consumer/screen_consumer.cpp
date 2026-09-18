@@ -2324,6 +2324,15 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
             config.tone_map_op = 3;
         else if (boost::iequals(tm, L"hlg_ootf"))
             config.tone_map_op = 7;
+        else if (boost::iequals(tm, L"none"))
+            // WRITTEN OUT rather than left as the initialiser, so "the operator turned it off"
+            // and "the operator mistyped it" stop being the same reply.
+            config.tone_map_op = 0;
+        else
+            // Eighth instance of the accept-a-typo defect: a misspelled operator left
+            // `tone_map_op` at its default and answered 202. 2026-09-18 module sweep.
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                "TONE_MAP must be reinhard, aces_filmic, aces_rrt, hlg_ootf or none, not '" + u8(tm) + "'"));
     }
     if (contains_param(L"PEAK_LUMINANCE", params)) {
         config.display_peak_luminance = static_cast<float>(get_param(L"PEAK_LUMINANCE", params, 1000));

@@ -663,6 +663,13 @@ spl::shared_ptr<core::frame_producer> create_dmx_producer(const core::frame_prod
     if (boost::iequals(proto_str, L"SACN") || boost::iequals(proto_str, L"E131")
         || boost::iequals(proto_str, L"E1.31")) {
         protocol = dmx_protocol::sacn;
+    } else if (boost::iequals(proto_str, L"ARTNET")) {
+        protocol = dmx_protocol::artnet; // named, not left over -- see below
+    } else {
+        // ARTNET was the leftover branch: any unrecognised protocol name silently selected it
+        // and answered 202. Ninth instance of the accept-a-typo defect, 2026-09-18 sweep.
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+            "PROTOCOL must be ARTNET, SACN, E131 or E1.31, not '" + u8(proto_str) + "'"));
     }
 
     // Default port based on protocol

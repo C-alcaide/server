@@ -75,7 +75,9 @@
 #include <protocol/http/state_hub.h>
 #include <core/video_format.h>
 
+#ifdef CASPAR_OFX_ENABLED
 #include <modules/ofx/host/ofx_host.h>
+#endif
 #include <modules/isf/isf_shader.h>
 #include <modules/image/consumer/image_consumer.h>
 
@@ -1193,6 +1195,7 @@ struct server::impl
                 api_ctx.catalog = []() -> std::vector<http::catalog_entry> {
                     std::vector<http::catalog_entry> out;
 
+#ifdef CASPAR_OFX_ENABLED
                     for (const auto& p : ofx::global_host().plugins()) {
                         http::catalog_entry e;
                         e.kind  = "ofx";
@@ -1211,6 +1214,7 @@ struct server::impl
                         e.properties.emplace_back("contexts", contexts);
                         out.push_back(std::move(e));
                     }
+#endif
 
                     for (const auto& s : isf::discover_shaders()) {
                         http::catalog_entry e;

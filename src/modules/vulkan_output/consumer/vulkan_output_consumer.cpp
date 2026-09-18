@@ -4589,12 +4589,25 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
         config.gpu_index = std::stoi(params.at(2));
 
     // Optional video-mode parameter
-    for (size_t i = 1; i < params.size(); ++i) {
-        if (boost::iequals(params[i], L"MODE") && i + 1 < params.size())
+    // The `MIXER SHAPE` variant of the accept-a-typo defect: the old loop tested
+    // `keyword && a value follows`, so a correctly spelled `DELAY` with its value left off fell
+    // into the same silence as a misspelled one, and both answered 202. The two need different
+    // messages. Positional numerics (`params[1]`, `params[2]`) are not keywords and pass.
+    for (size_t i = 3; i < params.size(); ++i) {
+        const auto& key = params[i];
+        const bool  known = boost::iequals(key, L"MODE") || boost::iequals(key, L"DELAY") ||
+                            boost::iequals(key, L"DELAY_MS");
+        if (!known)
+            CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(
+                "VULKAN_OUTPUT: unknown option '" + u8(key) + "' -- expected MODE, DELAY or DELAY_MS"));
+        if (i + 1 >= params.size())
+            CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(
+                "VULKAN_OUTPUT: " + u8(key) + " needs a value"));
+        if (boost::iequals(key, L"MODE"))
             config.video_mode = params[++i];
-        else if (boost::iequals(params[i], L"DELAY") && i + 1 < params.size())
+        else if (boost::iequals(key, L"DELAY"))
             config.delay_frames = std::stoi(params[++i]);
-        else if (boost::iequals(params[i], L"DELAY_MS") && i + 1 < params.size())
+        else
             config.delay_ms = std::stod(params[++i]);
     }
 

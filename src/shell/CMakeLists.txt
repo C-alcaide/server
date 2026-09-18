@@ -31,6 +31,11 @@ endif ()
 
 
 add_executable(casparcg ${SOURCES} ${HEADERS})
+# The shell bridges the OFX plug-in catalogue into the control API, so it has to know whether
+# the OFX host is in this build at all -- the module's own `CASPAR_OFX_ENABLED` is PRIVATE.
+if (TARGET openfx_host)
+	target_compile_definitions(casparcg PRIVATE CASPAR_OFX_ENABLED)
+endif()
 set_target_properties(casparcg PROPERTIES
         OUTPUT_NAME "${CASPARCG_BINARY_NAME}"
     )
