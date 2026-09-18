@@ -104,6 +104,10 @@ class image_mixer final : public core::image_mixer
     /// The previz stage, published every tick. See `core::image_mixer::state()`.
     /// Offer a pointer or keyboard event to previz. See `core::image_mixer::input`.
     core::monitor::state state() const override;
+    /// Scopes, see `core::image_mixer::set_scopes_enabled`.
+    void                 set_scopes_enabled(bool enabled) override;
+    bool                 scopes_enabled() const override;
+    core::monitor::state scopes_state() const override;
     bool                 input(const core::input_event& event) override;
 
     void set_target_color(core::color_space cs, core::color_transfer ct, bool auto_convert, int auto_tone_map, float peak_luminance, float sdr_reference_white, bool auto_gamut_compress, bool straight_alpha_grading, bool working_space_composite) override;

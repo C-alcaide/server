@@ -21,6 +21,10 @@
 
 #pragma once
 
+#include <cstdint>
+#include <memory>
+#include <vector>
+
 #include <accelerator/accelerator.h>
 #include <common/array.h>
 #include <common/bit_depth.h>
@@ -221,6 +225,20 @@ class device final
     std::future<std::shared_ptr<class texture>>
     copy_compressed_async(const array<const uint8_t>& source, int width, int height, vk::Format format);
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<class texture>& source);
+
+    /// SCOPES. A 3 x 256-bin RGB histogram of `source`, reduced by a compute shader into a
+    /// device buffer and copied to a host buffer; a pixel's bin is round(v * 255) of the
+    /// sampled value, the 8-bit code a consumer receives. The future is ready when the work is
+    /// SUBMITTED; the GPU has finished when `readback_complete(signal_value)` says so -- a
+    /// host-side counter read, so a per-tick caller can poll it without ever waiting. Then
+    /// `buffer->invalidate()` and read 768 uint32 from `buffer->data()`.
+    struct histogram_readback
+    {
+        std::shared_ptr<class buffer> buffer;
+        std::uint64_t                 signal_value = 0;
+    };
+    std::future<histogram_readback> histogram_async(const std::shared_ptr<class texture>& source);
+    bool                            readback_complete(std::uint64_t signal_value) const;
 
     /// `copy_async`, but reading a DOWNSCALED copy: a linear blit into a `dst_width` x
     /// `dst_height` attachment, then the readback of that.

@@ -41,6 +41,7 @@ word "API".
 | `WS /v1/events` -- prefix subscription with a per-connection diff | implemented | `collect_events` in `api_events.cpp`, `ws_session` in `http_server.cpp` |
 | `throttle_ms`, `repetition_filter`, revert events | implemented | same |
 | `/diag` -- every DIAG-window graph as `[last, max]`, its tags as `[count, severity]`, in the tree, `/v1/value` and `/v1/events`; **opt-in, off by default** | implemented | `state_graph.cpp` (core), `publish_root` in `state_hub.cpp`, `diag_publish_command` in `AMCPCommandsImpl.cpp` |
+| `channel/{n}/mixer/scopes/` -- the channel's output frame reduced on the GPU to a 256-bin RGB histogram, published every tick; **opt-in, off by default** | implemented | `histogram_async` in both `device.cpp`s, `fold_histogram` in `core/mixer/image/scopes.h`, `scopes_command` in `AMCPCommandsImpl.cpp` |
 
 **Three sources are joined to build the tree**, and none of them alone describes the address space:
 
@@ -640,6 +641,57 @@ It is the **previous** tick's count, necessarily — it is read before the curre
 finished — and therefore exact whenever the leaf set is stable, which is whenever
 `structure_revision` is.
 
+### `mixer/scopes` — the picture reduced to data, for a client that wants to draw a scope
+
+A scope is a reduction of a frame that is already in VRAM, and reductions are what shaders are
+for (DECISIONS L163/L166). The mixer reduces the frame the consumers receive — after the
+composite, the calibration LUT and the resolve, so it is the picture on the wire — with a
+compute shader, and publishes the counts every tick:
+
+```
+SCOPES 1 ON              # or <scopes>true</scopes> inside the channel's <channel> element
+SCOPES 1                 # -> 201 SCOPES OK / "ON" | "OFF"
+SCOPES 1 OFF
+SCOPES 1 BANANA          # -> 403. Neither ON nor OFF is refused, never read as one of them.
+```
+
+```
+channel/1/mixer/scopes/histogram/r     256 counts, bin = round(v * 255) of the output value
+channel/1/mixer/scopes/histogram/g     256 counts
+channel/1/mixer/scopes/histogram/b     256 counts
+channel/1/mixer/scopes/pixels          width * height   -- sum(bins) == pixels, on every channel
+channel/1/mixer/scopes/bins            256
+```
+
+Three things about it, each a choice:
+
+* **Off by default** (L394). Three 256-element vectors per tick is three heap allocations
+  in the per-tick tree, which `state_leaves` above explains is the cost centre, so the
+  default is the safe one until the measurement says otherwise. Off, it costs one atomic
+  load per tick. The still-frame cache is dropped when scopes come ON, because the reduction
+  is taken where a render FINISHES and a channel showing a still would otherwise publish
+  nothing until its picture changed.
+* **Never waits on the GPU.** The reduction is dispatched on the mixer's own device queue
+  after the draws and before the consumer readback, and the tick publishes the newest
+  reduction that has COMPLETED — a frame whose counts have not landed republishes the
+  previous frame's. A tick is late by at most one publication, never by a readback.
+* **Both backends, one shape.** OpenGL uses a compute program on the finished texture and an
+  SSBO; Vulkan a compute pipeline built at runtime from the same GLSL (`glsl_compiler`) with
+  the image sampled, not read as storage, and handed back in the layout the consumer
+  readback expects. `fold_histogram` in `core/mixer/image/scopes.h` is the only place the
+  published shape is written down, so the two cannot drift.
+
+**The oracle is the consumer's picture, not a model.** `scopes` in the harness plays two
+flat, asymmetric colours, has the IMAGE consumer write the same frame to a PNG, and requires
+the published counts to equal a histogram of that PNG **bin for bin, with no tolerance** —
+possible because the fixture is static, and decisive about channel order because a red/blue
+exchange in either shader names its permutation rather than passing.
+
+**What is not measured.** The reduction of a picture that changes every frame (the PNG and
+the counts would be of different frames — the battery checks that such a picture CHANGES the
+counts, a weaker claim), and the waveform and vectorscope, which L163 named and this does not
+yet compute.
+
 ### `/diag` — the diagnostics graphs, for a client that wants to draw them
 
 The DIAG window shows every `diagnostics::graph` in the server — frame time, decode time,
@@ -1134,7 +1186,7 @@ and Linux and leaves both bootstraps untouched.
 
 ## 4. Verification -- what is measured, and what is not
 
-Seven batteries, run on **both mixers**. Every one exits 0 only if every check passed; an
+Eight batteries, run on **both mixers**. Every one exits 0 only if every check passed; an
 INCONCLUSIVE check exits 2, never 0, so a battery whose fixture did not come up cannot report
 success.
 
@@ -1144,6 +1196,7 @@ success.
 | `api-roundtrip` | every writable field, with a value **derived from its own descriptor** | **8/8** on both mixers. **172 of 177 fields written with a non-default value; 0 refused, 0 failed to store, 0 disagreed between the API and `MIXER FIELD`, 0 failed to restore** | 2026-09-05 |
 | `api-events` | 3 subscriptions | **10/10** on both mixers. AMCP-originated and API-originated changes both arrive; revert reported; throttle at 400 ms gave gaps of **401, 438, 400 ms** and still ended on the final value; `SUBSCRIPTIONS` back to 0 on close | 2026-09-05 |
 | `api-diag` | the `/diag` publication: toggle, tree, events, a provoked tag, removal, cost | **11/11** on both mixers. OFF by default on both facades; `DIAG PUBLISH BANANA` -> 403 with the state unchanged; 6 graphs captioned, 4 publishing `frame-time` as `[last, max]`; a `/diag` subscriber receives values, a `/channel/1` subscriber receives none of them with a positive control; `CALL SEEK` moves `tag/seek` from `[2, "info"]` to `[3, "info"]`; OFF reverts `/diag/interval` and the root is gone; late frames over 8 s at 2x1080p25, OFF then ON: ogl 0/0 -> 0/0, vulkan 3/1 -> 1/0 -- noise in both directions at this load, so the arm gates on "ON adds none", not on a figure | 2026-09-18 |
+| `scopes` | one 1080p50 channel: toggle, oracle, change, cost, removal | **7/7** on both mixers. OFF by default on both facades; `SCOPES 1 BANANA` -> 403 with the state unchanged; two flat asymmetric layers -> the published 3 x 256 counts equal the IMAGE consumer PNG's histogram bin for bin, 2,073,600 pixels, exactly two populated bins per channel; a colour change moves the counts; late frames over 8 s on a looping clip, OFF then ON: ogl 0 -> 0, vulkan 1 -> 1 | 2026-09-18 |
 | `api-write` | validation, contention, batches | **9/9** on both mixers. Eight refusals each with their own code and **the value read back unchanged after all eight**; **200 concurrent toggles forming one unbroken chain**; a failed batch applied nothing; a two-channel batch landed on **frame 215 on both** | 2026-09-05 |
 | `api-atframe` | 10 scheduled batches | **7/7** on both mixers. **Spread between channels 0 frames on all ten**; offset from `at_frame` **2 frames on all ten** | 2026-09-05 |
 | `api-readiness` | a 75-frame clip | **7/7** on both mixers. Readiness observable **113-133 ms after PLAY**; transport followed pause/resume/stop; `file/frame` **(22, 75)** against **ffprobe's 75** | 2026-09-05 |

@@ -713,6 +713,8 @@ struct server::impl
             const std::wstring lifecycle_key = L"lock" + std::to_wstring(channel_id);
             channel->stage()->set_timeline_store(timelines_);
             channel->stage()->set_graph_store(graphs_);
+            // SCOPES, opt-in (DECISIONS L394): the boot value; `SCOPES <ch> ON|OFF` changes it live.
+            channel->mixer().get_image_mixer()->set_scopes_enabled(xml_channel.second.get(L"scopes", false));
 
             // HOW A TIMELINE OBJECT'S CLIP BECOMES A PRODUCER.
             //

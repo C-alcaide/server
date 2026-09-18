@@ -3936,6 +3936,26 @@ std::future<std::wstring> mixer_lut3d_command(command_context& ctx)
 //
 // Quote both arguments. Every display and view name in the bundled ACES config contains
 // spaces, and AMCP tokenizes on whitespace.
+// SCOPES <ch> [ON|OFF] -- the channel's output frame reduced to DATA (a 256-bin RGB histogram
+// today) under channel/N/mixer/scopes/, every tick. Off by default (DECISIONS L394); the
+// `<scopes>` channel element sets the boot value. No argument queries. An argument that is
+// neither ON nor OFF is refused rather than read as one of them.
+std::wstring scopes_command(command_context& ctx)
+{
+    auto image_mixer = ctx.channel.raw_channel->mixer().get_image_mixer();
+    if (ctx.parameters.empty())
+        return std::wstring(L"201 SCOPES OK\r\n") + (image_mixer->scopes_enabled() ? L"ON" : L"OFF") + L"\r\n";
+
+    const auto& arg = ctx.parameters.at(0);
+    if (boost::iequals(arg, L"ON"))
+        image_mixer->set_scopes_enabled(true);
+    else if (boost::iequals(arg, L"OFF"))
+        image_mixer->set_scopes_enabled(false);
+    else
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"SCOPES takes ON or OFF, not " + arg));
+    return L"202 SCOPES OK\r\n";
+}
+
 std::future<std::wstring> ocio_display_command(command_context& ctx)
 {
     auto image_mixer = ctx.channel.raw_channel->mixer().get_image_mixer();
@@ -7030,6 +7050,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
 
     repo->register_channel_command(L"Calibration Commands", L"CALIBRATION", calibration_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"OCIO_DISPLAY", ocio_display_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"SCOPES", scopes_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"OCIO_LOOK", ocio_look_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"AMF", amf_command, 1);
 

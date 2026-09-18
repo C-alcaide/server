@@ -416,6 +416,7 @@ struct video_channel::impl final
                     // therefore default" depending on which frame it lands on. A backend with
                     // nothing to say returns an empty state, which writes no keys at all.
                     state["mixer"]["previz"] = image_mixer_->state();
+                    state["mixer"]["scopes"] = image_mixer_->scopes_state();
                     state["output"]      = output_.state();
 
                     if (tick_published_valid_ && tick_published_.ticks > 0) {

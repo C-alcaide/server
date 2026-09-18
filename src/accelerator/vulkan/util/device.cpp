@@ -1066,6 +1066,8 @@ struct device::impl : public std::enable_shared_from_this<impl>
 
         _device.waitIdle();
 
+        destroy_histogram_pipeline();
+
         for (auto& pool : host_pools_)
             pool.clear();
 
@@ -2163,6 +2165,233 @@ struct device::impl : public std::enable_shared_from_this<impl>
         });
     }
 
+    // ── SCOPES: a compute-shader histogram, read back as 768 counts ──────────────────────
+    //
+    // Built on first use, so a channel with scopes off pays nothing. Four slots rotate: a
+    // descriptor set may not be updated while a submission using it is in flight, the mixer
+    // issues at most one of these per frame and reads each before issuing the next but one,
+    // so a slot four frames old has retired. The image is SAMPLED, not read as storage -- an
+    // attachment is created with eSampled and not eStorage -- and is handed back in
+    // eColorAttachmentOptimal because copy_async() and the GPU-direct consumers expect it there.
+    struct hist_slot
+    {
+        vk::DescriptorSet set{};
+        VkBuffer          ssbo  = VK_NULL_HANDLE;
+        VmaAllocation     alloc = VK_NULL_HANDLE;
+    };
+    static constexpr vk::DeviceSize hist_bytes = 768 * sizeof(std::uint32_t);
+    vk::ShaderModule                hist_module_{};
+    vk::DescriptorSetLayout         hist_set_layout_{};
+    vk::PipelineLayout              hist_pipeline_layout_{};
+    vk::Pipeline                    hist_pipeline_{};
+    vk::DescriptorPool              hist_pool_{};
+    vk::Sampler                     hist_sampler_{};
+    std::array<hist_slot, 4>        hist_slots_{};
+    std::size_t                     hist_next_  = 0;
+    bool                            hist_ready_ = false;
+
+    void ensure_histogram_pipeline()
+    {
+        if (hist_ready_)
+            return;
+        static const char* src = R"GLSL(#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(set = 0, binding = 0) uniform sampler2D img;
+layout(std430, set = 0, binding = 1) buffer Hist { uint bins[768]; };
+void main()
+{
+    ivec2 sz = textureSize(img, 0);
+    ivec2 p  = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= sz.x || p.y >= sz.y)
+        return;
+    vec4  c = texelFetch(img, p, 0);
+    // The mixer's images carry BGRA bytes under an RGBA format label, so the sampled .r is
+    // blue. Measured, not assumed: with .rgb the histogram matched the consumer's PNG only
+    // under a red/blue exchange (harness `scopes`, 2026-09-18); OpenGL needs no swizzle.
+    uvec3 b = uvec3(clamp(c.bgr, 0.0, 1.0) * 255.0 + 0.5);
+    atomicAdd(bins[b.r], 1u);
+    atomicAdd(bins[256u + b.g], 1u);
+    atomicAdd(bins[512u + b.b], 1u);
+}
+)GLSL";
+        auto spirv = compile_glsl_compute_to_spirv(src, "scopes_histogram");
+        if (spirv.empty())
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info("scopes: the histogram compute shader did not compile"));
+        vk::ShaderModuleCreateInfo mi{};
+        mi.setCode(spirv);
+        hist_module_ = _device.createShaderModule(mi);
+
+        std::array<vk::DescriptorSetLayoutBinding, 2> bindings{
+            vk::DescriptorSetLayoutBinding(0, vk::DescriptorType::eCombinedImageSampler, 1, vk::ShaderStageFlagBits::eCompute),
+            vk::DescriptorSetLayoutBinding(1, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute)};
+        vk::DescriptorSetLayoutCreateInfo li{};
+        li.setBindings(bindings);
+        hist_set_layout_ = _device.createDescriptorSetLayout(li);
+
+        vk::PipelineLayoutCreateInfo pli{};
+        pli.setSetLayouts(hist_set_layout_);
+        hist_pipeline_layout_ = _device.createPipelineLayout(pli);
+
+        vk::PipelineShaderStageCreateInfo stage{};
+        stage.stage  = vk::ShaderStageFlagBits::eCompute;
+        stage.module = hist_module_;
+        stage.pName  = "main";
+        vk::ComputePipelineCreateInfo ci{};
+        ci.stage  = stage;
+        ci.layout = hist_pipeline_layout_;
+        auto created = _device.createComputePipeline(nullptr, ci);
+        if (created.result != vk::Result::eSuccess)
+            CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("scopes: createComputePipeline failed"));
+        hist_pipeline_ = created.value;
+
+        const auto n = static_cast<uint32_t>(hist_slots_.size());
+        std::array<vk::DescriptorPoolSize, 2> sizes{vk::DescriptorPoolSize(vk::DescriptorType::eCombinedImageSampler, n),
+                                                    vk::DescriptorPoolSize(vk::DescriptorType::eStorageBuffer, n)};
+        vk::DescriptorPoolCreateInfo pi{};
+        pi.setPoolSizes(sizes);
+        pi.maxSets = n;
+        hist_pool_ = _device.createDescriptorPool(pi);
+
+        vk::SamplerCreateInfo si{};
+        si.magFilter    = vk::Filter::eNearest;
+        si.minFilter    = vk::Filter::eNearest;
+        si.addressModeU = vk::SamplerAddressMode::eClampToEdge;
+        si.addressModeV = vk::SamplerAddressMode::eClampToEdge;
+        si.addressModeW = vk::SamplerAddressMode::eClampToEdge;
+        hist_sampler_   = _device.createSampler(si);
+
+        std::vector<vk::DescriptorSetLayout> layouts(hist_slots_.size(), hist_set_layout_);
+        vk::DescriptorSetAllocateInfo        ai{};
+        ai.descriptorPool = hist_pool_;
+        ai.setSetLayouts(layouts);
+        auto sets = _device.allocateDescriptorSets(ai);
+        for (std::size_t i = 0; i < hist_slots_.size(); ++i) {
+            hist_slots_[i].set = sets[i];
+            VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bi.size  = hist_bytes;
+            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                       VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            VmaAllocationCreateInfo aci{};
+            aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            if (vmaCreateBuffer(_allocator, &bi, &aci, &hist_slots_[i].ssbo, &hist_slots_[i].alloc, nullptr) !=
+                VK_SUCCESS)
+                CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("scopes: vmaCreateBuffer failed"));
+            vk::DescriptorBufferInfo dbi(hist_slots_[i].ssbo, 0, hist_bytes);
+            vk::WriteDescriptorSet   w(sets[i], 1, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &dbi);
+            _device.updateDescriptorSets(1, &w, 0, nullptr);
+        }
+        hist_ready_ = true;
+        CASPAR_LOG(info) << L"[scopes] histogram compute pipeline built";
+    }
+
+    void destroy_histogram_pipeline()
+    {
+        for (auto& sl : hist_slots_) {
+            if (sl.ssbo != VK_NULL_HANDLE)
+                vmaDestroyBuffer(_allocator, sl.ssbo, sl.alloc);
+            sl.ssbo = VK_NULL_HANDLE;
+        }
+        if (hist_pool_)
+            _device.destroyDescriptorPool(hist_pool_);
+        if (hist_sampler_)
+            _device.destroySampler(hist_sampler_);
+        if (hist_pipeline_)
+            _device.destroyPipeline(hist_pipeline_);
+        if (hist_pipeline_layout_)
+            _device.destroyPipelineLayout(hist_pipeline_layout_);
+        if (hist_set_layout_)
+            _device.destroyDescriptorSetLayout(hist_set_layout_);
+        if (hist_module_)
+            _device.destroyShaderModule(hist_module_);
+        hist_pool_ = vk::DescriptorPool{};
+        hist_sampler_ = vk::Sampler{};
+        hist_pipeline_ = vk::Pipeline{};
+        hist_pipeline_layout_ = vk::PipelineLayout{};
+        hist_set_layout_ = vk::DescriptorSetLayout{};
+        hist_module_ = vk::ShaderModule{};
+        hist_ready_ = false;
+    }
+
+    std::future<device::histogram_readback> histogram_async(const std::shared_ptr<texture>& source)
+    {
+        return dispatch_async(
+            [this, source]() -> device::histogram_readback {
+                ensure_histogram_pipeline();
+                auto& slot = hist_slots_[hist_next_++ % hist_slots_.size()];
+                vk::DescriptorImageInfo dii(hist_sampler_, source->view(), vk::ImageLayout::eShaderReadOnlyOptimal);
+                vk::WriteDescriptorSet  w(slot.set, 0, 0, 1, vk::DescriptorType::eCombinedImageSampler, &dii);
+                _device.updateDescriptorSets(1, &w, 0, nullptr);
+                auto buf = create_buffer(static_cast<int>(hist_bytes), false);
+                const auto gx = static_cast<uint32_t>((source->width() + 15) / 16);
+                const auto gy = static_cast<uint32_t>((source->height() + 15) / 16);
+                auto signal_value = submitSingleTimeCommands([&](vk::CommandBuffer cmd) {
+                    transitionImageLayout(source->id(),
+                                          vk::ImageLayout::eColorAttachmentOptimal,
+                                          vk::AccessFlagBits2::eColorAttachmentWrite,
+                                          vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                                          vk::ImageLayout::eShaderReadOnlyOptimal,
+                                          vk::AccessFlagBits2::eShaderSampledRead,
+                                          vk::PipelineStageFlagBits2::eComputeShader,
+                                          cmd);
+                    cmd.fillBuffer(slot.ssbo, 0, hist_bytes, 0);
+                    vk::BufferMemoryBarrier2 zeroed{};
+                    zeroed.srcStageMask        = vk::PipelineStageFlagBits2::eTransfer;
+                    zeroed.srcAccessMask       = vk::AccessFlagBits2::eTransferWrite;
+                    zeroed.dstStageMask        = vk::PipelineStageFlagBits2::eComputeShader;
+                    zeroed.dstAccessMask       = vk::AccessFlagBits2::eShaderStorageRead | vk::AccessFlagBits2::eShaderStorageWrite;
+                    zeroed.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+                    zeroed.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+                    zeroed.buffer              = slot.ssbo;
+                    zeroed.size                = VK_WHOLE_SIZE;
+                    vk::DependencyInfo d0{};
+                    d0.setBufferMemoryBarriers(zeroed);
+                    cmd.pipelineBarrier2(d0);
+
+                    cmd.bindPipeline(vk::PipelineBindPoint::eCompute, hist_pipeline_);
+                    cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, hist_pipeline_layout_, 0, 1, &slot.set, 0, nullptr);
+                    cmd.dispatch(gx, gy, 1);
+
+                    vk::BufferMemoryBarrier2 counted = zeroed;
+                    counted.srcStageMask  = vk::PipelineStageFlagBits2::eComputeShader;
+                    counted.srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite;
+                    counted.dstStageMask  = vk::PipelineStageFlagBits2::eTransfer;
+                    counted.dstAccessMask = vk::AccessFlagBits2::eTransferRead;
+                    vk::DependencyInfo d1{};
+                    d1.setBufferMemoryBarriers(counted);
+                    cmd.pipelineBarrier2(d1);
+                    cmd.copyBuffer(slot.ssbo, buf->id(), vk::BufferCopy(0, 0, hist_bytes));
+
+                    vk::BufferMemoryBarrier2 hostBarrier = zeroed;
+                    hostBarrier.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
+                    hostBarrier.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
+                    hostBarrier.dstStageMask  = vk::PipelineStageFlagBits2::eHost;
+                    hostBarrier.dstAccessMask = vk::AccessFlagBits2::eHostRead;
+                    hostBarrier.buffer        = buf->id();
+                    vk::DependencyInfo d2{};
+                    d2.setBufferMemoryBarriers(hostBarrier);
+                    cmd.pipelineBarrier2(d2);
+
+                    // Back to where copy_async() and the GPU-direct consumers expect to find it.
+                    transitionImageLayout(source->id(),
+                                          vk::ImageLayout::eShaderReadOnlyOptimal,
+                                          vk::AccessFlagBits2::eShaderSampledRead,
+                                          vk::PipelineStageFlagBits2::eComputeShader,
+                                          vk::ImageLayout::eColorAttachmentOptimal,
+                                          vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eColorAttachmentRead,
+                                          vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                                          cmd);
+                });
+                return device::histogram_readback{buf, signal_value};
+            },
+            dispatch_kind::readback);
+    }
+
+    bool readback_complete(std::uint64_t signal_value) const
+    {
+        return _device.getSemaphoreCounterValue(_semaphore) >= signal_value;
+    }
+
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<texture>& source)
     {
         // A block-compressed image cannot be read back this way. create_buffer below
@@ -2711,6 +2940,11 @@ std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<textu
 {
     return impl_->copy_async(source);
 }
+std::future<device::histogram_readback> device::histogram_async(const std::shared_ptr<texture>& source)
+{
+    return impl_->histogram_async(source);
+}
+bool device::readback_complete(std::uint64_t signal_value) const { return impl_->readback_complete(signal_value); }
 
 std::future<array<const uint8_t>>
 device::copy_async_scaled(const std::shared_ptr<texture>& source, int dst_width, int dst_height)

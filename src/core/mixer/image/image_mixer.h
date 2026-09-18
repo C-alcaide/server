@@ -271,6 +271,16 @@ class image_mixer
     /// writes no keys at all.
     virtual monitor::state state() const { return {}; }
 
+    /// SCOPES: the frame that left this mixer, reduced to DATA and published under
+    /// `channel/{n}/mixer/scopes/` -- today a 256-bin histogram per colour channel, see
+    /// `scopes.h` for the shape. OFF by default (DECISIONS L394): three 256-bin vectors per
+    /// tick is three heap allocations in the per-tick tree, the known cost centre, so it is
+    /// a `<scopes>` element or `SCOPES <ch> ON` away rather than always on. Published EVERY
+    /// tick like `state()`; an empty state writes no keys, so "off" costs one atomic load.
+    virtual void           set_scopes_enabled(bool /*enabled*/) {}
+    virtual bool           scopes_enabled() const { return false; }
+    virtual monitor::state scopes_state() const { return {}; }
+
     /// Offer this backend a pointer or keyboard event. Returns true if it consumed it.
     ///
     /// The WRITE direction of the `state()` seam directly above, and it exists for the same

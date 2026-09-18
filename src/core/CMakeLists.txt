@@ -113,6 +113,7 @@ set(HEADERS
 
 		mixer/image/blend_modes.h
 		mixer/image/image_mixer.h
+		mixer/image/scopes.h
 
 		mixer/mixer.h
 

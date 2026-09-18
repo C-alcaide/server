@@ -26,7 +26,9 @@
 
 namespace caspar { namespace accelerator { namespace vulkan {
 
-std::vector<uint32_t> compile_glsl_fragment_to_spirv(const std::string& source, const std::string& name)
+namespace {
+
+std::vector<uint32_t> compile(const std::string& source, const std::string& name, shaderc_shader_kind kind)
 {
     if (source.empty()) {
         CASPAR_LOG(warning) << L"[glsl_compiler] empty source for '" << u16(name) << L"'";
@@ -71,7 +73,7 @@ std::vector<uint32_t> compile_glsl_fragment_to_spirv(const std::string& source, 
     // larger than shaderc's share.
     options.SetOptimizationLevel(shaderc_optimization_level_performance);
 
-    const auto result = compiler.CompileGlslToSpv(source, shaderc_glsl_fragment_shader, name.c_str(), options);
+    const auto result = compiler.CompileGlslToSpv(source, kind, name.c_str(), options);
 
     if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
         // The diagnostic is the whole value of this branch: a generated shader fails for
@@ -88,6 +90,18 @@ std::vector<uint32_t> compile_glsl_fragment_to_spirv(const std::string& source, 
     }
 
     return std::vector<uint32_t>(result.cbegin(), result.cend());
+}
+
+} // namespace
+
+std::vector<uint32_t> compile_glsl_fragment_to_spirv(const std::string& source, const std::string& name)
+{
+    return compile(source, name, shaderc_glsl_fragment_shader);
+}
+
+std::vector<uint32_t> compile_glsl_compute_to_spirv(const std::string& source, const std::string& name)
+{
+    return compile(source, name, shaderc_glsl_compute_shader);
 }
 
 }}} // namespace caspar::accelerator::vulkan

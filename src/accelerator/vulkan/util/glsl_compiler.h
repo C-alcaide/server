@@ -44,4 +44,10 @@ namespace caspar { namespace accelerator { namespace vulkan {
 /// `name` appears in diagnostics only; pass something identifying the variant.
 std::vector<uint32_t> compile_glsl_fragment_to_spirv(const std::string& source, const std::string& name);
 
+/// The same for a COMPUTE shader. Same cost, same contract, same reason it exists at runtime:
+/// the scopes histogram is a dozen lines nobody wants a build rule and an embedded header
+/// for, and a compute pipeline built on first use costs a channel that never enables scopes
+/// nothing at all.
+std::vector<uint32_t> compile_glsl_compute_to_spirv(const std::string& source, const std::string& name);
+
 }}} // namespace caspar::accelerator::vulkan

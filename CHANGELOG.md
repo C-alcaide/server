@@ -1,6 +1,31 @@
 CasparVP — Unreleased
 ==========================================
 
+### Scopes: the channel's output reduced on the GPU to a histogram, published as data -- opt-in, `SCOPES <ch> ON`
+
+The first scope (DECISIONS L163/L166/L394). Both mixers reduce the frame the consumers
+receive -- after the composite, the calibration LUT and the resolve -- to a 256-bin histogram
+per colour channel with a compute shader, and publish the counts every tick under
+`channel/N/mixer/scopes/` (`histogram/r|g|b`, `pixels`, `bins`). OpenGL: a compute program on
+the finished texture and an SSBO; Vulkan: a compute pipeline built at runtime from the same
+GLSL, the image sampled and handed back in the layout the consumer readback expects. One
+`fold_histogram` writes the published shape for both.
+
+**Off by default.** `<scopes>true</scopes>` in a channel's element or `SCOPES <ch> ON` turns it
+on, `SCOPES <ch> OFF` removes the leaves, `SCOPES <ch>` queries, `SCOPES <ch> BANANA` is refused.
+Three 256-element vectors per tick is three heap allocations in the per-tick tree -- the known
+cost centre -- so the default is the safe one. The tick never waits on the GPU: it publishes the
+newest reduction that has completed, so it is late by at most one publication. The still-frame
+cache is dropped when scopes come on, or a channel showing a still would publish nothing.
+
+Verified: `scopes` (new) 7/7 on both mixers -- off by default on both facades, the typo refused,
+and the published counts EQUAL a histogram of the PNG the IMAGE consumer writes of the same frame
+bin for bin (2,073,600 pixels, two flat asymmetric layers, exactly two populated bins per
+channel); a colour change moves the counts; late frames over 8 s on a looping 1080p50 clip, OFF
+then ON: OpenGL 0 -> 0, Vulkan 1 -> 1. `vk-validation --scenario scopes` 0 findings. Not
+measured: the reduction of a picture that changes every frame, and the waveform and vectorscope
+L163 named -- this is the histogram only.
+
 ### The DIAG window's graphs are published into the control API and OSC -- opt-in, `DIAG PUBLISH ON`
 
 A third `graph_sink` beside the window and the log. Every diagnostics graph -- frame time,

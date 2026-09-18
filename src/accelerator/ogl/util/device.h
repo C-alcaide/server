@@ -31,6 +31,9 @@
 
 #ifdef WIN32
 #include <GL/glew.h>
+
+#include <cstdint>
+#include <vector>
 #endif
 
 namespace caspar { namespace accelerator { namespace ogl {
@@ -64,6 +67,12 @@ class device final
     std::future<std::shared_ptr<class texture>>
     copy_async(const array<const uint8_t>& source, int width, int height, int stride, common::bit_depth depth);
     std::future<array<const uint8_t>> copy_async(const std::shared_ptr<class texture>& source);
+
+    /// SCOPES. A 3 x 256-bin RGB histogram of `source`, reduced on the GPU by a compute
+    /// shader and read back as 768 counts (r[0..255], g[0..255], b[0..255]); a pixel's bin is
+    /// round(v * 255) of the sampled value, the 8-bit code a consumer receives. Never blocks
+    /// the caller: the wait for the result is a coroutine on the device thread, as copy_async().
+    std::future<std::vector<std::uint32_t>> histogram_async(const std::shared_ptr<class texture>& source);
 
 #ifdef WIN32
     /// The WGL_NV_DX_interop2 device handle, or null when interop was not set up.

@@ -21,6 +21,13 @@
 #include <algorithm>
 #include "image_mixer.h"
 
+#include <core/mixer/image/scopes.h>
+
+#include <chrono>
+#include <cstring>
+#include <future>
+#include <optional>
+
 #include "image_kernel.h"
 
 #include <core/graph/isf_render.h>
@@ -410,6 +417,17 @@ class image_renderer
     //: a mutex every frame to answer a question that is almost always "no".
     std::atomic<bool>                preview_drop_cache_{false};
 
+    // SCOPES (DECISIONS L394). Written on the render thread, read on the channel tick thread
+    // through `scopes_state()`, so the pending readback and the last result sit under a
+    // mutex; the flag is an atomic the render lambda reads without taking it.
+    std::atomic<bool>                                scopes_enabled_{false};
+    mutable std::mutex                               scopes_mutex_;
+    mutable std::future<device::histogram_readback>  scopes_pending_;
+    mutable core::monitor::state                     scopes_state_;
+    int                                              scopes_width_  = 0;
+    int                                              scopes_height_ = 0;
+    mutable std::optional<device::histogram_readback> scopes_readback_;
+
     //: A preview that has been DRAWN this frame and not yet copied back. Resolved after the
     //: frame's single `commit()`, because a mid-frame commit corrupts the command stream --
     //: see the serve site. Render-thread only, so no lock.
@@ -571,6 +589,52 @@ class image_renderer
         if (needed && !was) {
             prev_fingerprint_ = {};
         }
+    }
+
+    void set_scopes_enabled(bool enabled)
+    {
+        const bool was = scopes_enabled_.exchange(enabled, std::memory_order_acq_rel);
+        if (enabled && !was) {
+            // The still-frame cache serves a static picture without rendering, and the
+            // histogram is taken where the render FINISHES -- so a channel showing a still
+            // would publish nothing until the picture changed. Drop the cache the way
+            // `arm_node_preview` does: by flag, on the render thread, never from here.
+            preview_drop_cache_.store(true, std::memory_order_release);
+        }
+        if (!enabled) {
+            std::lock_guard<std::mutex> lock(scopes_mutex_);
+            scopes_pending_ = {};
+            scopes_state_   = {};
+            scopes_readback_.reset();
+        }
+    }
+    bool scopes_enabled() const { return scopes_enabled_.load(std::memory_order_relaxed); }
+
+    /// The newest COMPLETED histogram, folded into `scopes/`. Never waits on the GPU: a frame
+    /// whose reduction has not landed yet republishes the previous one, so a tick is late by
+    /// at most one publication and never by a readback.
+    core::monitor::state scopes_state() const
+    {
+        if (!scopes_enabled_.load(std::memory_order_relaxed))
+            return {};
+        std::lock_guard<std::mutex> lock(scopes_mutex_);
+        if (scopes_pending_.valid() &&
+            scopes_pending_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            try {
+                scopes_readback_ = scopes_pending_.get();
+            } catch (const std::exception& e) {
+                CASPAR_LOG(warning) << L"[scopes] histogram submit failed: " << e.what();
+            }
+        }
+        if (scopes_readback_ && scopes_readback_->buffer &&
+            vulkan_->readback_complete(scopes_readback_->signal_value)) {
+            scopes_readback_->buffer->invalidate();
+            std::vector<std::uint32_t> counts(core::scopes::histogram_counts);
+            std::memcpy(counts.data(), scopes_readback_->buffer->data(), counts.size() * sizeof(std::uint32_t));
+            scopes_state_ = core::scopes::fold_histogram(counts, scopes_width_, scopes_height_);
+            scopes_readback_.reset();
+        }
+        return scopes_state_;
     }
 
     std::future<core::render_output>
@@ -824,6 +888,15 @@ class image_renderer
                 // The device goes into each wrapper so a consumer can ask for a reduced
                 // readback instead of declaring needs_cpu_frame_data and pulling the whole
                 // frame back every tick.
+                if (scopes_enabled_.load(std::memory_order_relaxed)) {
+                    // Posted onto this device's queue AFTER the pass and BEFORE the consumer
+                    // readback below, on the same thread, so it reads the frame the consumer
+                    // receives and hands the image back in the layout copy_async() expects.
+                    std::lock_guard<std::mutex> lock(scopes_mutex_);
+                    scopes_pending_ = vulkan_->histogram_async(primary_target);
+                    scopes_width_   = primary_target->width();
+                    scopes_height_  = primary_target->height();
+                }
                 auto make_result = [&](std::shared_ptr<texture> tex) -> core::render_result {
                     auto wrapper = std::make_shared<texture_wrapper>(
                         tex, wait_fn, sem_handle, sem_value, vulkan_);
@@ -2679,6 +2752,9 @@ ogl::previz_renderer* image_mixer::get_previz_renderer()
 }
 
 core::monitor::state image_mixer::state() const { return impl_->stage_state(); }
+void image_mixer::set_scopes_enabled(bool enabled) { impl_->renderer_.set_scopes_enabled(enabled); }
+bool image_mixer::scopes_enabled() const { return impl_->renderer_.scopes_enabled(); }
+core::monitor::state image_mixer::scopes_state() const { return impl_->renderer_.scopes_state(); }
 
 bool image_mixer::input(const core::input_event& event) { return impl_->stage_input(event); }
 

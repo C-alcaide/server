@@ -20,6 +20,8 @@
  */
 #include "device.h"
 
+#include <cstring>
+
 #include "buffer.h"
 #include "context.h"
 #include "shader.h"
@@ -180,6 +182,11 @@ struct device::impl : public std::enable_shared_from_this<impl>
         thread_.join();
 
         context_->bind();
+
+        if (hist_program_)
+            glDeleteProgram(hist_program_);
+        if (hist_ssbo_)
+            glDeleteBuffers(1, &hist_ssbo_);
 
         for (auto& pool : host_pools_)
             pool.clear();
@@ -401,6 +408,117 @@ struct device::impl : public std::enable_shared_from_this<impl>
     /// blocking the GL thread. Shared by copy_async() and reduce_and_copy_async()
     /// so the wait prediction below has one implementation and one set of
     /// statistics.
+  public:
+    // ── SCOPES: a compute-shader histogram, read back as 768 counts ──────────────────────
+    //
+    // Built on first use, so a channel with scopes off never compiles it. One SSBO serves
+    // every request because this GL queue executes in order: a later request's clear cannot
+    // overtake an earlier request's copy into its host buffer. The wait is a coroutine on the
+    // device thread, exactly as read_back() waits, so nothing on the frame path blocks.
+    GLuint hist_program_ = 0;
+    GLuint hist_ssbo_    = 0;
+
+    void ensure_histogram_program()
+    {
+        if (hist_program_)
+            return;
+        static const char* src = R"GLSL(#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(binding = 0) uniform sampler2D img;
+layout(std430, binding = 0) buffer Hist { uint bins[768]; };
+void main()
+{
+    ivec2 sz = textureSize(img, 0);
+    ivec2 p  = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= sz.x || p.y >= sz.y)
+        return;
+    vec4  c = texelFetch(img, p, 0);
+    uvec3 b = uvec3(clamp(c.rgb, 0.0, 1.0) * 255.0 + 0.5);
+    atomicAdd(bins[b.r], 1u);
+    atomicAdd(bins[256u + b.g], 1u);
+    atomicAdd(bins[512u + b.b], 1u);
+}
+)GLSL";
+        GLint  ok     = 0;
+        GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
+        GL(glShaderSource(shader, 1, &src, nullptr));
+        GL(glCompileShader(shader));
+        GL(glGetShaderiv(shader, GL_COMPILE_STATUS, &ok));
+        if (ok == GL_FALSE) {
+            char info[2048] = {};
+            glGetShaderInfoLog(shader, sizeof(info), nullptr, info);
+            glDeleteShader(shader);
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info(std::string("scopes: histogram compute shader failed to compile: ") + info));
+        }
+        GLuint program = glCreateProgram();
+        GL(glAttachShader(program, shader));
+        GL(glLinkProgram(program));
+        GL(glDeleteShader(shader));
+        GL(glGetProgramiv(program, GL_LINK_STATUS, &ok));
+        if (ok == GL_FALSE) {
+            char info[2048] = {};
+            glGetProgramInfoLog(program, sizeof(info), nullptr, info);
+            glDeleteProgram(program);
+            CASPAR_THROW_EXCEPTION(caspar_exception()
+                                   << msg_info(std::string("scopes: histogram compute program failed to link: ") + info));
+        }
+        hist_program_ = program;
+        GL(glCreateBuffers(1, &hist_ssbo_));
+        GL(glNamedBufferStorage(hist_ssbo_, 768 * sizeof(GLuint), nullptr, GL_DYNAMIC_STORAGE_BIT));
+        CASPAR_LOG(info) << L"[scopes] histogram compute program built";
+    }
+
+    void wait_for_fence(GLsync fence, yield_context yield, const char* what)
+    {
+        deadline_timer timer(io_context_);
+        const auto     start = std::chrono::steady_clock::now();
+        while (true) {
+            auto wait = glClientWaitSync(fence, 0, 0);
+            if (wait == GL_ALREADY_SIGNALED || wait == GL_CONDITION_SATISFIED)
+                break;
+            if (wait == GL_WAIT_FAILED) {
+                glDeleteSync(fence);
+                CASPAR_THROW_EXCEPTION(caspar_exception()
+                                       << msg_info(std::string("glClientWaitSync failed on a fence: ") + what));
+            }
+            if (std::chrono::steady_clock::now() - start > std::chrono::seconds(10)) {
+                glDeleteSync(fence);
+                CASPAR_THROW_EXCEPTION(caspar_exception()
+                                       << msg_info(std::string("a fence did not signal within the wait budget: ") + what));
+            }
+            timer.expires_from_now(boost::posix_time::microseconds(200));
+            timer.async_wait(yield);
+        }
+        glDeleteSync(fence);
+    }
+
+    std::future<std::vector<std::uint32_t>> histogram_async(const std::shared_ptr<texture>& source)
+    {
+        return spawn_async([=, this](yield_context yield) -> std::vector<std::uint32_t> {
+            ensure_histogram_program();
+            const GLuint zero = 0;
+            GL(glClearNamedBufferData(hist_ssbo_, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero));
+            GL(glUseProgram(hist_program_));
+            GL(glBindTextureUnit(0, static_cast<GLuint>(source->id())));
+            GL(glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, hist_ssbo_));
+            GL(glDispatchCompute(static_cast<GLuint>((source->width() + 15) / 16),
+                                 static_cast<GLuint>((source->height() + 15) / 16),
+                                 1));
+            GL(glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT));
+            GL(glUseProgram(0));
+            auto buf = create_buffer(static_cast<int>(768 * sizeof(GLuint)), false);
+            GL(glCopyNamedBufferSubData(hist_ssbo_, static_cast<GLuint>(buf->id()), 0, 0, 768 * sizeof(GLuint)));
+            auto fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            GL(glFlush());
+            wait_for_fence(fence, yield, "scopes histogram");
+            std::vector<std::uint32_t> out(768);
+            std::memcpy(out.data(), buf->data(), 768 * sizeof(GLuint));
+            return out;
+        });
+    }
+
+  private:
     array<const uint8_t> read_back(const std::shared_ptr<texture>& source, yield_context yield)
     {
         auto buf = create_buffer(source->size(), false);
@@ -625,6 +743,10 @@ std::shared_ptr<void> device::d3d_interop() const { return impl_->interop_handle
 std::future<array<const uint8_t>> device::copy_async(const std::shared_ptr<texture>& source)
 {
     return impl_->copy_async(source);
+}
+std::future<std::vector<std::uint32_t>> device::histogram_async(const std::shared_ptr<texture>& source)
+{
+    return impl_->histogram_async(source);
 }
 std::future<std::tuple<array<const uint8_t>, int, int>>
 device::reduce_and_copy_async(unsigned int source_id, int source_width, int source_height, int levels)

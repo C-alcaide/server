@@ -980,6 +980,7 @@ sub-command reaches the server.
 | Effects | `PLAY <ch>-<l> [ISF] <shader>`, `PLAY <ch>-<l> [OFX] <plugin-id>`, and `INFO ISF` / `INFO OFX` to find out **what is installed** — `CLS` lists media and `TLS` lists templates, and a `.fs` and an `.ofx` bundle are neither, so without these two an operator has to know the name already |
 | Consumers | `ADD <ch> <NAME> …`, `REMOVE <ch> <NAME>` — see the preview senders below |
 | Any mixer field | `MIXER <ch>-<l> FIELD <name> [values] [duration] [tween]` — see below |
+| Scopes | `SCOPES <ch> [ON\|OFF]` — the channel's output as a 256-bin RGB histogram under `channel/N/mixer/scopes/`, every tick; off by default, `<scopes>` in the channel element sets the boot value, no argument queries |
 | System | `INFO`, `RESTART`, `SHUTDOWN`, `DIAG` (the graphs window), `DIAG PUBLISH [ON\|OFF]` (the same graphs into the control API and OSC under `/diag/...`; off by default, `<publish-diagnostics>` sets the boot value; no argument queries) |
 
 ### `MIXER FIELD` — every mixer parameter, without a command per parameter
