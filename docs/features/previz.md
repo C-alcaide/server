@@ -459,6 +459,36 @@ and nothing moves.
 
 ## 4. Verification — what is measured, and what is not
 
+**WHERE a screen is, measured since 2026-09-18** — `cli.py previz-place`, 7/7 on both mixers.
+The gap this section carried from the beginning, and the harness's mutation battery calls A16:
+*a screen that stores its position perfectly and renders in the wrong place*. Nothing could see
+it — `api-stage` reads every property back through the tree and touches no pixel, and
+`previz-picture` proves the right channel reaches the right mesh without knowing where the mesh
+is.
+
+The oracle is a closed-form projection **re-derived from the documented convention** in
+`stage_fields.cpp` and §1.2 above — a flat screen's origin is centre-bottom and it faces +Z,
+rotations are `Ry*Rx*Rz`, `fov` is vertical, an unrotated camera looks along -Z — so every
+expectation is a number before the server starts. Measured, 1080p50, a 4 x 2.25 m screen at
+(0, 0, -2) with the viewport camera at (0, 1.6, 4):
+
+| what | predicted | measured |
+| :--- | :--- | :--- |
+| centroid | (960.0, 614.0) px | (959.5, 613.5) px — **0.7 px** |
+| size | 624 x 351 px | 623 x 349 px |
+| +1.2 m in X | +187.1 px | +187.0 px |
+| yaw 40° | centroid (888.5, 618.8), width 501 px | (888.1, 618.3), 500 px |
+| camera +0.8 m in X | −124.7 px | −124.5 px |
+| 3 m further away | width × 0.667 | × 0.666 |
+
+**Mutation-verified twice.** Ignoring a screen's rotation turns exactly the yaw arm red and
+reports it still at its unrotated width; negating `pos_z` on the render path alone — A16
+literally — fails five arms while the tree goes on reporting (0, 0, −2).
+
+**Still uncovered**: a curved screen's geometry, roll and pitch, and the production camera
+(previz renders from the viewport one).
+
+
 **Cost is measured, and since 2026-09-05 so is the picture — for `MAP`.** `preview-cost`'s three
 previz arms drive `PREVIZ SCENE`, `MAP`, `SHOW`, `GRID` and `WIREFRAME` against a generated scene
 (`core/previz_scene.py` — four named quads around a stage) and report what previz costs the

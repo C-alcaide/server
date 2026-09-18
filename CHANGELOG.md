@@ -1,6 +1,20 @@
 CasparVP — Unreleased
 ==========================================
 
+### Measured, not changed: where a previz screen actually renders (A16)
+
+No behaviour change. The previz renderer agrees with its own documented convention to **0.7 px**
+on both mixers, which nothing had ever checked: a screen's centre-bottom origin facing +Z, the
+`Ry*Rx*Rz` rotation order, a vertical `fov`, a camera looking along -Z. `cli.py previz-place`
+(new) predicts the pixel a screen lands on from those rules alone and compares the picture --
+centroid, size, a translation's delta, a yaw's narrowing and shift, the viewport camera moving
+the picture the other way, and depth's scaling ratio -- then requires the published pose and the
+picture to agree, which is the mutation battery's A16 in one verdict.
+
+Mutation-verified twice: ignoring a screen's rotation turns exactly the yaw arm red, and negating
+`pos_z` on the render path alone fails five arms while the tree still reports (0, 0, -2). Not
+covered: curved screens, roll and pitch, and the production camera.
+
 ### Outbound bindings: a parameter reported OUT over OSC -- `SINK`, `BIND ... OUT`
 
 Bindings had one direction. `SINK <ch> ADD <name> OSC <host> <port>` names an endpoint and
