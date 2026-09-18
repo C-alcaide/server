@@ -277,8 +277,17 @@ const std::vector<screen_field>& screen_table()
         SF(S, "arc_v", arc_v_deg, 0.0, R_ARC_V, refuse, "deg",
            "Vertical arc. 0 leaves a single-curved cylinder; non-zero makes it doubly curved."),
         SV2I(S, "resolution", res_w, res_h, 0, 0, R_RES, refuse, "px",
-             "Pixel resolution of the panel. INERT: stored, persisted to the layout file, and "
-             "read by no renderer path and no projection calculation. 0 means unset."),
+             "Pixel resolution of the panel. Drives `pixel_pitch_h` / `pixel_pitch_v` below and "
+             "nothing else -- no renderer path and no projection calculation reads it, because "
+             "previz draws the surface rather than its pixels. 0 means unset."),
+        SF_RO(S, "pixel_pitch_h", pitch_h_mm, 0.0, "mm",
+              "DERIVED, horizontal: size / resolution, in millimetres per pixel -- the number a "
+              "wall is actually specified by. Recomputed whenever either input changes, so it "
+              "moves under a SIZE or a RESOLUTION write. 0 while the resolution is unset."),
+        SF_RO(S, "pixel_pitch_v", pitch_v_mm, 0.0, "mm",
+              "DERIVED, vertical. Published beside the horizontal one rather than assumed equal: "
+              "a non-square pixel is a real (if unusual) panel, and a single figure would be a "
+              "claim nothing checks."),
         SI(S, "channel", channel, -1,
            "Which channel feeds this screen. -1 is unmapped. A reference to a channel rather "
            "than a plain integer -- and note that PREVIZ MAP writes the mesh mapping WITHOUT "

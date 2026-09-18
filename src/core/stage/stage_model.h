@@ -71,6 +71,12 @@ struct screen_meta
     float       rot_yaw = 0.0f, rot_pitch = 0.0f, rot_roll = 0.0f;
     int         res_w   = 0; // 0 = not set (use channel default)
     int         res_h   = 0;
+    // DERIVED from size and resolution, in millimetres per pixel, and the reason `resolution`
+    // is no longer inert: a wall is specified by its pitch, and an operator who types a size
+    // and a panel resolution wants to be told what that makes -- and to see it move when
+    // either changes. 0 while the resolution is unset.
+    float       pitch_h_mm = 0.0f;
+    float       pitch_v_mm = 0.0f;
     int         channel = -1; // mapped channel (-1 = unmapped)
     // Eye-point model for curve compensation & FOV:
     //   eye_mode 0 = CAMERA → eye follows the production virtual camera (in-camera VFX)

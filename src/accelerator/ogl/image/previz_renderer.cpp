@@ -1446,6 +1446,16 @@ previz_mesh generate_curved_screen(const std::string& name, float w, float h, fl
     return m;
 }
 
+/// Radius from width and arc, and pitch from size and resolution: the two derivations a
+/// screen carries, in one place so `ADD` and the mutators cannot drift apart.
+void derive_screen(screen_meta& meta)
+{
+    const float half_arc = meta.arc_deg * static_cast<float>(M_PI) / 360.0f;
+    meta.radius_m = std::abs(std::sin(half_arc)) > 1e-6f ? meta.width_m * 0.5f / std::sin(half_arc) : 0.0f;
+    meta.pitch_h_mm = meta.res_w > 0 ? meta.width_m * 1000.0f / static_cast<float>(meta.res_w) : 0.0f;
+    meta.pitch_v_mm = meta.res_h > 0 ? meta.height_m * 1000.0f / static_cast<float>(meta.res_h) : 0.0f;
+}
+
 void apply_screen_transform(previz_mesh& mesh, const screen_meta& meta)
 {
     // Re-generate the base mesh then apply rotation + translation
@@ -1576,6 +1586,8 @@ void previz_renderer::add_screen_curved(const std::string& name, float width_m, 
                             << L" m. Using the derived radius; width and arc win.";
     }
     sm.radius_m = derived;
+    derive_screen(sm); // the pitch half; the radius above is already the derived one
+    sm.radius_m = derived;
     impl_->scene_.screens[name] = sm;
 
     auto mesh = generate_curved_screen(name, width_m, height_m, sm.radius_m, arc_deg);
@@ -1647,6 +1659,51 @@ void previz_renderer::set_screen_resolution(const std::string& name, int width_p
     if (it == impl_->scene_.screens.end()) return;
     it->second.res_w = width_px;
     it->second.res_h = height_px;
+    // The pitch is what a wall is specified by, and it follows from these two and the size.
+    // Deriving it here is what makes RESOLUTION a write with a consequence rather than a
+    // stored number no path reads.
+    derive_screen(it->second);
+}
+
+void previz_renderer::set_screen_size(const std::string& name, float width_m, float height_m)
+{
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto                        it = impl_->scene_.screens.find(name);
+        if (it == impl_->scene_.screens.end())
+            return;
+        it->second.width_m  = width_m;
+        it->second.height_m = height_m;
+        // A curved screen's radius follows its width, so a resize re-derives it -- and the
+        // pitch follows the size, so it moves too.
+        derive_screen(it->second);
+        for (auto& mesh : impl_->scene_.meshes) {
+            if (mesh.name == name) {
+                apply_screen_transform(mesh, it->second);
+                break;
+            }
+        }
+    }
+    update_projections();
+}
+
+void previz_renderer::set_screen_arc(const std::string& name, float arc_deg)
+{
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto                        it = impl_->scene_.screens.find(name);
+        if (it == impl_->scene_.screens.end())
+            return;
+        it->second.arc_deg = arc_deg;
+        derive_screen(it->second);
+        for (auto& mesh : impl_->scene_.meshes) {
+            if (mesh.name == name) {
+                apply_screen_transform(mesh, it->second);
+                break;
+            }
+        }
+    }
+    update_projections();
 }
 
 void previz_renderer::set_screen_eye_mode(const std::string& name, int eye_mode, float x, float y, float z)

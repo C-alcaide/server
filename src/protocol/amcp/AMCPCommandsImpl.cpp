@@ -6714,6 +6714,29 @@ std::wstring previz_screen_command(command_context& ctx)
             float roll  = std::stof(u8(ctx.parameters.at(4)));
             ogl_mix->set_screen_rotation(name, yaw, pitch, roll);
             return L"202 PREVIZ OK\r\n";
+        } else if (sub == L"SIZE") {
+            // RESIZE IN PLACE. Until 2026-09-18 the only way to change a screen's dimensions
+            // was to ADD it again, which builds a fresh screen_meta and discards its position,
+            // rotation, channel, eye mode, ICVFX, vertical arc and resolution -- so correcting
+            // a wall by 20 cm meant re-entering the whole stage.
+            if (ctx.parameters.size() < 4)
+                return L"400 PREVIZ ERROR usage: SCREEN <name> SIZE <width_m> <height_m>\r\n";
+            float w = std::stof(u8(ctx.parameters.at(2)));
+            float h = std::stof(u8(ctx.parameters.at(3)));
+            if (!(w > 0.0f) || !(h > 0.0f))
+                return L"400 PREVIZ ERROR a screen's width and height must both be positive\r\n";
+            ogl_mix->set_screen_size(name, w, h);
+            return L"202 PREVIZ OK\r\n";
+        } else if (sub == L"ARC") {
+            // 0 FLATTENS IT. The radius follows width and arc, so this is the one control that
+            // turns a flat screen into a curved one and back without rebuilding it.
+            if (ctx.parameters.size() < 3)
+                return L"400 PREVIZ ERROR usage: SCREEN <name> ARC <deg> (0 = flat)\r\n";
+            float arc = std::stof(u8(ctx.parameters.at(2)));
+            if (arc < 0.0f || arc >= 360.0f)
+                return L"400 PREVIZ ERROR the arc must be 0 (flat) or less than 360 degrees\r\n";
+            ogl_mix->set_screen_arc(name, arc);
+            return L"202 PREVIZ OK\r\n";
         } else if (sub == L"RESOLUTION") {
             if (ctx.parameters.size() < 4)
                 return L"400 PREVIZ ERROR usage: SCREEN <name> RESOLUTION <w> <h>\r\n";

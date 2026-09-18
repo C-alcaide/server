@@ -1455,16 +1455,15 @@ struct server::impl
                         previz->set_screen_arc_v(name, sm.arc_v_deg);
                     else if (path == "icvfx")
                         previz->set_screen_icvfx(name, sm.icvfx_enable);
+                    else if (path == "size")
+                        previz->set_screen_size(name, sm.width_m, sm.height_m);
+                    else if (path == "arc")
+                        previz->set_screen_arc(name, sm.arc_deg);
                     else {
-                        // `size` and `arc` reach here. The renderer has no mutator for either:
-                        // both are set only by `add_screen_flat`/`add_screen_curved`, which build
-                        // a FRESH screen_meta and would silently discard position, rotation, eye
-                        // mode and ICVFX. Refusing is the honest answer until the renderer grows
-                        // a resize that regenerates the mesh in place.
-                        out.reason = "screen field '" + path +
-                                     "' has no mutator in the renderer: it is set only when the "
-                                     "screen is created, and re-creating it would discard every "
-                                     "other property";
+                        // `radius` and the two pitches reach here, and all three are DERIVED --
+                        // the descriptor already marks them read-only, so this is the belt to
+                        // that braces rather than a refusal a client should ever see.
+                        out.reason = "screen field '" + path + "' is derived and not settable";
                         return out;
                     }
 

@@ -1,6 +1,39 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: a previz screen can be resized and bent in place, and RESOLUTION means something
+
+Two functional holes in the 3D stage, both found by auditing what is UNIMPLEMENTED rather than
+what is untested.
+
+**A screen's size and arc could not be changed.** Every other property had a mutator -- position,
+rotation, vertical arc, eye mode, ICVFX, channel, resolution -- and these two had none: they were
+set only by `SCREEN ADD`, which builds a fresh `screen_meta` and discards position, rotation,
+channel, eye mode, ICVFX, vertical arc and resolution. So correcting a wall from 10 m to 10.2 m
+meant rebuilding it and re-entering the stage. The control API's write path refused `size` and
+`arc` saying exactly that, which is how the hole stayed visible.
+
+`PREVIZ <ch> SCREEN <name> SIZE <width_m> <height_m>` and `SCREEN <name> ARC <deg>` (0 flattens
+it) now mutate in place: the mesh is regenerated, the radius re-derived by the same
+`width / 2 / sin(arc / 2)` rule `ADD ... CURVED` uses, and the projections recomputed -- as every
+other mutator already did. Both are writable through `PUT /v1/value/.../screen/<name>/size` too.
+
+**`SCREEN ... RESOLUTION` was inert** -- stored, persisted, published, and read by nothing; the
+stage's own field table said so. It derives the screen's **pixel pitch** now, published read-only
+as `pixel_pitch_h` / `pixel_pitch_v` in millimetres, which is the number an LED wall is specified
+by. It moves under a `SIZE` write as well as a `RESOLUTION` one, which is what makes it a
+derivation rather than a second stored copy. The resolution still reaches no renderer path --
+previz draws the surface rather than its pixels -- and the field now says that rather than
+"INERT".
+
+Verified: `previz-place` 10/10 on both mixers, three new arms. The resize is gated on the PICTURE
+(half size at yaw 12: predicted centroid (952.9, 702.0) and width 305 px, measured (952.2, 700.8)
+and 304) **and** on the survivors -- position, rotation and channel read back unchanged. The pitch
+is exact (3840x2160 on 4.00 x 2.25 m -> 1.0417 mm both ways) and halves with the screen. `ARC` has
+no closed form here, so its claim is a round trip: the picture changes (623 -> 571 px wide) and
+`ARC 0` lands back on the flat prediction to the pixel, with the radius derived at 4.000 m.
+`api-stage`, `previz-gizmo` and `previz-picture` re-run green.
+
 ### Scopes: a luma waveform, an RGB parade and a vectorscope, pulled as images
 
 The other three scopes DECISIONS L163 named; the histogram shipped first. All four are now ONE

@@ -114,6 +114,21 @@ class previz_renderer
     void set_screen_position(const std::string& name, float x, float y, float z);
     void set_screen_rotation(const std::string& name, float yaw, float pitch, float roll);
     void set_screen_resolution(const std::string& name, int width_px, int height_px);
+
+    /// Resize a screen IN PLACE, keeping everything else it carries.
+    ///
+    /// The hole this fills: until 2026-09-18 `width_m`, `height_m` and `arc_deg` were writable
+    /// only by `add_screen_flat` / `add_screen_curved`, which build a FRESH `screen_meta` -- so
+    /// correcting a wall from 10 m to 10.2 m meant re-adding it and losing its position,
+    /// rotation, channel, eye mode, ICVFX, vertical arc and resolution. Every other property
+    /// had a mutator; these two did not, and the control API's write path refused them saying
+    /// so. The mesh is regenerated and the projections recomputed, as every other mutator does.
+    void set_screen_size(const std::string& name, float width_m, float height_m);
+
+    /// The horizontal arc. 0 makes the screen FLAT (radius 0); non-zero re-derives the radius
+    /// from the current width by `width / 2 / sin(arc / 2)`, the same rule `ADD ... CURVED`
+    /// uses, so the two routes cannot disagree about what a curved screen is.
+    void set_screen_arc(const std::string& name, float arc_deg);
     void set_screen_channel(const std::string& name, int channel);
 
     /// Set the eye-point model for a screen: eye_mode 0=CAMERA (follow production

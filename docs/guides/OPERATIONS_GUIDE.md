@@ -988,7 +988,7 @@ sub-command reaches the server.
 | Grade | `MIXER <ch>-<l> BRIGHTNESS/CONTRAST/SATURATION/LEVELS/CURVES/HUECURVE/QUALIFIER/COLORSPACE` |
 | OCIO | `MIXER <ch>-<l> OCIO/CDL_FILE`, `OCIO_DISPLAY <ch>`, `OCIO_LOOK <ch>`, `AMF <ch>-<l>`, `INFO OCIO [COLORSPACES\|DISPLAYS\|LOOKS]` |
 | Geometry | `MIXER <ch>-<l> PERSPECTIVE/PROJECTION/PROJECTION_DISTORTION/PROJECTION_BLEND/PROJECTION_BLEND_MASK/MESH` |
-| Previz | `PREVIZ <ch> CAMERA/VIEW/SCREEN/SHOW/GRID/WIREFRAME/GIZMO`, `PREVIZ <ch> PRESET SAVE\|RECALL\|LIST <name>` (camera presets; `RECALL` of a name never saved is a 404) |
+| Previz | `PREVIZ <ch> SCREEN <name> SIZE <w> <h>` and `ARC <deg>` resize and bend a wall **in place** (everything else on it survives); `PREVIZ <ch> CAMERA/VIEW/SCREEN/SHOW/GRID/WIREFRAME/GIZMO`, `PREVIZ <ch> PRESET SAVE\|RECALL\|LIST <name>` (camera presets; `RECALL` of a name never saved is a 404) |
 | Tracking | `TRACKING <ch>-<l> BIND/UNBIND/OFFSET/SCALE/ZERO/INFO`, `TRACKING LIST` |
 | Calibration | `CALIBRATION <ch> LUT/BYPASS/CLEAR/INFO` |
 | Effects | `PLAY <ch>-<l> [ISF] <shader>`, `PLAY <ch>-<l> [OFX] <plugin-id>`, and `INFO ISF` / `INFO OFX` to find out **what is installed** — `CLS` lists media and `TLS` lists templates, and a `.fs` and an `.ofx` bundle are neither, so without these two an operator has to know the name already |

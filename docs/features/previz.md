@@ -69,7 +69,7 @@ the verb, as it does for `MIXER`. The layer index parses and **no previz command
 - **`PREVIZ MAP` requires two parameters and returns `400`**; most of the others accept an empty
   parameter list as a query or a default.
 
-### 1.1 `PREVIZ SCREEN` — the twelve subcommands
+### 1.1 `PREVIZ SCREEN` — the fourteen subcommands
 
 Read out of `previz_screen_command`'s dispatch chain on 2026-09-06 and checked against it
 argument by argument. This is the enumeration §5.3 recorded as owed, and `BRIEF.md` requires it
@@ -83,6 +83,8 @@ rather than `400`.
 | `LIST` | `SCREEN LIST` | — | — |
 | `ADD … FLAT` | `SCREEN ADD <name> FLAT <width_m> <height_m>` | a fresh `screen_meta` with only name and size; generates the mesh; sets the scene active | **no** |
 | `ADD … CURVED` | `SCREEN ADD <name> CURVED <width_m> <height_m> <radius_m> <arc_deg>` | as above plus `arc_deg`; **`radius_m` is recomputed, see below** | **no** |
+| `SIZE` | `SCREEN <name> SIZE <width_m> <height_m>` | `width_m`, `height_m`, **re-derives `radius_m` and the pitch**, regenerates the mesh | yes |
+| `ARC` | `SCREEN <name> ARC <deg>` — 0 flattens it | `arc_deg`, **re-derives `radius_m`**, regenerates the mesh | yes |
 | `POSITION` | `SCREEN <name> POSITION <x> <y> <z>` | `pos_x/y/z`, re-applies the mesh transform | yes |
 | `ROTATION` | `SCREEN <name> ROTATION <yaw> <pitch> <roll>` | `rot_yaw/pitch/roll`, re-applies the mesh transform | yes |
 | `RESOLUTION` | `SCREEN <name> RESOLUTION <w_px> <h_px>` | `res_w`, `res_h` | **no** |
@@ -817,8 +819,13 @@ screens were published they became wrong in writing.
    blue, 1.2 m ribbons rather than lines, because `glLineWidth` above 1.0 is not required of a
    core profile and a one-pixel gizmo is neither visible at four metres nor measurable.
    `cli.py previz-gizmo` gates it on the picture, by the three axis colours separately.
-   **`res_w`/`res_h` are still stored, persisted and read by nothing** — `SCREEN … RESOLUTION`
-   answers `202` and changes nothing that renders.
+   ~~**`res_w`/`res_h` are stored, persisted and read by nothing**~~ — **FIXED 2026-09-18.**
+   `RESOLUTION` now derives the screen's **pixel pitch**, published read-only as
+   `pixel_pitch_h` / `pixel_pitch_v` in millimetres, which is the number a wall is actually
+   specified by. It moves under a `SIZE` write as well as a `RESOLUTION` one, so it is a
+   derivation rather than a second stored copy. Still true, and now the whole of the limit: no
+   renderer path and no projection calculation reads the resolution, because previz draws the
+   surface rather than its pixels.
 5. ~~**`PREVIZ MAP` and `PREVIZ SCREEN … CHANNEL` are not the same operation.**~~ **FIXED
    2026-09-06.** `map_mesh` wrote `mesh_to_channel[name]` and `mesh.is_screen` and never touched
    `screens[name].channel`, while `update_projections` iterates `screens` and skips any whose
@@ -882,9 +889,13 @@ Two limits and one that closed, each a consequence of a decision rather than an 
 * **Only screens are pickable.** `compute_pick` intersects the `screen_meta` quads. A venue mesh
   loaded from glTF is drawn and cannot be selected or dragged, so a scene whose walls are geometry
   rather than screens is look-only.
-* **Nothing is manipulated except position.** No rotation gizmo, no resize — and resize is blocked
-  at a lower level anyway (§2.1: `size` and `arc` have no mutator, because `add_screen_*` rebuilds
-  a fresh `screen_meta` and would discard everything else on it). The growth path is named in
+* **Nothing is manipulated except position** *in the window*. No rotation handle and no resize
+  handle — but the lower-level blocker is gone: `SCREEN … SIZE` and `SCREEN … ARC` resize and
+  bend a screen **in place** since 2026-09-18, keeping its position, rotation, channel, eye mode,
+  ICVFX, vertical arc and resolution. Until then the only route was to `ADD` it again, which
+  builds a fresh `screen_meta` and discards all seven, so correcting a wall by 20 cm meant
+  re-entering the stage. The control API's write path refused `size` and `arc` saying exactly
+  that; both are writable now and `previz-place` gates the resize on the PICTURE. The growth path is named in
   `INTERACTIVE_PREVIZ_SCOPE.md` §5 rather than left implicit: picking, then a rotation handle, then
   materials, each behind its own gate.
 
