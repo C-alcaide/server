@@ -30,6 +30,7 @@ set(SOURCES
 
 		diagnostics/call_context.cpp
 		diagnostics/log_graph.cpp
+		diagnostics/state_graph.cpp
 		diagnostics/osd_graph.cpp
 
 		frame/draw_frame.cpp
@@ -90,6 +91,7 @@ set(HEADERS
 
 		diagnostics/call_context.h
 		diagnostics/log_graph.h
+		diagnostics/state_graph.h
 		diagnostics/osd_graph.h
 
 		frame/alpha_mode.cpp

@@ -36,6 +36,7 @@
 #include <core/consumer/output.h>
 #include <core/diagnostics/call_context.h>
 #include <core/diagnostics/log_graph.h>
+#include <core/diagnostics/state_graph.h>
 #include <core/diagnostics/osd_graph.h>
 #include <core/frame/pixel_format.h>
 #include <core/mixer/image/image_mixer.h>
@@ -209,6 +210,33 @@ struct server::impl
         // battery, or a post-mortem. Off by default: it is per-graph output on the frame path.
         if (env::properties().get(L"configuration.log-diagnostics", false)) {
             caspar::core::diagnostics::log::register_sink();
+        }
+
+        // And into the control API and OSC, for a client that wants to redraw the graphs and
+        // surface their events. Registered ALWAYS so `DIAG PUBLISH ON` works at runtime -- a
+        // graph collects its sinks when it is created -- and enabled only if asked: while off,
+        // every graph write it sees is one atomic load.
+        {
+            const double interval =
+                std::max(0.02, env::properties().get(L"configuration.publish-diagnostics-interval", 0.1));
+            auto weak_hub    = std::weak_ptr<http::state_hub>(state_hub_);
+            auto weak_client = std::weak_ptr<osc::client>(osc_client_);
+            caspar::core::diagnostics::publish::register_sink(
+                interval, [weak_hub, weak_client](std::shared_ptr<const core::monitor::state> snap) {
+                    // The same two facades a channel's tick feeds, in the same way: the hub
+                    // takes the pointer, OSC takes a copy under its root.
+                    if (auto hub = weak_hub.lock())
+                        hub->publish_root("diag", snap);
+                    if (auto client = weak_client.lock()) {
+                        if (snap->size() == 0)
+                            return;
+                        core::monitor::state state;
+                        state[""]["diag"] = *snap;
+                        client->send(std::move(state));
+                    }
+                });
+            caspar::core::diagnostics::publish::set_enabled(
+                env::properties().get(L"configuration.publish-diagnostics", false));
         }
     }
 

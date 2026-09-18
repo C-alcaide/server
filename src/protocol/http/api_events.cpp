@@ -130,6 +130,30 @@ json::object collect_events(subscription& sub, const state_hub& hub, const std::
         }
     }
 
+    // The diagnostics root, when subscribed. Its snapshot is replaced at the publication
+    // interval rather than per tick, and an empty publication (DIAG PUBLISH OFF) removes it,
+    // which the revert pass below then reports leaf by leaf.
+    const bool wants_diag = std::any_of(sub.prefixes.begin(), sub.prefixes.end(), [](const std::string& p) {
+        return p == "/diag" || p.compare(0, 6, "/diag/") == 0;
+    });
+    if (wants_diag) {
+        if (const auto snap = hub.get_root("diag")) {
+            for (const auto& kv : *snap) {
+                const auto path = "/diag/" + kv.first;
+                if (!any_prefix_matches(path, sub.prefixes))
+                    continue;
+                seen.emplace(path, kv.second);
+                const auto prev = sub.last_values.find(path);
+                if (prev != sub.last_values.end() && sub.repetition_filter && prev->second == kv.second)
+                    continue;
+                json::object e;
+                e["path"]  = path;
+                e["value"] = vector_to_json(kv.second);
+                events.push_back(std::move(e));
+            }
+        }
+    }
+
     for (const auto& kv : sub.last_values) {
         if (seen.find(kv.first) != seen.end())
             continue;
@@ -186,8 +210,12 @@ api_reply parse_subscribe(const json::value& msg, int max_prefixes, subscription
         // Required, and not merely conventional: the channel index in the prefix is what
         // bounds the scan to the channels a subscriber actually asked for. Without it a
         // single subscription walks every channel's whole snapshot on every tick.
-        if (s.compare(0, 9, "/channel/") != 0)
-            return api_reply::fail(api_code::bad_request, "a prefix must start with /channel/{index}: " + s);
+        // `/diag` is the one non-channel root: the diagnostics publication, one tree for the
+        // whole server, walked only when a prefix names it.
+        const bool is_diag = s == "/diag" || s.compare(0, 6, "/diag/") == 0;
+        if (s.compare(0, 9, "/channel/") != 0 && !is_diag)
+            return api_reply::fail(api_code::bad_request,
+                                   "a prefix must start with /channel/{index} or /diag: " + s);
         out.prefixes.push_back(std::move(s));
     }
 

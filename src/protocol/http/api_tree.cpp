@@ -423,6 +423,22 @@ json::object build_tree(const state_hub& hub, const http_config& cfg, const api_
 
     auto root = make_root();
 
+    // The diagnostics publication, when it is on: one root beside the channels, read-only
+    // telemetry keyed by graph id (`state_graph.h` says why not by channel). Absent when
+    // off, so a client can tell "off" from "no graphs" -- and so the default tree does not
+    // grow for a feature nobody enabled.
+    if (const auto diag = hub.get_root("diag")) {
+        auto& diag_node    = node_at(root, "", {"diag"});
+        diag_node["ACCESS"] = 0;
+        for (const auto& kv : *diag) {
+            auto segments = split_path(kv.first);
+            if (segments.empty())
+                continue;
+            auto& leaf = node_at(diag_node, "/diag", segments);
+            fill_telemetry_leaf(leaf, kv.second);
+        }
+    }
+
     for (const int ch : hub.channels()) {
         const auto snap = hub.get(ch);
         if (!snap)
@@ -754,8 +770,32 @@ json::object host_info(const http_config& cfg, int subscriptions)
 api_reply read_value(const state_hub& hub, const api_context& ctx, const std::string& path)
 {
     const auto segments = split_path(path);
+
+    if (!segments.empty() && segments[0] == "diag") {
+        const auto snap = hub.get_root("diag");
+        if (!snap)
+            return api_reply::fail(api_code::unknown_path,
+                                   "diagnostics publication is off (DIAG PUBLISH ON, or <publish-diagnostics>true)");
+        std::string key;
+        for (size_t i = 1; i < segments.size(); ++i) {
+            if (i > 1)
+                key += "/";
+            key += segments[i];
+        }
+        for (const auto& kv : *snap) {
+            if (kv.first == key) {
+                json::object r;
+                r["path"]  = "/diag/" + key;
+                r["value"] = vector_to_json(kv.second);
+                r["type"]  = osc_tags(kv.second);
+                return api_reply::ok_with(std::move(r));
+            }
+        }
+        return api_reply::fail(api_code::unknown_path, "no such diagnostics leaf: " + path);
+    }
+
     if (segments.size() < 3 || segments[0] != "channel")
-        return api_reply::fail(api_code::bad_request, "a value path starts with /channel/{index}/");
+        return api_reply::fail(api_code::bad_request, "a value path starts with /channel/{index}/ or /diag/");
 
     if (segments[1].empty() || segments[1].find_first_not_of("0123456789") != std::string::npos)
         return api_reply::fail(api_code::channel_not_found, "channel index is not a number: " + segments[1]);

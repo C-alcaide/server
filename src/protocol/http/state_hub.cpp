@@ -45,6 +45,28 @@ state_hub::snapshot state_hub::get(int channel_index) const
     return it == latest_.end() ? nullptr : it->second;
 }
 
+void state_hub::publish_root(const std::string& name, snapshot s)
+{
+    observer_t observer;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (s && s->size() > 0)
+            roots_[name] = std::move(s);
+        else
+            roots_.erase(name);
+        observer = observer_;
+    }
+    if (observer)
+        observer(0);
+}
+
+state_hub::snapshot state_hub::get_root(const std::string& name) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto                        it = roots_.find(name);
+    return it == roots_.end() ? nullptr : it->second;
+}
+
 std::vector<int> state_hub::channels() const
 {
     std::lock_guard<std::mutex> lock(mutex_);

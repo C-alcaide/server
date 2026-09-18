@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace caspar { namespace protocol { namespace http {
@@ -42,6 +43,13 @@ class state_hub
     /// Every channel index that has published at least once, ascending.
     std::vector<int> channels() const;
 
+    /// A root that is not a channel -- `diag`, the diagnostics publication. Same contract as
+    /// `publish`: a pointer store from whatever thread produces it, and the observer fires
+    /// (with index 0, which no channel has) so the events fan-out runs. An EMPTY snapshot
+    /// removes the root: the tree stops listing it and a subscriber sees its leaves reverted.
+    void     publish_root(const std::string& name, snapshot s);
+    snapshot get_root(const std::string& name) const;
+
     /// Called on the TICK THREAD immediately after a snapshot is stored, with the channel
     /// index. Whatever it does must be a hand-off -- a post onto another executor -- and
     /// never work: this runs inside the frame.
@@ -53,6 +61,7 @@ class state_hub
     // contiguous -- a config can define channels 1 and 3.
     mutable std::mutex      mutex_;
     std::map<int, snapshot> latest_;
+    std::map<std::string, snapshot> roots_;
     observer_t              observer_;
 };
 

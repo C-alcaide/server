@@ -40,6 +40,7 @@ word "API".
 | `at_frame` / `in_frames` on a batch | implemented | `park_batch` and `drain_batches` in `http_server.cpp` |
 | `WS /v1/events` -- prefix subscription with a per-connection diff | implemented | `collect_events` in `api_events.cpp`, `ws_session` in `http_server.cpp` |
 | `throttle_ms`, `repetition_filter`, revert events | implemented | same |
+| `/diag` -- every DIAG-window graph as `[last, max]`, its tags as `[count, severity]`, in the tree, `/v1/value` and `/v1/events`; **opt-in, off by default** | implemented | `state_graph.cpp` (core), `publish_root` in `state_hub.cpp`, `diag_publish_command` in `AMCPCommandsImpl.cpp` |
 
 **Three sources are joined to build the tree**, and none of them alone describes the address space:
 
@@ -639,6 +640,62 @@ It is the **previous** tick's count, necessarily — it is read before the curre
 finished — and therefore exact whenever the leaf set is stable, which is whenever
 `structure_revision` is.
 
+### `/diag` — the diagnostics graphs, for a client that wants to draw them
+
+The DIAG window shows every `diagnostics::graph` in the server — frame time, decode time,
+queue fill, fps, and the dropped/late-frame tags — to a person at the machine, and until now to
+nobody else (`<log-diagnostics>` writes the same numbers to the log, for a battery or a
+post-mortem). The same graphs are now published into this API, **when asked for**:
+
+```
+DIAG PUBLISH ON          # or <publish-diagnostics>true</publish-diagnostics> in the config
+DIAG PUBLISH             # -> 201 DIAG PUBLISH OK / "ON 0.100"  (state, interval in seconds)
+DIAG PUBLISH OFF
+DIAG PUBLISH BANANA      # -> 403. Neither ON nor OFF is refused, never read as one of them.
+```
+
+```
+/diag/interval                seconds between publications -- the time axis
+/diag/{id}/text               the graph's caption, the string the window shows
+/diag/{id}/{value}            [last, max] over the last interval    e.g. frame-time = [0.49, 0.51]
+/diag/{id}/tag/{name}         [count since ON, "warning" | "info"]  e.g. tag/seek = [3, "info"]
+/diag/{id}/color/{name}       the line colour the window would draw, packed RGBA
+```
+
+Four things about the shape, each of which was a choice:
+
+* **Keyed by graph, not by channel.** A graph does not know its channel: the SPI
+  (`common/diagnostics/graph.h`) gives it a caption, values, tags and colours, and nothing
+  else, and the producers that own most graphs are not told which channel they were loaded
+  on. Teaching them would be a second table. The caption carries the identity the window
+  shows (`ffmpeg[clip.mp4|...]`, `video_channel[1|1080p2500]`), and a client that wants to
+  group by channel reads it there — which is exactly how a person reads the window.
+* **Folded, not streamed.** A graph writes `frame-time` once per frame. Publishing per frame
+  would put a leaf per graph per frame into every subscriber's diff, which is the per-tick
+  cost the `state_leaves` section above exists to warn about. The sink publishes on its own
+  thread at `<publish-diagnostics-interval>` (0.1 s by default, 0.02 minimum) and folds each
+  value to `[last, max]` — the level and the spike, which is what a person reads off a graph.
+  The tree never enters a channel's snapshot, so `state_leaves` does not move.
+* **Tags are counted, not sampled.** A dropped frame is an event; sampled at 10 Hz it is a
+  missed one. The count is cumulative since `ON` and resets on `OFF`, and every change is an
+  event on `/v1/events`, so a subscriber to `/diag` gets a message per occurrence with the
+  severity the graph's author gave it (`WARNING` or `INFO`; `SILENT` tags are not published).
+  The tag names and their severities are listed in `faults.yaml` under `diagnostic_tags`.
+* **Off by default, and cheap when off.** The sink is registered unconditionally — a graph
+  collects its sinks when it is created, so the toggle has to be there from the start — and
+  every write it receives while off is one relaxed atomic load. `OFF` publishes one empty
+  tree, so `/diag` disappears from `/v1/tree` and a subscriber sees each leaf `reverted`.
+  Absent means off; a client can tell "off" from "no graphs".
+
+`/v1/events` accepts `/diag` (or `/diag/...`) as a prefix beside `/channel/{n}/...`, and a
+channel subscription never receives a `/diag` event. The OSC client receives the same tree at
+the same cadence under `/diag/...`.
+
+**What is not measured.** `api-diag` gates the shape and the bounds (`0 <= last <= max`), the
+toggle, the events, the removal and the cost at the fixture's light load. It cannot say whether
+a folded value is RIGHT — the graphs have no oracle outside the server — and nothing reads the
+OSC copy.
+
 ### `structure_revision` — how a client learns the address space changed
 
 **`/v1/events` carries value changes only, and the tree is dynamic.** `PLAY` grows
@@ -1077,7 +1134,7 @@ and Linux and leaves both bootstraps untouched.
 
 ## 4. Verification -- what is measured, and what is not
 
-Six batteries, run on **both mixers**. Every one exits 0 only if every check passed; an
+Seven batteries, run on **both mixers**. Every one exits 0 only if every check passed; an
 INCONCLUSIVE check exits 2, never 0, so a battery whose fixture did not come up cannot report
 success.
 
@@ -1086,6 +1143,7 @@ success.
 | `api-tree` | 2 channels, a clip on layer 10 | **11/11** on both mixers. **500 advertised leaves, 0 unresolvable** through `/v1/value`; 177 mixer descriptors, all carrying their vendor block; 0 empty `RANGE` objects; all four not-found codes specific | 2026-09-05 |
 | `api-roundtrip` | every writable field, with a value **derived from its own descriptor** | **8/8** on both mixers. **172 of 177 fields written with a non-default value; 0 refused, 0 failed to store, 0 disagreed between the API and `MIXER FIELD`, 0 failed to restore** | 2026-09-05 |
 | `api-events` | 3 subscriptions | **10/10** on both mixers. AMCP-originated and API-originated changes both arrive; revert reported; throttle at 400 ms gave gaps of **401, 438, 400 ms** and still ended on the final value; `SUBSCRIPTIONS` back to 0 on close | 2026-09-05 |
+| `api-diag` | the `/diag` publication: toggle, tree, events, a provoked tag, removal, cost | **11/11** on both mixers. OFF by default on both facades; `DIAG PUBLISH BANANA` -> 403 with the state unchanged; 6 graphs captioned, 4 publishing `frame-time` as `[last, max]`; a `/diag` subscriber receives values, a `/channel/1` subscriber receives none of them with a positive control; `CALL SEEK` moves `tag/seek` from `[2, "info"]` to `[3, "info"]`; OFF reverts `/diag/interval` and the root is gone; late frames over 8 s at 2x1080p25, OFF then ON: ogl 0/0 -> 0/0, vulkan 3/1 -> 1/0 -- noise in both directions at this load, so the arm gates on "ON adds none", not on a figure | 2026-09-18 |
 | `api-write` | validation, contention, batches | **9/9** on both mixers. Eight refusals each with their own code and **the value read back unchanged after all eight**; **200 concurrent toggles forming one unbroken chain**; a failed batch applied nothing; a two-channel batch landed on **frame 215 on both** | 2026-09-05 |
 | `api-atframe` | 10 scheduled batches | **7/7** on both mixers. **Spread between channels 0 frames on all ten**; offset from `at_frame` **2 frames on all ten** | 2026-09-05 |
 | `api-readiness` | a 75-frame clip | **7/7** on both mixers. Readiness observable **113-133 ms after PLAY**; transport followed pause/resume/stop; `file/frame` **(22, 75)** against **ffprobe's 75** | 2026-09-05 |

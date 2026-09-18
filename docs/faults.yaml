@@ -232,3 +232,47 @@ benign_log_lines:
       authentication" is a decision worth seeing in the log of a server somebody else set
       up -- and every harness fixture runs without a password because it binds to loopback.
       Its ABSENCE on a server configured with `off` would be the finding.
+
+# The diagnostics graphs' TAGS -- what `/diag/{graph}/tag/{name}` publishes as [count, severity]
+# when `DIAG PUBLISH` is on, and what the DIAG window draws as a vertical line. Severity is the
+# one the graph's author gave the tag (`tag_severity::WARNING` or `INFO`); SILENT tags are never
+# published. Documentation only: nothing in the harness asserts on this section yet.
+diagnostic_tags:
+  - name: dropped-frame
+    severity: warning
+    meaning: >
+      A producer, consumer or the channel discarded a frame to stay on cadence. Twenty-one
+      sites set it; the caption says which.
+  - name: late-frame
+    severity: warning
+    meaning: The channel or a consumer missed its deadline and the frame went out late.
+  - name: dropped
+    severity: warning
+    meaning: An input dropped data (a device or stream input, not a decoded frame).
+  - name: underflow
+    severity: warning
+    meaning: A queue ran empty when a frame was due -- the source did not keep up.
+  - name: starved
+    severity: warning
+    meaning: A producer waited for input that did not arrive in time.
+  - name: flushed-frame
+    severity: warning
+    meaning: DeckLink flushed a queued frame, usually around a mode change or restart.
+  - name: restart
+    severity: warning
+    meaning: The GStreamer producer restarted its pipeline.
+  - name: audio-underrun
+    severity: warning
+    meaning: The audio output ran out of samples.
+  - name: audio-clipping
+    severity: warning
+    meaning: Mixed audio exceeded full scale and was clipped.
+  - name: audio-buffer-overflow
+    severity: warning
+    meaning: Audio arrived faster than the consumer took it and samples were discarded.
+  - name: seek
+    severity: info
+    meaning: The ffmpeg input seeked (CALL SEEK, a loop wrap, or a position write).
+  - name: param
+    severity: info
+    meaning: The flash producer received a parameter.

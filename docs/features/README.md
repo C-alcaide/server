@@ -41,10 +41,11 @@ nowhere:
 by **registration site** rather than by directory. Anything registered outside `src/modules/` is a
 feature with no directory, and needs an owner named explicitly.
 
-Also worth a sweep: fork `<configuration>` elements outside any module. Currently three —
-`log-diagnostics`, `log-diagnostics-interval` (core) and `ocio-config` (shell) — all present in
-`src/shell/casparcg.config`, so an operator can find them, though the first two are described only
-in an architecture note and an audit.
+Also worth a sweep: fork `<configuration>` elements outside any module. Currently five —
+`log-diagnostics`, `log-diagnostics-interval`, `publish-diagnostics`,
+`publish-diagnostics-interval` (core) and `ocio-config` (shell) — all present in
+`src/shell/casparcg.config`, so an operator can find them. The `publish-*` pair is described in
+`control-api.md` (`/diag`); the `log-*` pair only in an architecture note and an audit.
 
 ## Every module, and why it is or is not here
 

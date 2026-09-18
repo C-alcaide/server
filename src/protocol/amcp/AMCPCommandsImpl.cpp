@@ -47,6 +47,7 @@
 #include <core/consumer/output.h>
 #include <core/diagnostics/call_context.h>
 #include <core/diagnostics/osd_graph.h>
+#include <core/diagnostics/state_graph.h>
 #include <core/frame/frame_transform.h>
 #include <core/frame/transform_fields.h>
 #include <core/frame/frame_visitor.h>
@@ -5369,6 +5370,32 @@ std::wstring diag_command(command_context& ctx)
     return L"202 DIAG OK\r\n";
 }
 
+// DIAG PUBLISH [ON|OFF] -- the DIAG window's graphs into the control API and OSC (`/diag/...`),
+// at the configured interval. No argument queries. Off by default; `<publish-diagnostics>`
+// sets the boot value. An argument that is neither ON nor OFF is refused rather than read as
+// one of them -- the accept-a-typo defect this tree keeps finding.
+std::wstring diag_publish_command(command_context& ctx)
+{
+    namespace publish = core::diagnostics::publish;
+
+    if (ctx.parameters.empty()) {
+        std::wstringstream reply;
+        reply << L"201 DIAG PUBLISH OK\r\n" << (publish::enabled() ? L"ON" : L"OFF") << L" " << std::fixed
+              << std::setprecision(3) << publish::interval() << L"\r\n";
+        return reply.str();
+    }
+
+    const auto& arg = ctx.parameters.at(0);
+    if (boost::iequals(arg, L"ON"))
+        publish::set_enabled(true);
+    else if (boost::iequals(arg, L"OFF"))
+        publish::set_enabled(false);
+    else
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"DIAG PUBLISH takes ON or OFF, not " + arg));
+
+    return L"202 DIAG PUBLISH OK\r\n";
+}
+
 std::wstring bye_command(command_context& ctx)
 {
     ctx.client->disconnect();
@@ -7037,6 +7064,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_command(L"Query Commands", L"TLS", tls_command, 0);
     repo->register_command(L"Query Commands", L"VERSION", version_command, 0);
     repo->register_command(L"Query Commands", L"DIAG", diag_command, 0);
+    repo->register_command(L"Query Commands", L"DIAG PUBLISH", diag_publish_command, 0);
     repo->register_command(L"Query Commands", L"BYE", bye_command, 0);
     repo->register_command(L"Query Commands", L"KILL", kill_command, 0);
     repo->register_command(L"Query Commands", L"RESTART", restart_command, 0);

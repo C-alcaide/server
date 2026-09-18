@@ -1,6 +1,29 @@
 CasparVP — Unreleased
 ==========================================
 
+### The DIAG window's graphs are published into the control API and OSC -- opt-in, `DIAG PUBLISH ON`
+
+A third `graph_sink` beside the window and the log. Every diagnostics graph -- frame time,
+decode time, queue fill, fps, and the dropped/late-frame tags -- is folded on its own thread at
+`<publish-diagnostics-interval>` (0.1 s default) into a `/diag` root: `/diag/{graph}/text` is the
+caption the window shows, `/diag/{graph}/{value}` is `[last, max]` over the interval, and
+`/diag/{graph}/tag/{name}` is `[count, severity]`, so a client can redraw the graphs and surface a
+dropped frame as a message with the severity its author gave it. Readable at `/v1/tree/diag` and
+`/v1/value/diag/...`, streamed by `/v1/events` with a `/diag` prefix, mirrored to OSC.
+
+**Off by default.** `<publish-diagnostics>true</publish-diagnostics>` or `DIAG PUBLISH ON` turns it
+on, `DIAG PUBLISH OFF` removes the root (a subscriber sees every leaf reverted), `DIAG PUBLISH`
+alone queries. While off, every graph write costs one atomic load. Keyed by graph rather than by
+channel because the SPI gives a graph no owner and teaching 21 producers their channel would be
+a second table; the caption carries it where the window does. The tree never enters a channel's
+snapshot, so `state_leaves` does not move.
+
+Verified: `api-diag` (new) 11/11 on both mixers -- off by default on both facades, `DIAG PUBLISH
+BANANA` refused with the state unchanged, values in shape, events delivered to `/diag` and not to
+`/channel/1` (positive control), `CALL SEEK` moving `tag/seek` by exactly one, OFF reverting the
+root, and late frames over 8 s at two 1080p25 channels: OpenGL 0/0 off, 0/0 on; Vulkan 3/1 off, 1/0 on -- noise in both directions at this load, so the arm gates on "ON adds none" rather than on a figure. Not measured: the
+OSC copy, and whether a folded value is right -- the graphs have no oracle outside the server.
+
 ### BEHAVIOUR: a GPU-direct producer scrubs while paused, lands on the frame asked for, and reports the frame on screen
 
 `hap`, `cuda_prores` and `cuda_notchlc` all changed in three ways on 2026-09-16, and each one
