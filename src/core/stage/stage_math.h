@@ -25,6 +25,7 @@
 #include <cstring>
 #include <map>
 #include <optional>
+#include <utility>
 #include <string>
 
 #ifndef M_PI
@@ -177,6 +178,24 @@ struct pick
 /// approximation `casparcg-360-client`'s `frustum_check.py` documents for the same reason, and
 /// it means a pick near the edge of a deeply curved panel can be off by the sagitta. Named
 /// here rather than discovered later.
+/// Where the pointer meets a screen's PLANE, in the screen's own axes -- with NO bounds test.
+///
+/// `compute_pick` answers "is the pointer on this screen", which means it rejects everything
+/// outside the quad. That is right for selecting and wrong for RESIZING: a corner handle is
+/// dragged OUTWARD, so the pointer spends the whole gesture off the screen it is resizing, and
+/// a bounds-checked re-pick returns nothing exactly when it is needed. Measured 2026-09-19 --
+/// the first resize handle grabbed correctly and then did nothing at all, because every frame
+/// of the drag fell outside the old quad.
+///
+/// Returns local (x, y) in metres: x from the centre, y from the BOTTOM, the same axes
+/// `pick::local_x` / `local_y` report. Empty when the ray is parallel to the plane or meets it
+/// behind the eye.
+std::optional<std::pair<double, double>> compute_plane_point(const previz_camera& view,
+                                                             double               aspect,
+                                                             double               sx,
+                                                             double               sy,
+                                                             const screen_meta&   meta);
+
 /// THE ROTATION RING, as a pure question: where does the pointer meet the horizontal plane a
 /// screen stands on, and is that on the screen's yaw ring?
 ///

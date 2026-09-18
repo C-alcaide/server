@@ -924,7 +924,19 @@ Two limits and one that closed, each a consequence of a decision rather than an 
   in the plane the screen stands on, and a screen seen from above covers part of it, so a
   pick-first order would make the handle unreachable exactly where an operator looks down to use
   it.
-* **Nothing is manipulated except position and yaw** *in the window*. No resize
+* ~~**No resize handle.**~~ **CLOSED 2026-09-19.** The selected screen carries a small square at
+  each TOP corner; dragging one sets the size. Top corners and not all four, because a screen's
+  origin is its centre-BOTTOM: it stands on the floor, and dragging a bottom corner would have to
+  move the screen as well as resize it. Width follows the half-width doubled, so the screen grows
+  both ways and stays where it was.
+
+  **The drag reads the screen's PLANE rather than its quad, and that is the whole of why it
+  works.** `compute_pick` rejects everything outside the surface — right for selecting, and wrong
+  here: a corner is dragged OUTWARD, so the pointer is off the screen it is resizing for the
+  whole gesture. The first version grabbed correctly and then did nothing at all, every frame of
+  the drag falling outside the old quad. `core::compute_plane_point` is the bounds-free
+  counterpart, pure and beside the others.
+* **Nothing is manipulated except position, yaw and size** *in the window*. No pitch or roll
   handle — but the lower-level blocker is gone: `SCREEN … SIZE` and `SCREEN … ARC` resize and
   bend a screen **in place** since 2026-09-18, keeping its position, rotation, channel, eye mode,
   ICVFX, vertical arc and resolution. Until then the only route was to `ADD` it again, which

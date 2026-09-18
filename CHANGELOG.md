@@ -1,6 +1,29 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: a previz screen can be resized by hand -- corner handles on the selected screen
+
+The last of `INTERACTIVE_PREVIZ_SCOPE.md` §5's named growth path. The selected screen carries a
+small square at each TOP corner; dragging one sets the size. Top corners and not all four,
+because a screen's origin is its centre-BOTTOM -- it stands on the floor, and a bottom corner
+would have to move the screen as well as resize it, which is two operations at once on the axis
+an operator wants neither. Width follows the half-width doubled, so the screen grows both ways
+and stays where it was.
+
+**The drag reads the screen's PLANE, not its quad.** `compute_pick` rejects everything outside
+the surface, which is right for selecting and exactly wrong here: a corner is dragged OUTWARD, so
+the pointer spends the whole gesture off the screen it is resizing. The first version grabbed
+correctly and then did nothing at all -- every frame of the drag fell outside the old quad.
+`core::compute_plane_point` is the bounds-free counterpart, pure and beside `compute_pick` and
+`compute_ring_hit`.
+
+Verified: `previz-gizmo` 16/16 on both mixers. Grab the top-right corner at local (1.0, 2.0) and
+drop at (1.5, 3.0): the screen must become 3.0 x 3.0 m and must NOT move -- measured 3.0004 x
+2.9999 with the position unchanged, because a resize that also shifted the screen would look
+right in a screenshot and be wrong on a stage. A grab in the MIDDLE must move it and leave the
+size alone, which is what makes the corner a corner. `previz-interact`, `previz-place`,
+`api-stage` and `previz-picture` re-run green.
+
 ### BEHAVIOUR: a previz screen can be turned by hand -- the selected screen carries a yaw ring
 
 The window manipulated POSITION alone; `INTERACTIVE_PREVIZ_SCOPE.md` named a rotation handle as

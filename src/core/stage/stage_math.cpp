@@ -235,6 +235,54 @@ screen_projection compute_frustum(const previz_camera& cam, const screen_meta& m
     return result;
 }
 
+std::optional<std::pair<double, double>> compute_plane_point(const previz_camera& view,
+                                                             double               aspect,
+                                                             double               sx,
+                                                             double               sy,
+                                                             const screen_meta&   meta)
+{
+    const auto   cam_rot = mat4::rotate_y(view.yaw) * mat4::rotate_x(view.pitch) * mat4::rotate_z(view.roll);
+    const double rgt[3]  = {cam_rot.m[0], cam_rot.m[1], cam_rot.m[2]};
+    const double up[3]   = {cam_rot.m[4], cam_rot.m[5], cam_rot.m[6]};
+    const double fwd[3]  = {-cam_rot.m[8], -cam_rot.m[9], -cam_rot.m[10]};
+    const double half_v  = std::tan(view.fov * 0.5 * M_PI / 180.0);
+    const double xc      = (2.0 * sx - 1.0) * aspect * half_v;
+    const double yc      = (1.0 - 2.0 * sy) * half_v;
+    double       dir[3];
+    for (int i = 0; i < 3; ++i)
+        dir[i] = fwd[i] + rgt[i] * xc + up[i] * yc;
+
+    // The screen's own basis, as `compute_pick` builds it -- same rotation order, same columns.
+    const auto   rot     = mat4::rotate_y(meta.rot_yaw) * mat4::rotate_x(meta.rot_pitch) *
+                     mat4::rotate_z(meta.rot_roll);
+    const double s_rgt[3] = {rot.m[0], rot.m[1], rot.m[2]};
+    const double s_up[3]  = {rot.m[4], rot.m[5], rot.m[6]};
+    const double s_nrm[3] = {rot.m[8], rot.m[9], rot.m[10]};
+
+    double denom = 0.0;
+    for (int i = 0; i < 3; ++i)
+        denom += dir[i] * s_nrm[i];
+    if (std::abs(denom) < 1e-9)
+        return std::nullopt;
+
+    const double origin[3] = {meta.pos_x, meta.pos_y, meta.pos_z};
+    double       num       = 0.0;
+    for (int i = 0; i < 3; ++i)
+        num += (origin[i] - (i == 0 ? view.x : i == 1 ? view.y : view.z)) * s_nrm[i];
+    const double t = num / denom;
+    if (t <= 0.0)
+        return std::nullopt;
+
+    double lx = 0.0, ly = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        const double eye = i == 0 ? view.x : i == 1 ? view.y : view.z;
+        const double d   = eye + dir[i] * t - origin[i];
+        lx += d * s_rgt[i];
+        ly += d * s_up[i];
+    }
+    return std::make_pair(lx, ly);
+}
+
 double ring_radius(const screen_meta& meta)
 {
     // Outside the screen's own footprint, so the ring is grabbable on a wall seen face-on, and

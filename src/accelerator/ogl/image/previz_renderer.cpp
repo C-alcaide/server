@@ -70,6 +70,11 @@ namespace {
 using core::mat4;
 using core::compute_frustum;
 
+// Declared up here because its two callers straddle the impl: the resize handle is DRAWN from
+// inside `previz_renderer::impl` and HIT-TESTED from `previz_renderer::input` below it, and the
+// definition sits with the other screen geometry near the bottom of this file.
+float corner_size(const core::screen_meta& meta);
+
 // ---- glTF loader -----------------------------------------------------------
 
 // A validated window onto one glTF accessor's data.
@@ -346,6 +351,9 @@ struct previz_renderer::impl
     GLuint                      depth_rbo_ = 0;
     int                         fbo_w_     = 0;
     int                         fbo_h_     = 0;
+    GLuint                      corner_vao_ = 0;
+    GLuint                      corner_vbo_ = 0;
+    int                         corner_vert_count_ = 0;
     GLuint                      ring_vao_ = 0;
     GLuint                      ring_vbo_ = 0;
     int                         ring_vert_count_ = 0;
@@ -376,6 +384,11 @@ struct previz_renderer::impl
                 glDeleteFramebuffers(1, &fbo_);
             if (depth_rbo_)
                 glDeleteRenderbuffers(1, &depth_rbo_);
+            if (corner_vao_) {
+                glDeleteVertexArrays(1, &corner_vao_);
+                glDeleteBuffers(1, &corner_vbo_);
+                corner_vao_ = 0;
+            }
             if (ring_vao_) {
                 glDeleteVertexArrays(1, &ring_vao_);
                 glDeleteBuffers(1, &ring_vbo_);
@@ -451,6 +464,62 @@ struct previz_renderer::impl
     ///
     /// The normal is the LIGHT DIRECTION, so `NdotL` is 1 and the colour arrives at full
     /// intensity: a diagnostic aid should not be dimmed by where the sun is.
+    /// The two TOP corners of the selected screen, as small squares lying in its surface.
+    ///
+    /// Top corners and not all four, deliberately. A screen's origin is its centre-BOTTOM: it
+    /// stands on the floor, and the bottom edge is where it meets the deck. Dragging a bottom
+    /// corner would have to move the screen as well as resize it -- two operations at once, on
+    /// the axis an operator is least likely to want either. The top corners resize about that
+    /// same origin: width follows |local_x| doubled, height follows local_y, and the screen
+    /// stays on the floor and centred where it was.
+    void build_corners(const screen_meta& meta)
+    {
+        const float c   = corner_size(meta);
+        const auto  rot = mat4::rotate_y(meta.rot_yaw) * mat4::rotate_x(meta.rot_pitch) *
+                         mat4::rotate_z(meta.rot_roll);
+        std::vector<previz_vertex> verts;
+        auto put_local = [&](float lx, float ly) {
+            // A curved screen's surface is not its chord plane, but the pick is against the
+            // chord (see `compute_pick`), so the handle is drawn where the pick will find it
+            // rather than where the surface bulges. Naming that here because the two differ by
+            // the sagitta on a deeply curved panel.
+            verts.push_back({rot.m[0] * lx + rot.m[4] * ly + meta.pos_x,
+                             rot.m[1] * lx + rot.m[5] * ly + meta.pos_y,
+                             rot.m[2] * lx + rot.m[6] * ly + meta.pos_z,
+                             0, 1, 0, 0, 0});
+        };
+        for (int side = 0; side < 2; ++side) {
+            const float cx = (side == 0 ? -1.0f : 1.0f) * meta.width_m * 0.5f;
+            const float cy = meta.height_m;
+            const float sx = side == 0 ? 1.0f : -1.0f; // inwards
+            const float box[5][2] = {{cx, cy}, {cx + sx * c, cy}, {cx + sx * c, cy - c}, {cx, cy - c}, {cx, cy}};
+            for (int i = 0; i < 4; ++i) {
+                put_local(box[i][0], box[i][1]);
+                put_local(box[i + 1][0], box[i + 1][1]);
+            }
+        }
+        corner_vert_count_ = static_cast<int>(verts.size());
+        if (!corner_vao_) {
+            glGenVertexArrays(1, &corner_vao_);
+            glGenBuffers(1, &corner_vbo_);
+        }
+        glBindVertexArray(corner_vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, corner_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(previz_vertex)),
+                     verts.data(), GL_DYNAMIC_DRAW);
+        auto stride  = static_cast<GLsizei>(sizeof(previz_vertex));
+        auto pos_loc = shader_->get_attrib_location("a_Position");
+        glEnableVertexAttribArray(pos_loc);
+        glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
+        auto nrm_loc = shader_->get_attrib_location("a_Normal");
+        glEnableVertexAttribArray(nrm_loc);
+        glVertexAttribPointer(nrm_loc, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(3 * sizeof(float)));
+        auto uv_loc = shader_->get_attrib_location("a_TexCoord");
+        glEnableVertexAttribArray(uv_loc);
+        glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(6 * sizeof(float)));
+        glBindVertexArray(0);
+    }
+
     /// The yaw RING on the selected screen: a circle in the horizontal plane through its base,
     /// with a spoke at the screen's current facing so the handle says which way it is pointing.
     ///
@@ -979,6 +1048,16 @@ struct previz_renderer::impl
                     glBindVertexArray(ring_vao_);
                     glDrawArrays(GL_LINES, 0, ring_vert_count_);
                     glBindVertexArray(0);
+
+                    // The resize corners, in the same amber family as the ring but lighter, so
+                    // the two read as one handle set rather than as two unrelated overlays.
+                    build_corners(sit->second);
+                    glDepthFunc(GL_LEQUAL);
+                    shader_->set("u_base_color", 0.99, 0.8, 0.35);
+                    glBindVertexArray(corner_vao_);
+                    glDrawArrays(GL_LINES, 0, corner_vert_count_);
+                    glBindVertexArray(0);
+                    glDepthFunc(GL_LESS);
                 }
             }
         }
@@ -1207,6 +1286,7 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
         bool          panning   = false;
         bool          dragging  = false;
         bool          rotating  = false;
+        bool          resizing  = false;
         double        grab_angle = 0.0; ///< where on the ring the grab started, degrees
         double        grab_yaw   = 0.0; ///< the screen's yaw at that moment
         std::string   drag_name;
@@ -1278,6 +1358,28 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                         }
                     }
                     const auto hit = pick_at(event.x, event.y);
+                    // A GRAB ON A TOP CORNER RESIZES rather than moves, and the test is on the
+                    // pick's own local coordinates -- no second ray, no second plane, and no way
+                    // for the handle to sit somewhere the pick does not agree with.
+                    if (hit && hit->name == impl_->scene_.selected) {
+                        screen_meta sel{};
+                        bool        have = false;
+                        {
+                            std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                            const auto it = impl_->scene_.screens.find(hit->name);
+                            if (it != impl_->scene_.screens.end()) {
+                                sel  = it->second;
+                                have = true;
+                            }
+                        }
+                        const float c = have ? corner_size(sel) : 0.0f;
+                        if (have && hit->local_y > sel.height_m - c &&
+                            std::abs(std::abs(hit->local_x) - sel.width_m * 0.5) < c) {
+                            g.resizing  = true;
+                            g.drag_name = hit->name;
+                            return true;
+                        }
+                    }
                     {
                         std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
                         impl_->scene_.selected = hit ? hit->name : std::string();
@@ -1297,6 +1399,7 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                 else if (event.button == 0) {
                     g.dragging = false;
                     g.rotating = false;
+                    g.resizing = false;
                     g.drag_name.clear();
                 }
             }
@@ -1336,6 +1439,38 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                 return true;
             }
 
+            if (g.resizing && !g.drag_name.empty()) {
+                screen_meta meta{};
+                bool        found = false;
+                {
+                    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                    const auto                  it = impl_->scene_.screens.find(g.drag_name);
+                    if (it != impl_->scene_.screens.end()) {
+                        meta  = it->second;
+                        found = true;
+                    }
+                }
+                if (!found) {
+                    g.resizing = false;
+                    return true;
+                }
+                // The PLANE, not the quad. A corner is dragged OUTWARD, so the pointer is off
+                // the screen it is resizing for the whole gesture, and `compute_pick`'s bounds
+                // test -- right for selecting -- returns nothing exactly when it is needed.
+                // Measured: the first version grabbed correctly and then did nothing at all.
+                if (const auto p = core::compute_plane_point(view, aspect, event.x, event.y, meta)) {
+                    // Width is the half-width DOUBLED, because the origin is the centre: an
+                    // operator dragging one corner out grows the screen both ways and it stays
+                    // where it was. A minimum of 10 cm so a drag through the centre cannot
+                    // invert the geometry or collapse it to a line nothing can grab again.
+                    const float w = std::max(0.1f, static_cast<float>(std::abs(p->first)) * 2.0f);
+                    const float h = std::max(0.1f, static_cast<float>(p->second));
+                    set_screen_size(g.drag_name, w, h);
+                }
+                g.last_x = event.x;
+                g.last_y = event.y;
+                return true;
+            }
             if (g.rotating && !g.drag_name.empty()) {
                 screen_meta sel{};
                 bool        have = false;
@@ -1801,6 +1936,18 @@ previz_mesh generate_curved_screen(const std::string& name, float w, float h, fl
 
     m.gpu_dirty = true;
     return m;
+}
+
+/// How big a resize corner is, in metres of the screen's own surface.
+///
+/// In the file's geometry namespace rather than inside the renderer's impl, because BOTH the
+/// drawing and the hit-test need it and they live on opposite sides of that boundary -- the
+/// draw is impl, the gesture is `previz_renderer::input`. One function for the reason
+/// `ring_radius` is one: a handle you can see and cannot grab, or grab and cannot see, is the
+/// same defect twice.
+float corner_size(const screen_meta& meta)
+{
+    return std::max(0.12f, std::min(meta.width_m, meta.height_m) * 0.12f);
 }
 
 /// Radius from width and arc, and pitch from size and resolution: the two derivations a
