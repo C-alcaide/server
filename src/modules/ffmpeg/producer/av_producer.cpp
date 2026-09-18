@@ -3454,7 +3454,7 @@ struct AVProducer::Impl
     /// The effective answer make_frame consumes: operator, then the file, then the
     /// convention that decoded media is straight. Computed rather than stored so a stream
     /// that only declares itself on frame 30 is still honoured from frame 30.
-    std::atomic<bool> straight_alpha_{true};
+    std::atomic<bool> straight_alpha_{core::configured_default_straight()};
     std::atomic<bool> alpha_source_logged_{false};
     int64_t                          frame_count_    = 0;
     bool                             frame_flush_    = true;

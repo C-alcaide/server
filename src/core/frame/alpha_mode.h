@@ -47,31 +47,40 @@ namespace caspar { namespace core {
 /// to see. HTML is unaffected for a different reason — CEF hands over genuinely
 /// premultiplied BGRA, so `false` is the truth there and stays.
 ///
-/// STRAIGHT IS THE DEFAULT FOR DECODED MEDIA, because that is what the formats store:
-/// FFmpeg has no premultiplied pixel format for these, and every NLE writes ProRes 4444,
-/// QuickTime Animation, NotchLC and PNG with straight alpha. `docs/guides/COLOR_GRADING.md` has
-/// documented this as the intended behaviour all along — *"Premultiply if the source is
-/// straight (default)"* — it was only ever the flag that went unset.
+/// THE DEFAULT IS PREMULTIPLIED, and it is configurable. Nothing in ProRes 4444, QuickTime
+/// Animation, Hap or NotchLC declares the mode, and both populations are real: After
+/// Effects and this server's own recordings are premultiplied, Premiere and Media Encoder
+/// are straight. Detection cannot settle it either -- a dark graphic satisfies
+/// `rgb <= alpha` whichever convention it is -- so it is declared, never guessed.
 ///
-/// The override exists because the assumption is about a convention rather than a signal
-/// in the file, and a premultiplied render does occasionally reach us — some Adobe
-/// ProRes 4444 exports among them. There is nothing in the container to detect it with,
-/// so it is the operator's to declare:
+/// Measured 2026-09-18, a premultiplied qtrle recorded out of this server and played back:
+/// under the old straight default its partial-alpha pixels were wrong by mean 17.3 / max 53
+/// codes, because the mixer's premultiplied output was premultiplied a second time. The
+/// round trip closes at mean 0.58 with the default below.
 ///
-///     PLAY 1-1 "clip"                    straight (default, correct for anything an NLE wrote)
+///     <decode-alpha-mode>default [default|straight|premultiplied]</decode-alpha-mode>
+///
+///     PLAY 1-1 "clip"                    the configured default
 ///     PLAY 1-1 "clip" PREMULTIPLIED      the RGB already carries its alpha
-///     PLAY 1-1 "clip" STRAIGHT           explicit, for a config that wants to say so
+///     PLAY 1-1 "clip" STRAIGHT           it does not; premultiply it before the blend
 ///
-/// `PREMULTIPLIED` also restores the pre-2026-08-20 rendering exactly, which is the
-/// escape hatch for anyone whose content was authored against the old behaviour.
+/// This matches upstream's `decode-alpha-mode` (CasparCG/server#1800) so the two do not
+/// diverge, and the shape other systems use: Resolume's per-clip "Alpha Type" defaults to
+/// premultiplied for the same reason, Disguise makes it a per-layer blend mode.
+///
+/// The convention to fall back on: `configuration.decode-alpha-mode`, premultiplied unless
+/// it says otherwise. Defined in alpha_mode.cpp so the config is read, and warned about,
+/// exactly once for all four producers that share this.
+bool configured_default_straight();
+
 template <class C>
-bool source_is_straight_alpha(C&& params, bool default_straight = true)
+bool source_is_straight_alpha(C&& params)
 {
     if (contains_param(L"PREMULTIPLIED", params))
         return false;
     if (contains_param(L"STRAIGHT", params))
         return true;
-    return default_straight;
+    return configured_default_straight();
 }
 
 /// What the OPERATOR said, kept separate from what we would assume.
@@ -84,8 +93,8 @@ enum class alpha_declaration
 
 /// The same three keywords, read as three answers rather than two.
 ///
-/// `source_is_straight_alpha` collapses "nothing was said" into "straight", which is right
-/// for a producer with nothing better to consult. It is wrong for one that has: FFmpeg 8
+/// `source_is_straight_alpha` collapses "nothing was said" into the configured default,
+/// which is right for a producer with nothing better to consult. It is wrong for one that has: FFmpeg 8
 /// carries `AVFrame.alpha_mode`, and a PNG or EXR or alpha-tagged Matroska now DECLARES its
 /// mode. Collapsing first would let the fallback silently outrank the file.
 ///

@@ -1,6 +1,54 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: decoded media is assumed PREMULTIPLIED again, and it is now configurable
+
+Since 2026-08-20 decoded media was assumed **straight**, which fixed NLE-authored clips and
+silently broke two things this server produces itself.
+
+**The round trip was broken.** The ffmpeg consumer writes the mixer's premultiplied output with
+no straightening — only the IMAGE consumer straightens — so a qtrle or ProRes 4444 recorded out
+of CasparVP came back premultiplied and was premultiplied a second time on playback. Measured on
+a recording made by this server, partial-alpha pixels against the correct picture:
+
+| | mean | p99 | max |
+| :--- | ---: | ---: | ---: |
+| before, default straight | 17.30 | 45 | 53 |
+| after, default premultiplied | **0.58** | 1 | 7 |
+
+The same applied to After Effects ProRes 4444 masters, which are premultiplied: measured 0.00%
+of partial-alpha pixels with `rgb > alpha` on two of them.
+
+**Nothing in the file says which it is** — not the ProRes bitstream (`alpha_info` is the alpha
+BIT DEPTH), not the MOV container, and FFmpeg populates `AVFrame.alpha_mode` for PNG, EXR and
+JPEG XL only. Detection cannot settle it either: a dark graphic satisfies `rgb <= alpha`
+whichever convention it is, so a straight dark lower third is indistinguishable from a
+premultiplied one. It is therefore declared:
+
+```xml
+<decode-alpha-mode>default [default|straight|premultiplied]</decode-alpha-mode>
+```
+
+```
+PLAY 1-1 "clip" STRAIGHT
+PLAY 1-1 "clip" PREMULTIPLIED
+```
+
+Top level, not under `<ffmpeg>`, because four producers share it — ffmpeg, hap, cuda_prores and
+cuda_notchlc. OFX is unaffected: it declares its own mode from the plugin. An unrecognised value
+warns and uses premultiplied.
+
+**Anyone playing Premiere or Media Encoder output, which is straight, now needs one config line**
+(`<decode-alpha-mode>straight</decode-alpha-mode>`) or the per-clip keyword. This matches
+upstream's `decode-alpha-mode` (CasparCG/server#1800) so the two do not diverge, and the shape
+Resolume and Disguise both use — Resolume defaults to premultiplied for the same reason.
+
+Verified 7/7: no config line, `default`, `premultiplied` and a bad value all render
+premultiplied; `straight` renders straight; and each keyword overrides the opposite config
+setting. `decoded-alpha` passes on both mixers, and its fixture now declares `STRAIGHT` because
+its subject is the decode route rather than the default.
+
+
 ### BREAKING: the legacy `projection/*` published block is retired
 
 Every projection value has been published twice — under its historical `projection/*` names and
