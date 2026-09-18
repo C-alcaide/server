@@ -82,18 +82,30 @@ if(NOT WIN32)
     endforeach()
 endif()
 
-if(WIN32 AND TARGET portaudio_static)
-    # The global CMAKE_CXX_FLAGS force-includes common/compiler/vs/disable_silly_warnings.h
-    # by a path relative to the source root, so an out-of-tree target cannot resolve it.
-    # Same fix as openfx_host and tinyobjloader.
-    target_include_directories(portaudio_static PRIVATE ${CMAKE_SOURCE_DIR})
-    # PortAudio's ASIO host API and Steinberg's SDK are third-party and predate /W4 /WX by
-    # about two decades. Scoped to this target so the fork's own code keeps the strict flags.
-    #
-    # /UUNICODE /U_UNICODE for the same reason openfx_host needs it: asiolist.cpp calls the
-    # TCHAR Win32 APIs (RegOpenKey, CharLowerBuff) with char* and assumes an ANSI build, so
-    # the global UNICODE resolves them to the W variants and every call fails to convert.
-    target_compile_options(portaudio_static PRIVATE /W0 /WX- /UUNICODE /U_UNICODE)
+if(WIN32)
+    # BOTH targets, not just the static one. PortAudio builds a shared `portaudio` as well
+    # when ASIO is enabled, from the same third-party sources, and it needs the same two
+    # fixes -- without them every C++ file under hostapi/asio and asiosdk-src fails with
+    # `C1083: cannot open include file 'common/compiler/vs/disable_silly_warnings.h'` and no
+    # exe is produced. The Linux block above already loops over both for the same reason.
+    foreach(_pa_target portaudio portaudio_static)
+        if(TARGET ${_pa_target})
+            # The global CMAKE_CXX_FLAGS force-includes
+            # common/compiler/vs/disable_silly_warnings.h by a path relative to the source
+            # root, so an out-of-tree target cannot resolve it. Same fix as openfx_host and
+            # tinyobjloader.
+            target_include_directories(${_pa_target} PRIVATE ${CMAKE_SOURCE_DIR})
+            # PortAudio's ASIO host API and Steinberg's SDK are third-party and predate
+            # /W4 /WX by about two decades. Scoped to these targets so the fork's own code
+            # keeps the strict flags.
+            #
+            # /UUNICODE /U_UNICODE for the same reason openfx_host needs it: asiolist.cpp
+            # calls the TCHAR Win32 APIs (RegOpenKey, CharLowerBuff) with char* and assumes
+            # an ANSI build, so the global UNICODE resolves them to the W variants and every
+            # call fails to convert.
+            target_compile_options(${_pa_target} PRIVATE /W0 /WX- /UUNICODE /U_UNICODE)
+        endif()
+    endforeach()
 endif()
 
 set(SOURCES
