@@ -1534,6 +1534,16 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
         view = impl_->scene_.has_view_override ? impl_->scene_.view_camera : impl_->scene_.camera;
     }
 
+    // Read once per event rather than captured at grab time: an operator who turns snapping on
+    // mid-drag means it from that moment, and a value latched at mouse-down would ignore them
+    // until they let go and grabbed again.
+    double snap_m = 0.0, snap_deg = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        snap_m   = impl_->scene_.snap_m;
+        snap_deg = impl_->scene_.snap_deg;
+    }
+
     const auto pick_at = [&](double sx, double sy) {
         std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
         return core::compute_pick(view, aspect, sx, sy, impl_->scene_.screens);
@@ -1722,8 +1732,13 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                     // operator dragging one corner out grows the screen both ways and it stays
                     // where it was. A minimum of 10 cm so a drag through the centre cannot
                     // invert the geometry or collapse it to a line nothing can grab again.
-                    const float w = std::max(0.1f, static_cast<float>(std::abs(p->first)) * 2.0f);
-                    const float h = std::max(0.1f, static_cast<float>(p->second));
+                    // Snapped BEFORE the minimum, so the floor is the last word: a snap step
+                    // coarser than 10 cm would otherwise round a dragged-through-centre size to
+                    // zero and hand `set_screen_size` a degenerate screen.
+                    const float w = std::max(
+                        0.1f, static_cast<float>(core::snap_to(std::abs(p->first) * 2.0, snap_m)));
+                    const float h =
+                        std::max(0.1f, static_cast<float>(core::snap_to(p->second, snap_m)));
                     set_screen_size(g.drag_name, w, h);
                 }
                 g.last_x = event.x;
@@ -1756,6 +1771,10 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                             a -= 360.0;
                         while (a < -180.0)
                             a += 360.0;
+                        // Snapped AFTER the wrap, so a step that divides 360 lands on the same
+                        // set of angles either side of the seam -- snapping first and wrapping
+                        // after can turn a snapped 180 into an unsnapped -180.
+                        a = core::snap_to(a, snap_deg);
                         // Only the grabbed component moves. The other two are carried through
                         // from the screen as it stands, because `set_screen_rotation` takes all
                         // three and writing a stale copy of the other two is how a pitch drag
@@ -1803,10 +1822,15 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                     const auto d_lx = static_cast<float>(hit->local_x - g.grab_local_x);
                     const auto d_ly = static_cast<float>(hit->local_y - g.grab_local_y);
 
-                    set_screen_position(g.drag_name,
-                                        meta.pos_x + rgt[0] * d_lx + up[0] * d_ly,
-                                        meta.pos_y + rgt[1] * d_lx + up[1] * d_ly,
-                                        meta.pos_z + rgt[2] * d_lx + up[2] * d_ly);
+                    // Snapped in WORLD axes, not the screen's own. The grid an operator is
+                    // lining a stage up against is the floor's, and a yawed screen snapped in
+                    // its local frame would land on a grid rotated with it -- which is a
+                    // different grid for every screen, and so no grid at all.
+                    set_screen_position(
+                        g.drag_name,
+                        static_cast<float>(core::snap_to(meta.pos_x + rgt[0] * d_lx + up[0] * d_ly, snap_m)),
+                        static_cast<float>(core::snap_to(meta.pos_y + rgt[1] * d_lx + up[1] * d_ly, snap_m)),
+                        static_cast<float>(core::snap_to(meta.pos_z + rgt[2] * d_lx + up[2] * d_ly, snap_m)));
                 }
                 return true;
             }
@@ -2622,6 +2646,13 @@ previz_scene previz_renderer::scene() const
 /// The fallback chain is the one every 3D application has, and its last step is what makes the
 /// command useful on a stage nobody has clicked yet: "frame everything" is how an operator finds
 /// a venue they have just loaded and cannot see.
+void previz_renderer::set_snap(double metres, double degrees)
+{
+    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+    impl_->scene_.snap_m   = metres;
+    impl_->scene_.snap_deg = degrees;
+}
+
 bool previz_renderer::frame_view(const std::string& target)
 {
     core::previz_camera before;
@@ -2715,6 +2746,8 @@ core::stage_snapshot previz_renderer::stage_snapshot() const
     out.flags.show_gizmo        = sc.show_gizmo;
     out.flags.show_camera       = sc.show_camera;
     out.flags.camera_locked     = sc.camera_locked;
+    out.flags.snap_m            = sc.snap_m;
+    out.flags.snap_deg          = sc.snap_deg;
     out.flags.has_view_override = sc.has_view_override;
     out.camera                  = sc.camera;
     out.view_camera             = sc.view_camera;

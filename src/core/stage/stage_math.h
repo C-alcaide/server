@@ -301,6 +301,16 @@ constexpr double ring_band_fraction = 0.18;
 /// copies of this number is a handle you can see and cannot grab.
 double ring_radius(const screen_meta& meta);
 
+/// Round `value` to the nearest multiple of `step`. A step of zero or less is OFF and returns
+/// the value untouched.
+///
+/// The zero case is the whole reason this is a function rather than one line at each call site:
+/// `std::round(v / 0.0) * 0.0` is NaN, and a NaN position does not throw, does not log, and
+/// makes a screen disappear from the viewport with the tree still reporting a number. "Off" has
+/// to be a value the caller can hold, because that is what an operator with snapping disabled
+/// has, and it must travel through the same code as any other step.
+double snap_to(double value, double step);
+
 /// An axis-aligned box in world space, grown a point at a time.
 ///
 /// `valid` rather than a sentinel extent: an EMPTY box and a box around a single point are

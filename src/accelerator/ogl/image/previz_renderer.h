@@ -70,6 +70,9 @@ class previz_renderer
     /// affects projection).  Enables the view override.
     void set_view_camera(float x, float y, float z, float yaw, float pitch, float roll, float fov);
 
+    /// Gesture snapping: the step a DRAG rounds to, in metres and in degrees. 0 disables.
+    void set_snap(double metres, double degrees);
+
     /// Frame a target in the viewport -- a named screen or mesh, else the selection, else the
     /// whole stage. False for a name that is neither, and for an empty stage.
     bool frame_view(const std::string& target);

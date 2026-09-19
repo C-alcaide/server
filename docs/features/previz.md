@@ -41,6 +41,7 @@ the verb, as it does for `MIXER`. The layer index parses and **no previz command
 | `PREVIZ UNMAP` | `<mesh_name>` | `previz_unmap_command` |
 | `PREVIZ CAMERA` | *(query)* \| `RESET` \| `OVERRIDE [1\|0]` \| `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | `previz_camera_command` |
 | `PREVIZ VIEW` | *(query)* \| `CLEAR` \| `RESET` \| `FRAME [<name>]` \| `TOP` \| `FRONT` \| `SIDE` \| `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | `previz_view_command` |
+| `PREVIZ SNAP` | *(query)* \| `OFF` \| `<metres> [<degrees>]` | `previz_snap_command` |
 | `PREVIZ INFO` | — query | `previz_info_command` |
 | `PREVIZ SHOW` | `<mesh_name> [1\|0]` | `previz_show_command` |
 | `PREVIZ GRID` | `[1\|0]` | `previz_grid_command` |
@@ -121,6 +122,38 @@ rather than `400`.
    adding one whose `channel` is set only by `PREVIZ MAP` does not, because `MAP` does not either.
 7. **`res_w`/`res_h` are stored and persisted and read by nothing.** No renderer path and no
    projection calculation consults them.
+
+### 1.1a `PREVIZ SNAP` — since 2026-09-19
+
+`PREVIZ <ch> SNAP OFF` \| `PREVIZ <ch> SNAP <metres> [<degrees>]`, and with no argument a query
+that answers `201` then `<metres> <degrees>`. Both steps are `0` by default, which is off.
+
+**It applies to a GESTURE and never to a COMMAND**, and that is the whole of the design.
+`SCREEN <name> POSITION 1.234` sets 1.234 with snapping on, because a client sending a number
+means that number — a stage built from a survey is full of positions no grid contains, and a
+snap that reached the write path would quietly move every one of them the first time anything
+re-sent them, with snapping enabled for an unrelated reason. The three drags that snap are the
+move, the resize and the three rotation rings.
+
+Three details that are not arbitrary:
+
+* **The position snaps in WORLD axes**, not the screen's own. The grid an operator lines a stage
+  up against is the floor's; a yawed screen snapped in its local frame lands on a grid rotated
+  with it, which is a different grid for every screen and so no grid at all.
+* **The size snaps BEFORE its 10 cm minimum**, so the floor is the last word. A step coarser than
+  10 cm would otherwise round a dragged-through-centre size to zero.
+* **The rotation snaps AFTER the wrap to ±180°**, so a step that divides 360 lands on the same
+  set of angles either side of the seam.
+
+`OFF` is spelled out rather than left as the initialiser of a chain, and a NEGATIVE step is
+`400` rather than being read as off — it is a typo for a positive one, and treating it as off
+is the same lie as accepting a word. A step of zero reaches `core::snap_to`, which returns the
+value untouched: `round(v / 0) * 0` is NaN, and a NaN position neither throws nor logs while
+removing a screen from the picture with the tree still reporting a number beside it.
+
+Published as `snap_m` and `snap_deg` on the stage — but note that an **untouched stage
+publishes no previz sub-tree at all** (§4.2), so on a stage with nothing on it they are absent
+rather than zero. That is the documented behaviour of the publisher and not a fault of these two.
 
 ### 1.2 `PREVIZ CAMERA` and `PREVIZ VIEW`
 

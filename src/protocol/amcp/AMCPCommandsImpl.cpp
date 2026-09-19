@@ -5813,6 +5813,48 @@ std::wstring previz_view_command(command_context& ctx)
     }
 }
 
+/// `PREVIZ <ch> SNAP` | `OFF` | `<metres> [<degrees>]`
+///
+/// Snapping applies to a GESTURE and never to a command: `SCREEN <name> POSITION 1.234` sets
+/// 1.234 with snapping on, because a client sending a number means that number. A stage built
+/// from a survey is full of positions no grid contains, and a snap that reached the write path
+/// would quietly move every one of them the first time anything re-sent them.
+std::wstring previz_snap_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+
+    if (ctx.parameters.empty()) {
+        const auto sc = ogl_mix->scene();
+        std::wostringstream os;
+        os << L"201 PREVIZ OK\r\n" << sc.snap_m << L" " << sc.snap_deg << L"\r\n\r\n";
+        return os.str();
+    }
+
+    // OFF is spelled out rather than left as the initialiser of an if/else chain. Every instance
+    // of this tree's most repeated defect had a legitimate way to turn the feature off and every
+    // one of them was the leftover branch; naming it is what separates "the operator cleared it"
+    // from "the operator mistyped".
+    if (boost::iequals(ctx.parameters.at(0), L"OFF")) {
+        ogl_mix->set_snap(0.0, 0.0);
+        return L"202 PREVIZ OK\r\n";
+    }
+
+    try {
+        const double m = std::stod(u8(ctx.parameters.at(0)));
+        const double d = ctx.parameters.size() > 1 ? std::stod(u8(ctx.parameters.at(1))) : 0.0;
+        // A negative step is refused rather than clamped: it is a typo for a positive one, and
+        // silently reading it as OFF is the same class of lie as accepting BANANA.
+        if (m < 0.0 || d < 0.0)
+            return L"400 PREVIZ ERROR\r\n";
+        ogl_mix->set_snap(m, d);
+        return L"202 PREVIZ OK\r\n";
+    } catch (const std::exception&) {
+        return L"400 PREVIZ ERROR\r\n"; // a word that is not a number names nothing
+    }
+}
+
 std::wstring previz_info_command(command_context& ctx)
 {
     auto* ogl_mix = get_ogl_mixer(ctx);
@@ -7261,6 +7303,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Previz Commands", L"PREVIZ PRESET",    previz_preset_command,    1);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SCREEN",    previz_screen_command,    1);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ AUTOPROJECTION", previz_autoprojection_command, 0);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ SNAP",      previz_snap_command,      0);
 
     repo->register_command(L"Thumbnail Commands", L"THUMBNAIL LIST", thumbnail_list_command, 0);
     repo->register_command(L"Thumbnail Commands", L"THUMBNAIL RETRIEVE", thumbnail_retrieve_command, 1);

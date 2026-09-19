@@ -530,6 +530,7 @@ on, the tab pushes `PREVIZ <channel> …` commands as you work:
 | `PREVIZ <ch> VIEW …` | Navigation view sync. |
 | `PREVIZ <ch> VIEW FRAME [<name>]` | Fit a screen or venue mesh in the viewport, keeping the angle you are looking from. With no name it frames the selection, and with nothing selected the whole stage — which is how to find a venue model you have just loaded and cannot see. |
 | `PREVIZ <ch> VIEW TOP\|FRONT\|SIDE` | Jump to a canonical orientation and frame the stage from it. |
+| `PREVIZ <ch> SNAP <metres> [<degrees>]` | Make dragging in the viewport land on a grid — position and size to the metre step, rotation to the angle step. `SNAP OFF` disables it. **Only dragging snaps**: a `SCREEN ... POSITION` command still sets exactly what you send, so a surveyed stage is safe with snapping left on. |
 | `PREVIZ <ch> SCREEN …` | A screen's geometry / parameters change. |
 | `PREVIZ <ch> SHOW …` | A node's visibility changes. |
 | `PREVIZ <ch> CAMERA SHOW <0\|1>` | Draw the **production camera** in the viewport — its body and the frustum it is covering. Needs a viewport of its own (`PREVIZ <ch> VIEW ...`), because from the camera's own eye there is nothing to see. Clicking a screen outlines it. |

@@ -101,6 +101,10 @@ struct previz_scene
     // works).  Cleared to hand control back to the tracker.
     bool                             camera_locked = false;
     std::map<std::string, int>       mesh_to_channel; // mesh name → channel index
+    /// Gesture snapping, off at 0 -- see `core::previz_flags`. Applies to a DRAG and never to
+    /// a command, so a client that sends a number gets that number.
+    double                           snap_m         = 0.0;
+    double                           snap_deg       = 0.0;
     bool                             show_grid      = true;
     bool                             show_wireframe = false;
     bool                             show_gizmo     = true;

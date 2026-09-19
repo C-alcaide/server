@@ -493,6 +493,13 @@ std::optional<ring_hit> compute_ring_grab(const previz_camera& view,
     return best;
 }
 
+double snap_to(double value, double step)
+{
+    if (!(step > 0.0)) // also refuses NaN, which compares false against everything
+        return value;
+    return std::round(value / step) * step;
+}
+
 previz_camera frame_view(const previz_camera& view, double aspect, const world_box& box)
 {
     previz_camera out = view;

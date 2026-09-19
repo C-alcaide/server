@@ -17,6 +17,7 @@
 #include <common/utf.h>
 
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <map>
 #include <string>
@@ -919,6 +920,46 @@ stage_math_report stage_math_self_test()
                 rep.failures.emplace_back("frame/orientation: a word that names no orientation was "
                                           "accepted -- the house defect");
         }
+    }
+
+    // ---- 18. snap_to: a grid, and the three inputs that are not a grid ------------------
+    //
+    // The arithmetic is one line; the cases below are not about the arithmetic. A step of ZERO
+    // is what every operator with snapping switched off has, and `round(v / 0.0) * 0.0` is NaN
+    // -- which does not throw, does not log, and makes a screen vanish from the viewport with
+    // the tree still reporting a number beside it. A NEGATIVE step is a typo for a positive one.
+    // And a NaN step is what a malformed parse hands over.
+    {
+        check("snap/exact", snap_to(1.0, 0.5), 1.0, 1e-12);
+        check("snap/up", snap_to(0.4, 0.5), 0.5, 1e-12);
+        check("snap/down", snap_to(0.1, 0.5), 0.0, 1e-12);
+        check("snap/negative-value", snap_to(-1.2, 0.5), -1.0, 1e-12);
+        check("snap/quarter", snap_to(3.3, 0.25), 3.25, 1e-12);
+
+        // Angles: a 15 degree grid must land ON its multiples from either side of one.
+        check("snap/angle/below", snap_to(44.0, 15.0), 45.0, 1e-12);
+        check("snap/angle/above", snap_to(46.0, 15.0), 45.0, 1e-12);
+        check("snap/angle/seam", snap_to(-179.0, 15.0), -180.0, 1e-12);
+
+        // OFF, and the two inputs that must be treated as OFF rather than as a grid.
+        check("snap/off", snap_to(1.234, 0.0), 1.234, 1e-12);
+        check("snap/negative-step", snap_to(1.234, -0.5), 1.234, 1e-12);
+        {
+            const double nan_step = std::numeric_limits<double>::quiet_NaN();
+            const double got      = snap_to(1.234, nan_step);
+            ++rep.checks;
+            if (std::isnan(got) || std::abs(got - 1.234) > 1e-12)
+                rep.failures.emplace_back("snap/nan-step: a NaN step produced " +
+                                          std::to_string(got) +
+                                          " -- it must be treated as OFF, because a NaN position "
+                                          "neither throws nor logs and removes a screen from the "
+                                          "picture while the tree still reports a number");
+        }
+
+        // A step coarser than the value must reach ZERO rather than the step: this is the case
+        // the resize drag's 10 cm floor exists for, and a version that clamped to the step
+        // instead would hide it.
+        check("snap/coarse", snap_to(0.2, 1.0), 0.0, 1e-12);
     }
 
     return rep;

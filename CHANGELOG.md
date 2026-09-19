@@ -1,6 +1,34 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: previz gestures can SNAP to a grid -- `PREVIZ <ch> SNAP <metres> [<degrees>]`
+
+Lining screens up edge to edge is most of what building an LED volume in previz IS, and every
+drag landed on an arbitrary float. The move, the resize and the three rotation rings now round to
+a step an operator chooses; `SNAP OFF` is the default.
+
+**It applies to a GESTURE and never to a COMMAND.** `SCREEN <name> POSITION 1.234` sets 1.234
+with snapping on, because a client sending a number means that number -- a stage built from a
+survey is full of positions no grid contains, and a snap that reached the write path would
+quietly move every one of them the first time anything re-sent them, with snapping enabled for an
+unrelated reason. That distinction has its own battery arm, because it is the half that would
+break silently.
+
+The position snaps in WORLD axes rather than the screen's own, since the grid an operator lines a
+stage up against is the floor's and a local-frame grid is a different grid for every screen. The
+size snaps BEFORE its 10 cm minimum, so a coarse step cannot round a screen to zero. The rotation
+snaps AFTER the wrap to +-180, so a step dividing 360 lands on the same angles either side of the
+seam.
+
+Verified: `previz-gizmo` 34/34 on both mixers. The snap arm runs the SAME drag twice, off then
+on, and expects two different NUMBERS rather than "it moved" and "it moved differently" -- this
+fixture's drag lands near 0.4 against a 0.5 grid, which is close enough that "the position
+changed" could not tell a working snap from a broken one. The rotation arm drags 50 degrees
+against a 15 degree step, because a 45 degree drag is already on the grid and would pass on a
+server that snapped nothing. Stage math self-test 149 checks, up from 137, and four of the new
+ones are about inputs that are not a grid: zero, negative, NaN, and a step coarser than the
+value.
+
 ### BEHAVIOUR: the previz viewport can FRAME things -- `VIEW FRAME`, `VIEW TOP|FRONT|SIDE`
 
 Every 3D application has these two and previz had neither, so finding a screen meant typing seven

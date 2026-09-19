@@ -132,6 +132,15 @@ struct previz_flags
     bool show_camera       = true;
     bool camera_locked     = false;
     bool has_view_override = false;
+    /// Gesture snapping, off at 0. `snap_m` rounds a dragged position and a dragged size to a
+    /// multiple of itself in metres; `snap_deg` does the same for a dragged rotation.
+    ///
+    /// They apply to the GESTURE and never to the COMMAND. `SCREEN <name> POSITION 1.234` sets
+    /// 1.234 with snapping on, because a client sending a number means that number -- a stage
+    /// built from a survey is full of positions no grid contains, and a snap that reached the
+    /// write path would quietly move every one of them.
+    double snap_m          = 0.0;
+    double snap_deg        = 0.0;
 };
 
 /// Everything about the stage that is worth publishing every tick, and nothing that is not.
