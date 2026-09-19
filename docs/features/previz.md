@@ -11,7 +11,7 @@
 > it are §5.3 below
 > **Guide:** [`../guides/PREVIZ_3D_MODULE.md`](../guides/PREVIZ_3D_MODULE.md)
 > **Coverage:** `cli.py previz-picture` — does the mapped channel arrive on the mesh, in order, on both mixers (§4). `cli.py api-stage` — screens and cameras as addressable nodes, and §4's check 3, the two routes to ICVFX state (§4.2). `cli.py preview-cost --arm previz --arm previz_spout --arm previz_screen` — what previz costs the channel, at 1080p50 and at the VP workload; the floor those shares are measured against is `cli.py raster-capacity`. The projection maths itself is checked at every server start (§4.1). `cli.py previz-interact` — the window's mouse and keyboard, sixteen checks on both mixers,
-> mutation-proved (§4.3). **Spatial placement is still uncovered by all of them** — see §4
+> mutation-proved (§4.3). `cli.py previz-place` — **WHERE a screen is**, against a closed-form projection re-derived from the documented convention; this closed mutation A16 on 2026-09-18 and is what the line here used to say was uncovered by everything. `cli.py previz-gizmo` — every overlay and viewport gesture, 37 arms on both mixers. `cli.py icvfx-mask` — the ICVFX mask's geometry, feather, camera-driven quad and tweened form (§4)
 
 Loads a 3D scene, maps channel output onto meshes in it, and renders a camera view of the result —
 so a projection design can be checked without the venue. Screens, presets and camera positions are
@@ -564,8 +564,11 @@ expectation is a number before the server starts. Measured, 1080p50, a 4 x 2.25 
 reports it still at its unrotated width; negating `pos_z` on the render path alone — A16
 literally — fails five arms while the tree goes on reporting (0, 0, −2).
 
-**Still uncovered**: a curved screen's geometry, roll and pitch, and the production camera
-(previz renders from the viewport one).
+**Still uncovered by `previz-place`**: a curved screen's geometry, and placement seen through the
+PRODUCTION camera (previz renders from the viewport one). **Roll and pitch are driven since
+2026-09-19**, though not here — `previz-gizmo`'s three rotation rings turn a screen about all
+three axes through the window and read the result off the published rotation, so this file's
+projection model still predicts flat screens under yaw only.
 
 **And where it LANDS, on an ICVFX screen** — the inner-frustum footprint, drawn from
 `compute_frustum`'s own `icvfx_q`. That choice is the point: `icvfx_q` is the quad the ICVFX mask
@@ -629,7 +632,9 @@ as unmeasured.
 arrived on four meshes, not that `screen1` is the back wall — and colour accuracy, since the quads
 are lit and projected so the tolerance is deliberately wide.
 
-**Of the thirteen commands, three are driven by nothing**: `GIZMO`, `PRESET`, `INFO`. `UNMAP` and
+~~**Of the thirteen commands, three are driven by nothing**: `GIZMO`, `PRESET`, `INFO`.~~
+**ALL FOURTEEN ARE DRIVEN** — `GIZMO` and `PRESET` since 2026-09-18 (`previz-gizmo`), `INFO`
+before them, and `SNAP`, the fourteenth, from the day it landed. `UNMAP` and
 `AUTOPROJECTION` are driven by `api-stage`; `VIEW` and `AUTOPROJECTION` again by `previz-interact`;
 `SCREEN` and both cameras by both.
 
@@ -750,9 +755,11 @@ it — so a broken property means screens are already being pointed the wrong wa
 
 **What it does not cover.** It is a check on the *maths*, not on the picture: it says nothing about
 whether the computed projection reaches the shader, whether the warp applies it, or where a screen
-appears on screen. Spatial placement stays uncovered, exactly as the previous section says. Nor
-does it touch the twelve `PREVIZ SCREEN` subcommands that *write* this geometry — that is check 3
-above, still unwritten.
+appears on screen. ~~Spatial placement stays uncovered~~ — **closed 2026-09-18 by
+`previz-place`**, which predicts the pixel a screen lands on from the documented convention. What
+THIS battery still does not touch is the fifteen `PREVIZ SCREEN` subcommands that *write* the
+geometry, one by one — check 3 above, still unwritten, and note the count has moved twice since
+that check was proposed.
 
 ### A mapped channel needs a consumer, or `PREVIZ MAP` succeeds and shows nothing
 
