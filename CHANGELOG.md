@@ -36,6 +36,32 @@ requires a refusal, then sends **both** `ON` and `OFF` and requires both to be a
 control is not enough, because a command that accepted only its ON word would still be unable to
 express the thing an operator most needs to say.
 
+### BEHAVIOUR: removing the LAST previz screen now clears the picture on Vulkan too
+
+`PREVIZ <ch> SCREEN <name> REMOVE` took the screen out of the scene and out of the published
+tree, and on the **Vulkan** mixer left it on screen. For ever. The stage was empty, the tree
+correctly reported no screens, and the wall was still there.
+
+`previz_renderer::render` began `if (!scene_.active || scene_.meshes.empty()) return;` -- and the
+two backends disagree about what an untouched target means. On OpenGL the picture falls back to
+the channel's own composite, so removing the last screen looked right. On Vulkan the previz
+output lives in a bridge texture that is only written when previz draws, so skipping the draw
+left the PREVIOUS frame in it.
+
+**An active scene with no meshes still has to draw.** It has a grid, a gizmo, a camera and above
+all a background to clear: "there is nothing on the stage" is a picture, and not the same picture
+as "do not touch the target". The guard is now `if (!scene_.active) return;`.
+
+**Why nothing had noticed**, which is the part worth keeping: with one screen left the two
+mixers agree to the pixel -- 218 400 px of the mapped channel's colour on both -- and they
+diverge only on the LAST removal, 0 against 218 400. Every battery that sent `SCREEN ... REMOVE`
+sent it as cleanup and none of them looked at the result; it is the `MIXER EXPOSURE` class
+inverted, a write that is stored correctly and rendered by nobody stopping.
+
+Found by a `previz-place` arm written the same day to give `REMOVE` its first verdict. Verified
+0 px on both mixers after the last removal; `previz-place` 16/16, `previz-gizmo` 37/37,
+`api-stage` 22/22 and `previz-picture` green on both.
+
 ### BEHAVIOUR: a previz screen can be CLONED -- `SCREEN <name> CLONE <newname>`
 
 With snapping, this is how a wall gets built out of panels. The copy carries every property but

@@ -1001,7 +1001,20 @@ struct previz_renderer::impl
 
     void render(std::shared_ptr<texture>& target, const channel_texture_store& tex_store, int w, int h)
     {
-        if (!scene_.active || scene_.meshes.empty())
+        // AN ACTIVE SCENE WITH NO MESHES STILL HAS TO DRAW. It has a grid, a gizmo, a camera
+        // and -- above all -- a background to clear; "there is nothing on the stage" is a
+        // picture, and not the same picture as "do not touch the target".
+        //
+        // This read `|| scene_.meshes.empty()` until 2026-09-19, and the two backends then
+        // disagreed about what an untouched target means. On the OpenGL path it falls back to
+        // the channel's own composite, so removing the last screen looked correct. On the
+        // VULKAN path the previz output lives in a bridge texture that is only written when
+        // previz draws, so the last frame stayed in it: remove the last screen and the wall is
+        // still on screen, for ever, while the tree correctly reports no screens at all.
+        //
+        // Measured identically on both mixers with one screen left (218400 px) and only then
+        // diverging -- 0 against 218400 -- which is why nothing had noticed.
+        if (!scene_.active)
             return;
 
         ensure_shader();
