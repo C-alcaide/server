@@ -70,6 +70,14 @@ class previz_renderer
     /// affects projection).  Enables the view override.
     void set_view_camera(float x, float y, float z, float yaw, float pitch, float roll, float fov);
 
+    /// Frame a target in the viewport -- a named screen or mesh, else the selection, else the
+    /// whole stage. False for a name that is neither, and for an empty stage.
+    bool frame_view(const std::string& target);
+
+    /// One of the canonical viewport orientations (TOP, FRONT, SIDE), then frame the stage.
+    /// False for a word that is none of them.
+    bool set_view_orientation(const std::string& name);
+
     /// Clear the viewport override so render() follows the production camera again.
     void clear_view_camera();
 

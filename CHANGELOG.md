@@ -1,6 +1,32 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: the previz viewport can FRAME things -- `VIEW FRAME`, `VIEW TOP|FRONT|SIDE`
+
+Every 3D application has these two and previz had neither, so finding a screen meant typing seven
+numbers and guessing. `PREVIZ <ch> VIEW FRAME [<name>]` moves the eye until the target fits the
+frame; `VIEW TOP`, `FRONT` and `SIDE` jump to a canonical orientation and frame the stage from it.
+
+**`FRAME` keeps the rotation and moves only the eye**, which is what the command means in every
+tool that has it: the operator chose that angle. The fallback chain is the named screen or mesh,
+then the selection, then everything -- and that last step is how an operator finds a venue model
+they have just loaded and cannot see. `404` for a name that is neither a screen nor a mesh.
+
+**The distance comes from the target's bounding SPHERE**, so it does not breathe as the camera
+orbits; a framing derived from the projected extent would, and a stage is full of long thin walls
+where that is most of a metre. Fitted to the NARROW axis with `sin` rather than `tan`, because
+the limit is where the frustum's side plane is tangent to the sphere. There is a 25 cm floor on
+the radius, because a stage contains degenerate boxes as a matter of course -- a flat screen has
+no thickness -- and without it the camera lands on the thing it was asked to show.
+
+Verified: `previz-gizmo` 30/30 on both mixers. The picture arm is TWO-SIDED, for the reason the
+boot check is: "the screen is inside the frame" is satisfied by a camera a kilometre away, which
+is exactly what a sign error produces and exactly what an operator calls "frame did nothing". The
+selected screen's outline goes from too small to measure at 63 m to 0.605 of the frame's height,
+entirely inside it, with the rotation unchanged. Stage math self-test 137 checks, up from 124,
+covering three starting poses so that a framing which also turned the camera cannot pass from the
+one pose that was already canonical.
+
 ### BEHAVIOUR: a venue mesh can be clicked -- previz picks geometry, not only screens
 
 `compute_pick` intersected the `screen_meta` quads and nothing else, so a stage whose walls came

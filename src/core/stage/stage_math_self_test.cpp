@@ -809,6 +809,118 @@ stage_math_report stage_math_self_test()
         }
     }
 
+    // ---- 17. frame_view: the box fits, and fits TIGHTLY --------------------------------
+    //
+    // The oracle is the PROPERTY, not the distance: every corner of the box must land inside the
+    // frustum, AND at least one must land near its edge. Both halves are needed and they fail
+    // different mistakes -- "inside" alone is satisfied by a camera a kilometre away, which is
+    // what a sign error or a radius mixed up with a diameter produces, and it is exactly the
+    // failure an operator describes as "frame did nothing".
+    {
+        world_box box;
+        box.add(-2.0, 0.0, -1.0);
+        box.add(2.0, 3.0, 1.0);
+
+        const double aspect = 16.0 / 9.0;
+        // Three starting poses, because framing must keep the ROTATION and move only the eye:
+        // a version that also pointed the camera somewhere canonical passes from a pose that was
+        // already canonical and fails from every other.
+        const previz_camera poses[3] = {
+            {0.0f, 0.0f, 50.0f, 0.0f, 0.0f, 0.0f, 50.0f, 0.1f, 1000.0f},
+            {30.0f, 20.0f, 0.0f, 70.0f, -30.0f, 0.0f, 35.0f, 0.1f, 1000.0f},
+            {-5.0f, 1.0f, -40.0f, 185.0f, 5.0f, 0.0f, 60.0f, 0.1f, 1000.0f},
+        };
+
+        for (int p = 0; p < 3; ++p) {
+            const auto cam = frame_view(poses[p], aspect, box);
+
+            ++rep.checks;
+            if (std::abs(cam.yaw - poses[p].yaw) > 1e-4 || std::abs(cam.pitch - poses[p].pitch) > 1e-4 ||
+                std::abs(cam.roll - poses[p].roll) > 1e-4 || std::abs(cam.fov - poses[p].fov) > 1e-4)
+                rep.failures.emplace_back("frame/rotation: framing turned the camera -- it must move "
+                                          "the eye and leave the angle the operator chose");
+
+            const auto   rot     = mat4::rotate_y(cam.yaw) * mat4::rotate_x(cam.pitch) * mat4::rotate_z(cam.roll);
+            const double rgt[3]  = {rot.m[0], rot.m[1], rot.m[2]};
+            const double up[3]   = {rot.m[4], rot.m[5], rot.m[6]};
+            const double fwd[3]  = {-rot.m[8], -rot.m[9], -rot.m[10]};
+            const double half_v  = std::tan(rad(cam.fov) * 0.5);
+
+            double worst = 0.0; // the closest any corner comes to the frame edge, as a fraction
+            bool   out   = false;
+            for (int i = 0; i < 8; ++i) {
+                const double w[3] = {(i & 1) ? box.hi[0] : box.lo[0],
+                                     (i & 2) ? box.hi[1] : box.lo[1],
+                                     (i & 4) ? box.hi[2] : box.lo[2]};
+                const double d[3] = {w[0] - cam.x, w[1] - cam.y, w[2] - cam.z};
+                const double z    = d[0] * fwd[0] + d[1] * fwd[1] + d[2] * fwd[2];
+                if (z <= 0.0) {
+                    out = true; // behind the eye
+                    continue;
+                }
+                const double x = d[0] * rgt[0] + d[1] * rgt[1] + d[2] * rgt[2];
+                const double y = d[0] * up[0] + d[1] * up[1] + d[2] * up[2];
+                const double fx = std::abs(x) / (z * half_v * aspect);
+                const double fy = std::abs(y) / (z * half_v);
+                const double f  = std::max(fx, fy);
+                if (f > 1.0)
+                    out = true;
+                worst = std::max(worst, f);
+            }
+
+            ++rep.checks;
+            if (out)
+                rep.failures.emplace_back("frame/fits: a corner of the box fell outside the frame "
+                                          "from pose " + std::to_string(p));
+            ++rep.checks;
+            if (worst < 0.35)
+                rep.failures.emplace_back("frame/tight: the box filled only " +
+                                          std::to_string(worst) +
+                                          " of the frame from pose " + std::to_string(p) +
+                                          " -- 'inside' alone is satisfied by a camera a "
+                                          "kilometre away");
+        }
+
+        // An EMPTY box leaves the camera exactly where it was. The alternative is a camera at the
+        // origin looking at nothing, which is indistinguishable from the viewport having broken.
+        {
+            const world_box nothing;
+            const auto      same = frame_view(poses[1], aspect, nothing);
+            ++rep.checks;
+            if (std::abs(same.x - poses[1].x) > 1e-6 || std::abs(same.y - poses[1].y) > 1e-6 ||
+                std::abs(same.z - poses[1].z) > 1e-6)
+                rep.failures.emplace_back("frame/empty: framing nothing moved the camera");
+        }
+
+        // A DEGENERATE box -- a flat screen has no thickness, and a point has no size -- must
+        // still produce a finite distance. Without the floor on the radius the camera lands ON
+        // the thing it was asked to show.
+        {
+            world_box point;
+            point.add(4.0, 1.0, 4.0);
+            const auto cam = frame_view(poses[0], aspect, point);
+            const double d = std::sqrt((cam.x - 4.0) * (cam.x - 4.0) + (cam.y - 1.0) * (cam.y - 1.0) +
+                                       (cam.z - 4.0) * (cam.z - 4.0));
+            ++rep.checks;
+            if (!(d > 0.2 && d < 100.0))
+                rep.failures.emplace_back("frame/degenerate: framing a single point put the camera " +
+                                          std::to_string(d) + " m from it");
+        }
+
+        // And the orientations are a CLOSED set: a word that is not one of them returns nothing,
+        // rather than the first branch of a chain with no else.
+        {
+            ++rep.checks;
+            if (!view_orientation("TOP") || !view_orientation("front") || !view_orientation("Side"))
+                rep.failures.emplace_back("frame/orientation: one of TOP/FRONT/SIDE was not "
+                                          "recognised, or the match is case-sensitive");
+            ++rep.checks;
+            if (view_orientation("BANANA") || view_orientation(""))
+                rep.failures.emplace_back("frame/orientation: a word that names no orientation was "
+                                          "accepted -- the house defect");
+        }
+    }
+
     return rep;
 }
 

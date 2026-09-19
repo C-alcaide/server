@@ -40,7 +40,7 @@ the verb, as it does for `MIXER`. The layer index parses and **no previz command
 | `PREVIZ MAP` | `<mesh_name> <channel>` — needs ≥2 parameters, else `400` | `previz_map_command` |
 | `PREVIZ UNMAP` | `<mesh_name>` | `previz_unmap_command` |
 | `PREVIZ CAMERA` | *(query)* \| `RESET` \| `OVERRIDE [1\|0]` \| `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | `previz_camera_command` |
-| `PREVIZ VIEW` | *(query)* \| `CLEAR` \| `RESET` \| `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | `previz_view_command` |
+| `PREVIZ VIEW` | *(query)* \| `CLEAR` \| `RESET` \| `FRAME [<name>]` \| `TOP` \| `FRONT` \| `SIDE` \| `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | `previz_view_command` |
 | `PREVIZ INFO` | — query | `previz_info_command` |
 | `PREVIZ SHOW` | `<mesh_name> [1\|0]` | `previz_show_command` |
 | `PREVIZ GRID` | `[1\|0]` | `previz_grid_command` |
@@ -133,6 +133,8 @@ Both are families of four, and both were listed in §1 as *"placement arguments"
 | `RESET` | camera back to its default, projections recomputed | same as `CLEAR` |
 | `CLEAR` | — | drops the view override |
 | `OVERRIDE [1\|0]` | freezes tracker control of the production camera | — |
+| `FRAME [<name>]` | — | move the eye until the target fits the frame, **keeping the angle**. The named screen or mesh; with no name, the selection; with nothing selected, the whole stage. `404` for a name that is neither |
+| `TOP` \| `FRONT` \| `SIDE` | — | a canonical orientation, **then framed**. Anything else is `400` |
 | `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | sets the **production** camera; recomputes projections | sets the **viewport** camera; **deliberately does not recompute** |
 
 * **`OVERRIDE` with no argument locks.** The test is `size() < 2 || at(1) != "0"`, so only the exact
@@ -140,6 +142,20 @@ Both are families of four, and both were listed in §1 as *"placement arguments"
 * **The two cameras are not interchangeable.** `compute_frustum` always uses the production camera,
   so orbiting the viewport never moves a projection. That is the point of the split, and it is why
   `VIEW` omits the recompute.
+* **`FRAME` keeps the rotation and moves only the eye**, which is what "frame the selection"
+  means in every 3D application: the operator chose that angle. A version that also pointed the
+  camera somewhere canonical would be two commands welded together — and the second of them
+  is `TOP` / `FRONT` / `SIDE`, which turn *and then* frame, because turning alone leaves the eye
+  wherever it stood looking at whatever is now in that direction, which from most poses is
+  nothing at all.
+* **The distance comes from the target's bounding SPHERE**, so it does not breathe as the camera
+  orbits — a framing derived from the projected extent would, and a stage is full of long thin
+  walls where that is most of a metre. The sphere is fitted to the NARROW axis of the frame using
+  `sin` rather than `tan`, because the limit is where the frustum's side plane is *tangent* to the
+  sphere; `tan` frames a little too tight, by more the wider the lens. There is 10% air around it,
+  and a floor of 25 cm on the radius, because a stage contains degenerate boxes as a matter of
+  course: a flat screen has no thickness and a point has no size, and without the floor the camera
+  lands on the thing it was asked to show.
 * **Neither reports `near_clip`/`far_clip`, and neither can set them.** `set_camera` hard-codes
   `0.1` and `100`, and the layout file does not carry them.
 * **With a tracker bound in `PREVIZ` mode, `set_camera` runs per tracker sample** — so

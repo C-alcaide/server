@@ -21,6 +21,8 @@
 
 #include "stage_model.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -298,6 +300,45 @@ constexpr double ring_band_fraction = 0.18;
 /// stay in frame. One function so the renderer draws exactly what the hit-test accepts -- two
 /// copies of this number is a handle you can see and cannot grab.
 double ring_radius(const screen_meta& meta);
+
+/// An axis-aligned box in world space, grown a point at a time.
+///
+/// `valid` rather than a sentinel extent: an EMPTY box and a box around a single point are
+/// different things, and a caller framing a stage with nothing on it must be able to tell them
+/// apart rather than fly somewhere derived from infinities.
+struct world_box
+{
+    double lo[3] = {0, 0, 0};
+    double hi[3] = {0, 0, 0};
+    bool   valid = false;
+
+    void add(double x, double y, double z)
+    {
+        const double p[3] = {x, y, z};
+        for (int i = 0; i < 3; ++i) {
+            lo[i] = valid ? std::min(lo[i], p[i]) : p[i];
+            hi[i] = valid ? std::max(hi[i], p[i]) : p[i];
+        }
+        valid = true;
+    }
+};
+
+/// Move a camera along ITS OWN view direction until `box` fits the frame, keeping its rotation.
+///
+/// Keeping the rotation is the decision. "Frame the selection" in every 3D application moves the
+/// eye and leaves the angle alone, because the operator chose that angle; a version that also
+/// pointed the camera somewhere canonical would be two commands welded together, and the second
+/// of them is `VIEW TOP` / `FRONT` / `SIDE`.
+///
+/// The distance comes from the box's bounding SPHERE, so it does not change as the camera orbits
+/// -- a framing derived from the projected extent would breathe as the box turned, and a stage is
+/// full of long thin walls where that is most of a metre.
+previz_camera frame_view(const previz_camera& view, double aspect, const world_box& box);
+
+/// The canonical viewport orientations, as (yaw, pitch, roll). `std::nullopt` for a name that is
+/// not one -- which is the whole reason this returns an optional rather than defaulting to FRONT:
+/// a typo that silently selected an orientation is this tree's most repeated defect.
+std::optional<std::array<float, 3>> view_orientation(const std::string& name);
 
 /// One candidate surface for `compute_mesh_pick`, read IN PLACE.
 ///

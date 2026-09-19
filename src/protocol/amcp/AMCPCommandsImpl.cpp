@@ -5774,6 +5774,24 @@ std::wstring previz_view_command(command_context& ctx)
         return L"202 PREVIZ OK\r\n";
     }
 
+    // FRAME: fit a target in the viewport, keeping the angle the operator chose.
+    if (boost::iequals(ctx.parameters.at(0), L"FRAME")) {
+        const std::string target =
+            ctx.parameters.size() > 1 ? u8(ctx.parameters.at(1)) : std::string();
+        if (!ogl_mix->frame_view(target))
+            return L"404 PREVIZ ERROR\r\n";
+        return L"202 PREVIZ OK\r\n";
+    }
+
+    // TOP / FRONT / SIDE: a canonical orientation, then framed.
+    if (ctx.parameters.size() == 1) {
+        if (ogl_mix->set_view_orientation(u8(ctx.parameters.at(0))))
+            return L"202 PREVIZ OK\r\n";
+        // Falls through to the arity check below, which answers 400 -- a single word that is
+        // neither an orientation nor CLEAR/RESET names nothing, and naming nothing is an error
+        // rather than a silently chosen default.
+    }
+
     // SET: PREVIZ ch VIEW x y z yaw pitch roll fov
     if (ctx.parameters.size() < 7)
         return L"400 PREVIZ ERROR\r\n";

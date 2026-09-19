@@ -49,6 +49,7 @@
 #pragma warning(pop)
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -353,6 +354,7 @@ struct previz_renderer::impl
     GLuint                      depth_rbo_ = 0;
     int                         fbo_w_     = 0;
     int                         fbo_h_     = 0;
+    std::atomic<double>         last_aspect_{16.0 / 9.0};
     GLuint                      mesh_box_vao_ = 0;
     GLuint                      mesh_box_vbo_ = 0;
     int                         mesh_box_vert_count_ = 0;
@@ -1019,6 +1021,11 @@ struct previz_renderer::impl
                     mat4::translate(-view_cam.x, -view_cam.y, -view_cam.z);
 
         float aspect = static_cast<float>(w) / static_cast<float>(h);
+        // Remembered for `frame_view`, which is driven by a command rather than by the render
+        // and so has no target of its own to ask. Until the first frame is drawn it is the 16:9
+        // it was initialised to -- framing a previz channel that has never rendered is not a
+        // situation an operator can reach, since there is nothing on screen to frame.
+        last_aspect_.store(static_cast<double>(aspect), std::memory_order_relaxed);
         auto  proj   = mat4::perspective(view_cam.fov, aspect, view_cam.near_clip, view_cam.far_clip);
 
         // Flip Y so the FBO output matches CasparCG's top-down texture convention.
@@ -2608,6 +2615,90 @@ previz_scene previz_renderer::scene() const
 {
     std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
     return impl_->scene_;
+}
+
+/// Frame a target in the viewport: the named screen or mesh, else the selection, else the lot.
+///
+/// The fallback chain is the one every 3D application has, and its last step is what makes the
+/// command useful on a stage nobody has clicked yet: "frame everything" is how an operator finds
+/// a venue they have just loaded and cannot see.
+bool previz_renderer::frame_view(const std::string& target)
+{
+    core::previz_camera before;
+    core::previz_camera after;
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto&       sc   = impl_->scene_;
+        std::string want = target;
+        if (want.empty())
+            want = !sc.selected.empty() ? sc.selected : sc.selected_mesh;
+
+        core::world_box box;
+        auto add_screen = [&](const core::screen_meta& m) {
+            // The four corners of the SURFACE, through the same transform the mesh uses, so a
+            // yawed or curved screen frames by what is drawn rather than by an axis-aligned
+            // guess at it.
+            const float xs[2] = {-m.width_m * 0.5f, m.width_m * 0.5f};
+            const float ys[2] = {0.0f, m.height_m};
+            for (float x : xs)
+                for (float y : ys) {
+                    const auto p = surface_to_world(m, x, y);
+                    box.add(p[0], p[1], p[2]);
+                }
+        };
+        auto add_mesh = [&](const previz_mesh& mesh) {
+            for (const auto& v : mesh.vertices)
+                box.add(v.px, v.py, v.pz);
+        };
+
+        if (!want.empty()) {
+            const auto sit = sc.screens.find(want);
+            if (sit != sc.screens.end())
+                add_screen(sit->second);
+            else {
+                bool found = false;
+                for (const auto& mesh : sc.meshes)
+                    if (mesh.name == want && !mesh.is_screen) {
+                        add_mesh(mesh);
+                        found = true;
+                    }
+                if (!found)
+                    return false; // a name that is neither: say so rather than framing the stage
+            }
+        } else {
+            for (const auto& [name, m] : sc.screens)
+                add_screen(m);
+            for (const auto& mesh : sc.meshes)
+                if (!mesh.is_screen)
+                    add_mesh(mesh);
+        }
+
+        if (!box.valid)
+            return false;
+
+        before = sc.has_view_override ? sc.view_camera : sc.camera;
+        after  = core::frame_view(before, impl_->last_aspect_.load(std::memory_order_relaxed), box);
+    }
+    set_view_camera(after.x, after.y, after.z, after.yaw, after.pitch, after.roll, after.fov);
+    return true;
+}
+
+bool previz_renderer::set_view_orientation(const std::string& name)
+{
+    const auto rot = core::view_orientation(name);
+    if (!rot)
+        return false;
+    core::previz_camera cam;
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        cam = impl_->scene_.has_view_override ? impl_->scene_.view_camera : impl_->scene_.camera;
+    }
+    // Turn first, then FRAME through the same path -- so an orientation always ends with the
+    // stage in shot. Turning alone leaves the camera wherever it happened to be, pointing at
+    // whatever is now in that direction, which from most poses is nothing at all.
+    set_view_camera(cam.x, cam.y, cam.z, (*rot)[0], (*rot)[1], (*rot)[2], cam.fov);
+    frame_view(std::string());
+    return true;
 }
 
 core::stage_snapshot previz_renderer::stage_snapshot() const

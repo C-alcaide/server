@@ -19,6 +19,8 @@
 
 #include "stage_math.h"
 
+#include <boost/algorithm/string.hpp>
+
 #include <algorithm>
 #include <cmath>
 
@@ -489,6 +491,55 @@ std::optional<ring_hit> compute_ring_grab(const previz_camera& view,
             best = h;
     }
     return best;
+}
+
+previz_camera frame_view(const previz_camera& view, double aspect, const world_box& box)
+{
+    previz_camera out = view;
+    if (!box.valid)
+        return out; // nothing to frame: leave the operator where they were, rather than at 0,0,0
+
+    double c[3];
+    double diag = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        c[i] = (box.lo[i] + box.hi[i]) * 0.5;
+        const double e = box.hi[i] - box.lo[i];
+        diag += e * e;
+    }
+    // A floor of 25 cm, because a stage contains DEGENERATE boxes as a matter of course: a flat
+    // screen seen edge-on has zero thickness, and a single point has no size at all. Without it
+    // the camera lands exactly on the thing it was asked to show.
+    const double radius = std::max(0.25, 0.5 * std::sqrt(diag));
+
+    // The tighter of the two half-angles, so the sphere fits the NARROW axis of the frame. `sin`
+    // rather than `tan`: the limit is where the frustum's side plane is TANGENT to the sphere,
+    // and `tan` would use the distance to the sphere's centre as though it were the edge --
+    // framing a little too tight, by more the wider the lens.
+    const double half_v = view.fov * 0.5 * M_PI / 180.0;
+    const double half_h = std::atan(std::tan(half_v) * std::max(aspect, 1e-6));
+    const double half   = std::min(half_v, half_h);
+    const double d      = radius / std::max(std::sin(half), 1e-6) * 1.1; // 10% air around it
+
+    const auto   rot    = mat4::rotate_y(view.yaw) * mat4::rotate_x(view.pitch) * mat4::rotate_z(view.roll);
+    const double fwd[3] = {-rot.m[8], -rot.m[9], -rot.m[10]};
+
+    out.x = static_cast<float>(c[0] - fwd[0] * d);
+    out.y = static_cast<float>(c[1] - fwd[1] * d);
+    out.z = static_cast<float>(c[2] - fwd[2] * d);
+    return out;
+}
+
+std::optional<std::array<float, 3>> view_orientation(const std::string& name)
+{
+    // yaw, pitch, roll. FRONT is the identity, which is where a screen's own +Z faces, so the
+    // default stage is seen face-on. TOP looks down; SIDE stands on +X looking towards -X.
+    if (boost::iequals(name, "FRONT"))
+        return std::array<float, 3>{0.0f, 0.0f, 0.0f};
+    if (boost::iequals(name, "TOP"))
+        return std::array<float, 3>{0.0f, -90.0f, 0.0f};
+    if (boost::iequals(name, "SIDE"))
+        return std::array<float, 3>{90.0f, 0.0f, 0.0f};
+    return std::nullopt;
 }
 
 std::optional<double>
