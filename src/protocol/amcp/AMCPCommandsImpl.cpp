@@ -2596,6 +2596,39 @@ std::future<std::wstring> mixer_projection_lens_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+/// An operator's ON/OFF word, or `std::nullopt` for a word that is neither.
+///
+/// ONE implementation, because the alternative is what this tree already had: nine commands each
+/// parsing a boolean their own way, and eight of them reading an unrecognised word as one of the
+/// two answers. That is this tree's most repeated defect -- sixteen instances in twelve modules
+/// -- and the shape is always the same, a value initialised to one of the valid answers with no
+/// `else` to catch a word that names neither.
+///
+/// The OFF words are spelled out rather than being "everything that is not ON". That is the
+/// whole fix: every one of these commands had a legitimate way to turn its feature off, and in
+/// every case it was the leftover branch, so nothing could tell "the operator cleared it" from
+/// "the operator mistyped". `YES` and `NO` are in because an operator who types them means them,
+/// and before this they meant the opposite of each other only by accident -- `yes` was not `1`
+/// and so disabled.
+std::optional<bool> parse_on_off(const std::wstring& arg)
+{
+    if (arg == L"1" || boost::iequals(arg, L"ON") || boost::iequals(arg, L"TRUE") ||
+        boost::iequals(arg, L"YES"))
+        return true;
+    if (arg == L"0" || boost::iequals(arg, L"OFF") || boost::iequals(arg, L"FALSE") ||
+        boost::iequals(arg, L"NO"))
+        return false;
+    return std::nullopt;
+}
+
+/// The message every one of them gives, so an operator meets the same sentence wherever they
+/// mistype and the list of accepted words cannot drift between commands.
+std::wstring on_off_error(const std::wstring& prefix, const std::wstring& what, const std::wstring& arg)
+{
+    return L"400 " + prefix + L" ERROR " + what +
+           L" takes 1, 0, ON, OFF, TRUE, FALSE, YES or NO, not " + arg + L"\r\n";
+}
+
 std::future<std::wstring> mixer_projection_icvfx_command(command_context& ctx)
 {
     if (ctx.parameters.empty()) {
@@ -2613,8 +2646,13 @@ std::future<std::wstring> mixer_projection_icvfx_command(command_context& ctx)
 
     // MIXER <ch>-<l> PROJECTION_ICVFX <enable> [inner_fov_deg] [feather] [outer_dim] [inner_dim] [dur] [tween]
     transforms_applier transforms(ctx);
-    bool         enable    = (ctx.parameters.at(0) == L"1" ||
-                              boost::iequals(ctx.parameters.at(0), L"true"));
+    // A typo used to DISABLE ICVFX and answer 202 -- on a live volume that is the inner
+    // frustum vanishing because someone spelled a word wrong.
+    const auto enable_opt = parse_on_off(ctx.parameters.at(0));
+    if (!enable_opt)
+        return make_ready_future<std::wstring>(
+            on_off_error(L"MIXER", L"PROJECTION_ICVFX", ctx.parameters.at(0)));
+    const bool enable = *enable_opt;
     bool         has_fov   = ctx.parameters.size() > 1;
     double       inner_fov = has_fov ? std::stod(ctx.parameters[1]) : 0.0;
     bool         has_feat  = ctx.parameters.size() > 2;
@@ -4326,8 +4364,14 @@ std::future<std::wstring> calibration_command(command_context& ctx)
     }
 
     if (boost::iequals(ctx.parameters.at(0), L"BYPASS")) {
-        bool bypass = ctx.parameters.size() > 1 &&
-                      (ctx.parameters.at(1) == L"1" || boost::iequals(ctx.parameters.at(1), L"TRUE"));
+        bool bypass = false;
+        if (ctx.parameters.size() > 1) {
+            const auto b = parse_on_off(ctx.parameters.at(1));
+            if (!b)
+                return make_ready_future<std::wstring>(
+                    on_off_error(L"CALIBRATION", L"BYPASS", ctx.parameters.at(1)));
+            bypass = *b;
+        }
         image_mixer->set_calibration_bypass(bypass);
         return make_ready_future<std::wstring>(L"202 CALIBRATION OK\r\n");
     }
@@ -5722,7 +5766,16 @@ std::wstring previz_camera_command(command_context& ctx)
 
     // OVERRIDE 1|0 — freeze/unfreeze tracker control of the production camera
     if (boost::iequals(ctx.parameters.at(0), L"OVERRIDE")) {
-        bool lock = (ctx.parameters.size() < 2) || ctx.parameters.at(1) != L"0";
+        // `at(1) != L"0"` until 2026-09-19, so a typo LOCKED the production camera against its
+        // tracker -- and `OVERRIDE FALSE` did too. This file has named it as an instance of the
+        // house defect since the GIZMO fix and nobody had changed it.
+        bool lock = true;
+        if (ctx.parameters.size() >= 2) {
+            const auto l = parse_on_off(ctx.parameters.at(1));
+            if (!l)
+                return on_off_error(L"PREVIZ", L"CAMERA OVERRIDE", ctx.parameters.at(1));
+            lock = *l;
+        }
         ogl_mix->set_camera_locked(lock);
         return L"202 PREVIZ OK\r\n";
     }
@@ -6605,7 +6658,13 @@ std::wstring previz_show_command(command_context& ctx)
         return L"400 PREVIZ ERROR missing mesh name\r\n";
 
     std::string mesh_name = u8(ctx.parameters.at(0));
-    bool visible = ctx.parameters.size() >= 2 ? (ctx.parameters.at(1) != L"0") : true;
+    bool visible = true;
+    if (ctx.parameters.size() >= 2) {
+        const auto v = parse_on_off(ctx.parameters.at(1));
+        if (!v)
+            return on_off_error(L"PREVIZ", L"SHOW", ctx.parameters.at(1));
+        visible = *v;
+    }
     ogl_mix->set_mesh_visible(mesh_name, visible);
     return L"202 PREVIZ OK\r\n";
 }
@@ -6618,7 +6677,13 @@ std::wstring previz_grid_command(command_context& ctx)
     auto* ogl_mix = get_ogl_mixer(ctx);
     if (!ogl_mix)
         return L"501 PREVIZ FAILED\r\n";
-    bool on = ctx.parameters.empty() || ctx.parameters.at(0) != L"0";
+    bool on = true;
+    if (!ctx.parameters.empty()) {
+        const auto o = parse_on_off(ctx.parameters.at(0));
+        if (!o)
+            return on_off_error(L"PREVIZ", L"GRID", ctx.parameters.at(0));
+        on = *o;
+    }
     ogl_mix->set_grid(on);
     return L"202 PREVIZ OK\r\n";
 }
@@ -6631,7 +6696,13 @@ std::wstring previz_wireframe_command(command_context& ctx)
     auto* ogl_mix = get_ogl_mixer(ctx);
     if (!ogl_mix)
         return L"501 PREVIZ FAILED\r\n";
-    bool on = ctx.parameters.empty() || ctx.parameters.at(0) != L"0";
+    bool on = true;
+    if (!ctx.parameters.empty()) {
+        const auto o = parse_on_off(ctx.parameters.at(0));
+        if (!o)
+            return on_off_error(L"PREVIZ", L"WIREFRAME", ctx.parameters.at(0));
+        on = *o;
+    }
     ogl_mix->set_wireframe(on);
     return L"202 PREVIZ OK\r\n";
 }
@@ -6647,15 +6718,15 @@ std::wstring previz_gizmo_command(command_context& ctx)
     // NO ARGUMENT MEANS ON, and everything else must NAME itself. This was
     // `at(0) != L"0"`, so `PREVIZ 1 GIZMO OFF` turned the gizmo ON and so did a typo -- the
     // house defect, in the same shape as `PREVIZ CAMERA OVERRIDE` and `TRACKING GENLOCK`.
+    // Through the shared parser rather than keeping the copy this command was fixed with: a
+    // second list of the accepted words is a second list to drift, and `YES` reaching one
+    // command and not another is exactly the drift.
     bool on = true;
     if (!ctx.parameters.empty()) {
-        const auto& arg = ctx.parameters.at(0);
-        if (arg == L"1" || boost::iequals(arg, L"ON") || boost::iequals(arg, L"TRUE"))
-            on = true;
-        else if (arg == L"0" || boost::iequals(arg, L"OFF") || boost::iequals(arg, L"FALSE"))
-            on = false;
-        else
-            return L"400 PREVIZ ERROR GIZMO takes 1, 0, ON, OFF, TRUE or FALSE, not " + arg + L"\r\n";
+        const auto o = parse_on_off(ctx.parameters.at(0));
+        if (!o)
+            return on_off_error(L"PREVIZ", L"GIZMO", ctx.parameters.at(0));
+        on = *o;
     }
     ogl_mix->set_gizmo(on);
     return L"202 PREVIZ OK\r\n";
@@ -6881,9 +6952,10 @@ std::wstring previz_screen_command(command_context& ctx)
             // SCREEN <name> ICVFX 1|0   (enable inner/outer frustum in-camera VFX)
             if (ctx.parameters.size() < 3)
                 return L"400 PREVIZ ERROR usage: SCREEN <name> ICVFX 1|0\r\n";
-            bool enable = (ctx.parameters.at(2) == L"1" ||
-                           boost::iequals(ctx.parameters.at(2), L"true"));
-            ogl_mix->set_screen_icvfx(name, enable);
+            const auto e = parse_on_off(ctx.parameters.at(2));
+            if (!e)
+                return on_off_error(L"PREVIZ", L"SCREEN ICVFX", ctx.parameters.at(2));
+            ogl_mix->set_screen_icvfx(name, *e);
             return L"202 PREVIZ OK\r\n";
         }
 
@@ -6908,7 +6980,13 @@ std::wstring previz_autoprojection_command(command_context& ctx)
     if (!ogl_mix)
         return L"501 PREVIZ FAILED\r\n";
 
-    bool on = ctx.parameters.empty() || ctx.parameters.at(0) != L"0";
+    bool on = true;
+    if (!ctx.parameters.empty()) {
+        const auto o = parse_on_off(ctx.parameters.at(0));
+        if (!o)
+            return on_off_error(L"PREVIZ", L"AUTOPROJECTION", ctx.parameters.at(0));
+        on = *o;
+    }
 
     if (on) {
         // Parse optional SOURCE <ch>-<layer>

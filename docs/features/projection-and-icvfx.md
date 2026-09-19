@@ -30,7 +30,7 @@ another document.
 | `MIXER PROJECTION_OFFSET` | `offset_x offset_y [dur] [tween]` |
 | `MIXER PROJECTION_CURVE` | `CYLINDER\|SPHERE\|FISHEYE arc_deg [arc_v_deg] [eye_distance] [dur] [tween]` |
 | `MIXER PROJECTION_LENS` | `CYLINDER\|SPHERE\|FISHEYE` — the *source* lens |
-| `MIXER PROJECTION_ICVFX` | `enable [inner_fov_rad] [feather] [outer_dim] [inner_dim] [dur] [tween]` |
+| `MIXER PROJECTION_ICVFX` | `enable [inner_fov_deg] [feather] [outer_dim] [inner_dim] [dur] [tween]` — `enable` takes `1\|0\|ON\|OFF\|TRUE\|FALSE\|YES\|NO`, and anything else is `400` |
 | `MIXER PROJECTION_ICVFX_COLOR` | `ir ig ib or og ob [dur] [tween]` |
 | `MIXER PROJECTION_FRUSTUM` | `frustum_h frustum_v [dur] [tween]` |
 | `MIXER PROJECTION_DISTORTION` | `k1 k2 k3 [p1 p2] [dur] [tween]` — Brown–Conrady |
@@ -48,6 +48,12 @@ All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cp
 
 **Three details that surprise people, all verified:**
 
+- **A typo used to turn ICVFX OFF.** `enable` was `at(0) == "1" || iequals "true"`, so every other
+  word — `BANANA`, and `YES` — disabled the inner frustum and answered `202`. On a live volume
+  that is the inner frustum vanishing because a word was misspelled. **Fixed 2026-09-19**: it goes
+  through the same `parse_on_off` as the eight other boolean arguments in this server, and a word
+  that names neither answer is `400`. The signature row above ALSO said `inner_fov_rad` while the
+  note below it said degrees, which had been true since 2026-09-15.
 - ~~**`PROJECTION` takes degrees, `PROJECTION_ICVFX` takes radians.**~~ **BOTH TAKE DEGREES since
   2026-09-15.** `PROJECTION_ICVFX`'s `inner_fov` is now multiplied by `DEG2RAD` at parse, exactly
   where `PROJECTION` does it and where auto-projection already did (`inner_fov_deg * I2R`). The

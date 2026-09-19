@@ -724,7 +724,7 @@ wrong reflex.
 
 ## A command that accepts a typo and answers OK is this tree's most repeated defect
 
-**Fifteen instances in eleven modules.** The first six were each found by accident, by a different
+**TWENTY-FOUR instances in twelve modules.** Nine more landed 2026-09-19 from a sweep the existing grep could not do (below), and eight of the nine were real. The first six were each found by accident, by a different
 route, and only the sixth by anyone looking. The last eight came from the audit of 2026-09-18,
 which extended the grep below to the FIVE MODULES THAT REGISTER THEIR OWN AMCP COMMANDS —
 `AMCPCommandsImpl.cpp` had been swept and they never had — and found three in one pass plus the
@@ -747,12 +747,33 @@ because a module that refused everything would pass the refusal half alone. 11/1
 | `ADD … VULKAN_OUTPUT [MODE\|DELAY\|DELAY_MS]` | the `MIXER SHAPE` variant: `DELAY` with its value missing fell into the same silence as `BANANA` |
 | `CALL … <verb>` on `replay` | **"OK"** — the fall-through return, for any verb it does not implement |
 | `CALL … <verb>` on `hap` / `cuda_prores` / `cuda_notchlc` | a log warning, and **202** on the wire |
+| `MIXER PROJECTION_ICVFX <enable>` | **ICVFX OFF** -- on a live volume, the inner frustum vanishing because a word was misspelled |
+| `PREVIZ CAMERA OVERRIDE <1\|0>` | the production camera **LOCKED** against its tracker. Named in this very file as an instance since the `GIZMO` fix, and still unfixed until 2026-09-19 |
+| `PREVIZ GRID` / `WIREFRAME` / `AUTOPROJECTION` | **ON** |
+| `PREVIZ SHOW <mesh> [1\|0]` | **visible** |
+| `PREVIZ SCREEN <name> ICVFX <1\|0>` | **off** |
+| `CALIBRATION BYPASS <1\|0>` | **not** bypassed |
 
 **The shape is always the same**: a variable initialised to one of the valid values, an
 `if/else if` chain over the others, and no `else`. The initialiser is then indistinguishable from
 a mistake, and the reply is `202`. `MIXER SHAPE` is the variant worth knowing -- its option loop
 tests `keyword && enough arguments follow`, so a correctly spelled option with its value left off
 falls into the same silence as a misspelled one, and the two need different messages.
+
+**THE GREP BELOW CANNOT SEE A BOOLEAN ARGUMENT, and that is how nine commands went unswept.**
+It looks for `boost::iequals` if/else chains; a command written `at(0) == L"1"` or
+`at(0) != L"0"` has no chain to find. The second sweep is therefore a DIFFERENT grep:
+
+    grep -nE '(==\s*L"1"|!=\s*L"0"|iequals\([^,]+,\s*L"(TRUE|ON|FALSE|OFF)"\))' \
+         src/protocol/amcp/AMCPCommandsImpl.cpp
+
+Nine hits, eight of them defects. **All nine go through one `parse_on_off` now** -- returning
+`std::optional<bool>`, accepting `1/ON/TRUE/YES` and `0/OFF/FALSE/NO`, and `std::nullopt` for a
+word that is neither -- with one shared `on_off_error`, so the accepted list cannot drift between
+commands. Adding a tenth boolean argument means calling that function, not writing a tenth
+parser. `cli.py refusals` sends `BANANA` plus **both** `ON` and `OFF` to each of the nine,
+because a command that accepted only its ON word would pass a single control and still be unable
+to say the thing an operator most needs to say.
 
 **The sweep is one grep and worth re-running after any new command lands:**
 

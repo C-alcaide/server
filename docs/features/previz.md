@@ -44,8 +44,8 @@ the verb, as it does for `MIXER`. The layer index parses and **no previz command
 | `PREVIZ SNAP` | *(query)* \| `OFF` \| `<metres> [<degrees>]` | `previz_snap_command` |
 | `PREVIZ INFO` | — query | `previz_info_command` |
 | `PREVIZ SHOW` | `<mesh_name> [1\|0]` | `previz_show_command` |
-| `PREVIZ GRID` | `[1\|0]` | `previz_grid_command` |
-| `PREVIZ WIREFRAME` | `[1\|0]` | `previz_wireframe_command` |
+| `PREVIZ GRID` | *(optional)* `1\|0\|ON\|OFF\|TRUE\|FALSE\|YES\|NO` | `previz_grid_command` |
+| `PREVIZ WIREFRAME` | *(optional)* `1\|0\|ON\|OFF\|TRUE\|FALSE\|YES\|NO` | `previz_wireframe_command` |
 | `PREVIZ GIZMO` | `[1\|0\|ON\|OFF\|TRUE\|FALSE]`, no argument means ON; anything else is `400` | `previz_gizmo_command` |
 | `PREVIZ PRESET` | `SAVE <name>` \| `RECALL <name>` \| `LIST` | `previz_preset_command` |
 | `PREVIZ SCREEN` | a family of twelve — see below | `previz_screen_command` |
@@ -190,8 +190,12 @@ Both are families of four, and both were listed in §1 as *"placement arguments"
 | `TOP` \| `FRONT` \| `SIDE` | — | a canonical orientation, **then framed**. Anything else is `400` |
 | `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | sets the **production** camera; recomputes projections | sets the **viewport** camera; **deliberately does not recompute** |
 
-* **`OVERRIDE` with no argument locks.** The test is `size() < 2 || at(1) != "0"`, so only the exact
-  string `0` unlocks — `false` and `off` both lock.
+* **`OVERRIDE` with no argument locks, and every other word must NAME itself.** It was
+  `size() < 2 || at(1) != "0"`, so only the exact string `0` unlocked — `false` and `off` both
+  LOCKED, and so did a typo. **Fixed 2026-09-19** along with the seven other commands that read a
+  boolean their own way; all nine go through `parse_on_off` now and answer `400` for a word that
+  is neither. This file had named `CAMERA OVERRIDE` as an instance of the house defect since the
+  `GIZMO` fix and nobody had changed it, which is the argument for the sweep over the note.
 * **The two cameras are not interchangeable.** `compute_frustum` always uses the production camera,
   so orbiting the viewport never moves a projection. That is the point of the split, and it is why
   `VIEW` omits the recompute.

@@ -1,6 +1,41 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: eight commands stop reading a typo as an answer -- one ON/OFF parser
+
+`MIXER PROJECTION_ICVFX BANANA` answered `202` and turned ICVFX **off**. On a live volume that is
+the inner frustum vanishing because a word was misspelled. Seven more did the same thing with a
+different default, and `YES` disabled all of them because it was not the string `1`:
+
+| command | what a typo did |
+| :--- | :--- |
+| `MIXER PROJECTION_ICVFX` | ICVFX **off** |
+| `PREVIZ CAMERA OVERRIDE` | the production camera **LOCKED** against its tracker |
+| `PREVIZ GRID` / `WIREFRAME` / `AUTOPROJECTION` | **on** |
+| `PREVIZ SHOW <mesh>` | **visible** |
+| `PREVIZ SCREEN <name> ICVFX` | **off** |
+| `CALIBRATION BYPASS` | **not** bypassed |
+
+All nine now go through one `parse_on_off`, which accepts `1/ON/TRUE/YES` and `0/OFF/FALSE/NO`
+and returns nothing for anything else; the caller answers `400` with the same sentence in every
+command. **The OFF words are spelled out rather than being "everything that is not ON"** -- that
+IS the fix, because every one of these had a legitimate way to turn its feature off and in every
+case it was the leftover branch, so nothing could tell "the operator cleared it" from "the
+operator mistyped".
+
+**This is a BREAKING change for any script that relied on a non-boolean word disabling
+something**, which is exactly the behaviour being removed.
+
+**Why the existing sweep missed all nine**, and it is worth knowing: the grep this project uses
+to find the defect looks for `boost::iequals` if/else chains, and a command written
+`at(0) == L"1"` has no chain to find. `PREVIZ CAMERA OVERRIDE` had even been NAMED as an
+instance in `CLAUDE.md` since the `GIZMO` fix, and was still unfixed.
+
+Verified: `refusals` 27/27 on both mixers, up from 18. Each of the nine arms sends `BANANA` and
+requires a refusal, then sends **both** `ON` and `OFF` and requires both to be accepted -- one
+control is not enough, because a command that accepted only its ON word would still be unable to
+express the thing an operator most needs to say.
+
 ### BEHAVIOUR: a previz screen can be CLONED -- `SCREEN <name> CLONE <newname>`
 
 With snapping, this is how a wall gets built out of panels. The copy carries every property but
