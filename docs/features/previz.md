@@ -62,7 +62,7 @@ the verb, as it does for `MIXER`. The layer index parses and **no previz command
 - **`PREVIZ SCREEN` is a command family of twelve, not one command** — enumerated in §1.1 below.
   It includes `ICVFX` and `EYEMODE`, which means per-screen ICVFX state is reachable from here as
   well as from `MIXER PROJECTION_ICVFX`. Two routes to one piece of state is the pattern
-  `CLAUDE.md` says earns a diagram; §7 records that as owed, and §5.4 records that the precedence
+  `CLAUDE.md` says earns a diagram, and §7 now HAS one; §5.4 records that the precedence
   between them is **not** what a reader would guess.
 - **`PREVIZ AUTOPROJECTION` with no argument turns it ON** — `ctx.parameters.empty() || at(0) != "0"`.
   Toggles that default to enabled are unusual in this command set and easy to trip over in a
@@ -787,10 +787,11 @@ it — so a broken property means screens are already being pointed the wrong wa
 **What it does not cover.** It is a check on the *maths*, not on the picture: it says nothing about
 whether the computed projection reaches the shader, whether the warp applies it, or where a screen
 appears on screen. ~~Spatial placement stays uncovered~~ — **closed 2026-09-18 by
-`previz-place`**, which predicts the pixel a screen lands on from the documented convention. What
-THIS battery still does not touch is the fifteen `PREVIZ SCREEN` subcommands that *write* the
-geometry, one by one — check 3 above, still unwritten, and note the count has moved twice since
-that check was proposed.
+`previz-place`**, which predicts the pixel a screen lands on from the documented convention. And check 3 —
+the `PREVIZ SCREEN` subcommands that *write* the geometry, one by one — **is written since
+2026-09-19**: all THIRTEEN are driven, by `previz-place` and `previz-gizmo` between them. Note
+the count, which has moved twice: this line said twelve when the check was proposed and fifteen
+before that was corrected, and §1.1 now carries the rule for counting rather than a number.
 
 ### A mapped channel needs a consumer, or `PREVIZ MAP` succeeds and shows nothing
 
