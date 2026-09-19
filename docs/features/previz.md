@@ -1154,10 +1154,53 @@ Two limits and one that closed, each a consequence of a decision rather than an 
 
 ## 6. Related commits
 
-Not yet traced. The module predates this document and its history has not been read; that is
-deliberate rather than lazy — a commit list here is only useful if each line says *why the commit
-matters*, and inventing that from subject lines would be exactly the kind of claim this folder
-exists to avoid. Tracked as work owed.
+**Traced 2026-09-19.** Twenty-two commits touch `previz_renderer.cpp`. The rule this section was
+owed under still holds — a commit list is only useful if each line says *why* — so every entry
+below is written from the commit's own body or from a change whose reason is recorded elsewhere
+in this file, and nothing is inferred from a subject line.
+
+### Where it came from
+
+| commit | what it established |
+| :--- | :--- |
+| `aa14ce603` (2026-05-11) | The renderer, the OBJ/STL mesh loader, and previz camera parameters on `frame_transform`. Previz arrives as a rendering feature; nothing about it is addressable yet. |
+| `fedf6ce09` (2026-05-15) | The Vulkan mixer. Previz is touched incidentally, and this is where the **two backends' lifetimes diverge** — OpenGL holds its renderer by value, Vulkan builds one lazily, which is what §4.2's first check later caught. |
+| `cf1cdc86c` (2026-06-21) | Projection lenses and the ICVFX inner/outer frustum with its distortion terms; `SCENE SAVE`/`LOAD`; `SCREEN EYEMODE CAMERA\|FIXED`. The feature surface most of this document describes lands here, **all of it untested** — the red/blue gain exchange of §5 was written in this commit and found fourteen months later by an audit. |
+| `e97e6675e` (2026-07-31) | Bounds-checking the glTF loader. Accessor, bufferView and buffer indices went straight from the file into pointer arithmetic, and `bufferView` is legally `-1` on a sparse accessor — an immediate negative-index read on a conforming file. |
+
+### When it became addressable
+
+| commit | what it established |
+| :--- | :--- |
+| `b00eb9873` (2026-09-06) | The stage model and its projection maths move out of the accelerator into `core`, which is what makes `compute_frustum` and `compute_pick` testable **without a display**. Every closed-form check in §4 depends on this. |
+| `d3fd99d6a` (2026-09-06) | The stage is published every tick, sparsely. Previz stops being write-only: `api-stage`, `previz-place` and the camera arms all read what this writes. |
+| `51ca54d33` (2026-09-06) | The screen list and the mesh mapping stop disagreeing — loading a scene cleared `meshes` and left `screens` describing meshes that no longer existed. |
+| `b08df8e93` (2026-09-08) | Orbit, pick and drag on the server's own window. The viewport becomes an input surface, which is the whole of §2.2. |
+| `ce7df18be` (2026-09-15) | Two commands stop accepting a mistake and reporting success — the house defect, in previz for the first time. |
+| `2b4f6fc5f` (2026-09-18) | `GIZMO` draws something. It had been written, published and persisted, and read by **no renderer path** — §5.6's first instance of the class this module keeps producing. |
+
+### What 2026-09-19 added
+
+Twelve commits in one day, listed because the reasons are recent and specific rather than because
+the count is interesting. Each is covered in `CHANGELOG.md` with its measurement.
+
+| commit | what it established |
+| :--- | :--- |
+| `c0079c218` | `SIZE` and `ARC` resize and bend a screen **in place**; `RESOLUTION` derives a published pixel pitch instead of being inert. |
+| `3ef77f083` | The production camera is drawn, and the selection is visible — two more things the stage knew and never rendered. |
+| `06ab9045f`, `0a4b4a8c5` | A yaw ring, then corner handles: a screen can be turned and resized by hand. |
+| `abbc4868a` | The ICVFX footprint, drawn from the mask shader's **own** quad so the line and the shading cannot disagree. |
+| `66433e8d3` | Rotation about all three axes; the ring radius moves outward because the roll ring lay across the screen's own face. |
+| `df125b130` | A venue mesh can be clicked. Screens and meshes compete on **depth**, not on an order. |
+| `d7d5bd52b` | `VIEW FRAME`, `TOP`, `FRONT`, `SIDE` — the viewport can find things. |
+| `f0e43953b` | Gesture snapping, and the decision that a **command** is never snapped. |
+| `290743118` | `SCREEN CLONE`: the next panel, placed where the next panel goes. |
+| `1ac0b2042` | Removing the **last** screen left it on screen for ever on Vulkan. Found by the arm that gave `REMOVE` its first verdict. |
+| `5b164373d` | A venue mesh can be moved. The `u_model` uniform had been carrying the identity behind a comment reading *"for now"*. |
+
+*What this section still does not do* is trace the Vulkan mixer's own previz path, whose history
+lives in `image_mixer.cpp` rather than here, or the shader-side projection work in `shader.frag`.
+Both are separate lineages and neither is read yet.
 
 ---
 
