@@ -56,6 +56,18 @@ All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cp
   in output NDC and therefore anisotropic in pixels** — at 16:9 the horizontal ramp is 16/9 of
   the vertical, which the battery asserts, because making it isotropic looks like a fix and would
   pass any check that measured one axis.
+- **The quad a REAL CAMERA drives is measured too**, on the wall's own raster. With
+  `PREVIZ AUTOPROJECTION` on, `compute_frustum` recomputes `icvfx_q` from the production camera's
+  pose on every move and writes it onto the mapped channel's layer, so the inner region appears in
+  the wall's picture — which is a different picture from previz's viewport. The prediction is
+  trigonometry: a camera square on at distance `d` with vertical fov `f` gives quad half-extents
+  `d*tan(f/2)*(16/9) / (width/2)` and `d*tan(f/2) / (height/2)` in the wall's NDC. Checked at
+  three poses, because a dolly changes the region's SIZE and a truck changes its POSITION, and a
+  projection can get one right and the other wrong.
+
+  **`PREVIZ AUTOPROJECTION` with no `SOURCE` applies to LAYER 0**, which its own comment calls
+  legacy mode. Content on any other layer is simply not projected — and that looks exactly like
+  auto-projection doing nothing.
 - **A typo used to turn ICVFX OFF.** `enable` was `at(0) == "1" || iequals "true"`, so every other
   word — `BANANA`, and `YES` — disabled the inner frustum and answered `202`. On a live volume
   that is the inner frustum vanishing because a word was misspelled. **Fixed 2026-09-19**: it goes
