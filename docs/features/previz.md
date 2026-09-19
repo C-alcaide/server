@@ -70,7 +70,7 @@ the verb, as it does for `MIXER`. The layer index parses and **no previz command
 - **`PREVIZ MAP` requires two parameters and returns `400`**; most of the others accept an empty
   parameter list as a query or a default.
 
-### 1.1 `PREVIZ SCREEN` — the fourteen subcommands
+### 1.1 `PREVIZ SCREEN` — the fifteen subcommands
 
 Read out of `previz_screen_command`'s dispatch chain on 2026-09-06 and checked against it
 argument by argument. This is the enumeration §5.3 recorded as owed, and `BRIEF.md` requires it
