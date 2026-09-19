@@ -685,15 +685,24 @@ PREVIZ AUTOPROJECTION ...
 are two routes into one ICVFX state**, so a value set through one is visible to the other. Setting
 the same quantity from both is not additive and not an error — the last write wins.
 
-**Three batteries drive PREVIZ, and none of them checks where a screen appears.**
+**Six batteries drive PREVIZ, all fourteen commands are driven, and where a screen appears is
+measured.**
 
-This line read *"No battery drives any of the twelve `PREVIZ` commands"* until 2026-09-06 and
-was wrong twice over: there are **thirteen** commands, not twelve, and `preview-cost`'s previz
-arms, `cli.py previz-picture` and `cli.py api-stage` all drive them. `previz-picture` gates the
-mapping's picture on both mixers; `api-stage` gates every screen and camera property through
-the control API; the projection maths has 68 property checks at every server start.
+*This paragraph has been wrong in four directions and is worth reading as a record of that.* It
+said **"No battery drives any of the twelve `PREVIZ` commands"** until 2026-09-06, which was
+wrong twice over — there were thirteen commands, not twelve, and three batteries drove them.
+It then said **"none of them checks where a screen appears"**, which `previz-place` closed on
+2026-09-18 by predicting the pixel a screen lands on from the documented convention. And it
+counted the boot self-test at **68** property checks, which is **149** today.
 
-**What none of them do is look at where a screen is.** Four colours prove four channels
-arrived on four meshes, not that `screen1` is the back wall, and `api-stage` touches no pixel
-at all. Eight of the thirteen commands still have no picture check. See
+Driving them now: `preview-cost`'s previz arms for COST, `previz-picture` for the mapping's
+picture, `api-stage` for every screen and camera property through the control API,
+`previz-interact` for the window's mouse and keyboard, `previz-place` for WHERE a screen is, and
+`previz-gizmo` for every overlay and viewport gesture — 37 arms, including the one that made
+`SNAP` the fourteenth command to be driven from the day it landed. `icvfx-mask` covers the ICVFX
+mask the walls shade with.
+
+**What is still not covered**: a CURVED screen's geometry (the projection model predicts flat
+screens under yaw), placement seen through the PRODUCTION camera rather than the viewport one,
+and the fifteen `PREVIZ SCREEN` subcommands one by one. See
 [`../features/previz.md`](../features/previz.md) §4.
