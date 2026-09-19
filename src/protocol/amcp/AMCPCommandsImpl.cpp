@@ -6831,6 +6831,16 @@ std::wstring previz_screen_command(command_context& ctx)
         } else if (sub == L"REMOVE") {
             ogl_mix->remove_screen(name);
             return L"202 PREVIZ OK\r\n";
+        } else if (sub == L"CLONE") {
+            // SCREEN <name> CLONE <newname> -- the next panel, edge to edge with this one.
+            if (ctx.parameters.size() < 3)
+                return L"400 PREVIZ ERROR usage: SCREEN <name> CLONE <newname>\r\n";
+            // 404 rather than 202: the two ways this fails -- no such source, name already
+            // taken -- are both the operator naming something wrong, and an OK would leave them
+            // looking for a panel that was never made.
+            if (!ogl_mix->clone_screen(name, u8(ctx.parameters.at(2))))
+                return L"404 PREVIZ ERROR\r\n";
+            return L"202 PREVIZ OK\r\n";
         } else if (sub == L"EYEMODE") {
             // SCREEN <name> EYEMODE CAMERA | FIXED [x y z]
             if (ctx.parameters.size() < 3)

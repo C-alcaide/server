@@ -90,6 +90,7 @@ rather than `400`.
 | `ROTATION` | `SCREEN <name> ROTATION <yaw> <pitch> <roll>` | `rot_yaw/pitch/roll`, re-applies the mesh transform | yes |
 | `RESOLUTION` | `SCREEN <name> RESOLUTION <w_px> <h_px>` | `res_w`, `res_h` | **no** |
 | `CHANNEL` | `SCREEN <name> CHANNEL <ch>` | `channel`; maps the mesh when `ch >= 0`, unmaps otherwise | yes |
+| `CLONE` | `SCREEN <name> CLONE <newname>` | copies EVERY property but the name, and places the copy EDGE TO EDGE along the source's own width axis. `404` if the source is missing or the new name is taken | yes |
 | `REMOVE` | `SCREEN <name> REMOVE` | erases the screen, its mapping and its mesh | **no** |
 | `EYEMODE` | `SCREEN <name> EYEMODE CAMERA` \| `SCREEN <name> EYEMODE FIXED [x y z]` | `eye_mode`, and `design_eye_*` only when `FIXED` **and** at least three coordinates were given | yes |
 | `ARCV` | `SCREEN <name> ARCV <arc_v_deg>` — 0 means a single-curved cylinder | `arc_v_deg` | yes |
@@ -154,6 +155,25 @@ removing a screen from the picture with the tree still reporting a number beside
 Published as `snap_m` and `snap_deg` on the stage — but note that an **untouched stage
 publishes no previz sub-tree at all** (§4.2), so on a stage with nothing on it they are absent
 rather than zero. That is the documented behaviour of the publisher and not a fault of these two.
+
+#### `CLONE`, and where the copy goes
+
+The offset is the source's FULL width along the source's own **+X**, so the new panel's left edge
+meets the old one's right edge. In the source's axes and not the world's, because a volume is
+built from panels that are toed in and a world-axis offset is wrong for every one of them.
+
+A clone dropped at the same position would be invisible — exactly behind the original — and an
+operator seeing nothing happen sends the command again. **An existing name is refused rather than
+overwritten**: overwriting is how someone loses the panel they spent ten minutes positioning, and
+the command that would have said so is the one that quietly did it.
+
+It carries the CHANNEL too, which is deliberate: the next panel of a wall shows the same feed
+until told otherwise, and an operator who wants a different one is already typing `CHANNEL`.
+
+*And the check that matters is a PIXEL.* A screen is a `screen_meta` **and** a mesh, and a map
+entry with no mesh behind it is listed by the tree, named by `SCREEN LIST`, and even SELECTED by
+a click — `compute_pick` tests the quad, not the geometry. `previz-gizmo` counts the mapped
+channel's colour before and after: 144 023 px with one panel, 302 092 with two.
 
 ### 1.2 `PREVIZ CAMERA` and `PREVIZ VIEW`
 

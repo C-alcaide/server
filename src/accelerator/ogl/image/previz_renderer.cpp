@@ -2646,6 +2646,62 @@ previz_scene previz_renderer::scene() const
 /// The fallback chain is the one every 3D application has, and its last step is what makes the
 /// command useful on a stage nobody has clicked yet: "frame everything" is how an operator finds
 /// a venue they have just loaded and cannot see.
+bool previz_renderer::clone_screen(const std::string& source, const std::string& name)
+{
+    core::screen_meta copy;
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        const auto src = impl_->scene_.screens.find(source);
+        if (src == impl_->scene_.screens.end())
+            return false;
+        // A name already in use is REFUSED rather than overwritten. Overwriting is how an
+        // operator building a wall loses the panel they spent ten minutes positioning, and the
+        // command that would have said so is the one that quietly did it.
+        if (impl_->scene_.screens.count(name))
+            return false;
+        copy = src->second;
+    }
+
+    copy.name = name;
+    // EDGE TO EDGE along the source's own width axis, which is what "the next panel" means. A
+    // clone dropped at the same position is invisible -- it is exactly behind the original, and
+    // an operator sees nothing happen and sends the command again.
+    //
+    // The offset is the FULL width, in the source's own +X: a screen's origin is its centre, so
+    // moving by one width puts the new panel's left edge on the old one's right edge. Rotation
+    // comes along, so a wall of toed-in panels clones round its own curve rather than off into
+    // the room.
+    const auto  rot    = mat4::rotate_y(copy.rot_yaw) * mat4::rotate_x(copy.rot_pitch) *
+                     mat4::rotate_z(copy.rot_roll);
+    const float rgt[3] = {rot.m[0], rot.m[1], rot.m[2]};
+    copy.pos_x += rgt[0] * copy.width_m;
+    copy.pos_y += rgt[1] * copy.width_m;
+    copy.pos_z += rgt[2] * copy.width_m;
+
+    // Built through the same path `add_screen_flat` uses and then written field by field, rather
+    // than dropped into the map directly: a screen is a MESH as well as a `screen_meta`, and a
+    // map entry with no mesh behind it is a screen the tree lists and nothing draws.
+    if (copy.radius_m > 0.0f && copy.arc_deg > 0.0f)
+        add_screen_curved(name, copy.width_m, copy.height_m, copy.radius_m, copy.arc_deg);
+    else
+        add_screen_flat(name, copy.width_m, copy.height_m);
+
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        const auto it = impl_->scene_.screens.find(name);
+        if (it == impl_->scene_.screens.end())
+            return false;
+        const auto fresh_name = it->second.name;
+        it->second            = copy;
+        it->second.name       = fresh_name;
+    }
+    set_screen_position(name, copy.pos_x, copy.pos_y, copy.pos_z);
+    set_screen_rotation(name, copy.rot_yaw, copy.rot_pitch, copy.rot_roll);
+    if (copy.channel >= 0)
+        set_screen_channel(name, copy.channel);
+    return true;
+}
+
 void previz_renderer::set_snap(double metres, double degrees)
 {
     std::lock_guard<std::mutex> lock(impl_->scene_mutex_);

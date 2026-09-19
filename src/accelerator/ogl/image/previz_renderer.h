@@ -160,6 +160,13 @@ class previz_renderer
     void set_screen_icvfx(const std::string& name, bool enable);
 
     void remove_screen(const std::string& name);
+
+    /// Copy a screen, placed EDGE TO EDGE with the original along its own width axis.
+    ///
+    /// False if the source does not exist or the new name is already taken. Note what it copies:
+    /// EVERYTHING except the name and the position, the channel included -- see the definition
+    /// for why that is the right default and not an oversight.
+    bool clone_screen(const std::string& source, const std::string& name);
     std::vector<std::string> list_screens() const;
 
     /// Render the 3D scene to the given target texture.

@@ -1,6 +1,25 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: a previz screen can be CLONED -- `SCREEN <name> CLONE <newname>`
+
+With snapping, this is how a wall gets built out of panels. The copy carries every property but
+the name -- rotation, size, resolution and its derived pixel pitch, eye mode, ICVFX, and the
+mapped CHANNEL, because the next panel of a wall shows the same feed until told otherwise.
+
+It lands EDGE TO EDGE along the SOURCE's own width axis, not the world's. A volume is built from
+panels that are toed in, and a world-axis offset is wrong for every one of them; a copy dropped
+at the same position would be invisible behind the original, and an operator seeing nothing
+happen sends the command again. An existing name is `404` rather than overwritten.
+
+Verified: `previz-gizmo` 37/37 on both mixers. The placement is predicted in closed form -- a 2 m
+screen yawed 20 degrees puts the copy at +(2cos20, 0, -2sin20) -- because "it moved somewhere" is
+satisfied by any offset at all, including the world-axis one that is the plausible wrong answer.
+**And one arm counts PIXELS**, which is the only check that can see the failure that matters
+here: a `screen_meta` with no mesh behind it is listed by the tree, named by `SCREEN LIST` and
+even SELECTED by a click, since picking tests the quad and not the geometry. The mapped channel's
+colour covers 144 023 px with one panel and 302 092 with two.
+
 ### BEHAVIOUR: previz gestures can SNAP to a grid -- `PREVIZ <ch> SNAP <metres> [<degrees>]`
 
 Lining screens up edge to edge is most of what building an LED volume in previz IS, and every
