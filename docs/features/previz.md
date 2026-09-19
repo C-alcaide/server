@@ -575,8 +575,16 @@ further away, and exactly as **tall**, because the nearest point is still the ce
 Mutation-verified: bending the mesh half again as far turns that arm red while the round trip
 stays green.
 
-**Still uncovered by `previz-place`**: placement seen through the PRODUCTION camera (previz
-renders from the viewport one). **Roll and pitch are driven since
+**Placement through the PRODUCTION camera is covered since 2026-09-19.** Every other arm renders
+through the viewport camera — which `compute_frustum` never reads — so ten checks of where a
+screen lands had all been made through the wrong half of the split. `VIEW CLEAR` drops the
+override and the render follows the production camera, which makes the same model apply with one
+variable changed: a server that read a production pose differently from a viewport one passes all
+ten and fails this. Measured under a pixel. Its companion asserts the split itself — setting the
+viewport again moves the picture back and leaves the production camera where it was.
+
+**Still uncovered by `previz-place`**: roll and pitch (driven through the window by
+`previz-gizmo`'s rings, but not predicted here), and colour. **Roll and pitch are driven since
 2026-09-19**, though not here — `previz-gizmo`'s three rotation rings turn a screen about all
 three axes through the window and read the result off the published rotation, so this file's
 projection model still predicts flat screens under yaw only.
