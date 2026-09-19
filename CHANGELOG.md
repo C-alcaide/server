@@ -1,6 +1,40 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: a venue mesh can be clicked -- previz picks geometry, not only screens
+
+`compute_pick` intersected the `screen_meta` quads and nothing else, so a stage whose walls came
+from a glTF or OBJ model was look-only: an operator could see a part and had no way to find out
+what it was called. `PREVIZ MAP` takes exactly that name, so the answer lived in the model file
+and nowhere an operator could reach it.
+
+`core::compute_mesh_pick` is Moller-Trumbore over each mesh's triangle list, read IN PLACE
+through a `pick_mesh` view -- a venue model is tens of thousands of triangles the renderer
+already holds interleaved, and copying them out per click would cost more than the pick. TWO-SIDED
+deliberately: a venue model is a room, and an operator looking around from inside it meets every
+wall from behind.
+
+**Screens and meshes compete on DEPTH, not on an order.** A venue wall standing in front of a
+screen occludes it; the same screen moved behind the wall loses the click. Any fixed order
+between the two kinds gives the same answer both times, and an operator would be selecting a
+picture they cannot see.
+
+The selected mesh is outlined by its bounding BOX, in violet, and published as `selected_mesh`.
+A box rather than the mesh's own wireframe, for the reason the screen highlight is a perimeter:
+a venue part is thousands of triangles and every edge of it would sit over the picture being
+judged.
+
+Verified: `previz-gizmo` 27/27 on both mixers, four new arms. TWO different meshes are clicked,
+because a pick that always answered with the first in the list passes a single check -- and the
+first in the list is what a loop that forgets to compare distances returns. The depth arm uses
+ONE PIXEL and expects TWO ANSWERS: the frame centre passes through a screen at z = -3, the
+venue's back wall at z = -6 and the same screen moved to z = -9. Stage math self-test 124 checks,
+up from 114. `api-stage`, `api-tree`, `previz-interact` and `previz-place` re-run green.
+
+A venue mesh still cannot be DRAGGED, which is a property of the model rather than an omission:
+the loaders bake each mesh into world space with an identity model matrix, so there is no
+transform to write.
+
 ### BEHAVIOUR: previz rotates a screen about all THREE axes -- pitch and roll join the yaw ring
 
 The selected screen carries three rotation rings now, in the gizmo's own axis colours: red turns

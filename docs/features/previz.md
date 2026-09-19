@@ -425,8 +425,11 @@ Spout out, AMCP back — and does not apply to this route; §4 of that document 
   `sfml_input_self_test`, run by hand under WSL against a real SFML window on WSLg. What that
   covers is the TRANSLATION: the server itself is not built on Linux here, so previz end to end
   on Linux rests on the translation being right plus everything downstream being shared.
-* **Screens are picked as planes.** A venue mesh loaded from glTF is drawn but not pickable — the
-  pick tests the `screen_meta` quads only.
+* **Screens are picked as planes, venue meshes as TRIANGLES, and the two compete on DEPTH.**
+  `compute_pick` intersects the `screen_meta` quads; `compute_mesh_pick` runs Moller-Trumbore
+  over every non-screen mesh's triangle list, read in place. Whichever hit is nearer the eye
+  wins, so a venue wall standing in front of a screen occludes it — any fixed order between
+  the two kinds would let an operator select a picture they cannot see.
 * **`selected` and `hover` are read-only.** Both are set by the pointer and published; there is no
   write path, because a selection that could be set remotely would fight the operator's own.
 
@@ -924,9 +927,31 @@ Two limits and one that closed, each a consequence of a decision rather than an 
   curved wall is every triangle edge, a grid of verticals over the very picture the operator is
   judging. An outline is the rim and nothing else, built from the same local geometry the mesh
   generators use.
-* **Only screens are pickable.** `compute_pick` intersects the `screen_meta` quads. A venue mesh
-  loaded from glTF is drawn and cannot be selected or dragged, so a scene whose walls are geometry
-  rather than screens is look-only.
+* ~~**Only screens are pickable.**~~ **CLOSED 2026-09-19.** A venue mesh can be clicked, and the
+  name it answers with is published as `selected_mesh`. That is the whole of the point: a glTF or
+  OBJ part has no size, no channel and no transform to drag, but it HAS a name, and `PREVIZ MAP`
+  takes exactly that name — so "which mesh is this?" stops being a question an operator
+  answers by opening the model in another program.
+
+  `core::compute_mesh_pick` is Moller-Trumbore over the triangle list, read IN PLACE through a
+  `pick_mesh` view: a venue model is tens of thousands of triangles and the renderer already
+  holds them interleaved, so copying them out per click would cost more than the pick. It is
+  **two-sided** deliberately — a venue model is a room, and an operator looking around from
+  inside it meets every wall from behind, so back-face culling is the natural-looking choice
+  that makes the walls of a volume unclickable from the only place anyone stands.
+
+  **The selection is drawn as a bounding BOX**, for the reason the screen highlight is a
+  perimeter rather than a wireframe: a venue part is thousands of triangles and every edge of it
+  would sit over the picture the operator is judging. Violet, a colour no other overlay wears
+  — checked in RGB DIRECTION rather than by eye, because half these overlays are
+  distinguished by chroma and two that look different can measure the same.
+
+  **Screens and meshes compete on DEPTH**, not on an order. `pick::distance` and
+  `mesh_hit::distance` are both metres from the eye, which is why `compute_mesh_pick`
+  normalises its ray direction where `compute_pick` scales its `t` at the end instead.
+* **A venue mesh still cannot be DRAGGED**, and that is a property of the model rather than an
+  omission: the loaders bake each mesh into world space with an identity model matrix, so there
+  is no transform to write. Moving one would mean rewriting its vertices.
 * ~~**No rotation handle.**~~ **CLOSED 2026-09-19.** The selected screen carries a **yaw ring**
   in the horizontal plane through its base, with a spoke at its current facing so the handle
   reads as an angle rather than a decoration. Grab it anywhere on the annulus and drag: the yaw

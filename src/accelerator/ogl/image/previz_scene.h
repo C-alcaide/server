@@ -92,6 +92,10 @@ struct previz_scene
     // renderer, and so `api-stage` can assert a click landed.
     std::string                      selected;
     std::string                      hover;
+    /// Which VENUE MESH is selected, by name -- the other kind of thing on a stage. A screen
+    /// and a mesh are never both selected: a click sets one and clears the other, because
+    /// "what is selected" is one question however many kinds of answer it has.
+    std::string                      selected_mesh;
     // Operator OVERRIDE/freeze: when true the bound tracker stops driving the
     // production camera, letting the operator hand-fly it (PREVIZ CAMERA SET still
     // works).  Cleared to hand control back to the tracker.

@@ -151,6 +151,11 @@ struct stage_snapshot
     /// Published so a client can draw a selection without owning a renderer.
     std::string                        selected;
     std::string                        hover;
+    /// The selected VENUE MESH, by name. A glTF or OBJ part is not a screen -- it has no size,
+    /// no channel and no transform to drag -- but it HAS a name, and `PREVIZ MAP` takes that
+    /// name. Publishing it is what turns "which mesh is this?" from a question an operator
+    /// answers by opening the model in another program into a click.
+    std::string                        selected_mesh;
 };
 
 // Equality is deliberately NOT defined here. Comparing these structs member by member would be a

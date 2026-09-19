@@ -353,6 +353,9 @@ struct previz_renderer::impl
     GLuint                      depth_rbo_ = 0;
     int                         fbo_w_     = 0;
     int                         fbo_h_     = 0;
+    GLuint                      mesh_box_vao_ = 0;
+    GLuint                      mesh_box_vbo_ = 0;
+    int                         mesh_box_vert_count_ = 0;
     GLuint                      footprint_vao_ = 0;
     GLuint                      footprint_vbo_ = 0;
     int                         footprint_vert_count_ = 0;
@@ -389,6 +392,11 @@ struct previz_renderer::impl
                 glDeleteFramebuffers(1, &fbo_);
             if (depth_rbo_)
                 glDeleteRenderbuffers(1, &depth_rbo_);
+            if (mesh_box_vao_) {
+                glDeleteVertexArrays(1, &mesh_box_vao_);
+                glDeleteBuffers(1, &mesh_box_vbo_);
+                mesh_box_vao_ = 0;
+            }
             if (footprint_vao_) {
                 glDeleteVertexArrays(1, &footprint_vao_);
                 glDeleteBuffers(1, &footprint_vbo_);
@@ -573,6 +581,66 @@ struct previz_renderer::impl
         }
         glBindVertexArray(footprint_vao_);
         glBindBuffer(GL_ARRAY_BUFFER, footprint_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(previz_vertex)),
+                     verts.data(), GL_DYNAMIC_DRAW);
+        auto stride  = static_cast<GLsizei>(sizeof(previz_vertex));
+        auto pos_loc = shader_->get_attrib_location("a_Position");
+        glEnableVertexAttribArray(pos_loc);
+        glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
+        auto nrm_loc = shader_->get_attrib_location("a_Normal");
+        glEnableVertexAttribArray(nrm_loc);
+        glVertexAttribPointer(nrm_loc, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(3 * sizeof(float)));
+        auto uv_loc = shader_->get_attrib_location("a_TexCoord");
+        glEnableVertexAttribArray(uv_loc);
+        glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(6 * sizeof(float)));
+        glBindVertexArray(0);
+    }
+
+    /// The selected VENUE MESH, as its world-space bounding BOX.
+    ///
+    /// A box and not a wireframe of the mesh, for the reason the screen outline is a perimeter
+    /// rather than a mesh wireframe: a venue part is thousands of triangles, and drawing every
+    /// edge of it puts a grid over the very picture the operator is judging. A box says WHICH
+    /// part and WHERE without hiding anything -- and it is what every 3D application draws for a
+    /// selection it cannot meaningfully outline.
+    void build_mesh_box(const previz_mesh& mesh)
+    {
+        float lo[3] = {1e30f, 1e30f, 1e30f};
+        float hi[3] = {-1e30f, -1e30f, -1e30f};
+        for (const auto& v : mesh.vertices) {
+            const float p[3] = {v.px, v.py, v.pz};
+            for (int i = 0; i < 3; ++i) {
+                lo[i] = std::min(lo[i], p[i]);
+                hi[i] = std::max(hi[i], p[i]);
+            }
+        }
+        std::vector<previz_vertex> verts;
+        auto corner = [&](int bits, float out[3]) {
+            out[0] = (bits & 1) ? hi[0] : lo[0];
+            out[1] = (bits & 2) ? hi[1] : lo[1];
+            out[2] = (bits & 4) ? hi[2] : lo[2];
+        };
+        // The twelve edges are the pairs of corners differing in exactly ONE bit, which is what
+        // `bits ^ (1 << axis)` enumerates; the `>` keeps each edge once rather than twice.
+        for (int bits = 0; bits < 8; ++bits) {
+            for (int axis = 0; axis < 3; ++axis) {
+                const int other = bits ^ (1 << axis);
+                if (other <= bits)
+                    continue;
+                float a[3], b[3];
+                corner(bits, a);
+                corner(other, b);
+                verts.push_back({a[0], a[1], a[2], 0, 1, 0, 0, 0});
+                verts.push_back({b[0], b[1], b[2], 0, 1, 0, 0, 0});
+            }
+        }
+        mesh_box_vert_count_ = static_cast<int>(verts.size());
+        if (!mesh_box_vao_) {
+            glGenVertexArrays(1, &mesh_box_vao_);
+            glGenBuffers(1, &mesh_box_vbo_);
+        }
+        glBindVertexArray(mesh_box_vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh_box_vbo_);
         glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(previz_vertex)),
                      verts.data(), GL_DYNAMIC_DRAW);
         auto stride  = static_cast<GLsizei>(sizeof(previz_vertex));
@@ -1095,6 +1163,28 @@ struct previz_renderer::impl
         // channel: tinting it would corrupt the very picture the operator is judging, and
         // `previz-picture` gates that picture at a colour. Drawing the mesh again in wireframe
         // costs one more draw per highlighted screen and touches no pixel of the fill.
+        // A SELECTED VENUE MESH gets a bounding box, in violet -- a colour no other overlay
+        // wears, checked in RGB DIRECTION rather than by eye, because half the overlays here are
+        // distinguished by chroma and two that look different can measure the same.
+        if (!scene_.selected_mesh.empty()) {
+            for (const auto& mesh : scene_.meshes) {
+                if (mesh.name != scene_.selected_mesh || mesh.vertices.empty())
+                    continue;
+                build_mesh_box(mesh);
+                glDepthFunc(GL_LEQUAL);
+                glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_mvp"), 1, GL_FALSE, mvp.m);
+                glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_model"), 1, GL_FALSE, model.m);
+                shader_->set("u_is_screen", false);
+                shader_->set("u_has_texture", false);
+                shader_->set("u_base_color", 0.7, 0.35, 1.0);
+                glBindVertexArray(mesh_box_vao_);
+                glDrawArrays(GL_LINES, 0, mesh_box_vert_count_);
+                glBindVertexArray(0);
+                glDepthFunc(GL_LESS);
+                break;
+            }
+        }
+
         {
             const std::string* marks[2] = {&scene_.hover, &scene_.selected};
             const double       cols[2][3] = {{0.95, 0.75, 0.15}, {0.15, 0.9, 0.95}};
@@ -1515,10 +1605,37 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                             return true;
                         }
                     }
+                    // A VENUE MESH IS PICKABLE TOO, and the two kinds compete on DEPTH rather
+                    // than on an order. A wall of the venue model standing in front of a screen
+                    // has to occlude it, or an operator clicks a picture they cannot see and the
+                    // viewport stops being a view of anything. `pick::distance` and
+                    // `mesh_hit::distance` are both metres from the eye, which is the whole
+                    // reason `compute_mesh_pick` normalises its direction.
+                    std::optional<core::mesh_hit> mesh;
                     {
                         std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
-                        impl_->scene_.selected = hit ? hit->name : std::string();
+                        std::vector<core::pick_mesh> cands;
+                        cands.reserve(impl_->scene_.meshes.size());
+                        for (const auto& m : impl_->scene_.meshes) {
+                            // Screens are excluded: the procedural ones are ALSO meshes here, and
+                            // a screen picked as geometry would arrive without the local
+                            // coordinates every gesture needs -- selectable, and then undraggable.
+                            if (m.is_screen || !m.visible || m.vertices.empty())
+                                continue;
+                            cands.push_back(core::pick_mesh{&m.name, &m.vertices[0].px,
+                                                            m.vertices.size(),
+                                                            sizeof(previz_vertex) / sizeof(float)});
+                        }
+                        mesh = core::compute_mesh_pick(view, aspect, event.x, event.y, cands);
                     }
+                    const bool mesh_wins = mesh && (!hit || mesh->distance < hit->distance);
+                    {
+                        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                        impl_->scene_.selected      = (hit && !mesh_wins) ? hit->name : std::string();
+                        impl_->scene_.selected_mesh = mesh_wins ? mesh->name : std::string();
+                    }
+                    if (mesh_wins)
+                        return true; // a venue mesh has no transform to drag
                     if (hit) {
                         g.dragging     = true;
                         g.drag_name    = hit->name;
@@ -2512,6 +2629,7 @@ core::stage_snapshot previz_renderer::stage_snapshot() const
     out.view_camera             = sc.view_camera;
     out.scene_path              = sc.scene_path;
     out.selected                = sc.selected;
+    out.selected_mesh           = sc.selected_mesh;
     out.hover                   = sc.hover;
     out.screens                 = sc.screens;
     return out;

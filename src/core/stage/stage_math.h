@@ -299,6 +299,48 @@ constexpr double ring_band_fraction = 0.18;
 /// copies of this number is a handle you can see and cannot grab.
 double ring_radius(const screen_meta& meta);
 
+/// One candidate surface for `compute_mesh_pick`, read IN PLACE.
+///
+/// A venue model is tens of thousands of triangles and the renderer already holds them
+/// interleaved with normals and UVs; copying them out per click would cost more than the pick.
+/// So this is a view: a pointer at the first position, how many vertices follow, and how far
+/// apart they are in floats. `vertex_count` is a multiple of three -- an expanded triangle list,
+/// which is what both loaders produce and what the draw call consumes.
+struct pick_mesh
+{
+    const std::string* name          = nullptr;
+    const float*       xyz           = nullptr;
+    std::size_t        vertex_count  = 0;
+    std::size_t        stride_floats = 3;
+};
+
+struct mesh_hit
+{
+    std::string name;
+    double      distance = 0.0;              ///< metres from the eye
+    double      x = 0.0, y = 0.0, z = 0.0;   ///< where, in world space
+};
+
+/// Moller-Trumbore, TWO-SIDED, returning the ray parameter in units of `dir`.
+///
+/// Two-sided deliberately: a venue model is a room, and an operator looking around from inside it
+/// meets every wall from behind. Back-face culling is the natural-looking choice that makes the
+/// walls of a volume unclickable from the only place anyone stands.
+std::optional<double>
+ray_triangle(const double eye[3], const double dir[3], const float* a, const float* b, const float* c);
+
+/// The nearest triangle under a viewport point, across every candidate mesh.
+///
+/// Separate from `compute_pick` rather than folded into it, because the two answer different
+/// questions: a SCREEN is a rectangle with local coordinates a gesture can drag by, and a venue
+/// mesh is geometry with a name. The caller compares the two distances -- see the renderer --
+/// which is the only way a wall standing in front of a screen can occlude it.
+std::optional<mesh_hit> compute_mesh_pick(const previz_camera&         view,
+                                          double                       aspect,
+                                          double                       sx,
+                                          double                       sy,
+                                          const std::vector<pick_mesh>& meshes);
+
 std::optional<pick> compute_pick(const previz_camera&                      view,
                                  double                                     aspect,
                                  double                                     sx,

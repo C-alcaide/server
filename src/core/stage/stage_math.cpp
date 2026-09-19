@@ -491,6 +491,89 @@ std::optional<ring_hit> compute_ring_grab(const previz_camera& view,
     return best;
 }
 
+std::optional<double>
+ray_triangle(const double eye[3], const double dir[3], const float* a, const float* b, const float* c)
+{
+    const double e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    const double e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+
+    const double p[3] = {dir[1] * e2[2] - dir[2] * e2[1],
+                         dir[2] * e2[0] - dir[0] * e2[2],
+                         dir[0] * e2[1] - dir[1] * e2[0]};
+    const double det  = dot3(e1, p);
+    // No back-face rejection -- see the header. Only a ray PARALLEL to the triangle is refused,
+    // and the epsilon is relative to nothing because `dir` is normalised by the caller.
+    if (std::abs(det) < 1e-12)
+        return std::nullopt;
+
+    const double inv = 1.0 / det;
+    const double tv[3] = {eye[0] - a[0], eye[1] - a[1], eye[2] - a[2]};
+    const double u     = dot3(tv, p) * inv;
+    if (u < 0.0 || u > 1.0)
+        return std::nullopt;
+
+    const double q[3] = {tv[1] * e1[2] - tv[2] * e1[1],
+                         tv[2] * e1[0] - tv[0] * e1[2],
+                         tv[0] * e1[1] - tv[1] * e1[0]};
+    const double v    = dot3(dir, q) * inv;
+    if (v < 0.0 || u + v > 1.0)
+        return std::nullopt;
+
+    const double t = dot3(e2, q) * inv;
+    if (t <= 0.0)
+        return std::nullopt; // behind the eye
+    return t;
+}
+
+std::optional<mesh_hit> compute_mesh_pick(const previz_camera&          view,
+                                          double                        aspect,
+                                          double                        sx,
+                                          double                        sy,
+                                          const std::vector<pick_mesh>& meshes)
+{
+    const auto   cam_rot = mat4::rotate_y(view.yaw) * mat4::rotate_x(view.pitch) * mat4::rotate_z(view.roll);
+    const double rgt[3]  = {cam_rot.m[0], cam_rot.m[1], cam_rot.m[2]};
+    const double up[3]   = {cam_rot.m[4], cam_rot.m[5], cam_rot.m[6]};
+    const double fwd[3]  = {-cam_rot.m[8], -cam_rot.m[9], -cam_rot.m[10]};
+    const double half_v  = std::tan(view.fov * 0.5 * M_PI / 180.0);
+    const double xc      = (2.0 * sx - 1.0) * aspect * half_v;
+    const double yc      = (1.0 - 2.0 * sy) * half_v;
+
+    double dir[3];
+    for (int i = 0; i < 3; ++i)
+        dir[i] = fwd[i] + rgt[i] * xc + up[i] * yc;
+
+    // NORMALISED here, unlike in `compute_pick`, which scales its `t` at the end instead. The
+    // difference matters: this function compares thousands of `t` values against each other
+    // before it returns one, and doing that in units of an un-normalised direction would be
+    // correct only because every comparison shares the same scale -- true today and a trap for
+    // anyone who later compares one of these against a `pick::distance`, which IS in metres.
+    const double dlen = std::sqrt(dot3(dir, dir));
+    if (dlen < 1e-12)
+        return std::nullopt;
+    for (auto& d : dir)
+        d /= dlen;
+
+    const double eye[3] = {view.x, view.y, view.z};
+
+    std::optional<mesh_hit> best;
+    for (const auto& m : meshes) {
+        if (!m.xyz || !m.name || m.vertex_count < 3)
+            continue;
+        const std::size_t tris = m.vertex_count / 3;
+        for (std::size_t i = 0; i < tris; ++i) {
+            const float* a = m.xyz + (i * 3 + 0) * m.stride_floats;
+            const float* b = m.xyz + (i * 3 + 1) * m.stride_floats;
+            const float* c = m.xyz + (i * 3 + 2) * m.stride_floats;
+            const auto   t = ray_triangle(eye, dir, a, b, c);
+            if (!t || (best && *t >= best->distance))
+                continue;
+            best = mesh_hit{*m.name, *t, eye[0] + dir[0] * *t, eye[1] + dir[1] * *t, eye[2] + dir[2] * *t};
+        }
+    }
+    return best;
+}
+
 std::optional<pick> compute_pick(const previz_camera&                     view,
                                  double                                    aspect,
                                  double                                    sx,

@@ -729,6 +729,86 @@ stage_math_report stage_math_self_test()
         }
     }
 
+    // ---- 16. compute_mesh_pick: a venue mesh is geometry with a name --------------------
+    //
+    // Four properties, each failing a different plausible mistake. The fixture is two quads
+    // square on to a camera looking down -Z from +Z, so every expected distance is a subtraction
+    // anyone can check by reading it.
+    {
+        const previz_camera front{0.0f, 0.0f, 10.0f, 0.0f, 0.0f, 0.0f, 60.0f, 0.1f, 100.0f};
+        const double        aspect = 16.0 / 9.0;
+
+        // A 2 x 2 quad at z = 0 and another at z = 4 -- the second is NEARER the eye. Positions
+        // only, stride 3, which is also the degenerate case of the interleaved layout the
+        // renderer passes.
+        auto quad = [](float z) {
+            return std::vector<float>{-1, -1, z, 1, -1, z, 1, 1, z, -1, -1, z, 1, 1, z, -1, 1, z};
+        };
+        const auto far_q  = quad(0.0f);
+        const auto near_q = quad(4.0f);
+
+        const std::string far_name  = "back_wall";
+        const std::string near_name = "pillar";
+
+        // 16a. the centre of the view hits the only mesh there is, at its own distance.
+        {
+            std::vector<pick_mesh> one{pick_mesh{&far_name, far_q.data(), far_q.size() / 3, 3}};
+            const auto             h = compute_mesh_pick(front, aspect, 0.5, 0.5, one);
+            ++rep.checks;
+            if (!h)
+                rep.failures.emplace_back("mesh/centre: the quad straight ahead was not hit");
+            else {
+                check("mesh/centre/distance", h->distance, 10.0, 1e-4);
+                ++rep.checks;
+                if (h->name != far_name)
+                    rep.failures.emplace_back("mesh/centre: hit reported the wrong mesh: " + h->name);
+            }
+        }
+
+        // 16b. NEAREST wins, and it is checked in BOTH orders. A loop that kept the last hit
+        // rather than the nearest passes one order and fails the other, and a fixture listing
+        // them in only one order cannot tell the two apart.
+        {
+            std::vector<pick_mesh> a{pick_mesh{&far_name, far_q.data(), far_q.size() / 3, 3},
+                                     pick_mesh{&near_name, near_q.data(), near_q.size() / 3, 3}};
+            std::vector<pick_mesh> b{pick_mesh{&near_name, near_q.data(), near_q.size() / 3, 3},
+                                     pick_mesh{&far_name, far_q.data(), far_q.size() / 3, 3}};
+            for (const auto& order : {a, b}) {
+                const auto h = compute_mesh_pick(front, aspect, 0.5, 0.5, order);
+                ++rep.checks;
+                if (!h || h->name != near_name)
+                    rep.failures.emplace_back("mesh/nearest: the FAR mesh won, or nothing did");
+                else
+                    check("mesh/nearest/distance", h->distance, 6.0, 1e-4);
+            }
+        }
+
+        // 16c. a point past the quad's edge hits nothing. Without this, a pick that returned the
+        // nearest PLANE rather than the nearest TRIANGLE would pass every check above -- and an
+        // operator would select a wall by clicking the sky beside it.
+        {
+            std::vector<pick_mesh> one{pick_mesh{&far_name, far_q.data(), far_q.size() / 3, 3}};
+            ++rep.checks;
+            if (compute_mesh_pick(front, aspect, 0.02, 0.5, one))
+                rep.failures.emplace_back("mesh/outside: a point well beside the quad was a hit -- "
+                                          "the pick is testing the plane, not the triangle");
+        }
+
+        // 16d. the BACK face is a hit. A venue model is a room, and an operator looking around
+        // from inside it meets every wall from behind; back-face culling is the natural-looking
+        // choice that makes the walls of a volume unclickable from the only place anyone stands.
+        {
+            const previz_camera behind{0.0f, 0.0f, -10.0f, 180.0f, 0.0f, 0.0f, 60.0f, 0.1f, 100.0f};
+            std::vector<pick_mesh> one{pick_mesh{&far_name, far_q.data(), far_q.size() / 3, 3}};
+            const auto             h = compute_mesh_pick(behind, aspect, 0.5, 0.5, one);
+            ++rep.checks;
+            if (!h)
+                rep.failures.emplace_back("mesh/backface: the same quad seen from behind was not hit");
+            else
+                check("mesh/backface/distance", h->distance, 10.0, 1e-4);
+        }
+    }
+
     return rep;
 }
 
