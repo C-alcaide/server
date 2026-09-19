@@ -68,6 +68,11 @@ All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cp
   **`PREVIZ AUTOPROJECTION` with no `SOURCE` applies to LAYER 0**, which its own comment calls
   legacy mode. Content on any other layer is simply not projected — and that looks exactly like
   auto-projection doing nothing.
+- **Both commands TWEEN**, and both are measured since 2026-09-19. `[dur] [tween]` interpolates
+  every ICVFX field that sensibly can — the dims, the feather, and all six gain components —
+  through `frame_transform::tween_to`. The mask QUAD deliberately does not tween: it snaps to its
+  destination, because previz recomputes it per frame and interpolating towards a value that has
+  already moved on would lag the camera.
 - **A typo used to turn ICVFX OFF.** `enable` was `at(0) == "1" || iequals "true"`, so every other
   word — `BANANA`, and `YES` — disabled the inner frustum and answered `202`. On a live volume
   that is the inner frustum vanishing because a word was misspelled. **Fixed 2026-09-19**: it goes
