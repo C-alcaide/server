@@ -226,11 +226,46 @@ std::optional<std::pair<double, double>> compute_plane_point(const previz_camera
 /// `yaw0 + (angle_now - angle_grab)` with no conversion in between and no chance of the two
 /// conventions drifting. Empty when the ray runs parallel to the plane, meets it behind the
 /// eye, or lands outside the ring's band.
+/// Which Euler component a rotation ring drives.
+///
+/// The three are NOT interchangeable, because the stage composes `Ry(yaw) * Rx(pitch) *
+/// Rz(roll)`: yaw turns about WORLD +Y, pitch about the yaw-turned +X, and roll about the
+/// yaw-then-pitch-turned +Z. So each ring lies in a different plane, and the plane of the
+/// second and third depends on the value of the ones outside them. A single ring re-used for
+/// all three by swapping which field it writes would be correct only while the other two are
+/// zero -- which is exactly the state a stage is in before anyone has used it, and so exactly
+/// the state a check would be written in.
+enum class ring_axis
+{
+    yaw = 0,
+    pitch,
+    roll
+};
+
 struct ring_hit
 {
-    double angle_deg = 0.0; ///< where on the ring, in the same sense as `screen_meta::rot_yaw`
-    double radius    = 0.0; ///< the ring's own radius, in metres
+    double    angle_deg    = 0.0; ///< where on the ring, in the same sense as the axis's own field
+    double    radius       = 0.0; ///< the ring's own radius, in metres
+    ring_axis axis         = ring_axis::yaw; ///< which ring, once `compute_ring_grab` has chosen
+    double    radial_error = 0.0; ///< |hit radius - ring radius|, which is how that choice is made
 };
+
+/// A ring's PLANE, as a normal and the two in-plane axes its angle is measured against: `a` is
+/// where the axis's own field reads zero, and `b` is where it reads +90 degrees.
+///
+/// Public for the same reason `ring_radius` is: the renderer draws the circle and the hit-test
+/// accepts it, and two derivations of one plane is a handle you can see and cannot grab. The
+/// basis is derived by APPLYING `mat4::rotate_*` rather than by writing out sines -- so a sign
+/// convention in the matrix and a sign convention here cannot disagree, because there is only
+/// one of them.
+struct ring_basis
+{
+    double n[3]{}; ///< the axis the ring turns about, in world space
+    double a[3]{}; ///< in-plane, at the field's zero
+    double b[3]{}; ///< in-plane, at the field's +90 degrees
+};
+
+ring_basis ring_frame(const screen_meta& meta, ring_axis axis);
 
 /// `band` is the half-width of the annulus that counts as a hit, in metres. A handle needs a
 /// tolerance an operator can actually hit with a mouse; the caller sizes it from the ring.
@@ -239,11 +274,29 @@ std::optional<ring_hit> compute_ring_hit(const previz_camera& view,
                                          double               sx,
                                          double               sy,
                                          const screen_meta&   meta,
-                                         double               band);
+                                         double               band,
+                                         ring_axis            axis);
 
-/// The ring's radius for a screen: big enough to clear the surface, small enough to stay in
-/// frame. One function so the renderer draws exactly what the hit-test accepts -- two copies of
-/// this number is a handle you can see and cannot grab.
+/// The ring the pointer is actually on, of the three -- NEAREST rather than first-match.
+///
+/// Three great circles of one sphere cross at six points, so "the first that accepts" would hand
+/// those six to whichever axis the loop happened to test first. Nearest is the only answer that
+/// does not depend on an ordering the operator cannot see.
+std::optional<ring_hit> compute_ring_grab(const previz_camera& view,
+                                          double               aspect,
+                                          double               sx,
+                                          double               sy,
+                                          const screen_meta&   meta,
+                                          double               band);
+
+/// How wide the grabbable annulus is, as a fraction of the ring's radius. Shared because
+/// `ring_radius` is DERIVED from it: the ring has to sit far enough out that its inner edge
+/// clears the screen's own handles, and that distance is a function of how wide the band is.
+constexpr double ring_band_fraction = 0.18;
+
+/// The ring's radius for a screen: outside everything else the screen draws, small enough to
+/// stay in frame. One function so the renderer draws exactly what the hit-test accepts -- two
+/// copies of this number is a handle you can see and cannot grab.
 double ring_radius(const screen_meta& meta);
 
 std::optional<pick> compute_pick(const previz_camera&                      view,

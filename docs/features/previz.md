@@ -950,8 +950,47 @@ Two limits and one that closed, each a consequence of a decision rather than an 
   whole gesture. The first version grabbed correctly and then did nothing at all, every frame of
   the drag falling outside the old quad. `core::compute_plane_point` is the bounds-free
   counterpart, pure and beside the others.
-* **Nothing is manipulated except position, yaw and size** *in the window*. No pitch or roll
-  handle — but the lower-level blocker is gone: `SCREEN … SIZE` and `SCREEN … ARC` resize and
+* ~~**No pitch or roll handle.**~~ **CLOSED 2026-09-19.** The selected screen carries **three**
+  rotation rings, in the gizmo's own axis colours: red turns about X (pitch), green about Y
+  (yaw), blue about Z (roll). That convention is the one thing an operator arriving from any
+  other 3D tool already knows, so the rings wear **exactly** the gizmo's colours rather than a
+  shade away from them -- a near neighbour reads as a deliberate distinction and is indisting-
+  uishable to anything measuring by chroma.
+
+  **The three rings are three PLANES, and two of them depend on the other's value.** The stage
+  composes `Ry(yaw) * Rx(pitch) * Rz(roll)`, so yaw turns in the world, pitch turns inside the
+  yaw, and roll inside both. `core::ring_frame` builds each ring's basis by APPLYING
+  `mat4::rotate_*` rather than by writing out sines, so a sign convention in the matrix and one
+  in the handle cannot disagree -- there is only one of them. A pitch ring built in the world's
+  fixed axes is correct at yaw 0 and wrong everywhere else, and yaw 0 is the state a fresh stage
+  is in; the boot self-test and `previz-gizmo` each carry a case at yaw 90 for exactly that.
+
+  A drag keeps the ring it **grabbed** for the whole gesture and writes **only** that component.
+  Re-choosing the nearest ring every frame would hand the operator a different rotation each
+  time the pointer crossed one of the six points where the rings meet, and writing all three
+  from a stale copy would quietly undo a rotation set a moment earlier.
+
+  **A ring seen edge-on is refused** rather than answered. As the view approaches a ring's plane,
+  one pixel of pointer movement sweeps an unbounded distance across it, so the angle stops
+  tracking the hand holding it. The threshold is about five degrees.
+* **The rings had to move outward, and a battery found why.** `ring_radius` was
+  `max(w, h) * 0.6`, which was fine while the yaw ring was the only one: it lies in the floor,
+  which a wall standing on it does not cover. **The roll ring lies in the screen's OWN plane.**
+  At the old radius it ran across the picture the operator is judging and -- the handles being
+  tested before the pick -- swallowed the click that MOVES a screen: the centre of a 2 x 2 m wall
+  is 1.0 m from its origin and the old band was 1.2 +- 0.216. The radius is derived from the
+  distance to a **top corner** now, which is the farthest point of the surface from the origin
+  every rotation turns about, and the self-test gates the PROPERTY -- inner edge clears the
+  corner -- rather than the number.
+* **Handle priority is corners, then rings, then the screen**, and every step of that order was
+  paid for. The rings come before the plain pick because they lie in planes a screen covers when
+  seen from the side or above. The **corners** come before the rings because a ring is a
+  three-metre circle whose projection sweeps most of the viewport: on an oblique view the pitch
+  ring's ellipse passes straight over the top corner of its own screen, and the corner grab
+  rotated instead of resizing. A 24 cm square is a far more specific statement of intent than
+  a point somewhere on a ring.
+* **Nothing is manipulated except position, rotation and size** *in the window*
+  -- the lower-level blocker on size is gone: `SCREEN … SIZE` and `SCREEN … ARC` resize and
   bend a screen **in place** since 2026-09-18, keeping its position, rotation, channel, eye mode,
   ICVFX, vertical arc and resolution. Until then the only route was to `ADD` it again, which
   builds a fresh `screen_meta` and discards all seven, so correcting a wall by 20 cm meant

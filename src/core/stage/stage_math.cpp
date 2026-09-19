@@ -333,9 +333,84 @@ std::optional<std::pair<double, double>> compute_plane_point(const previz_camera
 
 double ring_radius(const screen_meta& meta)
 {
-    // Outside the screen's own footprint, so the ring is grabbable on a wall seen face-on, and
-    // never smaller than a value a pointer can find on a small screen.
-    return std::max(0.6, static_cast<double>(std::max(meta.width_m, meta.height_m)) * 0.6);
+    // OUTSIDE THE WHOLE SURFACE, not merely outside its width -- and the distance that matters
+    // is to a TOP CORNER, because every rotation here turns about the origin, which is
+    // centre-BOTTOM.
+    //
+    // This was `max(w, h) * 0.6` while the yaw ring was the only one, and that was fine: the yaw
+    // ring lies in the floor, which a wall standing on it does not cover. The ROLL ring lies in
+    // the screen's OWN PLANE. At the old radius it ran straight across the picture the operator
+    // is judging -- and, because the handles are tested before the pick, it swallowed the click
+    // that moves a screen: the centre of a 2 x 2 m wall is 1.0 m from its origin, and the old
+    // band was 1.2 +- 0.216. Found by a battery arm that had been passing for a day.
+    //
+    // The inner edge is at `radius * (1 - ring_band_fraction)`, so clearing the corner handles
+    // needs `radius > corner / (1 - f)`; the extra 10% is the visible gap between the outermost
+    // handle and the ring.
+    const double corner = std::hypot(static_cast<double>(meta.width_m) * 0.5,
+                                     static_cast<double>(meta.height_m));
+    return std::max(0.6, corner * 1.1 / (1.0 - ring_band_fraction));
+}
+
+namespace {
+
+/// Apply a `mat4`'s rotation part to a 3-vector. Column-major, so column `c` starts at `m[c*4]`.
+void rot_apply(const mat4& m, const double v[3], double out[3])
+{
+    for (int r = 0; r < 3; ++r)
+        out[r] = static_cast<double>(m.m[0 * 4 + r]) * v[0] + static_cast<double>(m.m[1 * 4 + r]) * v[1] +
+                 static_cast<double>(m.m[2 * 4 + r]) * v[2];
+}
+
+double dot3(const double a[3], const double b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
+} // namespace
+
+ring_basis ring_frame(const screen_meta& meta, ring_axis axis)
+{
+    // The PARENT frame is what this Euler component rotates WITHIN, and it is the whole reason
+    // the three rings are not one function with a field selector. The stage composes
+    // Ry(yaw) * Rx(pitch) * Rz(roll), so yaw turns in the world, pitch turns inside the yaw, and
+    // roll turns inside both. A pitch ring drawn in the world's XZ plane is right only while yaw
+    // is zero -- which is the state a fresh stage is in, and therefore the state a check written
+    // without thinking about this would be written in.
+    mat4   parent = mat4::identity();
+    double n_local[3]{};
+    double base[3]{};
+    mat4   quarter = mat4::identity();
+    switch (axis) {
+        case ring_axis::yaw:
+            n_local[1] = 1.0;
+            base[2]    = 1.0; // a screen at yaw 0 faces local +Z
+            quarter    = mat4::rotate_y(90.0f);
+            break;
+        case ring_axis::pitch:
+            parent     = mat4::rotate_y(meta.rot_yaw);
+            n_local[0] = 1.0;
+            base[2]    = 1.0;
+            quarter    = mat4::rotate_x(90.0f);
+            break;
+        case ring_axis::roll:
+            parent     = mat4::rotate_y(meta.rot_yaw) * mat4::rotate_x(meta.rot_pitch);
+            n_local[2] = 1.0;
+            base[0]    = 1.0; // roll is measured from the screen's own +X, its width axis
+            quarter    = mat4::rotate_z(90.0f);
+            break;
+    }
+
+    // `b` is where the base direction ENDS UP at +90 degrees of this component, taken from the
+    // matrix itself rather than written out. Writing it by hand is where a rotation handle picks
+    // up the sign error that makes it turn the wrong way -- and a handle that turns the wrong way
+    // is worse than no handle, because the operator compensates and then meets a screen that was
+    // right all along.
+    double q_local[3];
+    rot_apply(quarter, base, q_local);
+
+    ring_basis rb;
+    rot_apply(parent, n_local, rb.n);
+    rot_apply(parent, base, rb.a);
+    rot_apply(parent, q_local, rb.b);
+    return rb;
 }
 
 std::optional<ring_hit> compute_ring_hit(const previz_camera& view,
@@ -343,7 +418,8 @@ std::optional<ring_hit> compute_ring_hit(const previz_camera& view,
                                          double               sx,
                                          double               sy,
                                          const screen_meta&   meta,
-                                         double               band)
+                                         double               band,
+                                         ring_axis            axis)
 {
     // The same ray `compute_pick` builds, and the comment there explains the y flip.
     const auto   cam_rot = mat4::rotate_y(view.yaw) * mat4::rotate_x(view.pitch) * mat4::rotate_z(view.roll);
@@ -357,29 +433,62 @@ std::optional<ring_hit> compute_ring_hit(const previz_camera& view,
     for (int i = 0; i < 3; ++i)
         dir[i] = fwd[i] + rgt[i] * xc + up[i] * yc;
 
-    // The ring lies in the horizontal plane through the screen's base -- its origin is
-    // centre-BOTTOM, so that plane is the floor the screen stands on.
-    if (std::abs(dir[1]) < 1e-9)
+    const ring_basis rb = ring_frame(meta, axis);
+
+    // A ring seen EDGE-ON is refused, and that is a feature rather than a guard against dividing
+    // by zero. As the view approaches a ring's plane, one pixel of pointer movement sweeps an
+    // unbounded distance across it, so the angle the handle reports stops tracking the hand
+    // holding it. Every 3D tool drops a gizmo ring at grazing incidence for this reason.
+    // 0.09 is about five degrees.
+    const double dlen = std::sqrt(dot3(dir, dir));
+    const double dn   = dot3(dir, rb.n);
+    if (dlen < 1e-12 || std::abs(dn) / dlen < 0.09)
         return std::nullopt;
-    const double t = (static_cast<double>(meta.pos_y) - view.y) / dir[1];
+
+    // Centred on the screen's ORIGIN -- centre-bottom, the point every rotation in this model
+    // turns about, so the handle turns what it looks like it turns.
+    const double o[3] = {view.x - meta.pos_x, view.y - meta.pos_y, view.z - meta.pos_z};
+    const double t    = -dot3(o, rb.n) / dn;
     if (t <= 0.0)
         return std::nullopt;
 
-    const double hx = view.x + dir[0] * t - meta.pos_x;
-    const double hz = view.z + dir[2] * t - meta.pos_z;
-    const double r  = std::sqrt(hx * hx + hz * hz);
+    double p[3];
+    for (int i = 0; i < 3; ++i)
+        p[i] = o[i] + dir[i] * t;
+
+    const double pa = dot3(p, rb.a);
+    const double pb = dot3(p, rb.b);
+    const double r  = std::sqrt(pa * pa + pb * pb);
     const double rr = ring_radius(meta);
     if (std::abs(r - rr) > band)
         return std::nullopt;
 
-    // The SAME sense as `rot_yaw`, which rotates about +Y by `mat4::rotate_y`: that maps local
-    // +Z (a screen's facing direction) towards +X as the angle grows, so the angle of a world
-    // point is atan2(x, z). Writing it as atan2(z, x) would be off by 90 degrees and mirrored,
-    // and a rotation handle that turns the wrong way is worse than none.
+    // Measured against the ring's OWN basis, so the angle is in the same sense as the field it
+    // drives. For yaw that works out to atan2(x, z), because `mat4::rotate_y` maps local +Z
+    // towards +X as the angle grows; writing that as atan2(z, x) would be 90 degrees out and
+    // mirrored.
     ring_hit out;
-    out.angle_deg = std::atan2(hx, hz) * 180.0 / M_PI;
-    out.radius    = rr;
+    out.angle_deg    = std::atan2(pb, pa) * 180.0 / M_PI;
+    out.radius       = rr;
+    out.axis         = axis;
+    out.radial_error = std::abs(r - rr);
     return out;
+}
+
+std::optional<ring_hit> compute_ring_grab(const previz_camera& view,
+                                          double               aspect,
+                                          double               sx,
+                                          double               sy,
+                                          const screen_meta&   meta,
+                                          double               band)
+{
+    std::optional<ring_hit> best;
+    for (const auto axis : {ring_axis::yaw, ring_axis::pitch, ring_axis::roll}) {
+        const auto h = compute_ring_hit(view, aspect, sx, sy, meta, band, axis);
+        if (h && (!best || h->radial_error < best->radial_error))
+            best = h;
+    }
+    return best;
 }
 
 std::optional<pick> compute_pick(const previz_camera&                     view,

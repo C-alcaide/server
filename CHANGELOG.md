@@ -1,6 +1,40 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: previz rotates a screen about all THREE axes -- pitch and roll join the yaw ring
+
+The selected screen carries three rotation rings now, in the gizmo's own axis colours: red turns
+about X, green about Y, blue about Z. Exactly the gizmo's colours rather than a shade away from
+them -- a near neighbour reads as a deliberate distinction to an operator and is indistinguishable
+to anything measuring by chroma direction.
+
+**Three rings are three PLANES, and two of them depend on the other's value.** The stage composes
+`Ry(yaw) * Rx(pitch) * Rz(roll)`, so pitch turns inside the yaw and roll inside both.
+`core::ring_frame` derives each basis by APPLYING `mat4::rotate_*` rather than by writing out
+sines, so the matrix's sign convention and the handle's cannot disagree. A drag keeps the ring it
+grabbed for the whole gesture and writes only that component.
+
+**Two defects found while measuring it, both of which had been invisible while the yaw ring was
+alone:**
+
+* **The ring was inside the screen.** `ring_radius` was `max(w, h) * 0.6`, fine for a ring lying
+  in the floor and wrong for the ROLL ring, which lies in the screen's own plane: it ran across
+  the picture and, the handles being tested before the pick, swallowed the click that MOVES a
+  screen. The centre of a 2 x 2 m wall is 1.0 m from its origin; the old band was 1.2 +- 0.216.
+  The radius derives from the distance to a top corner now, and the self-test gates the property
+  -- the inner edge clears the corner -- rather than the number.
+* **A ring stole the resize handle.** On an oblique view the pitch ring's projected ellipse
+  passes over the top corner of its own screen, so a corner grab rotated instead of resizing.
+  Handle priority is corners, then rings, then the screen: a 24 cm square is a more specific
+  statement of intent than a point on a three-metre circle.
+
+Verified: `previz-gizmo` 23/23 on both mixers, four new arms. Each drag asserts the grabbed
+component moved by the angle dragged AND that the other two did not, because a drag writing all
+three from a stale copy satisfies the first half. One arm drags the pitch ring at yaw 90, where a
+ring built in the world's fixed axes is not under the pointer at all. The stage math self-test is
+114 checks now, up from 99. `previz-place`, `previz-interact`, `api-stage` and `previz-picture`
+re-run green on both mixers.
+
 ### BEHAVIOUR: previz shows where the camera LANDS -- the inner-frustum footprint on an ICVFX wall
 
 The frustum says which way the production camera points; this says what it is covering, which is

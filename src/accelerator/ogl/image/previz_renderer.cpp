@@ -594,26 +594,36 @@ struct previz_renderer::impl
     /// Its radius comes from `core::ring_radius`, the same function the hit-test uses -- two
     /// copies of that number would be a handle you can see and cannot grab, which is the
     /// silent-failure shape this repository keeps finding in other guises.
-    void build_ring(const screen_meta& meta)
+    void build_ring(const screen_meta& meta, core::ring_axis axis)
     {
         const double       r        = core::ring_radius(meta);
         constexpr int      segments = 72;
+        // The SAME basis the hit-test uses, from the same function, so the circle drawn and the
+        // circle accepted are one object. Three rings mean three planes -- yaw in the world,
+        // pitch inside the yaw, roll inside both -- and deriving them twice is how a pitch
+        // handle ends up drawn flat while it is grabbed on the tilt.
+        const core::ring_basis rb = core::ring_frame(meta, axis);
         std::vector<previz_vertex> verts;
-        auto put = [&](double x, double z) {
-            verts.push_back({static_cast<float>(meta.pos_x + x), meta.pos_y,
-                             static_cast<float>(meta.pos_z + z), 0, 1, 0, 0, 0});
+        auto put = [&](double ca, double cb) {
+            verts.push_back({static_cast<float>(meta.pos_x + rb.a[0] * ca + rb.b[0] * cb),
+                             static_cast<float>(meta.pos_y + rb.a[1] * ca + rb.b[1] * cb),
+                             static_cast<float>(meta.pos_z + rb.a[2] * ca + rb.b[2] * cb),
+                             0, 1, 0, 0, 0});
         };
         for (int i = 0; i < segments; ++i) {
             const double a0 = 2.0 * M_PI * i / segments;
             const double a1 = 2.0 * M_PI * (i + 1) / segments;
-            put(r * std::sin(a0), r * std::cos(a0));
-            put(r * std::sin(a1), r * std::cos(a1));
+            put(r * std::cos(a0), r * std::sin(a0));
+            put(r * std::cos(a1), r * std::sin(a1));
         }
-        // The spoke: from the centre out along the screen's own facing, which is local +Z
-        // turned by its yaw -- so the ring reads as an angle rather than as a decoration.
-        const double fa = meta.rot_yaw * M_PI / 180.0;
+        // The spoke: from the centre out to where this component currently reads, so each ring
+        // shows its own angle rather than being a decoration three times over.
+        const double fa = (axis == core::ring_axis::yaw     ? meta.rot_yaw
+                           : axis == core::ring_axis::pitch ? meta.rot_pitch
+                                                            : meta.rot_roll) *
+                          M_PI / 180.0;
         put(0.0, 0.0);
-        put(r * std::sin(fa), r * std::cos(fa));
+        put(r * std::cos(fa), r * std::sin(fa));
 
         ring_vert_count_ = static_cast<int>(verts.size());
         if (!ring_vao_) {
@@ -1111,11 +1121,25 @@ struct previz_renderer::impl
                 // The yaw handle, on the SELECTED screen only -- a ring under every screen the
                 // pointer crosses would be a field of circles.
                 if (m == 1) {
-                    build_ring(sit->second);
-                    shader_->set("u_base_color", 0.95, 0.55, 0.1);
-                    glBindVertexArray(ring_vao_);
-                    glDrawArrays(GL_LINES, 0, ring_vert_count_);
-                    glBindVertexArray(0);
+                    // THREE rings, in the SAME axis colours as the translate gizmo: red turns
+                    // about X (pitch), green about Y (yaw), blue about Z (roll). The yaw ring was
+                    // amber while it was the only one; an amber ring beside a red and a blue one
+                    // says nothing about which axis it is, and the axis colour convention is the
+                    // one thing an operator arriving from any other 3D tool already knows.
+                    const core::ring_axis ring_axes[3] = {
+                        core::ring_axis::pitch, core::ring_axis::yaw, core::ring_axis::roll};
+                    // EXACTLY the gizmo's own axis colours, not a near neighbour of them. A
+                    // shade apart would read as a deliberate distinction to an operator and is
+                    // indistinguishable to anything measuring by chroma direction -- the trap the
+                    // footprint's first colour fell into against the frustum.
+                    const double ring_rgb[3][3] = {{0.9, 0.1, 0.1}, {0.1, 0.9, 0.1}, {0.1, 0.35, 0.95}};
+                    for (int ri = 0; ri < 3; ++ri) {
+                        build_ring(sit->second, ring_axes[ri]);
+                        shader_->set("u_base_color", ring_rgb[ri][0], ring_rgb[ri][1], ring_rgb[ri][2]);
+                        glBindVertexArray(ring_vao_);
+                        glDrawArrays(GL_LINES, 0, ring_vert_count_);
+                        glBindVertexArray(0);
+                    }
 
                     // The resize corners, in the same amber family as the ring but lighter, so
                     // the two read as one handle set rather than as two unrelated overlays.
@@ -1384,7 +1408,8 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
         bool          rotating  = false;
         bool          resizing  = false;
         double        grab_angle = 0.0; ///< where on the ring the grab started, degrees
-        double        grab_yaw   = 0.0; ///< the screen's yaw at that moment
+        double        grab_rot   = 0.0; ///< the grabbed COMPONENT's value at that moment
+        core::ring_axis grab_axis = core::ring_axis::yaw; ///< which of the three was grabbed
         std::string   drag_name;
         double        last_x = 0.0, last_y = 0.0;
         // Where on the screen the grab started, in the screen's own axes, so the screen moves
@@ -1429,34 +1454,25 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                     g.last_x  = event.x;
                     g.last_y  = event.y;
                 } else if (event.button == 0) { // left: select, and maybe start a drag
-                    // THE HANDLE IS TESTED FIRST, and it has to be: the ring lies in the plane
-                    // the screen stands on and a screen seen from above covers part of it, so a
-                    // pick-first order would make the handle unreachable exactly where an
-                    // operator looks down at the stage to use it.
-                    if (!impl_->scene_.selected.empty()) {
-                        std::optional<core::ring_hit> rh;
-                        screen_meta                   sel{};
-                        {
-                            std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
-                            const auto it = impl_->scene_.screens.find(impl_->scene_.selected);
-                            if (it != impl_->scene_.screens.end()) {
-                                sel = it->second;
-                                rh  = core::compute_ring_hit(view, aspect, event.x, event.y, sel,
-                                                             core::ring_radius(sel) * 0.18);
-                            }
-                        }
-                        if (rh) {
-                            g.rotating   = true;
-                            g.drag_name  = sel.name;
-                            g.grab_angle = rh->angle_deg;
-                            g.grab_yaw   = sel.rot_yaw;
-                            return true;
-                        }
-                    }
+                    // HANDLE PRIORITY, most specific first: the resize corners, then the rotation
+                    // rings, then the screen itself.
+                    //
+                    // The ORDER is the whole of this block, and each step of it was paid for.
+                    // The rings have to come before the plain pick, because they lie in planes a
+                    // screen covers when it is looked at from the side or from above -- a
+                    // pick-first order makes a handle unreachable exactly where an operator
+                    // reaches for it. And the CORNERS have to come before the rings, which was
+                    // not true until 2026-09-19: a ring is a three-metre circle whose projection
+                    // sweeps most of the viewport, and on an oblique view the pitch ring's
+                    // ellipse passes straight over the top corner of the screen it belongs to.
+                    // The corner grab then rotated instead of resizing -- measured, and found by
+                    // a battery arm that had been green the day before. A corner handle is a
+                    // 24 cm square; being on one is a far more specific statement of intent than
+                    // being somewhere on a ring, and that is the rule this order encodes.
                     const auto hit = pick_at(event.x, event.y);
-                    // A GRAB ON A TOP CORNER RESIZES rather than moves, and the test is on the
-                    // pick's own local coordinates -- no second ray, no second plane, and no way
-                    // for the handle to sit somewhere the pick does not agree with.
+                    // The corner test is on the PICK's own local coordinates -- no second ray,
+                    // no second plane, and no way for the handle to sit somewhere the pick does
+                    // not agree with.
                     if (hit && hit->name == impl_->scene_.selected) {
                         screen_meta sel{};
                         bool        have = false;
@@ -1473,6 +1489,29 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                             std::abs(std::abs(hit->local_x) - sel.width_m * 0.5) < c) {
                             g.resizing  = true;
                             g.drag_name = hit->name;
+                            return true;
+                        }
+                    }
+                    if (!impl_->scene_.selected.empty()) {
+                        std::optional<core::ring_hit> rh;
+                        screen_meta                   sel{};
+                        {
+                            std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                            const auto it = impl_->scene_.screens.find(impl_->scene_.selected);
+                            if (it != impl_->scene_.screens.end()) {
+                                sel = it->second;
+                                rh  = core::compute_ring_grab(view, aspect, event.x, event.y, sel,
+                                                              core::ring_radius(sel) * core::ring_band_fraction);
+                            }
+                        }
+                        if (rh) {
+                            g.rotating   = true;
+                            g.drag_name  = sel.name;
+                            g.grab_angle = rh->angle_deg;
+                            g.grab_axis  = rh->axis;
+                            g.grab_rot   = rh->axis == core::ring_axis::yaw     ? sel.rot_yaw
+                                           : rh->axis == core::ring_axis::pitch ? sel.rot_pitch
+                                                                                : sel.rot_roll;
                             return true;
                         }
                     }
@@ -1582,14 +1621,26 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                 // owns the angle, and snapping back because it strayed off a 20 cm annulus is
                 // the behaviour every 3D tool is careful NOT to have.
                 if (have) {
-                    const auto rh = core::compute_ring_hit(view, aspect, event.x, event.y, sel, 1e9);
+                    // The SAME ring throughout the gesture, not whichever is nearest now: a drag
+                    // that re-chose its axis mid-way would hand the operator a different rotation
+                    // every time the pointer crossed one of the six points where the rings meet.
+                    const auto rh =
+                        core::compute_ring_hit(view, aspect, event.x, event.y, sel, 1e9, g.grab_axis);
                     if (rh) {
-                        double yaw = g.grab_yaw + (rh->angle_deg - g.grab_angle);
-                        while (yaw > 180.0)
-                            yaw -= 360.0;
-                        while (yaw < -180.0)
-                            yaw += 360.0;
-                        set_screen_rotation(g.drag_name, static_cast<float>(yaw), sel.rot_pitch, sel.rot_roll);
+                        double a = g.grab_rot + (rh->angle_deg - g.grab_angle);
+                        while (a > 180.0)
+                            a -= 360.0;
+                        while (a < -180.0)
+                            a += 360.0;
+                        // Only the grabbed component moves. The other two are carried through
+                        // from the screen as it stands, because `set_screen_rotation` takes all
+                        // three and writing a stale copy of the other two is how a pitch drag
+                        // quietly undoes a yaw the operator set a moment earlier.
+                        const float f = static_cast<float>(a);
+                        set_screen_rotation(g.drag_name,
+                                            g.grab_axis == core::ring_axis::yaw ? f : sel.rot_yaw,
+                                            g.grab_axis == core::ring_axis::pitch ? f : sel.rot_pitch,
+                                            g.grab_axis == core::ring_axis::roll ? f : sel.rot_roll);
                     }
                 }
                 g.last_x = event.x;

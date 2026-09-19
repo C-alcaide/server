@@ -514,9 +514,22 @@ stage_math_report stage_math_self_test()
         wall.name     = "wall";
         wall.pos_y    = 0.0f;
         const double r = ring_radius(wall);
+        // The PROPERTY rather than the number, because the number is derived and the property is
+        // what a wrong number costs: the ring's INNER edge must clear the farthest point of the
+        // surface from the origin it turns about, which is a top corner. Until 2026-09-19 it did
+        // not, and the roll ring -- which lies in the screen's own plane -- ran across the face
+        // and swallowed the click that moves a screen, the handles being tested before the pick.
+        const double corner = std::hypot(wall.width_m * 0.5, wall.height_m);
         ++rep.checks;
-        if (std::abs(r - 1.2) > 1e-6)
-            rep.failures.emplace_back("ring/radius: expected 1.2 for a 2 m screen, got " + std::to_string(r));
+        if (r * (1.0 - ring_band_fraction) <= corner)
+            rep.failures.emplace_back("ring/radius: the ring's inner edge (" +
+                                      std::to_string(r * (1.0 - ring_band_fraction)) +
+                                      ") does not clear the screen's top corner (" +
+                                      std::to_string(corner) + ")");
+        ++rep.checks;
+        if (ring_radius(screen_meta{}) < 0.6)
+            rep.failures.emplace_back("ring/radius: a screen with no size must still have a ring "
+                                      "a pointer can find");
 
         // Straight down from above, so the ray meets the floor plane cleanly and the geometry
         // is checkable by hand: the eye is over the ring's +X point, looking -Y.
@@ -528,7 +541,7 @@ stage_math_report stage_math_self_test()
         {
             const double half_v = std::tan(rad(top.fov) * 0.5);
             const double sx     = (r / 8.0 / (aspect * half_v) + 1.0) * 0.5;
-            const auto   hit    = compute_ring_hit(top, aspect, sx, 0.5, wall, 0.2);
+            const auto   hit    = compute_ring_hit(top, aspect, sx, 0.5, wall, 0.2, ring_axis::yaw);
             ++rep.checks;
             if (!hit)
                 rep.failures.emplace_back("ring/+x: the ring's own +X point was not a hit");
@@ -539,13 +552,13 @@ stage_math_report stage_math_self_test()
         // 13b. the centre is NOT a hit, and neither is a point well outside.
         {
             ++rep.checks;
-            if (compute_ring_hit(top, aspect, 0.5, 0.5, wall, 0.2))
+            if (compute_ring_hit(top, aspect, 0.5, 0.5, wall, 0.2, ring_axis::yaw))
                 rep.failures.emplace_back("ring/centre: the middle of the ring was accepted -- "
                                           "the handle is an annulus, not a disc");
             const double half_v = std::tan(rad(top.fov) * 0.5);
             const double sx_far = (3.0 * r / 8.0 / (aspect * half_v) + 1.0) * 0.5;
             ++rep.checks;
-            if (compute_ring_hit(top, aspect, sx_far, 0.5, wall, 0.2))
+            if (compute_ring_hit(top, aspect, sx_far, 0.5, wall, 0.2, ring_axis::yaw))
                 rep.failures.emplace_back("ring/outside: a point three radii out was accepted");
         }
 
@@ -556,8 +569,8 @@ stage_math_report stage_math_self_test()
             const double sx_x   = (r / 8.0 / (aspect * half_v) + 1.0) * 0.5;
             // Looking down, the camera's up is -Z, so world -Z is ABOVE centre in the image.
             const double sy_z   = (1.0 - (r / 8.0) / half_v) * 0.5;
-            const auto   a      = compute_ring_hit(top, aspect, sx_x, 0.5, wall, 0.2);
-            const auto   b      = compute_ring_hit(top, aspect, 0.5, sy_z, wall, 0.2);
+            const auto   a      = compute_ring_hit(top, aspect, sx_x, 0.5, wall, 0.2, ring_axis::yaw);
+            const auto   b      = compute_ring_hit(top, aspect, 0.5, sy_z, wall, 0.2, ring_axis::yaw);
             ++rep.checks;
             if (!a || !b)
                 rep.failures.emplace_back("ring/drag: one end of the drag missed the ring");
@@ -610,6 +623,110 @@ stage_math_report stage_math_self_test()
         if (!clip_to_unit_rect(away, 4).empty())
             rep.failures.emplace_back("clip/outside: a quad entirely outside the rectangle "
                                       "produced points");
+    }
+
+    // ---- 15. the PITCH and ROLL rings -------------------------------------------------
+    //
+    // Three rings are three PLANES, and the second and third depend on the value of the ones
+    // outside them: the stage composes Ry(yaw) * Rx(pitch) * Rz(roll), so pitch turns inside the
+    // yaw and roll inside both. The last case here is the one that matters -- a pitch ring built
+    // without its parent frame is correct at yaw 0 and wrong everywhere else, and yaw 0 is
+    // exactly the state a fresh stage is in.
+    {
+        auto wall   = flat(); // 2 x 2 m at the origin, facing +Z
+        wall.name   = "wall";
+        wall.pos_y  = 0.0f;
+        const double r      = ring_radius(wall); // 1.2
+        const double aspect = 16.0 / 9.0;
+
+        // 15a. the ROLL ring, seen face-on from +Z. It lies in the XY plane and its angle runs
+        // from the screen's own +X (width) towards +Y, which is what `mat4::rotate_z` does.
+        {
+            const previz_camera front{0.0f, 0.0f, 8.0f, 0.0f, 0.0f, 0.0f, 60.0f, 0.1f, 100.0f};
+            const double        half_v = std::tan(rad(front.fov) * 0.5);
+            const double        sx_x   = ((r / 8.0) / (aspect * half_v) + 1.0) * 0.5;
+            const auto          at_x   = compute_ring_hit(front, aspect, sx_x, 0.5, wall, 0.2, ring_axis::roll);
+            ++rep.checks;
+            if (!at_x)
+                rep.failures.emplace_back("ring/roll: the ring's own +X point was not a hit");
+            else
+                check("ring/roll/zero", at_x->angle_deg, 0.0, 1e-3);
+
+            const double sy_y = (1.0 - (r / 8.0) / half_v) * 0.5;
+            const auto   at_y = compute_ring_hit(front, aspect, 0.5, sy_y, wall, 0.2, ring_axis::roll);
+            ++rep.checks;
+            if (!at_y)
+                rep.failures.emplace_back("ring/roll: the ring's +Y point was not a hit");
+            else
+                check("ring/roll/quarter", at_y->angle_deg, 90.0, 1e-3);
+
+            // And from here the YAW ring is EDGE-ON -- its plane contains the view direction --
+            // so it must be refused rather than answered with a number a pixel of movement
+            // would swing across the stage. `compute_ring_grab` therefore has one candidate,
+            // which is the property that makes the nearest-ring choice well defined at all.
+            ++rep.checks;
+            if (compute_ring_hit(front, aspect, sx_x, 0.5, wall, 0.2, ring_axis::yaw))
+                rep.failures.emplace_back("ring/grazing: the yaw ring answered while seen edge-on");
+            const auto grabbed = compute_ring_grab(front, aspect, sx_x, 0.5, wall, 0.2);
+            ++rep.checks;
+            if (!grabbed || grabbed->axis != ring_axis::roll)
+                rep.failures.emplace_back("ring/grab: the ring under the pointer was not the roll ring");
+        }
+
+        // 15b. the PITCH ring at yaw 0. It lies in the YZ plane, measured from +Z towards -Y --
+        // `mat4::rotate_x` carries +Z to (0, -sin, cos), and a handle that read +Y as positive
+        // pitch would tilt every screen the wrong way.
+        {
+            // On +X looking -X: yaw 90 turns the camera's forward from -Z onto -X.
+            const previz_camera side{8.0f, 0.0f, 0.0f, 90.0f, 0.0f, 0.0f, 60.0f, 0.1f, 100.0f};
+            const double        half_v = std::tan(rad(side.fov) * 0.5);
+            // The camera's right is -Z here, so the ring's +Z point sits to the LEFT of centre.
+            const double sx_z = (-(r / 8.0) / (aspect * half_v) + 1.0) * 0.5;
+            const auto   at_z = compute_ring_hit(side, aspect, sx_z, 0.5, wall, 0.2, ring_axis::pitch);
+            ++rep.checks;
+            if (!at_z)
+                rep.failures.emplace_back("ring/pitch: the ring's own +Z point was not a hit");
+            else
+                check("ring/pitch/zero", at_z->angle_deg, 0.0, 1e-3);
+
+            // -Y is BELOW the origin, and the camera's up is +Y, so it is below centre.
+            const double sy_down = (1.0 + (r / 8.0) / half_v) * 0.5;
+            const auto   at_down = compute_ring_hit(side, aspect, 0.5, sy_down, wall, 0.2, ring_axis::pitch);
+            ++rep.checks;
+            if (!at_down)
+                rep.failures.emplace_back("ring/pitch: the ring's -Y point was not a hit");
+            else
+                check("ring/pitch/quarter", at_down->angle_deg, 90.0, 1e-3);
+        }
+
+        // 15c. THE PITCH RING FOLLOWS THE YAW. At yaw 90 the ring's plane has turned with it:
+        // its normal is the yaw-turned +X, which is -Z, so the ring now lies in the XY plane and
+        // its zero is at +X. A ring built in the world's fixed axes passes 15b and fails here,
+        // which is the whole reason 15b is not enough on its own.
+        {
+            auto turned      = wall;
+            turned.rot_yaw   = 90.0f;
+            const previz_camera front{0.0f, 0.0f, 8.0f, 0.0f, 0.0f, 0.0f, 60.0f, 0.1f, 100.0f};
+            const double        half_v = std::tan(rad(front.fov) * 0.5);
+            const double        sx_x   = ((r / 8.0) / (aspect * half_v) + 1.0) * 0.5;
+            const auto          at_x = compute_ring_hit(front, aspect, sx_x, 0.5, turned, 0.2, ring_axis::pitch);
+            ++rep.checks;
+            if (!at_x)
+                rep.failures.emplace_back("ring/pitch/yawed: the turned ring's zero was not a hit -- "
+                                          "the pitch ring is not following the yaw");
+            else
+                check("ring/pitch/yawed/zero", at_x->angle_deg, 0.0, 1e-3);
+
+            // +90 of pitch now points at -Y still, because Rx's quarter turn carries +Z to -Y
+            // and the yaw leaves -Y alone. Below centre in the image.
+            const double sy_down = (1.0 + (r / 8.0) / half_v) * 0.5;
+            const auto   at_down = compute_ring_hit(front, aspect, 0.5, sy_down, turned, 0.2, ring_axis::pitch);
+            ++rep.checks;
+            if (!at_down)
+                rep.failures.emplace_back("ring/pitch/yawed: the turned ring's +90 point was not a hit");
+            else
+                check("ring/pitch/yawed/quarter", at_down->angle_deg, 90.0, 1e-3);
+        }
     }
 
     return rep;
