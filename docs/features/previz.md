@@ -595,8 +595,16 @@ variable changed: a server that read a production pose differently from a viewpo
 ten and fails this. Measured under a pixel. Its companion asserts the split itself — setting the
 viewport again moves the picture back and leaves the production camera where it was.
 
-**Still uncovered by `previz-place`**: roll and pitch (driven through the window by
-`previz-gizmo`'s rings, but not predicted here), and colour. **Roll and pitch are driven since
+**Roll, pitch and the COMPOSITION ORDER are covered since 2026-09-20.** Every other rotation arm
+uses yaw ALONE, and a single-axis rotation is identical whichever way `Ry*Rx*Rz` is written —
+so ten arms agreed with a server composing its rotations in any order at all. The discriminating
+case is all three at once, and the model had supported it from the day it was written: the
+prediction was available and simply never asked for, which is the cheapest kind of coverage gap
+and the easiest to miss. Mutation-verified — reversing the product turns ONLY the all-three arm
+red and leaves the single-axis arms green.
+
+**Still uncovered by `previz-place`**: colour. It measures where a screen is, never what shade it
+is; `previz-picture` owns that. **Roll and pitch are driven since
 2026-09-19**, though not here — `previz-gizmo`'s three rotation rings turn a screen about all
 three axes through the window and read the result off the published rotation, so this file's
 projection model still predicts flat screens under yaw only.
