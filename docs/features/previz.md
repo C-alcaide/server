@@ -564,8 +564,19 @@ expectation is a number before the server starts. Measured, 1080p50, a 4 x 2.25 
 reports it still at its unrotated width; negating `pos_z` on the render path alone — A16
 literally — fails five arms while the tree goes on reporting (0, 0, −2).
 
-**Still uncovered by `previz-place`**: a curved screen's geometry, and placement seen through the
-PRODUCTION camera (previz renders from the viewport one). **Roll and pitch are driven since
+**A CURVED screen's geometry is covered since 2026-09-19**, and by its AMOUNT rather than by the
+`ARC` round trip alone. That round trip brackets the curve -- the picture changes, `ARC 0` returns
+to the flat prediction -- and a screen bent by the wrong amount passes it perfectly. The closed
+form follows from `derive_screen`: `radius = (width / 2) / sin(arc / 2)` makes **width the
+CHORD**, so the edges stay at +-width/2 and the surface bulges away from the face by
+`radius * (1 - cos(arc / 2))`. Seen fronto-parallel that is two statements no scale error can
+satisfy together -- the projection is **narrower** than the flat screen's, because its edges are
+further away, and exactly as **tall**, because the nearest point is still the centre at z = 0.
+Mutation-verified: bending the mesh half again as far turns that arm red while the round trip
+stays green.
+
+**Still uncovered by `previz-place`**: placement seen through the PRODUCTION camera (previz
+renders from the viewport one). **Roll and pitch are driven since
 2026-09-19**, though not here — `previz-gizmo`'s three rotation rings turn a screen about all
 three axes through the window and read the result off the published rotation, so this file's
 projection model still predicts flat screens under yaw only.
