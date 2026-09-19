@@ -91,6 +91,7 @@ catch its mutation cannot fail*.
 | consumer **metadata** — colour signalling, HDR static data | `signalling` (DeckLink), `signalling --stream` (FFmpeg). **Vulkan output has no coverage — see below** |
 | consumer **pixels** | `sdi-output` (`--hdr-metadata` for the DeckLink HDR block), `consumer-view`, or `cli.py run --consumer <name>` |
 | Vulkan API usage rather than picture | `vk-validation`, **working again since 2026-09-15** — it needed the server's own `CASPARVP_VK_VALIDATION=1`, which is what creates the messenger core findings are delivered through. Discrimination shown both ways: a negative per-layer `setScissor` offset reads 20 findings planted, 0 reverted. And run it with `--render-format fp16` as well as the default — that arm found a real VUID the moment it could see |
+| **the ICVFX MASK -- `icvfx_mask`, the feather, the quad uniforms, or where the inner region falls** | `icvfx-mask`, **both mixers**. Its fixture is the DEFAULT quad, which is the only reason it has a closed form: the inner plateau's half-extent is (W/2)(1-feather) across and (H/2)(1-feather) down, a prediction in PIXELS from a parameter in NDC. THREE feathers, because one is matched by any wrong scale that agrees there; the ANISOTROPY asserted, because the feather is in NDC and "fixing" it to be isotropic would pass any single-axis check; and the gains SWAPPED so the two regions must swap, which is one arm for a red/blue exchange, an inner/outer swap and an inverted mask sign. Mutation-verified. It cannot see the quad driven by a real camera, the 360 inner-frustum reprojection, or either command's tweened form |
 | a per-channel colour uniform, on either mixer | `icvfx-parity` for ICVFX, `grading` and `conformance` for the rest — and **the values must be asymmetric**. A red/blue exchange is invariant under equal per-channel values, so a neutral white balance or a grey ramp is a check that cannot fail. This is the trap that hid the ICVFX gain exchange until 2026-08-26 |
 | a GPU interop path — CUDA external memory, an FFmpeg Vulkan decoder, a D3D11 bridge, the encode exporter | `coexistence`, because these now share one `VkDevice` and one graphics queue. A route measured alone says nothing about it running beside the others, and `av_vulkan_import.cpp`'s device-lost at four concurrent producers is what that costs |
 | geometry, rasters, projection | `geometry`, `mixer-parity` |
@@ -278,8 +279,13 @@ Still uncovered, and now the priority order for coverage rather than for docs:
   other. FreeD turned out to be a fixed-size packet with the receiver as its own specification,
   and the previz camera became readable only when the stage was published into the control API.
   **Before recording a gap as "nobody wrote a battery", check whether either end was reachable.**
-* **ICVFX beyond the gain** — `icvfx-parity` covers the gain exchange. The mask geometry, the
-  feather, the inner-frustum reprojection and the tweened forms remain uncovered.
+* **ICVFX beyond the gain and the mask.** `icvfx-parity` covers the gain exchange and
+  `icvfx-mask` covers the mask geometry and the feather since 2026-09-19, against a closed form
+  and mutation-verified. **Still uncovered**: the quad driven by a REAL CAMERA through
+  auto-projection — previz's footprint shows where that quad lands in the VIEWPORT, which is a
+  different picture from how the wall shades it — the inner-frustum REPROJECTION
+  (`get_equirect_uv_ex` on a 360 source, where the inner sample comes from somewhere else
+  entirely), and the tweened form of either command.
 
 **Verifying this block is one command**, and it is worth re-running rather than trusting: extract
 `register_command`/`register_channel_command` names from both trees, subtract upstream's, and grep

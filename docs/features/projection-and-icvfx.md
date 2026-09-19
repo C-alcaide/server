@@ -48,6 +48,14 @@ All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cp
 
 **Three details that surprise people, all verified:**
 
+- **The mask geometry and the feather are measured since 2026-09-19** — `icvfx-mask` in the
+  harness, both mixers. With no auto-projection driving it the quad sits at the raster's four
+  corners, so `icvfx_mask` reduces to the distance to the unit square over the feather and the
+  inner plateau's half-extent is **(W/2)(1 - feather) across and (H/2)(1 - feather) down**. That
+  is a prediction in pixels from a parameter in NDC, checked at three feathers. **The feather is
+  in output NDC and therefore anisotropic in pixels** — at 16:9 the horizontal ramp is 16/9 of
+  the vertical, which the battery asserts, because making it isotropic looks like a fix and would
+  pass any check that measured one axis.
 - **A typo used to turn ICVFX OFF.** `enable` was `at(0) == "1" || iequals "true"`, so every other
   word — `BANANA`, and `YES` — disabled the inner frustum and answered `202`. On a live volume
   that is the inner frustum vanishing because a word was misspelled. **Fixed 2026-09-19**: it goes
