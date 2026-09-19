@@ -85,6 +85,14 @@ All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cp
   `fov > 0`. A spare `1` in front shifts every argument, leaves `fov` at 0 and turns projection
   off, and the flat picture that results looks plausible while every inner-frustum parameter
   appears inert.
+- **The inner frustum's ORIENTATION is measured under one oracle.** `inner_pitch`, `inner_roll`,
+  `inner_offset_x` and `inner_offset_y` each have an outer twin — `proj_pitch`, `proj_roll`,
+  `proj_offset_x`, `proj_offset_y` — that moves the WHOLE frame the same way. So the check is
+  always the same shape: with the inner parameter at V and the view at rest, the inner region must
+  equal the same region of a frame taken with the outer twin at V. It matches byte for byte, and
+  neither side needs the equirect mapping modelled.
+
+  The one parameter with no twin is `inner_eye_distance`, which only bites on a curved screen.
 - **A typo used to turn ICVFX OFF.** `enable` was `at(0) == "1" || iequals "true"`, so every other
   word — `BANANA`, and `YES` — disabled the inner frustum and answered `202`. On a live volume
   that is the inner frustum vanishing because a word was misspelled. **Fixed 2026-09-19**: it goes

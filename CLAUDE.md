@@ -286,9 +286,12 @@ Still uncovered, and now the priority order for coverage rather than for docs:
   VIEWPORT, which is a different picture from how the wall shades it, and both are measured now.
   The TWEENED form of both commands is covered, and so is the 360
   inner-frustum REPROJECTION — **ICVFX is measured end to end as of 2026-09-19**, 16 checks on
-  both mixers. **Still uncovered**: `inner_pitch`, `inner_roll`, the inner offsets and
-  `inner_eye_distance`, which move the inner sample in ways a vertical-band panorama cannot
-  distinguish.
+  both mixers. The inner frustum's ORIENTATION is covered too since 2026-09-20 —
+  `inner_pitch`, `inner_roll` and both inner offsets, under ONE oracle: each has an OUTER twin
+  that moves the whole frame the same way, so the inner region at V must equal the same region of
+  a frame taken with the twin at V. Byte for byte. **ICVFX is measured end to end.** The only
+  parameter left is `inner_eye_distance`, which has no outer twin to be set against and only
+  bites on a curved screen.
 
 **Verifying this block is one command**, and it is worth re-running rather than trusting: extract
 `register_command`/`register_channel_command` names from both trees, subtract upstream's, and grep
