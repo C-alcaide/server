@@ -70,10 +70,21 @@ the verb, as it does for `MIXER`. The layer index parses and **no previz command
 - **`PREVIZ MAP` requires two parameters and returns `400`**; most of the others accept an empty
   parameter list as a query or a default.
 
-### 1.1 `PREVIZ SCREEN` — the fifteen subcommands
+### 1.1 `PREVIZ SCREEN` — the thirteen subcommands
 
 Read out of `previz_screen_command`'s dispatch chain on 2026-09-06 and checked against it
-argument by argument. This is the enumeration §5.3 recorded as owed, and `BRIEF.md` requires it
+argument by argument.
+
+*The COUNT in this heading has been wrong twice, in both directions, so it is worth saying how to
+settle it:* the dispatch chain has **thirteen branches**, and the table below has fourteen ROWS
+because `ADD` appears twice, once per form. Counting rows gives fourteen; counting `ADD` once
+gives thirteen. The heading has at different times said both fourteen and fifteen. Thirteen
+subcommands, fourteen rows.
+
+**All thirteen are driven since 2026-09-19** — the last two, `ARCV` and `EYEMODE`, by
+`previz-place`, and on CHANNEL 2 rather than the viewport, because neither touches the previz
+mesh: they feed `compute_frustum`, which writes the mapped channel's projection. A check that set
+`ARCV` and looked at the viewport would find it inert. This is the enumeration §5.3 recorded as owed, and `BRIEF.md` requires it
 **before** anything re-models how screens are described.
 
 The whole body is inside one `try`, so any unparseable number answers `502 PREVIZ FAILED <what>`
