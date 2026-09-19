@@ -1,6 +1,32 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: previz shows where the camera LANDS -- the inner-frustum footprint on an ICVFX wall
+
+The frustum says which way the production camera points; this says what it is covering, which is
+the question an ICVFX stage is built to answer. On every screen with ICVFX enabled, previz now
+outlines the part of that wall the camera's inner frustum reaches.
+
+**Drawn from `compute_frustum`'s own `icvfx_q`** -- the quad the ICVFX mask shader uses. Deriving
+the outline separately would be a second implementation of the same geometry, free to drift from
+the one that shades, and an operator would be judging a line that disagreed with the picture.
+From the shader's number, a divergence is impossible.
+
+**Clipped to the screen.** `icvfx_q` is where the frustum meets the screen's PLANE, which is
+unbounded: a lens wider than the wall puts corners far outside it, and the first version drew a
+quad running off into the distance -- measured on a 42 degree lens over a 6 m wall at 5.5 m.
+`core::clip_to_unit_rect` is Sutherland-Hodgman against the four half-planes, pure and gated at
+boot; the stage math self-test is 99 checks now rather than 90. Per-corner clamping is NOT the
+same operation and is wrong for a rotated quad -- it drags corners along the boundary and changes
+the shape, where clipping adds vertices.
+
+Verified: `previz-gizmo` 19/19 on both mixers. The expectation is closed-form -- a camera square
+on to a wall 4 m away with a 20 degree vertical lens covers 2.51 x 1.41 m, whose corners project
+to a box of (774, 1146, 435, 645) px; measured (775, ...) within a pixel. The footprint must
+FOLLOW the camera (left edge 775 -> 597 for 1.2 m of dolly), because one drawn from a hardcoded
+quad would pass "it appeared", and must VANISH with ICVFX off, because that is where the server
+computes it. `previz-place`, `api-stage`, `previz-picture` and `previz-interact` re-run green.
+
 ### BEHAVIOUR: a previz screen can be resized by hand -- corner handles on the selected screen
 
 The last of `INTERACTIVE_PREVIZ_SCOPE.md` §5's named growth path. The selected screen carries a

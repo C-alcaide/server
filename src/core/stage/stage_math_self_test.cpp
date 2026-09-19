@@ -566,6 +566,52 @@ stage_math_report stage_math_self_test()
         }
     }
 
+    // ---- 14. clip_to_unit_rect: the footprint's bounds ---------------------------------
+    //
+    // Three cases, because the failure modes are different: a quad already inside must come
+    // back UNCHANGED (a clip that always adds vertices would pass a "does it fit" check), one
+    // straddling an edge must gain vertices ON that edge rather than have its corners dragged
+    // along it, and one entirely outside must come back EMPTY rather than as a degenerate
+    // sliver the renderer would draw.
+    {
+        const float inside[8] = {-0.5f, 0.5f, 0.5f, 0.5f, 0.5f, -0.5f, -0.5f, -0.5f};
+        const auto  a         = clip_to_unit_rect(inside, 4);
+        ++rep.checks;
+        if (a.size() != 4)
+            rep.failures.emplace_back("clip/inside: a quad within the rectangle came back with " +
+                                      std::to_string(a.size()) + " points, expected 4");
+
+        // Twice as wide as the rectangle: the left and right edges are cut, the height is kept.
+        const float wide[8] = {-2.0f, 0.5f, 2.0f, 0.5f, 2.0f, -0.5f, -2.0f, -0.5f};
+        const auto  b       = clip_to_unit_rect(wide, 4);
+        ++rep.checks;
+        if (b.size() != 4)
+            rep.failures.emplace_back("clip/wide: expected 4 points after cutting two edges, got " +
+                                      std::to_string(b.size()));
+        for (const auto& p : b) {
+            ++rep.checks;
+            if (p.first < -1.0001f || p.first > 1.0001f || p.second < -1.0001f || p.second > 1.0001f)
+                rep.failures.emplace_back("clip/wide: a point survived outside the rectangle");
+        }
+        // The HEIGHT must be untouched -- a clip that clamped all four corners would leave the
+        // same four points and pass the bounds check above while changing nothing.
+        {
+            float lo = 9.0f, hi = -9.0f;
+            for (const auto& p : b) {
+                lo = std::min(lo, p.second);
+                hi = std::max(hi, p.second);
+            }
+            check("clip/wide/top", hi, 0.5, 1e-4);
+            check("clip/wide/bottom", lo, -0.5, 1e-4);
+        }
+
+        const float away[8] = {2.0f, 2.0f, 3.0f, 2.0f, 3.0f, 3.0f, 2.0f, 3.0f};
+        ++rep.checks;
+        if (!clip_to_unit_rect(away, 4).empty())
+            rep.failures.emplace_back("clip/outside: a quad entirely outside the rectangle "
+                                      "produced points");
+    }
+
     return rep;
 }
 

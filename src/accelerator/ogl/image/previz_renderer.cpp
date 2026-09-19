@@ -48,6 +48,7 @@
 #include "ogl_previz_fragment.h"
 #pragma warning(pop)
 
+#include <array>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -74,6 +75,7 @@ using core::compute_frustum;
 // inside `previz_renderer::impl` and HIT-TESTED from `previz_renderer::input` below it, and the
 // definition sits with the other screen geometry near the bottom of this file.
 float corner_size(const core::screen_meta& meta);
+std::array<float, 3> surface_to_world(const core::screen_meta& meta, float lx, float ly);
 
 // ---- glTF loader -----------------------------------------------------------
 
@@ -351,6 +353,9 @@ struct previz_renderer::impl
     GLuint                      depth_rbo_ = 0;
     int                         fbo_w_     = 0;
     int                         fbo_h_     = 0;
+    GLuint                      footprint_vao_ = 0;
+    GLuint                      footprint_vbo_ = 0;
+    int                         footprint_vert_count_ = 0;
     GLuint                      corner_vao_ = 0;
     GLuint                      corner_vbo_ = 0;
     int                         corner_vert_count_ = 0;
@@ -384,6 +389,11 @@ struct previz_renderer::impl
                 glDeleteFramebuffers(1, &fbo_);
             if (depth_rbo_)
                 glDeleteRenderbuffers(1, &depth_rbo_);
+            if (footprint_vao_) {
+                glDeleteVertexArrays(1, &footprint_vao_);
+                glDeleteBuffers(1, &footprint_vbo_);
+                footprint_vao_ = 0;
+            }
             if (corner_vao_) {
                 glDeleteVertexArrays(1, &corner_vao_);
                 glDeleteBuffers(1, &corner_vbo_);
@@ -505,6 +515,64 @@ struct previz_renderer::impl
         }
         glBindVertexArray(corner_vao_);
         glBindBuffer(GL_ARRAY_BUFFER, corner_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(previz_vertex)),
+                     verts.data(), GL_DYNAMIC_DRAW);
+        auto stride  = static_cast<GLsizei>(sizeof(previz_vertex));
+        auto pos_loc = shader_->get_attrib_location("a_Position");
+        glEnableVertexAttribArray(pos_loc);
+        glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
+        auto nrm_loc = shader_->get_attrib_location("a_Normal");
+        glEnableVertexAttribArray(nrm_loc);
+        glVertexAttribPointer(nrm_loc, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(3 * sizeof(float)));
+        auto uv_loc = shader_->get_attrib_location("a_TexCoord");
+        glEnableVertexAttribArray(uv_loc);
+        glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(6 * sizeof(float)));
+        glBindVertexArray(0);
+    }
+
+    /// WHERE THE CAMERA IS LOOKING, ON THE WALL: the inner-frustum footprint, drawn from
+    /// `compute_frustum`'s own `icvfx_q` rather than from a second computation.
+    ///
+    /// That choice is the point. `icvfx_q` is the quad the ICVFX mask shader uses -- the four
+    /// corners of the camera's frustum where it meets this screen, in the screen's output NDC.
+    /// Deriving the outline here instead would be a second implementation of the same geometry,
+    /// free to drift from the one that shades, and an operator would be judging a line that
+    /// disagreed with the picture. Drawn from the shader's number, a divergence is impossible.
+    ///
+    /// Only for screens with ICVFX enabled, because `compute_frustum` computes the quad only
+    /// there -- and because that is what the footprint MEANS: where the mask will be.
+    void build_footprint(const screen_meta& meta, const core::screen_projection& proj)
+    {
+        std::vector<previz_vertex> verts;
+        // CLIPPED to the screen first. `icvfx_q` is where the frustum meets the screen's PLANE,
+        // which is unbounded: a lens wider than the wall puts corners far outside it, and the
+        // unclipped quad draws off into the distance. Clipping is what the mask does in effect,
+        // and it is the only reading that answers the operator's question -- how much of THIS
+        // wall is inner frustum.
+        const auto clipped = core::clip_to_unit_rect(proj.icvfx_q, 4);
+        if (clipped.size() < 2)
+            return;
+        std::vector<std::array<float, 3>> corners;
+        corners.reserve(clipped.size());
+        for (const auto& [qx, qy] : clipped) {
+            // Un-normalise: x is +-1 across the width, and y is +1 at the BOTTOM -- the
+            // inverse of what `compute_frustum` writes, which is `1 - 2*ly/height`.
+            corners.push_back(surface_to_world(meta, qx * meta.width_m * 0.5f,
+                                               (1.0f - qy) * meta.height_m * 0.5f));
+        }
+        for (std::size_t i = 0; i < corners.size(); ++i) {
+            const auto& a = corners[i];
+            const auto& b = corners[(i + 1) % corners.size()];
+            verts.push_back({a[0], a[1], a[2], 0, 1, 0, 0, 0});
+            verts.push_back({b[0], b[1], b[2], 0, 1, 0, 0, 0});
+        }
+        footprint_vert_count_ = static_cast<int>(verts.size());
+        if (!footprint_vao_) {
+            glGenVertexArrays(1, &footprint_vao_);
+            glGenBuffers(1, &footprint_vbo_);
+        }
+        glBindVertexArray(footprint_vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, footprint_vbo_);
         glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(previz_vertex)),
                      verts.data(), GL_DYNAMIC_DRAW);
         auto stride  = static_cast<GLsizei>(sizeof(previz_vertex));
@@ -1082,6 +1150,34 @@ struct previz_renderer::impl
             glBindVertexArray(camera_vao_);
             glDrawArrays(GL_LINES, 0, camera_vert_count_);
             glBindVertexArray(0);
+
+            // AND WHERE IT LANDS. The frustum says which way the camera is pointing; this says
+            // what it is actually covering, which is the question an ICVFX stage is built to
+            // answer -- is the talent inside the inner frustum, and how much wall is left.
+            // Drawn ON the surface (LEQUAL), in a lighter magenta than the frustum so the two
+            // read as one idea seen twice.
+            glDepthFunc(GL_LEQUAL);
+            // A pale BLUE-white rather than a lighter magenta. The first choice sat within
+            // half a degree of the frustum's own hue in RGB direction, which reads fine to an
+            // eye and is indistinguishable to anything measuring by colour -- and the two
+            // overlap on screen by construction, since the footprint is where the frustum
+            // lands. Separable colours are what let a battery say which one it found.
+            shader_->set("u_base_color", 0.55, 0.8, 1.0);
+            for (const auto& [name, meta] : scene_.screens) {
+                if (!meta.icvfx_enable)
+                    continue;
+                // `screen_proj`, not `proj`: the draw's projection MATRIX is named `proj` in
+                // this scope, and /WX makes the shadow an error -- which is the right outcome,
+                // since the two are a 4x4 and a screen's frustum result.
+                const auto screen_proj = compute_frustum(scene_.camera, meta);
+                if (!screen_proj.icvfx_enable)
+                    continue;
+                build_footprint(meta, screen_proj);
+                glBindVertexArray(footprint_vao_);
+                glDrawArrays(GL_LINES, 0, footprint_vert_count_);
+                glBindVertexArray(0);
+            }
+            glDepthFunc(GL_LESS);
         }
 
         if (scene_.show_wireframe)
@@ -1945,6 +2041,31 @@ previz_mesh generate_curved_screen(const std::string& name, float w, float h, fl
 /// draw is impl, the gesture is `previz_renderer::input`. One function for the reason
 /// `ring_radius` is one: a handle you can see and cannot grab, or grab and cannot see, is the
 /// same defect twice.
+/// A point on a screen's SURFACE, from its own (x, y) in metres to world space.
+///
+/// x runs from the centre, y from the bottom -- the axes `compute_pick` reports and the ones
+/// `icvfx_q` is expressed in once it is un-normalised. A curved screen's surface is an arc, so
+/// this is not a plane map: the x coordinate becomes an angle along the arc, exactly as
+/// `generate_curved_screen` lays the mesh out. One function so the outline, the resize corners
+/// and the camera footprint all land ON the surface rather than near it.
+std::array<float, 3> surface_to_world(const screen_meta& meta, float lx, float ly)
+{
+    float sx = lx;
+    float sz = 0.0f;
+    if (meta.radius_m > 0.0f && meta.arc_deg > 1e-4f) {
+        const float half_arc = meta.arc_deg * static_cast<float>(M_PI) / 360.0f;
+        const float t        = meta.width_m > 1e-6f ? (lx / meta.width_m + 0.5f) : 0.5f;
+        const float a        = -half_arc + t * (half_arc * 2.0f);
+        sx                   = meta.radius_m * std::sin(a);
+        sz                   = meta.radius_m * std::cos(a) - meta.radius_m;
+    }
+    const auto rot = mat4::rotate_y(meta.rot_yaw) * mat4::rotate_x(meta.rot_pitch) *
+                     mat4::rotate_z(meta.rot_roll);
+    return {rot.m[0] * sx + rot.m[4] * ly + rot.m[8] * sz + meta.pos_x,
+            rot.m[1] * sx + rot.m[5] * ly + rot.m[9] * sz + meta.pos_y,
+            rot.m[2] * sx + rot.m[6] * ly + rot.m[10] * sz + meta.pos_z};
+}
+
 float corner_size(const screen_meta& meta)
 {
     return std::max(0.12f, std::min(meta.width_m, meta.height_m) * 0.12f);

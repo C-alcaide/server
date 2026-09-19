@@ -26,6 +26,7 @@
 #include <map>
 #include <optional>
 #include <utility>
+#include <vector>
 #include <string>
 
 #ifndef M_PI
@@ -178,6 +179,21 @@ struct pick
 /// approximation `casparcg-360-client`'s `frustum_check.py` documents for the same reason, and
 /// it means a pick near the edge of a deeply curved panel can be off by the sagitta. Named
 /// here rather than discovered later.
+/// Clip a convex polygon in NDC to the unit rectangle -- Sutherland-Hodgman, four half-planes.
+///
+/// `compute_frustum`'s `icvfx_q` is where the camera's frustum meets a screen's PLANE, and that
+/// is unbounded: a camera whose frustum is wider than the wall produces corners well outside
+/// +-1, which is correct geometry and useless as a picture. The mask shader clamps in NDC as a
+/// matter of course; anything DRAWING the footprint has to clip, or it draws a quad running off
+/// into the distance -- measured 2026-09-19, a 42-degree lens on a 6 m wall at 5.5 m.
+///
+/// Per-corner clamping is not the same thing and is wrong for a rotated quad: it drags corners
+/// along the boundary and changes the shape. Clipping adds vertices instead, which is why the
+/// result is up to eight points rather than four.
+///
+/// Input is x0,y0,x1,y1,... Empty when the polygon misses the rectangle entirely.
+std::vector<std::pair<float, float>> clip_to_unit_rect(const float* pts, int count);
+
 /// Where the pointer meets a screen's PLANE, in the screen's own axes -- with NO bounds test.
 ///
 /// `compute_pick` answers "is the pointer on this screen", which means it rejects everything

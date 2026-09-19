@@ -235,6 +235,54 @@ screen_projection compute_frustum(const previz_camera& cam, const screen_meta& m
     return result;
 }
 
+std::vector<std::pair<float, float>> clip_to_unit_rect(const float* pts, int count)
+{
+    std::vector<std::pair<float, float>> poly;
+    poly.reserve(static_cast<std::size_t>(count) + 4);
+    for (int i = 0; i < count; ++i)
+        poly.emplace_back(pts[i * 2 + 0], pts[i * 2 + 1]);
+
+    // Four half-planes: x >= -1, x <= 1, y >= -1, y <= 1. `inside` and the intersection
+    // parameter are the only things that differ between them, so the loop body is written once.
+    for (int edge = 0; edge < 4 && !poly.empty(); ++edge) {
+        const auto inside = [&](const std::pair<float, float>& p) {
+            switch (edge) {
+                case 0: return p.first >= -1.0f;
+                case 1: return p.first <= 1.0f;
+                case 2: return p.second >= -1.0f;
+                default: return p.second <= 1.0f;
+            }
+        };
+        const auto cross = [&](const std::pair<float, float>& a, const std::pair<float, float>& b) {
+            const float bound = (edge == 0 || edge == 2) ? -1.0f : 1.0f;
+            if (edge < 2) {
+                const float t = (bound - a.first) / (b.first - a.first);
+                return std::make_pair(bound, a.second + t * (b.second - a.second));
+            }
+            const float t = (bound - a.second) / (b.second - a.second);
+            return std::make_pair(a.first + t * (b.first - a.first), bound);
+        };
+
+        std::vector<std::pair<float, float>> out;
+        out.reserve(poly.size() + 1);
+        for (std::size_t i = 0; i < poly.size(); ++i) {
+            const auto& cur  = poly[i];
+            const auto& prev = poly[(i + poly.size() - 1) % poly.size()];
+            const bool  ci   = inside(cur);
+            const bool  pi   = inside(prev);
+            if (ci) {
+                if (!pi)
+                    out.push_back(cross(prev, cur));
+                out.push_back(cur);
+            } else if (pi) {
+                out.push_back(cross(prev, cur));
+            }
+        }
+        poly.swap(out);
+    }
+    return poly;
+}
+
 std::optional<std::pair<double, double>> compute_plane_point(const previz_camera& view,
                                                              double               aspect,
                                                              double               sx,

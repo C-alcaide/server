@@ -491,6 +491,20 @@ literally — fails five arms while the tree goes on reporting (0, 0, −2).
 **Still uncovered**: a curved screen's geometry, roll and pitch, and the production camera
 (previz renders from the viewport one).
 
+**And where it LANDS, on an ICVFX screen** — the inner-frustum footprint, drawn from
+`compute_frustum`'s own `icvfx_q`. That choice is the point: `icvfx_q` is the quad the ICVFX mask
+shader uses, so deriving the outline separately would be a second implementation of the same
+geometry, free to drift from the one that shades, with an operator judging a line that disagreed
+with the picture. Only on screens with ICVFX enabled, because that is where the quad is computed
+and what the footprint MEANS.
+
+**CLIPPED to the screen** (`core::clip_to_unit_rect`, Sutherland-Hodgman, gated at boot):
+`icvfx_q` is where the frustum meets the screen's PLANE, which is unbounded, so a lens wider than
+the wall puts corners far outside it and the unclipped quad draws off into the distance —
+measured on a 42° lens over a 6 m wall at 5.5 m. Per-corner clamping is not the same operation
+and is wrong for a rotated quad: it drags corners along the boundary and changes the shape, where
+clipping adds vertices.
+
 **The production camera is drawn in the viewport since 2026-09-19** — `PREVIZ <ch> CAMERA SHOW
 1|0`, a body and its frustum, out four metres down the lens. Previz showed where the screens were
 and never where the SHOT was, which for a virtual production is the half that matters: a tracked
