@@ -363,6 +363,15 @@ struct pick_mesh
     const float*       xyz           = nullptr;
     std::size_t        vertex_count  = 0;
     std::size_t        stride_floats = 3;
+    /// The mesh's own pose, applied to its vertices before they are seen. Yaw/pitch/roll in
+    /// DEGREES, composed `Ry*Rx*Rz` like everything else on this stage.
+    ///
+    /// The RAY is transformed into mesh space rather than the triangles into world space, which
+    /// is the difference between six multiplies per pick and six per TRIANGLE. Both give the
+    /// same answer here only because the pose is rigid -- rotation and translation, no scale --
+    /// so distances are preserved and `t` means the same on both sides.
+    double             pos[3] = {0.0, 0.0, 0.0};
+    double             rot[3] = {0.0, 0.0, 0.0};
 };
 
 struct mesh_hit

@@ -36,6 +36,36 @@ requires a refusal, then sends **both** `ON` and `OFF` and requires both to be a
 control is not enough, because a command that accepted only its ON word would still be unable to
 express the thing an operator most needs to say.
 
+### BEHAVIOUR: a venue mesh can be MOVED -- `PREVIZ <ch> MESH <name> POSITION|ROTATION`
+
+Previz could select a glTF or OBJ part and nothing else, because the loaders bake world space
+into the vertices and there was no transform to write. There is one now, and it is an OFFSET on
+top of those vertices rather than a replacement: a freshly loaded venue sits exactly where the
+model says, and this is where a correction to it goes.
+
+**The `u_model` uniform was already there**, carrying the identity and a comment saying "for
+now". The shader used it for lighting; nothing had ever written anything else into it.
+
+**The pick transforms the RAY into mesh space, not the triangles into world space** -- one
+transform per pick against one per triangle, on meshes carrying tens of thousands. The pose is
+rigid, so the inverse is the rotation's transpose and the ray parameter is unchanged, which is
+what lets a posed mesh's hit distance be compared with a screen's without rescaling anything.
+
+**And `is_screen` means two things, which cost a defect on the way in.** It is set on a
+procedural screen AND on any venue mesh a channel has been MAPPED to, because that is the flag
+the draw uses to decide whether to bind a channel texture. The new pose commands and the existing
+mesh PICK both tested it -- so a venue wall stopped being movable and stopped being SELECTABLE
+the moment it showed content, which is exactly when an operator wants to click it. Both test
+membership of the procedural-screen map now.
+
+Verified: `previz-gizmo` 43/43 on both mixers, nine new arms. The move is gated on the mesh's TOP
+EDGE against a closed-form projection, not on its centroid -- the back wall is wider than the
+frame, so its visible centroid moves by less than the mesh does, 58 px against a true 117, and an
+arm gating on that would report a correct move as a half-sized one. **The PICK is checked to
+follow the pose**, because the draw applies the transform to the vertices and the pick applies
+its inverse to the ray: two derivations of one transform that can disagree in a sign while each
+looks right alone.
+
 ### BEHAVIOUR: removing the LAST previz screen now clears the picture on Vulkan too
 
 `PREVIZ <ch> SCREEN <name> REMOVE` took the screen out of the scene and out of the published

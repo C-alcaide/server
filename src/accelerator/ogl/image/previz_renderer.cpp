@@ -1116,9 +1116,16 @@ struct previz_renderer::impl
             if (mesh.vertices.empty())
                 continue;
 
-            // Set MVP (all meshes use identity model matrix for now)
-            glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_mvp"), 1, GL_FALSE, mvp.m);
-            glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_model"), 1, GL_FALSE, model.m);
+            // THROUGH THE MESH'S OWN POSE. `u_model` was here already, carrying the identity
+            // and a comment saying "for now" -- the uniform existed, the shader used it for
+            // lighting, and nothing ever wrote anything but the identity into it. A venue mesh
+            // could not be moved because nobody had filled in the matrix that was waiting.
+            const auto mesh_model = mat4::translate(mesh.pos[0], mesh.pos[1], mesh.pos[2]) *
+                                    mat4::rotate_y(mesh.rot[0]) * mat4::rotate_x(mesh.rot[1]) *
+                                    mat4::rotate_z(mesh.rot[2]);
+            const auto mesh_mvp = proj * view * mesh_model;
+            glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_mvp"), 1, GL_FALSE, mesh_mvp.m);
+            glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_model"), 1, GL_FALSE, mesh_model.m);
 
             // Determine if this mesh is a screen
             bool is_screen = mesh.is_screen;
@@ -1191,9 +1198,16 @@ struct previz_renderer::impl
                 if (mesh.name != scene_.selected_mesh || mesh.vertices.empty())
                     continue;
                 build_mesh_box(mesh);
+                // Through the SAME pose the mesh is drawn with, or the selection box stays
+                // behind when the part moves -- an outline that does not follow its object is
+                // worse than none, because it reads as the move having failed.
+                const auto box_model = mat4::translate(mesh.pos[0], mesh.pos[1], mesh.pos[2]) *
+                                       mat4::rotate_y(mesh.rot[0]) * mat4::rotate_x(mesh.rot[1]) *
+                                       mat4::rotate_z(mesh.rot[2]);
+                const auto box_mvp = proj * view * box_model;
                 glDepthFunc(GL_LEQUAL);
-                glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_mvp"), 1, GL_FALSE, mvp.m);
-                glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_model"), 1, GL_FALSE, model.m);
+                glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_mvp"), 1, GL_FALSE, box_mvp.m);
+                glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_model"), 1, GL_FALSE, box_model.m);
                 shader_->set("u_is_screen", false);
                 shader_->set("u_has_texture", false);
                 shader_->set("u_base_color", 0.7, 0.35, 1.0);
@@ -1647,14 +1661,25 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                         std::vector<core::pick_mesh> cands;
                         cands.reserve(impl_->scene_.meshes.size());
                         for (const auto& m : impl_->scene_.meshes) {
-                            // Screens are excluded: the procedural ones are ALSO meshes here, and
-                            // a screen picked as geometry would arrive without the local
-                            // coordinates every gesture needs -- selectable, and then undraggable.
-                            if (m.is_screen || !m.visible || m.vertices.empty())
+                            // Procedural screens are excluded: they are ALSO meshes here, and one
+                            // picked as geometry would arrive without the local coordinates every
+                            // gesture needs -- selectable, and then undraggable.
+                            //
+                            // By NAME rather than by `m.is_screen`, which means two things: it is
+                            // also set on any venue mesh a channel has been MAPPED to, because
+                            // that is the flag the draw uses to bind a channel texture. Testing
+                            // it here made a venue wall stop being selectable the moment it was
+                            // showing content -- which is when an operator most wants to click it.
+                            if (!m.visible || m.vertices.empty() ||
+                                impl_->scene_.screens.count(m.name) > 0)
                                 continue;
-                            cands.push_back(core::pick_mesh{&m.name, &m.vertices[0].px,
-                                                            m.vertices.size(),
-                                                            sizeof(previz_vertex) / sizeof(float)});
+                            core::pick_mesh pm{&m.name, &m.vertices[0].px, m.vertices.size(),
+                                               sizeof(previz_vertex) / sizeof(float)};
+                            for (int k = 0; k < 3; ++k) {
+                                pm.pos[k] = m.pos[k];
+                                pm.rot[k] = m.rot[k];
+                            }
+                            cands.push_back(pm);
                         }
                         mesh = core::compute_mesh_pick(view, aspect, event.x, event.y, cands);
                     }
@@ -2713,6 +2738,52 @@ bool previz_renderer::clone_screen(const std::string& source, const std::string&
     if (copy.channel >= 0)
         set_screen_channel(name, copy.channel);
     return true;
+}
+
+bool previz_renderer::set_mesh_pose(const std::string& name, const float pos[3], const float rot[3])
+{
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        // NOT `m.is_screen`, which means two things. It is set on a procedural screen AND on any
+        // venue mesh a channel has been MAPPED to, because that is the flag the draw uses to
+        // decide whether to bind a channel texture -- so excluding it here refused to move
+        // exactly the venue meshes an operator cares about, the ones showing content. The
+        // discriminator is membership of `screens`, which is what "this is a procedural screen
+        // with its own SCREEN command family" actually means.
+        const bool is_procedural = impl_->scene_.screens.count(name) > 0;
+        if (is_procedural)
+            return false;
+        bool found = false;
+        for (auto& m : impl_->scene_.meshes) {
+            if (m.name != name)
+                continue;
+            for (int i = 0; i < 3; ++i) {
+                m.pos[i] = pos[i];
+                m.rot[i] = rot[i];
+            }
+            found = true;
+        }
+        if (!found)
+            return false;
+    }
+    return true;
+}
+
+bool previz_renderer::mesh_pose(const std::string& name, float pos[3], float rot[3]) const
+{
+    std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+    if (impl_->scene_.screens.count(name) > 0)
+        return false; // a procedural screen; see `set_mesh_pose` for why not `is_screen`
+    for (const auto& m : impl_->scene_.meshes) {
+        if (m.name != name)
+            continue;
+        for (int i = 0; i < 3; ++i) {
+            pos[i] = m.pos[i];
+            rot[i] = m.rot[i];
+        }
+        return true;
+    }
+    return false;
 }
 
 void previz_renderer::set_snap(double metres, double degrees)

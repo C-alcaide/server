@@ -70,6 +70,14 @@ class previz_renderer
     /// affects projection).  Enables the view override.
     void set_view_camera(float x, float y, float z, float yaw, float pitch, float roll, float fov);
 
+    /// Move or turn a VENUE MESH. False if no non-screen mesh carries that name.
+    ///
+    /// An offset ON TOP of the baked vertices rather than a replacement for them: the loaders
+    /// apply a glTF node's own transform as the file is read, so a freshly loaded venue sits
+    /// where the model says and this is where a correction goes.
+    bool set_mesh_pose(const std::string& name, const float pos[3], const float rot[3]);
+    bool mesh_pose(const std::string& name, float pos[3], float rot[3]) const;
+
     /// Gesture snapping: the step a DRAG rounds to, in metres and in degrees. 0 disables.
     void set_snap(double metres, double degrees);
 

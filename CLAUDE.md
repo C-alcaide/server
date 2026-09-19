@@ -118,8 +118,8 @@ Two rules that outrank the table:
   running the nearest battery. That sentence is what turns a gap into a tracked item; the
   Vulkan-consumer-metadata gap below was found exactly that way.
 
-**Closed 2026-08-27: all fork-specific AMCP commands are documented** — 91 then, **94 now**
-(`INFO OFX` and `INFO ISF` landed 2026-09-09; `PREVIZ SNAP` 2026-09-19). And the count is checked mechanically rather than
+**Closed 2026-08-27: all fork-specific AMCP commands are documented** — 91 then, **95 now**
+(`INFO OFX` and `INFO ISF` landed 2026-09-09; `PREVIZ SNAP` and `PREVIZ MESH` 2026-09-19). And the count is checked mechanically rather than
 remembered: `tests/test_docs_claims.py::test_every_fork_command_appears_in_some_doc` in the
 harness failed on both of them the moment they were registered, which is the only reason this
 paragraph is right. This block used to name
@@ -148,7 +148,7 @@ Still uncovered, and now the priority order for coverage rather than for docs:
   2026-09-08). `UNMAP` and `AUTOPROJECTION` are driven by `api-stage`, and `VIEW` and
   `AUTOPROJECTION` again by `previz-interact`.
 
-  **ALL FOURTEEN ARE DRIVEN** -- thirteen since 2026-09-18, and `SNAP` from the day it landed — `GIZMO` and `PRESET` were the last two, and
+  **ALL FIFTEEN ARE DRIVEN** -- thirteen since 2026-09-18, and `SNAP` and `MESH` from the day each landed — `GIZMO` and `PRESET` were the last two, and
   `previz-gizmo` drives them. Measured the way this paragraph tells you to, which is the only
   reason it has ever been right:
 
@@ -156,7 +156,7 @@ Still uncovered, and now the priority order for coverage rather than for docs:
 
   **And that grep OVER-counts, which the line above never said.** Re-run 2026-09-19 it returns
   FIFTEEN tokens, not thirteen: `EYEMODE` is a `SCREEN` SUBcommand and `RENDER` is not a
-  registered verb at all. The registry has exactly FOURTEEN (`SNAP` landed 2026-09-19) --
+  registered verb at all. The registry has exactly FIFTEEN (`SNAP` and `MESH` both landed 2026-09-19) --
   `grep -n 'register_channel_command(L"PREVIZ' src/protocol/amcp/AMCPCommandsImpl.cpp` is the
   list, and it is the one to subtract the grep FROM. A candidate list read as an answer is how
   this paragraph goes wrong; it is the same shape as the `boost::iequals` sweep two sections

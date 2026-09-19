@@ -52,6 +52,15 @@ struct previz_mesh
     std::string                name;
     std::vector<previz_vertex> vertices; // triangle list
     std::array<float, 3>       base_color = {0.5f, 0.5f, 0.5f};
+    /// Where this mesh sits, on top of the vertices themselves.
+    ///
+    /// The loaders BAKE world space into `vertices` -- a glTF node's transform is applied as the
+    /// file is read -- so this is an offset from wherever the model put it, not a replacement
+    /// for it. That keeps a freshly loaded venue exactly where the model says (both default to
+    /// zero) and gives an operator somewhere to put a correction, which is the whole reason a
+    /// venue mesh could not be moved before 2026-09-19: there was no transform to write.
+    std::array<float, 3>       pos = {0.0f, 0.0f, 0.0f};
+    std::array<float, 3>       rot = {0.0f, 0.0f, 0.0f}; ///< yaw, pitch, roll in DEGREES
     bool                       is_screen  = false;
     bool                       visible    = true;
 

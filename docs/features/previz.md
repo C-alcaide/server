@@ -41,6 +41,7 @@ the verb, as it does for `MIXER`. The layer index parses and **no previz command
 | `PREVIZ UNMAP` | `<mesh_name>` | `previz_unmap_command` |
 | `PREVIZ CAMERA` | *(query)* \| `RESET` \| `OVERRIDE [1\|0]` \| `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | `previz_camera_command` |
 | `PREVIZ VIEW` | *(query)* \| `CLEAR` \| `RESET` \| `FRAME [<name>]` \| `TOP` \| `FRONT` \| `SIDE` \| `<x> <y> <z> <yaw> <pitch> <roll> <fov>` | `previz_view_command` |
+| `PREVIZ MESH` | `<name> POSITION <x> <y> <z>` \| `ROTATION <yaw> <pitch> <roll>` \| `QUERY` | `previz_mesh_command` |
 | `PREVIZ SNAP` | *(query)* \| `OFF` \| `<metres> [<degrees>]` | `previz_snap_command` |
 | `PREVIZ INFO` | — query | `previz_info_command` |
 | `PREVIZ SHOW` | `<mesh_name> [1\|0]` | `previz_show_command` |
@@ -1059,9 +1060,24 @@ Two limits and one that closed, each a consequence of a decision rather than an 
   **Screens and meshes compete on DEPTH**, not on an order. `pick::distance` and
   `mesh_hit::distance` are both metres from the eye, which is why `compute_mesh_pick`
   normalises its ray direction where `compute_pick` scales its `t` at the end instead.
-* **A venue mesh still cannot be DRAGGED**, and that is a property of the model rather than an
-  omission: the loaders bake each mesh into world space with an identity model matrix, so there
-  is no transform to write. Moving one would mean rewriting its vertices.
+* ~~**A venue mesh still cannot be DRAGGED.**~~ **CLOSED 2026-09-19.** It has a pose now
+  — `PREVIZ <ch> MESH <name> POSITION` / `ROTATION` — and it is an OFFSET on top of the baked
+  vertices rather than a replacement for them, so a freshly loaded venue still sits exactly where
+  the model says and this is where a correction goes.
+
+  **The `u_model` uniform was already there**, carrying the identity and a comment saying "for
+  now": the shader used it for lighting and nothing had ever written anything else into it.
+
+  **The pick transforms the RAY, not the triangles** — one transform per pick against one per
+  triangle, on meshes that routinely carry tens of thousands. The pose is rigid, so the inverse
+  is the rotation's transpose and `t` is unchanged, which is what lets a posed mesh's hit
+  distance be compared with an unposed one's and with a screen's without rescaling anything.
+
+  *And `is_screen` means two things*, which cost a defect on the way in: it is set on a
+  procedural screen AND on any venue mesh a channel is MAPPED to, because that is the flag the
+  draw uses to bind a channel texture. Both the pose commands and the mesh PICK were testing it,
+  so a venue wall stopped being movable and selectable the moment it showed content — which is
+  when an operator most wants to click it. Both test membership of `screens` now.
 * ~~**No rotation handle.**~~ **CLOSED 2026-09-19.** The selected screen carries a **yaw ring**
   in the horizontal plane through its base, with a spoke at its current facing so the handle
   reads as an angle rather than a decoration. Grab it anywhere on the annulus and drag: the yaw

@@ -5872,6 +5872,62 @@ std::wstring previz_view_command(command_context& ctx)
 /// 1.234 with snapping on, because a client sending a number means that number. A stage built
 /// from a survey is full of positions no grid contains, and a snap that reached the write path
 /// would quietly move every one of them the first time anything re-sent them.
+/// `PREVIZ <ch> MESH <name> POSITION <x> <y> <z>` | `ROTATION <yaw> <pitch> <roll>` | *(query)*
+///
+/// A VENUE mesh, not a screen -- screens have their own family and their own origin convention.
+/// The pose is an OFFSET on top of the vertices the loader baked, because a glTF node's own
+/// transform is applied as the file is read: a freshly loaded venue sits exactly where the model
+/// says, and this is where a correction to it goes.
+std::wstring previz_mesh_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+    if (ctx.parameters.size() < 2)
+        return L"400 PREVIZ ERROR usage: MESH <name> POSITION|ROTATION <x> <y> <z>\r\n";
+
+    const std::string name = u8(ctx.parameters.at(0));
+    const auto        sub  = boost::to_upper_copy(ctx.parameters.at(1));
+
+    float pos[3] = {0, 0, 0}, rot[3] = {0, 0, 0};
+    // 404 rather than 202 for a name that is not a venue mesh: the two ways to get here are a
+    // typo and a screen's name, and a screen HAS a pose -- under a different command. Answering
+    // OK would leave an operator moving something that does not exist and watching the one that
+    // does stay put.
+    if (!ogl_mix->mesh_pose(name, pos, rot))
+        return L"404 PREVIZ ERROR\r\n";
+
+    if (sub == L"POSITION" || sub == L"ROTATION") {
+        if (ctx.parameters.size() < 5)
+            return L"400 PREVIZ ERROR " + sub + L" takes three numbers\r\n";
+        try {
+            float v[3];
+            for (int i = 0; i < 3; ++i)
+                v[i] = std::stof(u8(ctx.parameters.at(2 + i)));
+            if (sub == L"POSITION") {
+                pos[0] = v[0]; pos[1] = v[1]; pos[2] = v[2];
+            } else {
+                rot[0] = v[0]; rot[1] = v[1]; rot[2] = v[2];
+            }
+        } catch (const std::exception&) {
+            return L"400 PREVIZ ERROR " + sub + L" takes three numbers\r\n";
+        }
+        ogl_mix->set_mesh_pose(name, pos, rot);
+        return L"202 PREVIZ OK\r\n";
+    }
+
+    if (sub == L"QUERY") {
+        std::wostringstream os;
+        os << L"201 PREVIZ OK\r\n"
+           << pos[0] << L" " << pos[1] << L" " << pos[2] << L" "
+           << rot[0] << L" " << rot[1] << L" " << rot[2] << L"\r\n\r\n";
+        return os.str();
+    }
+
+    return L"400 PREVIZ ERROR MESH takes POSITION, ROTATION or QUERY, not " +
+           ctx.parameters.at(1) + L"\r\n";
+}
+
 std::wstring previz_snap_command(command_context& ctx)
 {
     auto* ogl_mix = get_ogl_mixer(ctx);
@@ -7392,6 +7448,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SCREEN",    previz_screen_command,    1);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ AUTOPROJECTION", previz_autoprojection_command, 0);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SNAP",      previz_snap_command,      0);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ MESH",      previz_mesh_command,      2);
 
     repo->register_command(L"Thumbnail Commands", L"THUMBNAIL LIST", thumbnail_list_command, 0);
     repo->register_command(L"Thumbnail Commands", L"THUMBNAIL RETRIEVE", thumbnail_retrieve_command, 1);

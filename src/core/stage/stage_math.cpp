@@ -618,14 +618,37 @@ std::optional<mesh_hit> compute_mesh_pick(const previz_camera&          view,
     for (const auto& m : meshes) {
         if (!m.xyz || !m.name || m.vertex_count < 3)
             continue;
+
+        // THE RAY GOES INTO MESH SPACE, not the triangles into world space: one transform per
+        // pick against one per triangle, on meshes that routinely carry tens of thousands. The
+        // pose is rigid, so the inverse is the transpose of the rotation and `t` is unchanged --
+        // which is what lets the hit distances of a posed mesh and an unposed one be compared
+        // against each other, and against a screen's, without rescaling anything.
+        const auto rot = mat4::rotate_y(static_cast<float>(m.rot[0])) *
+                         mat4::rotate_x(static_cast<float>(m.rot[1])) *
+                         mat4::rotate_z(static_cast<float>(m.rot[2]));
+        const double rel[3] = {eye[0] - m.pos[0], eye[1] - m.pos[1], eye[2] - m.pos[2]};
+        double       leye[3], ldir[3];
+        for (int r = 0; r < 3; ++r) {
+            // Transposed multiply: column r of the rotation dotted with the vector.
+            leye[r] = static_cast<double>(rot.m[r * 4 + 0]) * rel[0] +
+                      static_cast<double>(rot.m[r * 4 + 1]) * rel[1] +
+                      static_cast<double>(rot.m[r * 4 + 2]) * rel[2];
+            ldir[r] = static_cast<double>(rot.m[r * 4 + 0]) * dir[0] +
+                      static_cast<double>(rot.m[r * 4 + 1]) * dir[1] +
+                      static_cast<double>(rot.m[r * 4 + 2]) * dir[2];
+        }
+
         const std::size_t tris = m.vertex_count / 3;
         for (std::size_t i = 0; i < tris; ++i) {
             const float* a = m.xyz + (i * 3 + 0) * m.stride_floats;
             const float* b = m.xyz + (i * 3 + 1) * m.stride_floats;
             const float* c = m.xyz + (i * 3 + 2) * m.stride_floats;
-            const auto   t = ray_triangle(eye, dir, a, b, c);
+            const auto   t = ray_triangle(leye, ldir, a, b, c);
             if (!t || (best && *t >= best->distance))
                 continue;
+            // Reported in WORLD space, from the original ray, so a caller comparing this with a
+            // screen's `pick::distance` is comparing two metres-from-the-eye.
             best = mesh_hit{*m.name, *t, eye[0] + dir[0] * *t, eye[1] + dir[1] * *t, eye[2] + dir[2] * *t};
         }
     }
