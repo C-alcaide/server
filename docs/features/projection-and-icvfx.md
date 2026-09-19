@@ -73,6 +73,18 @@ All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cp
   through `frame_transform::tween_to`. The mask QUAD deliberately does not tween: it snaps to its
   destination, because previz recomputes it per frame and interpolating towards a value that has
   already moved on would lag the camera.
+- **The 360 inner-frustum REPROJECTION is measured** — the parallax correction the feature is
+  named after. With `MIXER PROJECTION` on, the outer region samples the panorama through the
+  wall's own view direction and the inner region through `inner_yaw/pitch/roll/fov`, so the wall
+  shows the environment from where the WALL is and the camera's frustum from where the CAMERA is.
+  The check needs no model of the equirect mapping: the inner region at `inner_yaw = Y` must show
+  what the whole frame shows at `view_yaw = Y`, and the outer region must not move while the
+  inner one sweeps.
+
+  **`MIXER PROJECTION` takes `<yaw> <pitch> <roll> <fov>` with no enable flag** — `enable` is
+  `fov > 0`. A spare `1` in front shifts every argument, leaves `fov` at 0 and turns projection
+  off, and the flat picture that results looks plausible while every inner-frustum parameter
+  appears inert.
 - **A typo used to turn ICVFX OFF.** `enable` was `at(0) == "1" || iequals "true"`, so every other
   word — `BANANA`, and `YES` — disabled the inner frustum and answered `202`. On a live volume
   that is the inner frustum vanishing because a word was misspelled. **Fixed 2026-09-19**: it goes

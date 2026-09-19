@@ -284,10 +284,11 @@ Still uncovered, and now the priority order for coverage rather than for docs:
   and mutation-verified. The quad driven by a REAL CAMERA through auto-projection is
   covered too, on the WALL's own raster — previz's footprint shows where that quad lands in the
   VIEWPORT, which is a different picture from how the wall shades it, and both are measured now.
-  The TWEENED form of both commands is covered too since 2026-09-19.
-  **Still uncovered**: the inner-frustum REPROJECTION alone — `get_equirect_uv_ex` on a 360
-  source, where the inner sample comes from somewhere else entirely, which is the parallax
-  correction the whole feature is named after.
+  The TWEENED form of both commands is covered, and so is the 360
+  inner-frustum REPROJECTION — **ICVFX is measured end to end as of 2026-09-19**, 16 checks on
+  both mixers. **Still uncovered**: `inner_pitch`, `inner_roll`, the inner offsets and
+  `inner_eye_distance`, which move the inner sample in ways a vertical-band panorama cannot
+  distinguish.
 
 **Verifying this block is one command**, and it is worth re-running rather than trusting: extract
 `register_command`/`register_channel_command` names from both trees, subtract upstream's, and grep
