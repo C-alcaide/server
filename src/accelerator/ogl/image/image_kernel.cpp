@@ -601,6 +601,7 @@ struct image_kernel::impl
             shader_->set("inner_pitch",     static_cast<float>(proj.inner_pitch));
             shader_->set("inner_roll",      static_cast<float>(proj.inner_roll));
             shader_->set("inner_fov",       static_cast<float>(proj.inner_fov));
+            shader_->set("inner_eye_distance", static_cast<float>(proj.inner_eye_distance));
             shader_->set("inner_offset_x",  static_cast<float>(proj.inner_offset_x));
             shader_->set("inner_offset_y",  static_cast<float>(proj.inner_offset_y));
             shader_->set("icvfx_q0x",       static_cast<float>(proj.icvfx_q0x));

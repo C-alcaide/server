@@ -377,7 +377,15 @@ struct alignas(16) uniform_block
     /// and decode after, -1 the reverse, 0 nothing. Replaces what was pure padding, so the
     /// block does not grow and no offset moves -- the one safe edit to this struct.
     int32_t  gn_isf_to_display = 0;                                         // 1212
-    // Total: 1216 bytes (76 x 16)
+    // ── The inner frustum's own eye distance ────────────────────────────
+    // Appended at the tail, per the procedure above, because there was no slack left. It is the
+    // CAMERA's distance / screen radius, against `eye_distance` which is the VIEWER's: a curved
+    // wall's compensation depends on where the eye is, and ICVFX has two eyes. The field existed
+    // in the transform, the registry, the tween and both composition allowlists since 2026-06-21
+    // and reached NO shader -- it is the first thing in this block that was published and inert.
+    float    inner_eye_distance = 1.0f;                                     // 1216
+    float    _pad_inner_eye[3]  = {0.f, 0.f, 0.f};                          // 1220, back to 16
+    // Total: 1232 bytes (77 x 16)
 };
 
 // ── THE SHADER'S DECLARATION ORDER IS PART OF THIS LAYOUT ───────────────────
@@ -411,7 +419,7 @@ struct alignas(16) uniform_block
 // The three anchors are deliberate rather than exhaustive: the FIRST field pins the start, and
 // the last two pin everything after the large projection/ICVFX block -- which is where fields
 // have actually been added. A drift anywhere before them moves at least one.
-static_assert(sizeof(uniform_block) == 1216,
+static_assert(sizeof(uniform_block) == 1232,
               "uniform_block must stay a multiple of 16 and match ParamsBlock in "
               "fragment_shader.frag -- see the measurement in the comment above");
 static_assert(offsetof(uniform_block, color_space_index) == 0,
@@ -436,6 +444,9 @@ static_assert(offsetof(uniform_block, gn_isf) == 1056,
               "wrong numbers and reports nothing");
 static_assert(offsetof(uniform_block, gn_isf_count) == 1184,
               "uniform_block: gn_isf_count moved; the shader reads it at a fixed offset");
+static_assert(offsetof(uniform_block, inner_eye_distance) == 1216,
+              "uniform_block: inner_eye_distance moved. It is the LAST field and the shader's "
+              "ParamsBlock must end with it and its padding, in this order");
 static_assert(offsetof(uniform_block, gn_isf_time) == 1188,
               "uniform_block: ISF's standard uniforms moved. The generated shader addresses them "
               "by explicit offset, so this is the one place the two sides can disagree without a "

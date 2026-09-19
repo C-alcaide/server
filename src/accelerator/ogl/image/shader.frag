@@ -89,6 +89,7 @@ uniform float inner_yaw;          // inner (camera-eye) view yaw   in radians
 uniform float inner_pitch;        // inner view pitch in radians
 uniform float inner_roll;         // inner view roll  in radians
 uniform float inner_fov;          // inner vertical FOV in radians
+uniform float inner_eye_distance; // the CAMERA's distance / screen radius, for the inner sample
 uniform float inner_offset_x;     // inner NDC lens-shift X
 uniform float inner_offset_y;     // inner NDC lens-shift Y
 uniform float icvfx_q0x;          // camera-frustum mask quad corner UL (output NDC)
@@ -1373,11 +1374,14 @@ float curve_warp_axis(float s, float half_arc, float k) {
     return tan(th) / tan(thm);
 }
 
-vec2 apply_curve_warp(vec2 uv) {
+// `k` is a PARAMETER rather than the `eye_distance` uniform, because the inner frustum has its
+// own: the wall is curved around the VIEWER at `eye_distance` and around the CAMERA at
+// `inner_eye_distance`, and reading one global for both is what made the second do nothing.
+vec2 apply_curve_warp(vec2 uv, float k_in) {
     float half_arc = abs(screen_arc) * 0.5;
     if (half_arc < 0.0001)
         return uv;
-    float k = max(eye_distance, 0.05);
+    float k = max(k_in, 0.05);
     float half_arc_v = abs(screen_arc_v) * 0.5;
     vec2 ndc = uv * 2.0 - 1.0;
     if (screen_curve_type == 1) {
@@ -2045,7 +2049,7 @@ void main()
     vec4 col;
     // Destination curve compensation is orthogonal to the source projection:
     // warp the screen UV first, then sample either the flat or 360 source.
-    vec2 view_uv = is_curved ? apply_curve_warp(base_uv) : base_uv;
+    vec2 view_uv = is_curved ? apply_curve_warp(base_uv, eye_distance) : base_uv;
     vec2 uv = is_360 ? get_equirect_uv(view_uv) : view_uv;
     if (flip_h) uv.s = 1.0 - uv.s;
     if (flip_v) uv.t = 1.0 - uv.t;
@@ -2149,10 +2153,17 @@ void main()
         // invariant under the exchange.
         col.rgb *= icvfx_outer_dim * icvfx_outer_gain.bgr;
         if (m > 0.0) {
+            // THE INNER SAMPLE IS WARPED FOR THE CAMERA'S EYE, not the viewer's, which is the
+            // whole of what `inner_eye_distance` is for: the curve compensation that makes a
+            // curved wall look right depends on where the eye is, and the two eyes are in
+            // different places. Warped from `base_uv` rather than from `view_uv`, because
+            // `view_uv` has already been warped for the VIEWER and warping it again would
+            // compose the two rather than replace one with the other.
+            vec2 inner_uv = is_curved ? apply_curve_warp(base_uv, inner_eye_distance) : base_uv;
             vec2 iuv = is_360
-                ? get_equirect_uv_ex(view_uv, inner_yaw, inner_pitch, inner_roll,
+                ? get_equirect_uv_ex(inner_uv, inner_yaw, inner_pitch, inner_roll,
                                      inner_fov, inner_offset_x, inner_offset_y)
-                : view_uv;
+                : inner_uv;
             if (flip_h) iuv.s = 1.0 - iuv.s;
             if (flip_v) iuv.t = 1.0 - iuv.t;
             vec4 icol = get_blurred_color(iuv);

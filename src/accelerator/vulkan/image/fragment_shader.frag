@@ -174,6 +174,10 @@ layout(scalar, binding = 2) uniform ParamsBlock {
     int   gn_isf_pass;
     float gn_isf_rendersize[2];
     int   gn_isf_to_display;
+    // Appended in the SAME ORDER as uniform_block.h's tail: the block is layout(scalar),
+    // so a field declared anywhere else silently reinterprets its neighbours.
+    float inner_eye_distance;
+    float _pad_inner_eye[3];
 };
 layout(binding = 3) uniform sampler3D lut3d_tex;
 layout(binding = 4) uniform sampler2D hue_curve_tex;
@@ -529,7 +533,7 @@ float curve_warp_axis(float s,float ha,float k){
     float thm=clamp(atan(sin(ha),k-(1.0-cos(ha))),-1.55334,1.55334);
     float th =clamp(atan(sin(s*ha),k-(1.0-cos(s*ha))),-1.55334,1.55334);
     return tan(th)/tan(thm);}
-vec2 apply_curve_warp(vec2 uv){float ha=abs(screen_arc)*0.5;if(ha<0.0001)return uv;float k=max(eye_distance,0.05);float hav=abs(screen_arc_v)*0.5;vec2 ndc=uv*2.0-1.0;
+vec2 apply_curve_warp(vec2 uv,float k_in){float ha=abs(screen_arc)*0.5;if(ha<0.0001)return uv;float k=max(k_in,0.05);float hav=abs(screen_arc_v)*0.5;vec2 ndc=uv*2.0-1.0;
     if(screen_curve_type==1){ndc.x=curve_warp_axis(ndc.x,ha,k);}
     else if(screen_curve_type==2){if(hav>0.0001){ndc.x=curve_warp_axis(ndc.x,ha,k);ndc.y=curve_warp_axis(ndc.y,hav,k);}else{float r=length(ndc);if(r>0.0001)ndc*=curve_warp_axis(r,ha,k)/r;}}
     else if(screen_curve_type==3){float r=length(ndc);if(r>0.0001){float thm=min(ha,1.55334);ndc*=(tan(r*ha)/tan(thm))/r;}}
@@ -729,7 +733,7 @@ void main(){
     vec2 buv=TexCoord.st/TexCoord.q;vec4 col;
     // Destination curve compensation composes with the source projection:
     // warp the screen UV first, then sample the flat or 360 source.
-    vec2 vuv=flag(F_CURVED)?apply_curve_warp(buv):buv;
+    vec2 vuv=flag(F_CURVED)?apply_curve_warp(buv,eye_distance):buv;
     vec2 uv=flag(F_360)?get_equirect_uv(vuv):vuv;
     if(flag(F_FLIP_H))uv.s=1.0-uv.s;if(flag(F_FLIP_V))uv.t=1.0-uv.t;
     col=get_blurred_color(uv);
@@ -855,7 +859,7 @@ void main(){
 
     // ICVFX inner/outer frustum: blend parallax-correct inner sample over the
     // dimmed outer sample inside the feathered camera-frustum quad mask.
-    if(flag2(F2_ICVFX)){float m=icvfx_mask(buv);col.rgb*=icvfx_outer_dim*vec3(icvfx_outer_gain_r,icvfx_outer_gain_g,icvfx_outer_gain_b);if(m>0.0){vec2 iuv=flag(F_360)?get_equirect_uv_ex(vuv,inner_yaw,inner_pitch,inner_roll,inner_fov,inner_offset_x,inner_offset_y):vuv;if(flag(F_FLIP_H))iuv.s=1.0-iuv.s;if(flag(F_FLIP_V))iuv.t=1.0-iuv.t;vec4 icol=get_blurred_color(iuv);icol.rgb*=icvfx_inner_dim*vec3(icvfx_inner_gain_r,icvfx_inner_gain_g,icvfx_inner_gain_b);col=mix(col,icol,m);}}
+    if(flag2(F2_ICVFX)){float m=icvfx_mask(buv);col.rgb*=icvfx_outer_dim*vec3(icvfx_outer_gain_r,icvfx_outer_gain_g,icvfx_outer_gain_b);if(m>0.0){vec2 inner_uv=flag(F_CURVED)?apply_curve_warp(buv,inner_eye_distance):buv;vec2 iuv=flag(F_360)?get_equirect_uv_ex(inner_uv,inner_yaw,inner_pitch,inner_roll,inner_fov,inner_offset_x,inner_offset_y):inner_uv;if(flag(F_FLIP_H))iuv.s=1.0-iuv.s;if(flag(F_FLIP_V))iuv.t=1.0-iuv.t;vec4 icol=get_blurred_color(iuv);icol.rgb*=icvfx_inner_dim*vec3(icvfx_inner_gain_r,icvfx_inner_gain_g,icvfx_inner_gain_b);col=mix(col,icol,m);}}
 
     if(flag(F_SHARPEN)){col.rgb=apply_sharpen(uv,col.rgb,sharpen_amount,sharpen_radius);}
     // ALPHA DOMAIN -- mirrors ogl/image/shader.frag, where the full account lives.

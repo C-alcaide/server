@@ -36,6 +36,37 @@ requires a refusal, then sends **both** `ON` and `OFF` and requires both to be a
 control is not enough, because a command that accepted only its ON word would still be unable to
 express the thing an operator most needs to say.
 
+### BEHAVIOUR: `inner_eye_distance` reaches a shader -- it had been inert since 2026-06-21
+
+The inner frustum's own eye distance was in the transform, the field registry, the tween, both
+composition allowlists, the AMCP surface and `compute_frustum`. It was **uploaded by neither
+kernel and named in neither shader**. Published, persisted, tweened, composed, documented, and
+read by no render path.
+
+`eye_distance` is where the VIEWER stands relative to the screen radius; `inner_eye_distance` is
+where the CAMERA does. A curved wall's compensation depends on where the eye is, and ICVFX has
+**two eyes** -- that is the whole point of the parameter. `apply_curve_warp` took its `k` from
+the one global, so there was nowhere for the second to go.
+
+It takes `k` as an argument now. The outer sample passes `eye_distance`, and the ICVFX branch
+warps **`base_uv`** with `inner_eye_distance` -- from `base_uv` and not from the already-warped
+`view_uv`, because warping twice composes the two eyes rather than replacing one with the other.
+
+**The Vulkan uniform block grew for the first time since the ISF work**, by the procedure its own
+comment sets out: append at the tail here, append at the tail there, keep the size a multiple of
+16. 1216 to 1232 bytes, with a new `static_assert` pinning the field's offset — the block is
+`layout(scalar)` and a mismatch silently reinterprets neighbouring floats rather than failing.
+
+Verified: `icvfx-mask` 21/21 both mixers. The new arm uses the same twin oracle as the other
+inner parameters — with `proj_inner_eye_distance` at 2.0 the inner region matches a frame taken
+with `proj_eye_distance` at 2.0, byte for byte — and carries a vacuity control that differs by
+147 when the parameter is left at rest. **The curve is ON for this case and off for the other
+four**, because on a flat screen neither eye distance does anything: an arm that forgot the curve
+would have passed on the server that ignored the parameter entirely.
+
+And because this edits a shader and the uniform layout: `conformance` 100/100 and `grading` 96/96
+on both mixers, `icvfx-parity` 0 LSB.
+
 ### BEHAVIOUR: a venue mesh can be MOVED -- `PREVIZ <ch> MESH <name> POSITION|ROTATION`
 
 Previz could select a glTF or OBJ part and nothing else, because the loaders bake world space

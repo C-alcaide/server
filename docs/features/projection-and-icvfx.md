@@ -92,7 +92,12 @@ All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cp
   equal the same region of a frame taken with the outer twin at V. It matches byte for byte, and
   neither side needs the equirect mapping modelled.
 
-  The one parameter with no twin is `inner_eye_distance`, which only bites on a curved screen.
+  `inner_eye_distance` has a twin too — `eye_distance`, in the CURVE block rather than the
+  projection one — and it is checked the same way, on a 90 degree cylinder because on a flat
+  screen neither does anything. **It reached no shader at all until 2026-09-20**: present in the
+  transform, the registry, the tween and both composition allowlists since 2026-06-21, and
+  uploaded by neither kernel. `apply_curve_warp` took its `k` from the single `eye_distance`
+  uniform, so there was nowhere for the camera's own eye to go.
 - **A typo used to turn ICVFX OFF.** `enable` was `at(0) == "1" || iequals "true"`, so every other
   word — `BANANA`, and `YES` — disabled the inner frustum and answered `202`. On a live volume
   that is the inner frustum vanishing because a word was misspelled. **Fixed 2026-09-19**: it goes

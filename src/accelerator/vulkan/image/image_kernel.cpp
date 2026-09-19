@@ -1984,6 +1984,7 @@ struct image_kernel::impl
             uniforms.inner_pitch     = static_cast<float>(proj.inner_pitch);
             uniforms.inner_roll      = static_cast<float>(proj.inner_roll);
             uniforms.inner_fov       = static_cast<float>(proj.inner_fov);
+            uniforms.inner_eye_distance = static_cast<float>(proj.inner_eye_distance);
             uniforms.inner_offset_x  = static_cast<float>(proj.inner_offset_x);
             uniforms.inner_offset_y  = static_cast<float>(proj.inner_offset_y);
             uniforms.icvfx_q0x       = static_cast<float>(proj.icvfx_q0x);
