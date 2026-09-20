@@ -70,7 +70,7 @@ All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cp
   auto-projection doing nothing.
 - **Both commands TWEEN**, and both are measured since 2026-09-19. `[dur] [tween]` interpolates
   every ICVFX field that sensibly can — the dims, the feather, and all six gain components —
-  through `frame_transform::tween_to`. The mask QUAD deliberately does not tween: it snaps to its
+  through `image_transform::tween`. The mask QUAD deliberately does not tween: it snaps to its
   destination, because previz recomputes it per frame and interpolating towards a value that has
   already moved on would lag the camera.
 - **The 360 inner-frustum REPROJECTION is measured** — the parallax correction the feature is
@@ -106,10 +106,14 @@ All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cp
   which is the only configuration in which it does anything at all (`SPHERE` with a non-zero
   `arc_v`; at 0 the same type takes a radial warp instead).
 
-  **Nothing in the PROJECTION family is driven by nothing any more.** What is still uncovered is
-  the TWEENED form of these commands: every one takes `[duration] [tween]`, and every one reaches
-  `frame_transform::tween_to`'s hand-written list -- which is exactly where `icvfx-mask` found
-  its own gap.
+  **Nothing in the PROJECTION family is driven by nothing any more.** **The tweened form is covered too**, at 28/28: every command in this
+  family takes `[duration] [tween]`, and all 52 projection fields are named in
+  `image_transform::tween` -- the continuous ones interpolated, and `source_lens`, `curve_type`
+  and `curve_enable` taking the destination value, which is the only sane answer for an enum and
+  is asserted rather than assumed (mid-tween the picture must still match exactly one lens model,
+  never a blend of two).
+
+  **Nothing in the PROJECTION family is driven by nothing, and nothing in it is untweened.**
 
   `inner_eye_distance` has a twin too — `eye_distance`, in the CURVE block rather than the
   projection one — and it is checked the same way, on a 90 degree cylinder because on a flat
