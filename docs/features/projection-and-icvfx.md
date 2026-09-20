@@ -92,6 +92,16 @@ All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cp
   equal the same region of a frame taken with the outer twin at V. It matches byte for byte, and
   neither side needs the equirect mapping modelled.
 
+  **And the rest of the PROJECTION family is measured since 2026-09-20** — `projection` in the
+  harness, 16/16 on both mixers. The soft-edge blend against `alpha == PROD clamp(d/width,0,1)
+  ** gamma` at 0.56 code values; the radial distortion as the zoom it is equivalent to on one
+  circle, `fov' = 2 atan(radial(r0) tan(fov/2))`; the tangential terms separated by the axis each
+  moves, `(3p2x^2, p1x^2)` on the horizontal centre line, and then by their magnitude; and
+  `frustum_h` shown to be the exact negative of `offset_x`. **Note where the blend lands:** the
+  mixer output is premultiplied, so the blend multiplies ALPHA as well as colour, and a consumer
+  that discards alpha discards the blend with it. `source_lens` and `screen_arc_v` are still
+  driven by nothing.
+
   `inner_eye_distance` has a twin too — `eye_distance`, in the CURVE block rather than the
   projection one — and it is checked the same way, on a 90 degree cylinder because on a flat
   screen neither does anything. **It reached no shader at all until 2026-09-20**: present in the
