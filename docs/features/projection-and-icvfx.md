@@ -99,8 +99,17 @@ All eleven are registered **consecutively in one block** in `AMCPCommandsImpl.cp
   moves, `(3p2x^2, p1x^2)` on the horizontal centre line, and then by their magnitude; and
   `frustum_h` shown to be the exact negative of `offset_x`. **Note where the blend lands:** the
   mixer output is premultiplied, so the blend multiplies ALPHA as well as colour, and a consumer
-  that discards alpha discards the blend with it. `source_lens` and `screen_arc_v` are still
-  driven by nothing.
+  that discards alpha discards the blend with it. **`source_lens` and `screen_arc_v` are covered too, from the same day**, at
+  23/23: each of the four sampling models identified by its own latitude law on the centre
+  column -- measured to 0.0002 NDC with margins of 373x to 972x over the next-best model, so the
+  picture NAMES which lens is running -- and the vertical arc measured on the toroidal branch,
+  which is the only configuration in which it does anything at all (`SPHERE` with a non-zero
+  `arc_v`; at 0 the same type takes a radial warp instead).
+
+  **Nothing in the PROJECTION family is driven by nothing any more.** What is still uncovered is
+  the TWEENED form of these commands: every one takes `[duration] [tween]`, and every one reaches
+  `frame_transform::tween_to`'s hand-written list -- which is exactly where `icvfx-mask` found
+  its own gap.
 
   `inner_eye_distance` has a twin too — `eye_distance`, in the CURVE block rather than the
   projection one — and it is checked the same way, on a 90 degree cylinder because on a flat
