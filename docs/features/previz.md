@@ -888,12 +888,37 @@ next battery on this surface:
    the two backends (346800 / 188232 / 188232 / 405674), and `api-stage` and `tracking-previz` both
    run on both arms.
 
-   What remains genuinely unmeasured is narrower and more interesting. A Vulkan channel composites
+   What remained genuinely unmeasured is narrower and more interesting. A Vulkan channel composites
    in Vulkan, posts the result to the VK→GL bridge, renders the scene on the OGL thread and returns
-   *that* as the channel output — so previz **replaces** the 2D output and **skips the
-   working-space composite**. Two consequences nothing checks: the per-frame round trip through a
-   second API is uncosted, and a channel's colour handling differs from the same channel with
-   previz off. Neither `conformance` nor `grading` can see it — they drive no previz.
+   *that* as the channel output — so previz **replaces** the 2D output. Two consequences nothing
+   checked: the per-frame round trip through a second API is uncosted, and a channel's colour
+   handling was said to differ from the same channel with previz off. Neither `conformance` nor
+   `grading` can see either — they drive no previz.
+
+   **THE COLOUR HALF IS MEASURED SINCE 2026-09-21, AND THE ANSWER IS THAT IT DOES NOT DIFFER.**
+   `cli.py previz-colour`: the previz picture of a mapped wall is **byte-identical** to that
+   channel's own output, on both mixers, at the default config **and** under
+   `<render-format>fp16` with `<working-space-composite>true` — the configuration this paragraph
+   predicted would differ. The sentence about skipping the working-space composite is therefore
+   withdrawn as a claim about the PICTURE; what the code does structurally is unchanged.
+
+   *The oracle is the server's own other route*, so nothing is modelled — and because equality is
+   what two black frames, two stale captures and two identically broken routes all produce, the
+   comparison is made at TWO values with a 0.5 brightness on the mapped layer between them: the
+   direct output must move (60 → 30, 143 → 71, 210 → 105) while the two routes stay equal at each
+   end. Mutation-verified with a 6% tint in `previz.frag`'s screen path, which turns the equality
+   arms red and leaves the flatness arms green.
+
+   **And one limit of that result is stated rather than left to be assumed:** a single opaque
+   layer cannot tell WHERE the display encoding happens. The composite moves it to after the
+   blend, and with nothing to blend the two placements are provably indistinguishable — the same
+   reason `grade-window` cannot see the placement its own config declares. So the fp16 arm is
+   evidence that previz does not *corrupt* the colour under that config, and **not** evidence that
+   it performs the composite.
+
+   **The COST half is still owed** — the per-frame VK→GL round trip on a Vulkan previz channel.
+   `preview-cost` owns previz cost and is parameterised by mixer; whether its arms isolate the
+   bridge is a separate question, and nothing has answered it.
 3. ~~**`PREVIZ SCREEN`'s eight subcommands are unenumerated**~~ — **CLOSED 2026-09-06**, and
    there were **twelve**, not eight. §1.1 enumerates all of them argument by argument, and §1.2
    does the same for `CAMERA` and `VIEW`, which §1 had described as *"placement arguments"*. Seven
