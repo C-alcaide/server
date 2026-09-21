@@ -954,6 +954,18 @@ frustum" is not "off the wall", and reporting 0 there would alarm on every ordin
 written against this has to bear that in mind: *1.0 is also what an unwired coverage reports*, so
 the useful assertion is that it FALLS.
 
+**AND IT IS PER SCREEN, WHICH IS NOT THE SAME AS PER SHOT.** In a volume of several walls a camera
+straddling the corner reads well below 1.0 on BOTH of them while the shot is entirely on LED —
+each number is the fraction of the frame landing on THAT screen, and they do not sum to the
+shot's total coverage. Two walls at 0.5 may be a perfectly framed shot or a badly framed one, and
+this number cannot tell them apart.
+
+The aggregate is a different computation — the union of every screen's footprint in the CAMERA's
+image plane, rather than one frustum clipped to one screen — and it is **not published**. A client
+that warns on `icvfx_coverage < 1` will cry wolf on any multi-wall volume; a client that wants the
+shot-level answer has to compute it. Said plainly here because the per-screen number is the one an
+operator will reach for, and the failure mode is a false alarm rather than a silence.
+
 ### 1.5 Reading the venue
 
 `channel/N/mixer/previz/meshes` lists every venue mesh by name. A mesh anyone has **touched** —
@@ -977,9 +989,33 @@ published as a screen; listing it twice would make a client choose which copy to
 
 ## 5. Known gaps
 
-1. **Picture coverage exists for `MAP` only, since 2026-09-05** — `cli.py previz-picture`, §4.
-   Arrival, component order and per-mesh identity are gated on both mixers. **The other twelve
-   commands still have no picture check**, and that is the gap this item is about.
+1. ~~**Picture coverage exists for `MAP` only**~~ — **stale, and corrected 2026-09-21 by counting
+   rather than remembering.** It read *"the other twelve commands still have no picture check"*,
+   which was true when written and has been wrong since `previz-place`, `previz-gizmo`,
+   `icvfx-mask` and `previz-colour` landed.
+
+   **Eight of the fourteen registered verbs are gated on a PICTURE today**, and the six that are
+   not are not an oversight — each is measured on something a picture cannot show:
+
+   | verb | picture gate |
+   | :--- | :--- |
+   | `MAP` | `previz-picture` — arrival, component order, per-mesh identity |
+   | `SCREEN` | `previz-place` — the predicted pixel, size, rotation, the hierarchy |
+   | `CAMERA` | `previz-place`'s production-camera arm; `previz-gizmo`'s frustum |
+   | `VIEW` | `previz-place` — the viewport moves the picture the other way |
+   | `AUTOPROJECTION` | `icvfx-mask` — the quad on the WALL's own raster |
+   | `GIZMO` | `previz-gizmo` — three axis colours, separately |
+   | `MESH` | `previz-gizmo` — the top edge moves by the predicted amount |
+   | `SCENE` | `previz-picture`, and `previz-gizmo`'s mesh picking |
+
+   **Not picture-gated, deliberately:** `PRESET` and `SNAP` are round trips through published
+   VALUES — a recalled pose either arrives or does not, and a picture adds nothing. `UNMAP`,
+   `SHOW`, `GRID` and `WIREFRAME` are driven as setup or by `refusals` and are the four worth
+   writing a picture arm for, because each of them is a *flag that could be stored and inert* —
+   the class this module has produced four times.
+
+   *Re-measure rather than quote this table.* It was wrong for a fortnight in the other direction,
+   and the count moves every time a battery gains an arm.
 
    §4's third check (`PREVIZ SCREEN ... ICVFX` against `MIXER PROJECTION_ICVFX`) was blocked on
    §5.3 and is **written** as of 2026-09-06 — `api-stage`'s last check, described in §4.2. It is
