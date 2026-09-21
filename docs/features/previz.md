@@ -916,9 +916,34 @@ next battery on this surface:
    evidence that previz does not *corrupt* the colour under that config, and **not** evidence that
    it performs the composite.
 
-   **The COST half is still owed** — the per-frame VK→GL round trip on a Vulkan previz channel.
-   `preview-cost` owns previz cost and is parameterised by mixer; whether its arms isolate the
-   bridge is a separate question, and nothing has answered it.
+   **THE COST HALF IS ANSWERED TOO, and it was an OBSERVABILITY question rather than a
+   measurement one.** `preview-cost`'s previz arms read **0.0000 ms and 0 late frames** at every
+   load tried, up to twelve channels of 2160p50 on both mixers — and two different reasons were
+   tangled in that number.
+
+   `consume_max_ms` is a **consumer** metric and previz is not a consumer: it measures the
+   channel's wait for consumers to take the frame, while previz adds work on the render thread.
+   The 0.0000 is structural, not a reading. A positive control says the instrument is sound:
+   `spout_256` reports 0.0567 ms and **19 late frames** in the same harness on the same box.
+   *A cost battery reading zero everywhere needs that control before its zero means anything.*
+
+   And the Vulkan bridge is **zero-copy** here, so nothing is late regardless. Separating those
+   two turned up a fact with **no observable at all**: `previz_texture_bridge` decides once at
+   construction whether `GL_EXT_memory_object` is available, logs one line, and published
+   nothing — while **the CPU fallback is NOT IMPLEMENTED and renders every previz channel
+   texture BLACK**, which the server states in its own warning. On a box without GPU interop,
+   previz shows black walls by design and nothing outside the log said so.
+
+   It is published now as `channel/N/mixer/previz/bridge` — `native`, `zero-copy` or
+   `cpu-fallback`, a string rather than a bool because there are three states and the OpenGL
+   mixer has no bridge at all. Empty while previz is inactive, because `same_stage` compares
+   against a default-constructed snapshot and a value set unconditionally would make every idle
+   channel publish a sub-tree every tick. `previz-colour` gates both, and the mutation that
+   forces interop off reads `cpu-fallback` with the wall at (0, 0, 0).
+
+   So the cost is a **bound with a mechanism** rather than a number: no late frame up to
+   12 x 2160p50 on the zero-copy path, and the path is readable, so the bound cannot be quoted
+   for a server that is not on it.
 3. ~~**`PREVIZ SCREEN`'s eight subcommands are unenumerated**~~ — **CLOSED 2026-09-06**, and
    there were **twelve**, not eight. §1.1 enumerates all of them argument by argument, and §1.2
    does the same for `CAMERA` and `VIEW`, which §1 had described as *"placement arguments"*. Seven
