@@ -277,9 +277,10 @@ const std::vector<screen_field>& screen_table()
         SF(S, "arc_v", arc_v_deg, 0.0, R_ARC_V, refuse, "deg",
            "Vertical arc. 0 leaves a single-curved cylinder; non-zero makes it doubly curved."),
         SV2I(S, "resolution", res_w, res_h, 0, 0, R_RES, refuse, "px",
-             "Pixel resolution of the panel. Drives `pixel_pitch_h` / `pixel_pitch_v` below and "
-             "nothing else -- no renderer path and no projection calculation reads it, because "
-             "previz draws the surface rather than its pixels. 0 means unset."),
+             "Pixel resolution of the panel. Drives `pixel_pitch_h` / `pixel_pitch_v` below, and "
+             "since 2026-09-21 the PANEL BOUNDARIES too -- with `tile` it derives how many panels "
+             "the wall is, and the renderer draws their edges. No projection calculation reads it. "
+             "0 means unset."),
         SF_RO(S, "pixel_pitch_h", pitch_h_mm, 0.0, "mm",
               "DERIVED, horizontal: size / resolution, in millimetres per pixel -- the number a "
               "wall is actually specified by. Recomputed whenever either input changes, so it "
@@ -299,6 +300,17 @@ const std::vector<screen_field>& screen_table()
             "The audience design eye position, used only when eye_mode is 'fixed'. It is also "
             "only WRITABLE then: the renderer's mutator stores these three components solely "
             "when the mode is already 'fixed', so set eye_mode first or the write is declined."),
+        SV2I(S, "tile", tile_w_px, tile_h_px, 0, 0, R_RES, refuse, "px",
+             "LED panel size in PIXELS. 0 clears it and stops the panel boundaries being drawn. "
+             "With `resolution` it derives `tile_cols` / `tile_rows` below -- which read 0 when "
+             "the two do not divide evenly, and that is worth looking at: a wall whose resolution "
+             "is not a whole number of panels is a build error rather than a rounding one."),
+        SF_RO(S, "tile_cols", tile_cols, 0, "",
+              "DERIVED panel count across, from resolution / tile. 0 when either is unset or the "
+              "division is not whole -- which is what a screen drawing no panel boundaries says "
+              "for itself, rather than leaving a stored-and-inert tile size to be guessed at."),
+        SF_RO(S, "tile_rows", tile_rows, 0, "",
+              "DERIVED panel count down. See `tile_cols`."),
         SB(S, "icvfx", icvfx_enable, false,
            "Compute a camera-eye inner frustum and a feathered camera-frustum mask for this "
            "screen. Also reachable as MIXER PROJECTION_ICVFX, and auto-projection overwrites "

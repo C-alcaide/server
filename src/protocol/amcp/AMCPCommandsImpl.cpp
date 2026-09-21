@@ -7017,6 +7017,20 @@ std::wstring previz_screen_command(command_context& ctx)
             float arc_v = std::stof(u8(ctx.parameters.at(2)));
             ogl_mix->set_screen_arc_v(name, arc_v);
             return L"202 PREVIZ OK\r\n";
+        } else if (sub == L"TILE") {
+            // SCREEN <name> TILE <w_px> <h_px>   (LED panel size; 0 0 clears)
+            if (ctx.parameters.size() < 4)
+                return L"400 PREVIZ ERROR usage: SCREEN <name> TILE <w_px> <h_px>\r\n";
+            try {
+                const int tw = std::stoi(u8(ctx.parameters.at(2)));
+                const int th = std::stoi(u8(ctx.parameters.at(3)));
+                if (tw < 0 || th < 0)
+                    return L"400 PREVIZ ERROR TILE takes two pixel sizes, 0 0 to clear\r\n";
+                ogl_mix->set_screen_tile(name, tw, th);
+            } catch (const std::exception&) {
+                return L"400 PREVIZ ERROR TILE takes two pixel sizes, 0 0 to clear\r\n";
+            }
+            return L"202 PREVIZ OK\r\n";
         } else if (sub == L"PARENT") {
             // SCREEN <name> PARENT <parent>|NONE   (hierarchy: a wall on a truss)
             //

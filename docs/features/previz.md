@@ -966,6 +966,26 @@ that warns on `icvfx_coverage < 1` will cry wolf on any multi-wall volume; a cli
 shot-level answer has to compute it. Said plainly here because the per-screen number is the one an
 operator will reach for, and the failure mode is a false alarm rather than a silence.
 
+### 1.4a LED panel boundaries — `SCREEN <name> TILE <w_px> <h_px>`
+
+```
+PREVIZ 1 SCREEN wall RESOLUTION 1920 1080
+PREVIZ 1 SCREEN wall TILE 192 180        —> a 10 x 6 panel wall, boundaries drawn
+PREVIZ 1 SCREEN wall TILE 0 0            —> cleared
+```
+
+The panel size is in **pixels**, because that is how a panel is specified. With `RESOLUTION` it
+derives `tile_cols` / `tile_rows`, both published, and the renderer draws the panel edges on the
+screen's surface — following the arc on a curved wall.
+
+**If the resolution is not a whole number of panels, nothing is drawn and the counts read 0.**
+1920 px is not 10.9 panels of 176 px; it is a mistake in one of the two numbers, and a rounded grid
+would not match anything on the truss. The published counts are how a screen that draws no
+boundaries says why.
+
+They are drawn for **every** screen that has them, not only the selected one — they describe the
+wall rather than the operator's current focus.
+
 ### 1.5 Reading the venue
 
 `channel/N/mixer/previz/meshes` lists every venue mesh by name. A mesh anyone has **touched** —

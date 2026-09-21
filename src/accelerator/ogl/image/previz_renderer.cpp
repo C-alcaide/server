@@ -405,6 +405,12 @@ struct previz_renderer::impl
     int                         ring_vert_count_ = 0;
     GLuint                      outline_vao_ = 0;
     GLuint                      outline_vbo_ = 0;
+    /// The LED panel boundaries. Their own buffer rather than the outline's, because they are
+    /// drawn for EVERY screen that has panels while the outline is drawn only for the selected
+    /// and hovered one -- sharing would mean rebuilding the outline's contents once per screen.
+    GLuint                      tile_vao_ = 0;
+    GLuint                      tile_vbo_ = 0;
+    int                         tile_vert_count_ = 0;
     int                         outline_vert_count_ = 0;
     GLuint                      camera_vao_ = 0;
     GLuint                      camera_vbo_ = 0;
@@ -449,6 +455,12 @@ struct previz_renderer::impl
                 glDeleteVertexArrays(1, &ring_vao_);
                 glDeleteBuffers(1, &ring_vbo_);
                 ring_vao_ = 0;
+            }
+            if (tile_vao_) {
+                glDeleteVertexArrays(1, &tile_vao_);
+                glDeleteBuffers(1, &tile_vbo_);
+                tile_vao_ = 0;
+                tile_vbo_ = 0;
             }
             if (outline_vao_) {
                 glDeleteVertexArrays(1, &outline_vao_);
@@ -761,6 +773,87 @@ struct previz_renderer::impl
     /// the quad's diagonal. An outline is the perimeter and nothing else, so it is built here
     /// from the same local geometry `generate_flat_screen` / `generate_curved_screen` use:
     /// the bottom edge left to right, up the right end, the top edge back, down the left end.
+    /// THE LED PANEL BOUNDARIES, drawn on the screen's surface.
+    ///
+    /// What an operator checks a wall build against: the previz shows a rectangle, the truss holds
+    /// panels, and until these lines existed there was nothing in the picture to count. Drawn only
+    /// when `tile_cols`/`tile_rows` derive -- an unset tile size, or a resolution that is not a
+    /// whole number of panels, draws nothing and SAYS so through the published counts.
+    ///
+    /// Follows the same rim as `build_screen_outline`, so a curved wall's panels follow its arc
+    /// rather than cutting through it. The rim is sampled per panel edge rather than at a fixed
+    /// resolution, which is what makes a vertical boundary land exactly on the arc.
+    void build_tile_lines(const screen_meta& meta)
+    {
+        if (meta.tile_cols <= 1 && meta.tile_rows <= 1)
+            return;   // one panel, or none: there is no interior boundary to draw
+
+        std::vector<previz_vertex> verts;
+        const auto rot = mat4::rotate_y(meta.rot_yaw) * mat4::rotate_x(meta.rot_pitch) *
+                         mat4::rotate_z(meta.rot_roll);
+        auto put = [&](float x, float y, float z) {
+            verts.push_back({rot.m[0] * x + rot.m[4] * y + rot.m[8] * z + meta.pos_x,
+                             rot.m[1] * x + rot.m[5] * y + rot.m[9] * z + meta.pos_y,
+                             rot.m[2] * x + rot.m[6] * y + rot.m[10] * z + meta.pos_z,
+                             0, 1, 0, 0, 0});
+        };
+
+        const bool  curved   = meta.radius_m > 0.0f && meta.arc_deg > 0.0f;
+        const float half_arc = meta.arc_deg * static_cast<float>(M_PI) / 360.0f;
+        // (x, z) at a fraction t across the screen, along its surface.
+        auto across = [&](float t) -> std::pair<float, float> {
+            if (curved) {
+                const float a = -half_arc + t * (half_arc * 2.0f);
+                return {meta.radius_m * std::sin(a), meta.radius_m * std::cos(a) - meta.radius_m};
+            }
+            return {-meta.width_m * 0.5f + t * meta.width_m, 0.0f};
+        };
+
+        // Vertical boundaries: the INTERIOR ones only. The outer edges are the screen's own rim
+        // and `build_screen_outline` already draws them -- drawing both would double the line and
+        // make a selected screen's outline look heavier than an unselected one.
+        for (int c = 1; c < meta.tile_cols; ++c) {
+            const auto p = across(static_cast<float>(c) / static_cast<float>(meta.tile_cols));
+            put(p.first, 0.0f, p.second);
+            put(p.first, meta.height_m, p.second);
+        }
+
+        // Horizontal boundaries follow the arc, so each is a polyline rather than a segment.
+        const int segs = curved ? std::max(8, static_cast<int>(meta.arc_deg / 2.0f)) : 1;
+        for (int r = 1; r < meta.tile_rows; ++r) {
+            const float y = meta.height_m * static_cast<float>(r) / static_cast<float>(meta.tile_rows);
+            for (int i = 0; i < segs; ++i) {
+                const auto a = across(static_cast<float>(i) / static_cast<float>(segs));
+                const auto b = across(static_cast<float>(i + 1) / static_cast<float>(segs));
+                put(a.first, y, a.second);
+                put(b.first, y, b.second);
+            }
+        }
+
+        tile_vert_count_ = static_cast<int>(verts.size());
+        if (verts.empty())
+            return;
+        if (!tile_vao_) {
+            glGenVertexArrays(1, &tile_vao_);
+            glGenBuffers(1, &tile_vbo_);
+        }
+        glBindVertexArray(tile_vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, tile_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(previz_vertex)),
+                     verts.data(), GL_DYNAMIC_DRAW);
+        auto stride  = static_cast<GLsizei>(sizeof(previz_vertex));
+        auto pos_loc = shader_->get_attrib_location("a_Position");
+        glEnableVertexAttribArray(pos_loc);
+        glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
+        auto nrm_loc = shader_->get_attrib_location("a_Normal");
+        glEnableVertexAttribArray(nrm_loc);
+        glVertexAttribPointer(nrm_loc, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(3 * sizeof(float)));
+        auto uv_loc = shader_->get_attrib_location("a_TexCoord");
+        glEnableVertexAttribArray(uv_loc);
+        glVertexAttribPointer(uv_loc, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(6 * sizeof(float)));
+        glBindVertexArray(0);
+    }
+
     void build_screen_outline(const screen_meta& meta)
     {
         std::vector<previz_vertex> verts;
@@ -1277,6 +1370,29 @@ struct previz_renderer::impl
         }
 
         {
+            // THE LED PANEL BOUNDARIES, on every screen that has them -- not only the selected
+            // one. They describe the WALL rather than the operator's current focus: the question
+            // they answer is "does this match what is on the truss", which is asked of the whole
+            // stage at once. Dim, because a bright grid over every screen would compete with the
+            // content the previz exists to show.
+            for (const auto& [tname, tmeta] : scene_.screens) {
+                if (tmeta.tile_cols <= 1 && tmeta.tile_rows <= 1)
+                    continue;
+                build_tile_lines(tmeta);
+                if (tile_vert_count_ <= 0)
+                    continue;
+                glDepthFunc(GL_LEQUAL);
+                glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_mvp"), 1, GL_FALSE, mvp.m);
+                glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_model"), 1, GL_FALSE, model.m);
+                shader_->set("u_is_screen", false);
+                shader_->set("u_has_texture", false);
+                shader_->set("u_base_color", 0.35f, 0.30f, 0.18f);
+                glBindVertexArray(tile_vao_);
+                glDrawArrays(GL_LINES, 0, tile_vert_count_);
+                glBindVertexArray(0);
+                glDepthFunc(GL_LESS);
+            }
+
             const std::string* marks[2] = {&scene_.hover, &scene_.selected};
             const double       cols[2][3] = {{0.95, 0.75, 0.15}, {0.15, 0.9, 0.95}};
             for (int m = 0; m < 2; ++m) {
@@ -2389,6 +2505,16 @@ void derive_screen(screen_meta& meta)
     meta.radius_m = std::abs(std::sin(half_arc)) > 1e-6f ? meta.width_m * 0.5f / std::sin(half_arc) : 0.0f;
     meta.pitch_h_mm = meta.res_w > 0 ? meta.width_m * 1000.0f / static_cast<float>(meta.res_w) : 0.0f;
     meta.pitch_v_mm = meta.res_h > 0 ? meta.height_m * 1000.0f / static_cast<float>(meta.res_h) : 0.0f;
+
+    // PANEL COUNTS, and only when the division is WHOLE. A wall of 1920 px built from 176 px
+    // panels is not 10.9 panels wide -- it is a mistake in one of the two numbers, and rounding it
+    // would draw a grid that does not match anything on the truss. 0 says so, and is published.
+    meta.tile_cols = (meta.tile_w_px > 0 && meta.res_w > 0 && meta.res_w % meta.tile_w_px == 0)
+                         ? meta.res_w / meta.tile_w_px
+                         : 0;
+    meta.tile_rows = (meta.tile_h_px > 0 && meta.res_h > 0 && meta.res_h % meta.tile_h_px == 0)
+                         ? meta.res_h / meta.tile_h_px
+                         : 0;
 }
 
 void apply_screen_transform(previz_mesh& mesh, const screen_meta& meta)
@@ -2748,6 +2874,22 @@ bool previz_renderer::set_mesh_parent(const std::string& name, const std::string
     else
         CASPAR_LOG(info) << L"[previz] Mesh " << u8(name) << L" parented to " << u8(parent);
     return true;
+}
+
+void previz_renderer::set_screen_tile(const std::string& name, int w_px, int h_px)
+{
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto it = impl_->scene_.screens.find(name);
+        if (it == impl_->scene_.screens.end())
+            return;
+        it->second.tile_w_px = w_px;
+        it->second.tile_h_px = h_px;
+        // Through `derive_screen`, so the counts come from the one place that owns every derived
+        // quantity on a screen -- rather than a second division here that could disagree with it.
+        derive_screen(it->second);
+    }
+    CASPAR_LOG(info) << L"[previz] Screen " << u8(name) << L" panel size " << w_px << L"x" << h_px;
 }
 
 void previz_renderer::set_screen_icvfx(const std::string& name, bool enable)

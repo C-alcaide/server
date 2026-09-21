@@ -69,6 +69,21 @@ struct screen_meta
     float       arc_v_deg = 0.0f; // vertical arc (0 = single-curved cylinder)
     float       pos_x = 0.0f, pos_y = 0.0f, pos_z = 0.0f;
     float       rot_yaw = 0.0f, rot_pitch = 0.0f, rot_roll = 0.0f;
+    /// LED PANEL size in PIXELS. 0 = unset, and then no panel boundaries are drawn.
+    ///
+    /// A wall is built out of identical panels and an operator knows their pixel size -- a 176 x
+    /// 176 tile, say -- so that is what this takes, rather than a count. Combined with
+    /// `res_w`/`res_h` it DERIVES the counts, which is the more useful direction: it can also
+    /// report that the two do not divide, and a resolution that is not a whole number of panels
+    /// is a real error on a wall build rather than a rounding question.
+    int         tile_w_px = 0;
+    int         tile_h_px = 0;
+    /// DERIVED panel counts, 0 when unset or when the division is not whole. Published, so a
+    /// screen that draws no boundaries says WHY -- otherwise a tile size that stores and draws
+    /// nothing is indistinguishable from a feature that does not work, which is this tree's most
+    /// repeated defect.
+    int         tile_cols = 0;
+    int         tile_rows = 0;
     int         res_w   = 0; // 0 = not set (use channel default)
     int         res_h   = 0;
     // DERIVED from size and resolution, in millimetres per pixel, and the reason `resolution`

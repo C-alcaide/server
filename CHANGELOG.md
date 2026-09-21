@@ -36,6 +36,37 @@ requires a refusal, then sends **both** `ON` and `OFF` and requires both to be a
 control is not enough, because a command that accepted only its ON word would still be unable to
 express the thing an operator most needs to say.
 
+### FEATURE: LED PANEL BOUNDARIES — the previz shows what is on the truss
+
+`PREVIZ <ch> SCREEN <name> TILE <w_px> <h_px>`, `0 0` to clear. With the screen's `RESOLUTION` it
+derives how many panels the wall is, and the renderer draws their edges on the surface — following
+the arc on a curved screen, so the boundaries lie on the wall rather than cutting through it.
+
+**A wall is built out of panels and the previz drew a rectangle.** There was nothing in the picture
+to count against the truss, which is the first thing an operator checks on a build.
+
+**The panel size is in PIXELS rather than a count**, because that is how a panel is specified — a
+176 x 176 tile — and because deriving the count is the more useful direction: it can report that
+the two do not divide. **1920 px of wall is not 10.9 panels**; it is a mistake in one of the two
+numbers, and a rounded grid would not match anything on the truss. So nothing is drawn, and the
+published `tile_cols` / `tile_rows` read 0 and say why — rather than leaving a tile size that stores
+and draws nothing, which is this tree's most repeated defect.
+
+Drawn for EVERY screen that has panels, not only the selected one: they describe the wall rather
+than the operator's focus. Dim amber, because a bright grid over every screen would compete with
+the content previz exists to show.
+
+Verified: `previz-gizmo` 48/48 both mixers. **Four states in one verdict, and the third is what
+stops it passing vacuously**: no tile size draws 0 px; 192 x 180 panels on a 1920 x 1080 wall draw
+11289 px and derive 10 x 6; **176 x 176, which 1920 does not divide, draws 0 px with `tile_cols` 0**;
+cleared draws 0. A feature that always drew a grid passes the first and last and fails only the
+third. Regression: `api-stage` 22/22, `previz-place` 27/27.
+
+*And `api-stage` earned its keep on the first run*: `tile` was in the descriptor table and had no
+mutator in `server.cpp`'s write dispatch, so a PUT answered `unknown_path` while the table
+advertised it as writable. That is the write-path half of the allowlist trap, caught by the battery
+whose whole job is to notice it.
+
 ### FEATURE: the VENUE is readable — meshes are published, and the hierarchy resolves
 
 `channel/N/mixer/previz/meshes` lists every venue mesh, and a mesh anyone has touched publishes

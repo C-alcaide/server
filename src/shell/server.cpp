@@ -1453,6 +1453,8 @@ struct server::impl
                             name, sm.eye_mode, sm.design_eye_x, sm.design_eye_y, sm.design_eye_z);
                     else if (path == "arc_v")
                         previz->set_screen_arc_v(name, sm.arc_v_deg);
+                    else if (path == "tile")
+                        previz->set_screen_tile(name, sm.tile_w_px, sm.tile_h_px);
                     else if (path == "icvfx")
                         previz->set_screen_icvfx(name, sm.icvfx_enable);
                     else if (path == "size")

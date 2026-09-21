@@ -165,6 +165,9 @@ class previz_renderer
 
     /// Enable/disable ICVFX inner-frustum (in-camera VFX) for a screen.  When
     /// on, auto-projection also computes the camera-eye inner frustum + mask.
+    /// LED panel size in PIXELS; 0 0 clears it. With the screen's resolution this derives how
+    /// many panels the wall is, and the renderer draws their boundaries.
+    void set_screen_tile(const std::string& name, int w_px, int h_px);
     void set_screen_icvfx(const std::string& name, bool enable);
     /// Parent a screen to another, or to the stage with an empty name.
     ///
