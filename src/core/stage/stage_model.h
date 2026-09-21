@@ -177,6 +177,32 @@ struct previz_flags
 /// `previz_renderer::scene()` deep-copies the lot under the scene lock. Taking that 50 times a
 /// second to read six floats would be absurd. This is the narrow view -- screens, the two
 /// cameras and the flags -- and it is what the cache-compare in the publication path diffs.
+/// A venue mesh, as the stage publishes it: where it is, what it hangs off, and whether it draws.
+///
+/// SEPARATE FROM `screen_meta` DELIBERATELY. A mesh has no size, no channel, no eye mode and no
+/// ICVFX -- it is geometry out of a model file with a name and a pose. Expressing one as a screen
+/// with most of its fields meaningless is how `is_screen` came to mean two different things, which
+/// cost a real defect: it is set both on a procedural screen AND on any mesh a channel is mapped
+/// to, and testing it made a mapped wall unselectable the moment it showed content.
+struct mesh_info
+{
+    float       pos[3] = {0.0f, 0.0f, 0.0f};
+    float       rot[3] = {0.0f, 0.0f, 0.0f}; ///< yaw, pitch, roll in DEGREES
+    float       world_pos[3] = {0.0f, 0.0f, 0.0f};
+    float       world_rot[3] = {0.0f, 0.0f, 0.0f};
+    std::string parent;
+    bool        visible = true;
+    /// Whether anything has been done to this mesh -- a pose, a parent, or hidden.
+    ///
+    /// THE DETAIL IS PUBLISHED ONLY WHEN THIS IS TRUE, and the reason is the per-tick cost this
+    /// tree has already measured: a channel publishes 52 leaves idle and starts missing frames
+    /// around 600, while a glTF venue can carry dozens of parts. Four leaves apiece would put a
+    /// medium venue into that budget for geometry nobody has touched. The NAME LIST is always
+    /// published, because that is what a client needs to resolve a `parent` -- which since the
+    /// hierarchy landed may name a mesh.
+    bool        touched = false;
+};
+
 struct stage_snapshot
 {
     previz_flags                       flags;
@@ -193,6 +219,8 @@ struct stage_snapshot
     /// name. Publishing it is what turns "which mesh is this?" from a question an operator
     /// answers by opening the model in another program into a click.
     std::string                        selected_mesh;
+    /// Every venue mesh by name. See `mesh_info::touched` for why most of them publish only a name.
+    std::map<std::string, mesh_info>   meshes;
     /// WHICH TEXTURE PATH THIS CHANNEL'S PREVIZ IS ON -- "native", "zero-copy", "cpu-fallback",
     /// or EMPTY when previz is not active.
     ///

@@ -36,6 +36,36 @@ requires a refusal, then sends **both** `ON` and `OFF` and requires both to be a
 control is not enough, because a command that accepted only its ON word would still be unable to
 express the thing an operator most needs to say.
 
+### FEATURE: the VENUE is readable — meshes are published, and the hierarchy resolves
+
+`channel/N/mixer/previz/meshes` lists every venue mesh, and a mesh anyone has touched publishes
+`position`, `rotation`, `world_position`, `world_rotation`, `parent` and `visible` under
+`mesh/<name>/`.
+
+**This gap was self-inflicted and one commit old.** The hierarchy made a screen's `parent` able to
+name a venue mesh; nothing published a mesh name. A client reading `screen/wall/parent = "truss"`
+had no way to learn what `truss` was, or where — the tree published nothing about a mesh but
+which one was selected.
+
+**THE DETAIL IS PUBLISHED ONLY FOR MESHES ANYONE HAS TOUCHED** — a pose, a parent, or hidden. The
+NAME LIST is always published, because that is the part a client needs to resolve a parent. A glTF
+venue can carry dozens of parts at six leaves apiece, against a ceiling this tree has measured at
+about **600 leaves per channel per tick**, so publishing the lot would spend the budget on geometry
+nobody has moved. It is the same rule the stage already follows — an untouched stage publishes
+nothing — applied one level down.
+
+*And note what did NOT measure it:* `channel/N/stage/state_leaves` counts the STAGE tree and previz
+publishes under `mixer/`, so it reads the same before and after and is the wrong instrument here.
+The bound is demonstrated instead by the detail keys being ABSENT — an untouched mesh's position
+answers `unknown_path`, which is a stronger statement than a count that did not move.
+
+A procedural screen is **not** listed among the meshes even though one exists behind it: it is
+published as a screen, and listing it twice would make a client choose which copy to believe.
+
+Verified: `previz-gizmo` 47/47 both mixers, with one arm gating BOTH halves — the list contains
+the venue AND an untouched mesh's detail is absent. Regression: `api-stage` 22/22, `previz-place`
+27/27, `icvfx-mask` 23/23.
+
 ### FEATURE: previz says how much of the shot is ON THE WALL — `icvfx_coverage`
 
 `channel/N/mixer/previz/screen/<name>/icvfx_coverage`, 0..1. **1.0 means the camera's inner

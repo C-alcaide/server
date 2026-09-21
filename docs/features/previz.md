@@ -954,6 +954,27 @@ frustum" is not "off the wall", and reporting 0 there would alarm on every ordin
 written against this has to bear that in mind: *1.0 is also what an unwired coverage reports*, so
 the useful assertion is that it FALLS.
 
+### 1.5 Reading the venue
+
+`channel/N/mixer/previz/meshes` lists every venue mesh by name. A mesh anyone has **touched** —
+given a pose, a parent, or hidden — also publishes under `mesh/<name>/`:
+
+| leaf | |
+| :--- | :--- |
+| `position`, `rotation` | what was set, LOCAL to the parent when it has one |
+| `world_position`, `world_rotation` | where it is, in the stage's frame |
+| `parent` | the screen or mesh it hangs off; empty for the stage |
+| `visible` | whether it draws |
+
+**The name list is always published and the detail is not**, and that is a cost decision rather
+than an oversight. A glTF venue can carry dozens of parts at six leaves apiece, against a ceiling
+measured at about 600 leaves per channel per tick — so geometry nobody has moved costs one entry
+in a list. The list is the half a client actually needs: a screen's `parent` may name a mesh, and
+without it there was no way to learn such a thing existed.
+
+A procedural screen is **not** in `meshes`, though one exists behind it in the renderer. It is
+published as a screen; listing it twice would make a client choose which copy to believe.
+
 ## 5. Known gaps
 
 1. **Picture coverage exists for `MAP` only, since 2026-09-05** — `cli.py previz-picture`, §4.

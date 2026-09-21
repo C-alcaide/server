@@ -423,6 +423,24 @@ bool same_stage(const stage_snapshot& a, const stage_snapshot& b)
         a.selected_mesh != b.selected_mesh || a.previz_bridge != b.previz_bridge)
         return false;
 
+    // THE MESHES, compared as a SET for the reason the screens are: they are named and created at
+    // runtime, so a scene load that changes the key set is a change even when every surviving mesh
+    // is untouched.
+    if (a.meshes.size() != b.meshes.size())
+        return false;
+    for (const auto& [name, ma] : a.meshes) {
+        const auto it = b.meshes.find(name);
+        if (it == b.meshes.end())
+            return false;
+        const auto& mb = it->second;
+        if (ma.parent != mb.parent || ma.visible != mb.visible || ma.touched != mb.touched)
+            return false;
+        for (int i = 0; i < 3; ++i)
+            if (ma.pos[i] != mb.pos[i] || ma.rot[i] != mb.rot[i] ||
+                ma.world_pos[i] != mb.world_pos[i] || ma.world_rot[i] != mb.world_rot[i])
+                return false;
+    }
+
     if (!same_camera(a.camera, b.camera) || !same_camera(a.view_camera, b.view_camera))
         return false;
 
@@ -549,6 +567,32 @@ void stage_publisher::refresh(const stage_snapshot& snap)
         // 1.0 means the camera's inner frustum is entirely on this wall; below that, the shot is
         // running off its edge and the rest of the frame is looking at whatever is behind it.
         st["screen/" + name + "/icvfx_coverage"] = sm.icvfx_coverage;
+    }
+
+    // THE MESH NAMES, always -- a client resolving a screen's `parent` may find it naming a venue
+    // mesh, and until this list existed there was no way to learn such a thing was there. That gap
+    // was self-inflicted: the hierarchy made `parent` able to name a mesh before anything published
+    // one.
+    {
+        std::vector<std::string> mesh_names;
+        mesh_names.reserve(snap.meshes.size());
+        for (const auto& [name, _] : snap.meshes)
+            mesh_names.push_back(name);
+        st["meshes"] = std::move(mesh_names);
+    }
+
+    // THE DETAIL, only for the ones anyone has touched. See `mesh_info::touched`: a venue can
+    // carry dozens of parts at six leaves apiece, against a measured ceiling of about 600 leaves
+    // per channel per tick.
+    for (const auto& [name, mi] : snap.meshes) {
+        if (!mi.touched)
+            continue;
+        st["mesh/" + name + "/position"]       = {mi.pos[0], mi.pos[1], mi.pos[2]};
+        st["mesh/" + name + "/rotation"]       = {mi.rot[0], mi.rot[1], mi.rot[2]};
+        st["mesh/" + name + "/world_position"] = {mi.world_pos[0], mi.world_pos[1], mi.world_pos[2]};
+        st["mesh/" + name + "/world_rotation"] = {mi.world_rot[0], mi.world_rot[1], mi.world_rot[2]};
+        st["mesh/" + name + "/parent"]         = mi.parent;
+        st["mesh/" + name + "/visible"]        = mi.visible;
     }
 
     state_ = std::move(st);

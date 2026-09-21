@@ -3056,6 +3056,25 @@ core::stage_snapshot previz_renderer::stage_snapshot() const
     out.selected                = sc.selected;
     out.selected_mesh           = sc.selected_mesh;
     out.hover                   = sc.hover;
+    // The venue meshes, by name, with the world pose resolved through the same namespace. A
+    // procedural screen also has a mesh behind it and is NOT listed here: it is published as a
+    // SCREEN, and listing it twice would make a client choose which copy to believe.
+    for (const auto& mesh : sc.meshes) {
+        if (sc.screens.count(mesh.name))
+            continue;
+        core::mesh_info mi;
+        for (int i = 0; i < 3; ++i) {
+            mi.pos[i] = mesh.pos[i];
+            mi.rot[i] = mesh.rot[i];
+        }
+        mi.parent  = mesh.parent;
+        mi.visible = mesh.visible;
+        mi.touched = !mesh.parent.empty() || !mesh.visible ||
+                     mesh.pos[0] != 0.0f || mesh.pos[1] != 0.0f || mesh.pos[2] != 0.0f ||
+                     mesh.rot[0] != 0.0f || mesh.rot[1] != 0.0f || mesh.rot[2] != 0.0f;
+        out.meshes[mesh.name] = mi;
+    }
+
     // RESOLVED HERE, because this is the only place that can see both screens and venue meshes --
     // and a screen's parent may be either. The publisher used to walk the chain itself, which was
     // correct exactly while every parent was another screen.
@@ -3081,6 +3100,19 @@ core::stage_snapshot previz_renderer::stage_snapshot() const
                 ? static_cast<float>(core::quad_coverage(
                       compute_frustum(sc.camera, it->second).icvfx_q))
                 : 1.0f;
+    }
+
+    // And the meshes' world poses, through the same resolver.
+    for (auto& [name, mi] : out.meshes) {
+        const auto it = resolved.find(name);
+        if (it == resolved.end())
+            continue;
+        mi.world_pos[0] = it->second.pos_x;
+        mi.world_pos[1] = it->second.pos_y;
+        mi.world_pos[2] = it->second.pos_z;
+        mi.world_rot[0] = it->second.rot_yaw;
+        mi.world_rot[1] = it->second.rot_pitch;
+        mi.world_rot[2] = it->second.rot_roll;
     }
     return out;
 }
