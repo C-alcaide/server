@@ -915,8 +915,17 @@ it is a NAME whose legality depends on the rest of the document, and the generic
 coerces numbers into fields and cannot ask whether a screen exists or whether an attachment closes
 a loop.
 
-*What this does not do yet:* venue MESHES cannot be parented (they have a pose, but no parent),
-and nothing can be parented to a mesh or to a camera.
+**Venue MESHES are in the same hierarchy** — `PREVIZ <ch> MESH <name> PARENT <parent>|NONE` —
+and `SCREEN ... PARENT` accepts a mesh name, so a wall can hang off an imported truss. The two
+kinds share one parent namespace; a screen wins a name collision, because its name was chosen by
+an operator while a mesh's came out of a model file.
+
+The two are not symmetric in one respect worth knowing: a procedural screen's geometry is
+REGENERATED in world space when anything above it moves, while a venue mesh's vertices come from
+the model file and are moved by its model matrix at draw time. So a screen hung off a mesh is
+rebuilt when the mesh moves; a mesh hung off a screen is not rebuilt, only re-drawn.
+
+*What this does not do yet:* nothing can be parented to a CAMERA.
 
 ## 5. Known gaps
 

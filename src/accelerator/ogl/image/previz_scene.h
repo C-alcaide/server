@@ -61,6 +61,13 @@ struct previz_mesh
     /// venue mesh could not be moved before 2026-09-19: there was no transform to write.
     std::array<float, 3>       pos = {0.0f, 0.0f, 0.0f};
     std::array<float, 3>       rot = {0.0f, 0.0f, 0.0f}; ///< yaw, pitch, roll in DEGREES
+    /// PARENT, by name -- a screen or another venue mesh. Empty means the stage.
+    ///
+    /// The same convention screens use: `pos` and `rot` become LOCAL to the parent and are not
+    /// rewritten on attach. A mesh and a screen share one namespace here, and a SCREEN wins a
+    /// collision, because a procedural screen's name is one an operator chose while a mesh's
+    /// comes out of the model file.
+    std::string                parent;
     bool                       is_screen  = false;
     bool                       visible    = true;
 

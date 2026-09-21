@@ -11,8 +11,6 @@
 
 #include "stage_fields.h"
 
-#include "stage_math.h"
-
 #include <common/except.h>
 #include <common/log.h>
 
@@ -383,6 +381,19 @@ bool same_screen(const screen_meta& a, const screen_meta& b)
     if (a.parent != b.parent)
         return false;
 
+    // AND SO IS THE DERIVED WORLD POSE, for a reason the local fields cannot cover: when a
+    // PARENT moves, nothing on the child changes. Its position, rotation and parent are all
+    // identical, so without these two loops the publisher decides nothing happened and keeps
+    // publishing the old world pose -- measured, with a venue mesh moved three times under a
+    // screen hung off it and the tree reporting the same coordinates every time.
+    //
+    // That is this file's own rule met from a new direction: a property absent from the
+    // comparison is invisible to change detection, and a DERIVED property is absent by default
+    // because the thing it derives from lives somewhere else entirely.
+    for (int i = 0; i < 3; ++i)
+        if (a.world_pos[i] != b.world_pos[i] || a.world_rot[i] != b.world_rot[i])
+            return false;
+
     for (const auto& f : screen_fields())
         if (f.get(a) != f.get(b))
             return false;
@@ -508,12 +519,11 @@ void stage_publisher::refresh(const stage_snapshot& snap)
 
     publish_object(st, "camera", snap.camera, camera_fields());
     publish_object(st, "view_camera", snap.view_camera, camera_fields());
-    // THE WORLD POSES, resolved once for the whole map. A client drawing a stage needs where a
-    // screen IS; an operator editing one needs what they typed. Publishing only the first would
-    // make the numbers in the tree disagree with the numbers in the command, and publishing only
-    // the second leaves a client unable to place a parented screen at all.
-    const auto world = core::resolve_world_poses(snap.screens);
-
+    // A client drawing a stage needs where a screen IS; an operator editing one needs what they
+    // typed. Publishing only the first would make the tree disagree with the command, and only
+    // the second leaves a client unable to place a parented screen at all. Both, then -- and the
+    // world pair arrives RESOLVED on the snapshot rather than being derived here, because a
+    // parent can be a venue mesh and this function cannot see one.
     for (const auto& [name, sm] : snap.screens) {
         publish_object(st, "screen/" + name, sm, screen_fields());
 
@@ -529,9 +539,8 @@ void stage_publisher::refresh(const stage_snapshot& snap)
         // An absent key would make a client test for the parent first and then choose which of
         // two shapes to read -- and the first client to forget would place every root screen at
         // the origin.
-        const auto& w = world.at(name);
-        st["screen/" + name + "/world_position"] = {w.pos_x, w.pos_y, w.pos_z};
-        st["screen/" + name + "/world_rotation"] = {w.rot_yaw, w.rot_pitch, w.rot_roll};
+        st["screen/" + name + "/world_position"] = {sm.world_pos[0], sm.world_pos[1], sm.world_pos[2]};
+        st["screen/" + name + "/world_rotation"] = {sm.world_rot[0], sm.world_rot[1], sm.world_rot[2]};
     }
 
     state_ = std::move(st);

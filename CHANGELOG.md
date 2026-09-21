@@ -36,6 +36,45 @@ requires a refusal, then sends **both** `ON` and `OFF` and requires both to be a
 control is not enough, because a command that accepted only its ON word would still be unable to
 express the thing an operator most needs to say.
 
+### FEATURE: the previz hierarchy spans VENUE MESHES — a screen can hang off an imported truss
+
+`PREVIZ <ch> MESH <name> PARENT <parent>|NONE`, and `SCREEN ... PARENT` now accepts a mesh name.
+**Screens and venue meshes share one parent namespace**, because an operator hanging a wall off a
+truss does not care which kind the truss is — and hanging a screen off a PROP is the case the
+products with a hierarchy are built around. A screen wins a name collision: its name was chosen by
+an operator, a mesh's comes out of a model file.
+
+**RESOLUTION MOVED TO THE RENDERER**, which is the only place that can see both kinds. The first
+version resolved inside the publisher, and that is correct exactly while every parent is another
+screen — `stage_snapshot` has no meshes in it. The snapshot now carries `world_pos`/`world_rot`
+filled in by the renderer, and the publisher publishes what it is handed. Simpler than what it
+replaced, and it removed a `stage_fields` dependency on `stage_math`.
+
+**Two defects of one shape, both found by driving it:**
+
+`set_mesh_pose` rebuilt nothing, so a screen hung off a mesh stayed where it was when the mesh
+moved — the same omission the screen setters had, and the same symptom: the tree resolves, the
+picture does not move.
+
+**And `same_screen` did not compare the DERIVED pose.** When a PARENT moves, nothing on the child
+changes — position, rotation and parent are all identical — so the publisher decided nothing had
+happened and kept publishing the old world pose. Measured with a mesh moved to y=5, 9 and 2 under a
+screen hung off it: the tree read 5.0 every time. That is this tree's own rule met from a new
+direction — *a property absent from the comparison is invisible to change detection, and a DERIVED
+property is absent by default, because the thing it derives from lives somewhere else.*
+
+**And one regression I introduced and the batteries caught immediately.** Resolving the hierarchy
+into `u_model` for every mesh applied a procedural screen's pose TWICE: its vertices are already in
+world space, baked by `apply_screen_transform`. `previz-place` went 27/27 to 10/27 and read as a
+camera fault — every screen a different size and moving by the wrong amount. A venue mesh is the
+opposite case: its vertices come from a model file and are never rewritten, so its pose belongs in
+`u_model` and nowhere else.
+
+Verified: `previz-place` 27/27, `api-stage` 22/22, `previz-gizmo` 43/43, `previz-colour` 6/6 —
+both mixers; `stage_math_self_test` 176 checks, 0 divergences. Driven end to end: a screen hung off
+a venue mesh follows it to y = 5, 9 and 2; a mesh can hang off a screen; a cycle across the two
+kinds is refused with 400.
+
 ### FEATURE: a previz screen can be PARENTED to another — a wall on a truss
 
 `PREVIZ <ch> SCREEN <name> PARENT <parent>|NONE`. Moving the parent moves the child with it, which

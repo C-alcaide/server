@@ -97,6 +97,17 @@ struct screen_meta
     /// published, because a client that showed only one of them would be unable to say either
     /// "where is this" or "what did I type".
     std::string parent;
+    /// The pose in the STAGE's frame, derived from `parent` and filled by the renderer.
+    ///
+    /// DERIVED HERE RATHER THAN IN THE PUBLISHER, and that is the second version of this design.
+    /// The first resolved the chain inside `stage_fields`, which works only while every parent is
+    /// another SCREEN -- the publisher sees `stage_snapshot`, and a venue mesh is not in it. Since
+    /// a screen can be hung off a prop (which is what the products with a hierarchy allow, and the
+    /// case an operator reaches for first), resolution has to happen where the whole scene is
+    /// visible. That is the renderer, and it is also the only place that can do it once per tick
+    /// instead of once per reader.
+    float world_pos[3] = {0.0f, 0.0f, 0.0f};
+    float world_rot[3] = {0.0f, 0.0f, 0.0f};
 };
 
 /// What `compute_frustum` produces for one screen: the orientation and field of view a channel

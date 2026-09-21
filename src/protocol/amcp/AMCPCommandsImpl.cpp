@@ -5897,6 +5897,19 @@ std::wstring previz_mesh_command(command_context& ctx)
     if (!ogl_mix->mesh_pose(name, pos, rot))
         return L"404 PREVIZ ERROR\r\n";
 
+    if (sub == L"PARENT") {
+        // MESH <name> PARENT <parent>|NONE -- the same hierarchy screens use, and the same
+        // namespace: a venue mesh may hang off a screen or off another mesh.
+        if (ctx.parameters.size() < 3)
+            return L"400 PREVIZ ERROR usage: MESH <name> PARENT <parent>|NONE\r\n";
+        const bool detach = boost::iequals(ctx.parameters.at(2), L"NONE") ||
+                            boost::iequals(ctx.parameters.at(2), L"STAGE");
+        if (!ogl_mix->set_mesh_parent(name, detach ? std::string{} : u8(ctx.parameters.at(2))))
+            return L"400 PREVIZ ERROR PARENT refused: no object named " +
+                   ctx.parameters.at(2) + L", or it would close a cycle\r\n";
+        return L"202 PREVIZ OK\r\n";
+    }
+
     if (sub == L"POSITION" || sub == L"ROTATION") {
         if (ctx.parameters.size() < 5)
             return L"400 PREVIZ ERROR " + sub + L" takes three numbers\r\n";

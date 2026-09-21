@@ -63,6 +63,42 @@ namespace caspar { namespace accelerator { namespace ogl {
 
 namespace {
 
+/// Every named thing that can be a parent or a child, as one map for the resolver.
+///
+/// SCREENS AND VENUE MESHES SHARE ONE NAMESPACE, because a parent is named and an operator hanging
+/// a wall off a truss does not care which kind the truss is -- which is the case the products with
+/// a hierarchy are built around, and the one this stopped short of when it covered screens only.
+/// A SCREEN WINS A COLLISION: a procedural screen's name was chosen by an operator, a mesh's comes
+/// out of a model file, so the deliberate one takes precedence.
+///
+/// The value type is `screen_meta` because the resolver is written against it and only its pose
+/// and parent are read. A mesh contributes nothing else, and nothing downstream of this map looks
+/// at a width -- stated here because a struct standing in for two things is how `is_screen` came
+/// to mean both "procedural screen" and "has a channel texture", which cost a real defect.
+std::map<std::string, core::screen_meta> pose_nodes(const previz_scene& scene)
+{
+    std::map<std::string, core::screen_meta> nodes;
+    for (const auto& mesh : scene.meshes) {
+        auto& n     = nodes[mesh.name];
+        n.name      = mesh.name;
+        n.pos_x     = mesh.pos[0];
+        n.pos_y     = mesh.pos[1];
+        n.pos_z     = mesh.pos[2];
+        n.rot_yaw   = mesh.rot[0];
+        n.rot_pitch = mesh.rot[1];
+        n.rot_roll  = mesh.rot[2];
+        n.parent    = mesh.parent;
+    }
+    for (const auto& [name, meta] : scene.screens)
+        nodes[name] = meta;            // screens last: they win
+    return nodes;
+}
+
+} // namespace
+
+
+namespace {
+
 // ---- Math helpers ----------------------------------------------------------
 
 // `mat4` and `compute_frustum` used to live here, in this anonymous namespace. They are pure
@@ -1107,6 +1143,9 @@ struct previz_renderer::impl
         }
 
         // Render each mesh
+        // Built ONCE for the whole pass: a venue mesh's world pose may depend on a parent, and
+        // resolving per mesh inside the loop would walk the same chains for every batch.
+        const auto scene_nodes = pose_nodes(scene_);
         for (auto& mesh : scene_.meshes) {
             if (!mesh.visible)
                 continue;
@@ -1120,9 +1159,27 @@ struct previz_renderer::impl
             // and a comment saying "for now" -- the uniform existed, the shader used it for
             // lighting, and nothing ever wrote anything but the identity into it. A venue mesh
             // could not be moved because nobody had filled in the matrix that was waiting.
-            const auto mesh_model = mat4::translate(mesh.pos[0], mesh.pos[1], mesh.pos[2]) *
-                                    mat4::rotate_y(mesh.rot[0]) * mat4::rotate_x(mesh.rot[1]) *
-                                    mat4::rotate_z(mesh.rot[2]);
+            // AND THROUGH ITS PARENT'S, since 2026-09-21 -- but ONLY for a venue mesh.
+            //
+            // A PROCEDURAL SCREEN'S VERTICES ARE ALREADY IN WORLD SPACE: `apply_screen_transform`
+            // bakes its pose (and now its parents') into them when the mesh is built. Resolving
+            // again here would apply the whole chain TWICE, which is what the first version of
+            // this line did -- `previz-place` went from 27/27 to 10/27 and read as a camera
+            // fault, every screen a different size and moving by the wrong amount. A venue mesh
+            // is the opposite: its vertices come from a model file and are never rewritten, so
+            // its pose belongs here and nowhere else.
+            const bool procedural = scene_.screens.count(mesh.name) > 0;
+            const auto wp = procedural ? core::screen_meta{}
+                                       : core::resolve_world_pose(scene_nodes, mesh.name);
+            const float mx = procedural ? mesh.pos[0] : wp.pos_x;
+            const float my = procedural ? mesh.pos[1] : wp.pos_y;
+            const float mz = procedural ? mesh.pos[2] : wp.pos_z;
+            const float ry = procedural ? mesh.rot[0] : wp.rot_yaw;
+            const float rx = procedural ? mesh.rot[1] : wp.rot_pitch;
+            const float rz = procedural ? mesh.rot[2] : wp.rot_roll;
+            const auto mesh_model = mat4::translate(mx, my, mz) *
+                                    mat4::rotate_y(ry) * mat4::rotate_x(rx) *
+                                    mat4::rotate_z(rz);
             const auto mesh_mvp = proj * view * mesh_model;
             glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_mvp"), 1, GL_FALSE, mesh_mvp.m);
             glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_model"), 1, GL_FALSE, mesh_model.m);
@@ -1576,8 +1633,14 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
         // RESOLVED, because a pick tests the rectangle the operator can SEE. Handing it the
         // local poses would hit-test a parented screen where its numbers say it is rather than
         // where it is drawn -- the two agree only for an unparented one.
-        return core::compute_pick(view, aspect, sx, sy,
-                                  core::resolve_world_poses(impl_->scene_.screens));
+        // Only SCREENS are pickable by this call -- a venue mesh has its own pick -- but they are
+        // resolved through the combined namespace, because a screen's parent may be a mesh.
+        auto resolved = core::resolve_world_poses(pose_nodes(impl_->scene_));
+        std::map<std::string, core::screen_meta> pickable;
+        for (const auto& [name, meta] : resolved)
+            if (impl_->scene_.screens.count(name))
+                pickable[name] = meta;
+        return core::compute_pick(view, aspect, sx, sy, pickable);
     };
 
     switch (event.type) {
@@ -2496,17 +2559,23 @@ namespace {
 /// cost a wrong picture rather than a hung render thread.
 void rebuild_screen_and_children(previz_scene& scene, const std::string& root)
 {
+    const auto nodes = pose_nodes(scene);
     std::vector<std::string> todo{root};
-    for (size_t guard = 0; guard < scene.screens.size() + 1 && !todo.empty(); ++guard) {
+    for (size_t guard = 0; guard < nodes.size() + 1 && !todo.empty(); ++guard) {
         std::vector<std::string> next;
         for (const auto& name : todo) {
-            for (auto& mesh : scene.meshes) {
-                if (mesh.name == name) {
-                    apply_screen_transform(mesh, core::resolve_world_pose(scene.screens, name));
-                    break;
+            // Only a SCREEN's geometry is regenerated from its pose -- a venue mesh's vertices
+            // come from a model file and are moved by `u_model` at draw time instead, so it needs
+            // no rebuild. It still has to be WALKED, because a screen can hang off it.
+            if (scene.screens.count(name)) {
+                for (auto& mesh : scene.meshes) {
+                    if (mesh.name == name) {
+                        apply_screen_transform(mesh, core::resolve_world_pose(nodes, name));
+                        break;
+                    }
                 }
             }
-            for (const auto& [child, meta] : scene.screens)
+            for (const auto& [child, meta] : nodes)
                 if (meta.parent == name)
                     next.push_back(child);
         }
@@ -2628,12 +2697,14 @@ bool previz_renderer::set_screen_parent(const std::string& name, const std::stri
         auto  it      = screens.find(name);
         if (it == screens.end())
             return false;
-        // A parent must EXIST. Accepting a dangling name would leave the resolver walking to a
-        // screen that is not there and silently treating the child as a root -- a hierarchy that
-        // reports a parent and behaves as though it has none.
-        if (!parent.empty() && screens.find(parent) == screens.end())
+        // A parent must EXIST, and it may be a screen OR a venue mesh -- hanging a wall off an
+        // imported truss is the case an operator reaches for first. Accepting a dangling name
+        // would leave the resolver walking to something that is not there and silently treating
+        // the child as a root: a hierarchy that reports a parent and behaves as though it has none.
+        const auto nodes = pose_nodes(impl_->scene_);
+        if (!parent.empty() && nodes.find(parent) == nodes.end())
             return false;
-        if (core::parent_would_cycle(screens, name, parent))
+        if (core::parent_would_cycle(nodes, name, parent))
             return false;
         it->second.parent = parent;
         rebuild_screen_and_children(impl_->scene_, name);
@@ -2645,6 +2716,37 @@ bool previz_renderer::set_screen_parent(const std::string& name, const std::stri
         CASPAR_LOG(info) << L"[previz] Screen " << u8(name) << L" parented to the stage";
     else
         CASPAR_LOG(info) << L"[previz] Screen " << u8(name) << L" parented to " << u8(parent);
+    return true;
+}
+
+bool previz_renderer::set_mesh_parent(const std::string& name, const std::string& parent)
+{
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto& sc = impl_->scene_;
+        // A venue mesh, not a screen -- screens have their own command, and answering for both
+        // here would let `MESH ... PARENT` silently edit a screen whose name happens to match.
+        if (sc.screens.count(name))
+            return false;
+        auto it = std::find_if(sc.meshes.begin(), sc.meshes.end(),
+                               [&](const previz_mesh& m) { return m.name == name; });
+        if (it == sc.meshes.end())
+            return false;
+        const auto nodes = pose_nodes(sc);
+        if (!parent.empty() && nodes.find(parent) == nodes.end())
+            return false;
+        if (core::parent_would_cycle(nodes, name, parent))
+            return false;
+        it->parent = parent;
+        // A mesh's own geometry is not regenerated -- it is moved by `u_model` at draw time -- but
+        // anything hanging off it is, and that is what this walk is for.
+        rebuild_screen_and_children(sc, name);
+    }
+    update_projections();
+    if (parent.empty())
+        CASPAR_LOG(info) << L"[previz] Mesh " << u8(name) << L" parented to the stage";
+    else
+        CASPAR_LOG(info) << L"[previz] Mesh " << u8(name) << L" parented to " << u8(parent);
     return true;
 }
 
@@ -2814,6 +2916,12 @@ bool previz_renderer::set_mesh_pose(const std::string& name, const float pos[3],
                 m.pos[i] = pos[i];
                 m.rot[i] = rot[i];
             }
+            // ANYTHING HANGING OFF THIS MESH MOVES WITH IT. The mesh's own vertices are left
+            // alone -- `u_model` carries its pose at draw time -- but a SCREEN parented to it is
+            // geometry baked in world space, and without this it stays where it was. Exactly the
+            // omission the screen setters had, found the same way: the tree resolved and the
+            // picture did not move.
+            rebuild_screen_and_children(impl_->scene_, name);
             found = true;
         }
         if (!found)
@@ -2948,7 +3056,22 @@ core::stage_snapshot previz_renderer::stage_snapshot() const
     out.selected                = sc.selected;
     out.selected_mesh           = sc.selected_mesh;
     out.hover                   = sc.hover;
-    out.screens                 = sc.screens;
+    // RESOLVED HERE, because this is the only place that can see both screens and venue meshes --
+    // and a screen's parent may be either. The publisher used to walk the chain itself, which was
+    // correct exactly while every parent was another screen.
+    out.screens              = sc.screens;
+    const auto resolved      = core::resolve_world_poses(pose_nodes(sc));
+    for (auto& [name, meta] : out.screens) {
+        const auto it = resolved.find(name);
+        if (it == resolved.end())
+            continue;
+        meta.world_pos[0] = it->second.pos_x;
+        meta.world_pos[1] = it->second.pos_y;
+        meta.world_pos[2] = it->second.pos_z;
+        meta.world_rot[0] = it->second.rot_yaw;
+        meta.world_rot[1] = it->second.rot_pitch;
+        meta.world_rot[2] = it->second.rot_roll;
+    }
     return out;
 }
 
@@ -2997,8 +3120,7 @@ void previz_renderer::update_projections()
                 continue;
             updates.push_back({meta.channel,
                                compute_frustum(impl_->scene_.camera,
-                                               core::resolve_world_pose(impl_->scene_.screens,
-                                                                        meta.name))});
+                                               core::resolve_world_pose(pose_nodes(impl_->scene_), meta.name))});
         }
     }
     // Lock released — safe to call external callbacks (stage transforms)
@@ -3013,7 +3135,7 @@ screen_projection previz_renderer::compute_screen_projection(const std::string& 
     if (it == impl_->scene_.screens.end())
         return {};
     return compute_frustum(impl_->scene_.camera,
-                           core::resolve_world_pose(impl_->scene_.screens, screen_name));
+                           core::resolve_world_pose(pose_nodes(impl_->scene_), screen_name));
 }
 
 }}} // namespace caspar::accelerator::ogl

@@ -173,6 +173,8 @@ class previz_renderer
     /// 400. The child's own position and rotation are left alone: they become LOCAL, which is
     /// what makes a parented screen jump when it is attached.
     bool set_screen_parent(const std::string& name, const std::string& parent);
+    /// The same, for a venue mesh. Screens and meshes share one parent namespace.
+    bool set_mesh_parent(const std::string& name, const std::string& parent);
 
     void remove_screen(const std::string& name);
 
