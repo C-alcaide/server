@@ -33,7 +33,7 @@ reads like a thin feature, and this is not one:
 | `ptp/` (635 lines) | a **PTP clock** over UDP multicast, with `master`, `client` and `external` modes — `external` defers to a grandmaster on the network |
 | `relay/` (718 lines) | a **TCP command relay** plus a **virtual channel map**, so a command issued on the master is executed on the member that owns that virtual channel |
 | `sync/command_scheduler` | parses and executes a relayed AMCP command at a target frame |
-| `sync/content_sync` | the watchdog: compares what members are playing and reports divergence |
+| `sync/content_sync` | the watchdog: compares what members are playing and **CORRECTS** — it issues a `seek`, counts it in `total_corrections_`, re-anchors `start_frame` and holds a 15-frame cooldown. This row said *"reports divergence"* until 2026-09-21 |
 
 **Singleton state behind one mutex** (`g_state_mutex`), with the watchdog above.
 
@@ -208,6 +208,54 @@ The corrected form carries the remainder and was checked against the exact ratio
 ---
 
 ## 5. Known gaps
+
+0. **The correction is a BARE SEEK ON THE LIVE LAYER, so every drift correction is a visible
+   jump on air.** `content_sync` calls `stage()->call(layer, {"seek", expected})` — the right
+   frame, arrived at visibly. On a video wall the whole point is that the audience cannot tell
+   the machines apart, and a correction that snaps is the one moment they can.
+
+   **The shape of the fix comes from [`FiLORUX/casparcg-auto-sync`](https://github.com/FiLORUX/casparcg-auto-sync)**
+   (MIT, 702 lines of Node.js), which is otherwise a much weaker thing than this module — an
+   external controller with no clock discipline at all, whose `t0` is wall-clock on the
+   controller and whose drift is measured by polling `CALL <ch>-<layer> FRAME` over TCP, so the
+   measurement's own jitter sits inside the control loop. **Its one good idea is that it never
+   touches the visible layer**: it keeps a STANDBY layer holding the same clip, `LOADBG … SEEK
+   <frame> LOOP` then `PAUSE` then `OPACITY 0`, and swaps active for standby inside a single
+   `DEFER`/`RESUME` bracket so both opacity changes land in one render cycle — a cut, or a
+   crossfade over N frames.
+
+   **In-process we can do it better than they can, and the reason is worth stating because it
+   is the part not to port.** Their standby is parked at the frame that was due when the
+   PRELOAD was issued, and the swap happens a network round trip later — so the correction
+   carries an error equal to its own preload latency, which is exactly the quantity a
+   drift corrector exists to remove. We schedule on the tick, so we know the frame the swap
+   will land on and can park the standby at *that* frame. **Re-derive it against our own clock;
+   do not copy the sequence.**
+
+   What a scope has to settle, none of it free:
+
+   * **where the standby layer comes from.** A reserved neighbour (`layer_index + N`) collides
+     with whatever an operator put there; an allocated one has to be invisible to `CLEAR`, to
+     the tree and to anything that enumerates layers. This is the decision the rest depends on.
+   * **the cost of a second producer.** Theirs is `PAUSE`d and so not decoding, and it is
+     allocated only for the correction and released after. Ours would be on the same box as the
+     channel it is correcting, so the peak matters: `replay`'s cost arm found one recording
+     spending an eighth of a frame budget, and a second decoder is a larger thing than that.
+   * **the swap has to be atomic in one tick**, which in-process means one stage call rather
+     than `DEFER`/`RESUME`'s two round trips — and that is also what removes their latency bug.
+   * **what happens when the standby has not finished loading** by the frame it is due. A
+     correction that silently does not happen is worse than a visible one, because the operator
+     now believes the wall is locked.
+
+   **And it needs an oracle before it needs code.** "The correction is invisible" is not
+   checkable by asserting the picture is right afterwards — a bare seek also ends up right. The
+   property is that NO frame during the swap shows content from neither side, which needs the
+   frames either side of the correction captured in order. That is `frame_hashes` over a
+   recording, and recording needs the consumer removed with **the same arguments the `ADD`
+   carried** — `PLAYBACK_AND_RECORDING_GUIDE.md`, *"`REMOVE` needs the same arguments as the
+   `ADD`"*. A bare `REMOVE 1 FILE` answers `404` and finalises nothing, and killing the server
+   instead leaves a 48-byte `ftyp` stub that reads exactly like a recorder that never ran.
+   Measured again 2026-09-17, by someone who had not read that line.
 
 1. **No coverage.** §4 lists two single-machine checks.
 2. **The 50 fps default** is corrected by a function that runs on command dispatch. A cluster that
