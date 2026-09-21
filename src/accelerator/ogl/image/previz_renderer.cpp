@@ -2481,6 +2481,41 @@ void previz_renderer::add_screen_curved(const std::string& name, float width_m, 
                      << L"m, arc=" << arc_deg << L"°)";
 }
 
+namespace {
+
+/// Rebuild a screen's mesh AND every mesh that descends from it. Call with the scene locked.
+///
+/// THE "AND EVERY DESCENDANT" IS THE WHOLE POINT, and it was written after a battery caught the
+/// half without it. Four setters rebuilt exactly one mesh, which was right while a screen's pose
+/// was its own business; with a hierarchy, moving a truss leaves its panels where they were --
+/// the tree reports the new world poses and the picture does not move. The same omission made
+/// `SCREEN ... PARENT` itself inert in the picture on its first run: the resolver was correct,
+/// the publisher was correct, and nothing rebuilt the geometry.
+///
+/// Bounded by the screen count, for the reason `resolve_world_pose` is: a looped document must
+/// cost a wrong picture rather than a hung render thread.
+void rebuild_screen_and_children(previz_scene& scene, const std::string& root)
+{
+    std::vector<std::string> todo{root};
+    for (size_t guard = 0; guard < scene.screens.size() + 1 && !todo.empty(); ++guard) {
+        std::vector<std::string> next;
+        for (const auto& name : todo) {
+            for (auto& mesh : scene.meshes) {
+                if (mesh.name == name) {
+                    apply_screen_transform(mesh, core::resolve_world_pose(scene.screens, name));
+                    break;
+                }
+            }
+            for (const auto& [child, meta] : scene.screens)
+                if (meta.parent == name)
+                    next.push_back(child);
+        }
+        todo.swap(next);
+    }
+}
+
+} // namespace
+
 void previz_renderer::set_screen_position(const std::string& name, float x, float y, float z)
 {
     {
@@ -2492,12 +2527,7 @@ void previz_renderer::set_screen_position(const std::string& name, float x, floa
         it->second.pos_y = y;
         it->second.pos_z = z;
 
-        for (auto& mesh : impl_->scene_.meshes) {
-            if (mesh.name == name) {
-                apply_screen_transform(mesh, core::resolve_world_pose(impl_->scene_.screens, name));
-                break;
-            }
-        }
+        rebuild_screen_and_children(impl_->scene_, name);
     }
     update_projections();
 }
@@ -2513,12 +2543,7 @@ void previz_renderer::set_screen_rotation(const std::string& name, float yaw, fl
         it->second.rot_pitch = pitch;
         it->second.rot_roll  = roll;
 
-        for (auto& mesh : impl_->scene_.meshes) {
-            if (mesh.name == name) {
-                apply_screen_transform(mesh, core::resolve_world_pose(impl_->scene_.screens, name));
-                break;
-            }
-        }
+        rebuild_screen_and_children(impl_->scene_, name);
     }
     update_projections();
 }
@@ -2549,12 +2574,7 @@ void previz_renderer::set_screen_size(const std::string& name, float width_m, fl
         // A curved screen's radius follows its width, so a resize re-derives it -- and the
         // pitch follows the size, so it moves too.
         derive_screen(it->second);
-        for (auto& mesh : impl_->scene_.meshes) {
-            if (mesh.name == name) {
-                apply_screen_transform(mesh, core::resolve_world_pose(impl_->scene_.screens, name));
-                break;
-            }
-        }
+        rebuild_screen_and_children(impl_->scene_, name);
     }
     update_projections();
 }
@@ -2568,12 +2588,7 @@ void previz_renderer::set_screen_arc(const std::string& name, float arc_deg)
             return;
         it->second.arc_deg = arc_deg;
         derive_screen(it->second);
-        for (auto& mesh : impl_->scene_.meshes) {
-            if (mesh.name == name) {
-                apply_screen_transform(mesh, core::resolve_world_pose(impl_->scene_.screens, name));
-                break;
-            }
-        }
+        rebuild_screen_and_children(impl_->scene_, name);
     }
     update_projections();
 }
@@ -2621,6 +2636,7 @@ bool previz_renderer::set_screen_parent(const std::string& name, const std::stri
         if (core::parent_would_cycle(screens, name, parent))
             return false;
         it->second.parent = parent;
+        rebuild_screen_and_children(impl_->scene_, name);
     }
     // The frustum of an auto-projected screen is computed from its WORLD pose, so a re-parent
     // moves it even though no number on the screen changed.
