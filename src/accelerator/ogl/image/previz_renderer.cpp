@@ -1393,6 +1393,30 @@ struct previz_renderer::impl
                 glDepthFunc(GL_LESS);
             }
 
+            // EVERY selected screen gets an outline, not only the active one -- otherwise a
+            // group of eight looks identical to a group of one and an operator cannot see what a
+            // drag is about to move. The ACTIVE screen is drawn last, over the top, because it is
+            // the one the rings and corners belong to.
+            for (const auto& sel_name : scene_.selection) {
+                if (sel_name == scene_.selected)
+                    continue;
+                const auto sit = scene_.screens.find(sel_name);
+                if (sit == scene_.screens.end())
+                    continue;
+                build_screen_outline(sit->second);
+                glDepthFunc(GL_LEQUAL);
+                glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_mvp"), 1, GL_FALSE, mvp.m);
+                glUniformMatrix4fv(glGetUniformLocation(shader_->id(), "u_model"), 1, GL_FALSE, model.m);
+                shader_->set("u_is_screen", false);
+                shader_->set("u_has_texture", false);
+                // Dimmer than the active screen's outline: both are selected, one is the handle.
+                shader_->set("u_base_color", 0.0f, 0.55f, 0.25f);
+                glBindVertexArray(outline_vao_);
+                glDrawArrays(GL_LINES, 0, outline_vert_count_);
+                glBindVertexArray(0);
+                glDepthFunc(GL_LESS);
+            }
+
             const std::string* marks[2] = {&scene_.hover, &scene_.selected};
             const double       cols[2][3] = {{0.95, 0.75, 0.15}, {0.15, 0.9, 0.95}};
             for (int m = 0; m < 2; ++m) {
@@ -1871,6 +1895,29 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                         std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
                         impl_->scene_.selected      = (hit && !mesh_wins) ? hit->name : std::string();
                         impl_->scene_.selected_mesh = mesh_wins ? mesh->name : std::string();
+                        // A press on a screen that is ALREADY SELECTED keeps the selection; one
+                        // on anything else replaces it.
+                        //
+                        // THAT DISTINCTION IS WHAT MAKES A GROUP DRAG POSSIBLE AT ALL, and the
+                        // first version did not have it: the press cleared the set and pushed the
+                        // one screen under the pointer, so by the time the move ran there was
+                        // nothing left to move together. The battery found it immediately -- one
+                        // screen moved and the other two sat still -- which is indistinguishable
+                        // from a group move that was never wired up.
+                        //
+                        // It is also the rule every product with a selection uses, and the reason
+                        // is the same everywhere: a press is the START of a drag, and a drag of a
+                        // group must not begin by destroying the group.
+                        const bool already =
+                            !impl_->scene_.selected.empty() &&
+                            std::find(impl_->scene_.selection.begin(),
+                                      impl_->scene_.selection.end(),
+                                      impl_->scene_.selected) != impl_->scene_.selection.end();
+                        if (!already) {
+                            impl_->scene_.selection.clear();
+                            if (!impl_->scene_.selected.empty())
+                                impl_->scene_.selection.push_back(impl_->scene_.selected);
+                        }
                     }
                     if (mesh_wins)
                         return true; // a venue mesh has no transform to drag
@@ -2047,11 +2094,38 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
                     // lining a stage up against is the floor's, and a yawed screen snapped in
                     // its local frame would land on a grid rotated with it -- which is a
                     // different grid for every screen, and so no grid at all.
-                    set_screen_position(
-                        g.drag_name,
-                        static_cast<float>(core::snap_to(meta.pos_x + rgt[0] * d_lx + up[0] * d_ly, snap_m)),
-                        static_cast<float>(core::snap_to(meta.pos_y + rgt[1] * d_lx + up[1] * d_ly, snap_m)),
-                        static_cast<float>(core::snap_to(meta.pos_z + rgt[2] * d_lx + up[2] * d_ly, snap_m)));
+                    const float nx = static_cast<float>(core::snap_to(meta.pos_x + rgt[0] * d_lx + up[0] * d_ly, snap_m));
+                    const float ny = static_cast<float>(core::snap_to(meta.pos_y + rgt[1] * d_lx + up[1] * d_ly, snap_m));
+                    const float nz = static_cast<float>(core::snap_to(meta.pos_z + rgt[2] * d_lx + up[2] * d_ly, snap_m));
+                    set_screen_position(g.drag_name, nx, ny, nz);
+
+                    // AND EVERY OTHER SELECTED SCREEN MOVES BY THE SAME WORLD DELTA. Taken from
+                    // the dragged screen AFTER snapping, so the group travels as one piece and
+                    // lands on the grid together -- snapping each member independently would
+                    // pull a row of panels apart by up to one grid step each, which is the
+                    // opposite of what selecting them together is for.
+                    const float gdx = nx - meta.pos_x;
+                    const float gdy = ny - meta.pos_y;
+                    const float gdz = nz - meta.pos_z;
+                    if (gdx != 0.0f || gdy != 0.0f || gdz != 0.0f) {
+                        std::vector<std::array<float, 4>> moves;   // index into names, + delta
+                        std::vector<std::string>          names;
+                        {
+                            std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                            for (const auto& n : impl_->scene_.selection) {
+                                if (n == g.drag_name)
+                                    continue;
+                                const auto it = impl_->scene_.screens.find(n);
+                                if (it == impl_->scene_.screens.end())
+                                    continue;
+                                names.push_back(n);
+                                moves.push_back({it->second.pos_x + gdx, it->second.pos_y + gdy,
+                                                 it->second.pos_z + gdz, 0.0f});
+                            }
+                        }
+                        for (std::size_t i = 0; i < names.size(); ++i)
+                            set_screen_position(names[i], moves[i][0], moves[i][1], moves[i][2]);
+                    }
                 }
                 return true;
             }
@@ -2876,6 +2950,52 @@ bool previz_renderer::set_mesh_parent(const std::string& name, const std::string
     return true;
 }
 
+bool previz_renderer::select_screen(const std::string& name, select_mode mode)
+{
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto& sc = impl_->scene_;
+
+        if (mode == select_mode::none) {
+            sc.selection.clear();
+            sc.selected.clear();
+            return true;
+        }
+        if (mode == select_mode::all) {
+            sc.selection.clear();
+            for (const auto& [n, _] : sc.screens)
+                sc.selection.push_back(n);
+            sc.selected = sc.selection.empty() ? std::string() : sc.selection.front();
+            return true;
+        }
+
+        if (sc.screens.find(name) == sc.screens.end())
+            return false;
+
+        auto it = std::find(sc.selection.begin(), sc.selection.end(), name);
+        if (mode == select_mode::replace) {
+            sc.selection.assign(1, name);
+            sc.selected = name;
+        } else if (mode == select_mode::add) {
+            if (it == sc.selection.end())
+                sc.selection.push_back(name);
+            sc.selected = name;   // the newest becomes the handle
+        } else { // toggle
+            if (it != sc.selection.end()) {
+                sc.selection.erase(it);
+                // The active one must stay a MEMBER, or the rings would hang off a screen the
+                // operator has just deselected.
+                if (sc.selected == name)
+                    sc.selected = sc.selection.empty() ? std::string() : sc.selection.front();
+            } else {
+                sc.selection.push_back(name);
+                sc.selected = name;
+            }
+        }
+    }
+    return true;
+}
+
 void previz_renderer::set_screen_tile(const std::string& name, int w_px, int h_px)
 {
     {
@@ -3196,6 +3316,7 @@ core::stage_snapshot previz_renderer::stage_snapshot() const
     out.view_camera             = sc.view_camera;
     out.scene_path              = sc.scene_path;
     out.selected                = sc.selected;
+    out.selection               = sc.selection;
     out.selected_mesh           = sc.selected_mesh;
     out.hover                   = sc.hover;
     // The venue meshes, by name, with the world pose resolved through the same namespace. A

@@ -36,6 +36,40 @@ requires a refusal, then sends **both** `ON` and `OFF` and requires both to be a
 control is not enough, because a command that accepted only its ON word would still be unable to
 express the thing an operator most needs to say.
 
+### FEATURE: MULTI-SELECTION, and a drag that moves the whole group
+
+`PREVIZ <ch> SELECT <name> [ADD|TOGGLE]`, `SELECT NONE`, `SELECT ALL`. A wall is many identical
+panels — `CLONE` makes them easy to create — and until now they moved one at a time, because
+`selected` was a single string.
+
+**TWO FIELDS, not one.** `selected` stays the ACTIVE screen and `selection` is the whole set, with
+the active one always a member. They answer different questions and one field cannot answer both:
+the rotation rings and the resize corners act on ONE screen — there is no sensible ring for eight
+at once, and grabbing a corner means that corner — while a MOVE acts on the set, which is the
+entire point of selecting several.
+
+**The group travels as one piece.** The world delta is taken from the dragged screen AFTER
+snapping and applied to every other member, so the row lands on the grid together. Snapping each
+member independently would pull a row of panels apart by up to a grid step each, which is the
+opposite of what selecting them together is for.
+
+**A PRESS ON AN ALREADY-SELECTED SCREEN KEEPS THE SELECTION**; a press on anything else replaces
+it. That distinction is what makes a group drag possible at all, and the first version did not have
+it: the press cleared the set and pushed the one screen under the pointer, so by the time the move
+ran there was nothing left to move together. **The battery found it immediately** — one screen
+moved and the other two sat still, which is indistinguishable from a group move that was never
+wired up. It is the rule every product with a selection uses, for the same reason: a press is the
+START of a drag, and a drag of a group must not begin by destroying the group.
+
+Adding to a selection is a COMMAND rather than a viewport modifier, because the window would have
+to carry one and a command works from a client, a script and a macro alike.
+
+Verified: `previz-gizmo` 49/49 both mixers. **The oracle is the SPACING**, not the positions — a
+group move is a translation, so the distances between members are invariant, which is a property
+of translation rather than of this server. The one-selected control comes FIRST, because "they all
+moved" is also what a server ignoring the selection entirely would produce. Regression:
+`api-stage` 22/22, `previz-place` 27/27, `previz-interact` 16/16.
+
 ### FEATURE: LED PANEL BOUNDARIES — the previz shows what is on the truss
 
 `PREVIZ <ch> SCREEN <name> TILE <w_px> <h_px>`, `0 0` to clear. With the screen's `RESOLUTION` it

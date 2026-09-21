@@ -432,7 +432,8 @@ bool same_stage(const stage_snapshot& a, const stage_snapshot& b)
         return false;
 
     if (a.scene_path != b.scene_path || a.selected != b.selected || a.hover != b.hover ||
-        a.selected_mesh != b.selected_mesh || a.previz_bridge != b.previz_bridge)
+        a.selected_mesh != b.selected_mesh || a.previz_bridge != b.previz_bridge ||
+        a.selection != b.selection)
         return false;
 
     // THE MESHES, compared as a SET for the reason the screens are: they are named and created at
@@ -540,6 +541,10 @@ void stage_publisher::refresh(const stage_snapshot& snap)
     st["view_override"]   = snap.flags.has_view_override;
     st["scene_path"]      = snap.scene_path;
     st["selected"]        = snap.selected;
+    // The whole set. `selected` is the ACTIVE one -- what the rings and corners act on -- and is
+    // always a member of this. A client drawing outlines wants this; a client drawing a gizmo
+    // wants `selected`.
+    st["selection"]       = snap.selection;
     st["selected_mesh"]   = snap.selected_mesh;
     st["bridge"]          = snap.previz_bridge;
     st["hover"]           = snap.hover;

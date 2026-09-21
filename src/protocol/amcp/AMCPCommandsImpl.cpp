@@ -5941,6 +5941,48 @@ std::wstring previz_mesh_command(command_context& ctx)
            ctx.parameters.at(1) + L"\r\n";
 }
 
+/// `PREVIZ <ch> SELECT <name> [ADD|TOGGLE]` | `SELECT NONE` | `SELECT ALL`
+///
+/// A COMMAND rather than a viewport modifier, because the window would have to carry one and a
+/// command works from a client, a script and a macro alike. A plain click in the viewport still
+/// REPLACES the selection, which is what a click means everywhere else.
+std::wstring previz_select_command(command_context& ctx)
+{
+    auto* ogl_mix = get_ogl_mixer(ctx);
+    if (!ogl_mix)
+        return L"501 PREVIZ FAILED\r\n";
+    if (ctx.parameters.empty())
+        return L"400 PREVIZ ERROR usage: SELECT <name> [ADD|TOGGLE] | SELECT NONE | SELECT ALL\r\n";
+
+    using sm = accelerator::ogl::previz_renderer::select_mode;
+    const auto first = ctx.parameters.at(0);
+    if (boost::iequals(first, L"NONE")) {
+        ogl_mix->select_screen({}, sm::none);
+        return L"202 PREVIZ OK\r\n";
+    }
+    if (boost::iequals(first, L"ALL")) {
+        ogl_mix->select_screen({}, sm::all);
+        return L"202 PREVIZ OK\r\n";
+    }
+
+    auto mode = sm::replace;
+    if (ctx.parameters.size() > 1) {
+        if (boost::iequals(ctx.parameters.at(1), L"ADD"))
+            mode = sm::add;
+        else if (boost::iequals(ctx.parameters.at(1), L"TOGGLE"))
+            mode = sm::toggle;
+        else
+            // Named explicitly rather than falling through to REPLACE: the leftover branch is
+            // this tree's most repeated defect, and here it would silently throw away a
+            // selection the operator was building.
+            return L"400 PREVIZ ERROR SELECT takes ADD or TOGGLE, not " + ctx.parameters.at(1) +
+                   L"\r\n";
+    }
+    if (!ogl_mix->select_screen(u8(first), mode))
+        return L"404 PREVIZ ERROR\r\n";
+    return L"202 PREVIZ OK\r\n";
+}
+
 std::wstring previz_snap_command(command_context& ctx)
 {
     auto* ogl_mix = get_ogl_mixer(ctx);
@@ -7493,6 +7535,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SCREEN",    previz_screen_command,    1);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ AUTOPROJECTION", previz_autoprojection_command, 0);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ SNAP",      previz_snap_command,      0);
+    repo->register_channel_command(L"Previz Commands", L"PREVIZ SELECT",    previz_select_command,    0);
     repo->register_channel_command(L"Previz Commands", L"PREVIZ MESH",      previz_mesh_command,      2);
 
     repo->register_command(L"Thumbnail Commands", L"THUMBNAIL LIST", thumbnail_list_command, 0);

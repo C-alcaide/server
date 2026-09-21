@@ -167,6 +167,17 @@ class previz_renderer
     /// on, auto-projection also computes the camera-eye inner frustum + mask.
     /// LED panel size in PIXELS; 0 0 clears it. With the screen's resolution this derives how
     /// many panels the wall is, and the renderer draws their boundaries.
+    /// How `select_screen` treats what is already selected.
+    enum class select_mode
+    {
+        replace, ///< this one only
+        add,     ///< add it, and make it the active one
+        toggle,  ///< in if out, out if in
+        none,    ///< clear
+        all      ///< every screen
+    };
+    /// Select a screen. False when the name is not a screen -- `none` and `all` ignore it.
+    bool select_screen(const std::string& name, select_mode mode);
     void set_screen_tile(const std::string& name, int w_px, int h_px);
     void set_screen_icvfx(const std::string& name, bool enable);
     /// Parent a screen to another, or to the stage with an empty name.

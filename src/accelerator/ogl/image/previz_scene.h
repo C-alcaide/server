@@ -134,6 +134,16 @@ struct previz_scene
 
     // Procedural screens (name → metadata)
     std::map<std::string, screen_meta>   screens;
+    /// EVERY selected screen. `selected` stays the ACTIVE one and is always a member when this is
+    /// non-empty.
+    ///
+    /// Two fields rather than one, because the two answer different questions and a single set
+    /// cannot answer both. The rotation rings and the resize corners act on ONE screen -- there is
+    /// no sensible ring for eight screens at once, and an operator grabbing a corner means that
+    /// corner -- while a MOVE acts on the whole set, which is the entire point of selecting
+    /// several. Collapsing them would either give every screen its own rings or make a group drag
+    /// impossible.
+    std::vector<std::string>             selection;
 };
 
 // ---- Channel texture store ------------------------------------------------

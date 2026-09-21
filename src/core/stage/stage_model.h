@@ -228,6 +228,8 @@ struct stage_snapshot
     /// Which screen the operator has selected, and which the pointer is over. Empty for none.
     /// Published so a client can draw a selection without owning a renderer.
     std::string                        selected;
+    /// Every selected screen, `selected` included. Empty when nothing is selected.
+    std::vector<std::string>           selection;
     std::string                        hover;
     /// The selected VENUE MESH, by name. A glTF or OBJ part is not a screen -- it has no size,
     /// no channel and no transform to drag -- but it HAS a name, and `PREVIZ MAP` takes that

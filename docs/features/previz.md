@@ -966,6 +966,24 @@ that warns on `icvfx_coverage < 1` will cry wolf on any multi-wall volume; a cli
 shot-level answer has to compute it. Said plainly here because the per-screen number is the one an
 operator will reach for, and the failure mode is a false alarm rather than a silence.
 
+### 1.3a Selecting several — `SELECT <name> [ADD|TOGGLE]`
+
+```
+PREVIZ 1 SELECT panel_a            replace the selection
+PREVIZ 1 SELECT panel_b ADD        add, and make it the active one
+PREVIZ 1 SELECT panel_b TOGGLE     in if out, out if in
+PREVIZ 1 SELECT ALL | NONE
+```
+
+Two leaves are published. **`selected` is the ACTIVE screen** — what the rotation rings and resize
+corners act on — and **`selection` is the whole set**, with the active one always a member. A
+client drawing outlines wants the set; one drawing a gizmo wants the active one.
+
+**A drag moves every selected screen by the same world delta**, taken from the dragged screen after
+snapping so the group lands on the grid together. **A press on an already-selected screen keeps the
+selection**; a press on anything else replaces it — otherwise the press that starts a group drag
+would destroy the group.
+
 ### 1.4a LED panel boundaries — `SCREEN <name> TILE <w_px> <h_px>`
 
 ```
