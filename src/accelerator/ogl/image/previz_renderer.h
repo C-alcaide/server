@@ -166,6 +166,13 @@ class previz_renderer
     /// Enable/disable ICVFX inner-frustum (in-camera VFX) for a screen.  When
     /// on, auto-projection also computes the camera-eye inner frustum + mask.
     void set_screen_icvfx(const std::string& name, bool enable);
+    /// Parent a screen to another, or to the stage with an empty name.
+    ///
+    /// Returns FALSE rather than throwing when the screen or the proposed parent does not exist,
+    /// or when the attachment would close a cycle -- the three cases the command turns into one
+    /// 400. The child's own position and rotation are left alone: they become LOCAL, which is
+    /// what makes a parented screen jump when it is attached.
+    bool set_screen_parent(const std::string& name, const std::string& parent);
 
     void remove_screen(const std::string& name);
 

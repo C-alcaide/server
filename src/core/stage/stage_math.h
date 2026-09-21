@@ -407,4 +407,62 @@ std::optional<pick> compute_pick(const previz_camera&                      view,
                                  double                                     sy,
                                  const std::map<std::string, screen_meta>& screens);
 
+// ── Hierarchy ───────────────────────────────────────────────────────────────────────────
+//
+// A screen may be parented to another, so that moving the parent moves the child with it: a
+// wall on a truss, a set of panels that travel as one piece. Every stage visualiser with a
+// hierarchy stores the child's pose RELATIVE to its parent and derives the world pose, and
+// this does the same -- see `screen_meta::parent`.
+//
+// THE COMPOSITION IS DONE IN MATRICES AND HANDED BACK AS EULER ANGLES, because the rest of
+// this file is written in the `Ry(yaw) * Rx(pitch) * Rz(roll)` convention and forty-odd call
+// sites read `rot_yaw` directly. Resolving once, at the point the scene is assembled, is what
+// lets all of them stay as they are -- the alternative is teaching every reader the hierarchy,
+// which is this tree's seven-readers trap at a larger scale.
+
+/// The composed rotation of `parent` applied to `child`, back in the Ry*Rx*Rz convention.
+///
+/// Degrees in and out. The decomposition is exact for the composition above it: from
+/// `R = Ry(a)Rx(b)Rz(c)` the elements give `b = asin(-R12)`, `c = atan2(R10, R11)` and
+/// `a = atan2(R02, R22)`, and at `cos(b) == 0` -- the gimbal case, pitch straight up or down --
+/// roll and yaw are not separable, so roll is taken as 0 and yaw carries the whole turn.
+void compose_rotation(const float parent_ypr[3], const float child_ypr[3], float out_ypr[3]);
+
+/// `child` expressed in the stage's frame, given its parent's WORLD pose.
+///
+/// The child's local offset is rotated by the parent's rotation before being added, which is
+/// what makes a parented screen ORBIT its parent rather than slide beside it.
+void compose_pose(const float parent_pos[3],
+                  const float parent_ypr[3],
+                  const float child_pos[3],
+                  const float child_ypr[3],
+                  float       out_pos[3],
+                  float       out_ypr[3]);
+
+/// Every screen with its pose resolved into the stage's frame.
+///
+/// A CYCLE IS BROKEN RATHER THAN HUNG: a chain is followed at most `screens.size()` deep, so a
+/// loop that survived the command's own check -- or one loaded from a hand-edited scene file --
+/// costs a wrong position and not a frozen render thread. The command refuses to create one; this
+/// is the second line, because a renderer is not the place to discover a malformed document.
+std::map<std::string, screen_meta> resolve_world_poses(const std::map<std::string, screen_meta>& screens);
+
+/// ONE screen with its pose resolved into the stage's frame -- the primitive the map version is
+/// built on, and the one every call site uses.
+///
+/// Walking a single chain is cheap (a screen has one parent, and a rig is two or three deep), so
+/// this is called per draw rather than cached. A cache would need every mutation of the screen
+/// map to invalidate it, and finding all of those is the audit that this design exists to avoid.
+/// Returns the screen unchanged when it has no parent, and when the name is unknown.
+screen_meta resolve_world_pose(const std::map<std::string, screen_meta>& screens,
+                               const std::string&                        name);
+
+/// Would making `child` a child of `parent` close a loop? Names, not poses.
+///
+/// True when `parent` is `child` itself or already descends from it. The command answers 400 on
+/// this rather than accepting a document whose world poses cannot be resolved.
+bool parent_would_cycle(const std::map<std::string, screen_meta>& screens,
+                        const std::string&                        child,
+                        const std::string&                        parent);
+
 }} // namespace caspar::core

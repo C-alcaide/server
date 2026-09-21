@@ -86,6 +86,17 @@ struct screen_meta
     // ICVFX inner/outer frustum: when true, auto-projection computes a
     // camera-eye inner frustum + feathered camera-frustum mask for this screen.
     bool icvfx_enable = false;
+    /// PARENT SCREEN, by name. Empty means parented to the stage, which is the default and what
+    /// every screen was before 2026-09-21.
+    ///
+    /// **`pos_*` and `rot_*` are LOCAL when this is set** -- relative to the parent's origin and
+    /// axes -- which is the convention every stage visualiser with a hierarchy uses, and which
+    /// the parent's own documentation warns operators about: adding a parent does not move the
+    /// child's stored numbers, it changes what they are measured from. The WORLD pose is derived
+    /// by `resolve_world_pose` and is what every renderer, pick and frustum reads; both are
+    /// published, because a client that showed only one of them would be unable to say either
+    /// "where is this" or "what did I type".
+    std::string parent;
 };
 
 /// What `compute_frustum` produces for one screen: the orientation and field of view a channel

@@ -962,6 +962,198 @@ stage_math_report stage_math_self_test()
         check("snap/coarse", snap_to(0.2, 1.0), 0.0, 1e-12);
     }
 
+    // ── 19. THE HIERARCHY ───────────────────────────────────────────────────────────────
+    //
+    // A screen may be parented to another, so a wall on a truss moves with the truss. The
+    // composition is done in matrices and handed back as `Ry*Rx*Rz` Euler angles, because forty
+    // call sites read `rot_yaw` directly and resolving ONCE is what lets them stay as they are.
+    //
+    // THE ORACLES HERE ARE NOT THE IMPLEMENTATION RESTATED, which for a geometry helper is the
+    // whole difficulty: re-deriving the same matrix product in the test proves the two copies
+    // agree and nothing else. Each check below is a property that holds independently of how the
+    // composition is written.
+    {
+        auto mk = [](const char* name, float x, float y, float z, float yaw, float pitch,
+                     float roll, const char* parent) {
+            screen_meta m;
+            m.name      = name;
+            m.width_m   = 2.0f;
+            m.height_m  = 1.0f;
+            m.pos_x     = x;
+            m.pos_y     = y;
+            m.pos_z     = z;
+            m.rot_yaw   = yaw;
+            m.rot_pitch = pitch;
+            m.rot_roll  = roll;
+            m.parent    = parent;
+            return m;
+        };
+
+        // (a) SINGLE-AXIS ROTATION IS ADDITIVE, which is true of rotation itself and not of this
+        //     code: Ry(a) * Ry(b) == Ry(a + b). So with pitch and roll zero on both, the composed
+        //     yaw must be the sum -- and likewise for each of the other two axes alone. A
+        //     composition that multiplied in the wrong ORDER still passes this, which is why (b)
+        //     and (c) follow; a composition that dropped a term does not.
+        {
+            const float p[3] = {30.0f, 0.0f, 0.0f}, c[3] = {25.0f, 0.0f, 0.0f};
+            float       o[3];
+            compose_rotation(p, c, o);
+            check("parent/yaw-additive", o[0], 55.0, 1e-3);
+            check("parent/yaw-additive-pitch", o[1], 0.0, 1e-3);
+            check("parent/yaw-additive-roll", o[2], 0.0, 1e-3);
+        }
+        {
+            const float p[3] = {0.0f, 20.0f, 0.0f}, c[3] = {0.0f, 15.0f, 0.0f};
+            float       o[3];
+            compose_rotation(p, c, o);
+            check("parent/pitch-additive", o[1], 35.0, 1e-3);
+        }
+        {
+            const float p[3] = {0.0f, 0.0f, -40.0f}, c[3] = {0.0f, 0.0f, 10.0f};
+            float       o[3];
+            compose_rotation(p, c, o);
+            check("parent/roll-additive", o[2], -30.0, 1e-3);
+        }
+
+        // (b) THE DECOMPOSITION IS EXACT FOR THE COMPOSITION -- the round trip that makes the
+        //     Euler answer trustworthy at angles where nothing is additive. Rebuilding
+        //     Ry*Rx*Rz from the returned triple must reproduce the matrix product element for
+        //     element. This is the one check that would catch a decomposition reading the wrong
+        //     matrix elements, which is easy to do in a column-major layout and produces angles
+        //     that look plausible.
+        {
+            const float p[3] = {35.0f, -20.0f, 15.0f}, c[3] = {-25.0f, 40.0f, -10.0f};
+            float       o[3];
+            compose_rotation(p, c, o);
+            const auto want = (mat4::rotate_y(p[0]) * mat4::rotate_x(p[1]) * mat4::rotate_z(p[2])) *
+                              (mat4::rotate_y(c[0]) * mat4::rotate_x(c[1]) * mat4::rotate_z(c[2]));
+            const auto got = mat4::rotate_y(o[0]) * mat4::rotate_x(o[1]) * mat4::rotate_z(o[2]);
+            double     worst = 0.0;
+            for (int i = 0; i < 16; ++i)
+                worst = std::max(worst, std::abs(double(got.m[i]) - double(want.m[i])));
+            check("parent/decompose-roundtrip", worst, 0.0, 1e-5);
+        }
+
+        // (c) A ROTATION IS AN ISOMETRY, so a child ORBITS its parent: whatever the parent's
+        //     rotation, the distance from parent to child is the length of the child's local
+        //     offset. A composition that applied the rotation to the wrong vector, or scaled,
+        //     fails here -- and the DISTANCE is asserted rather than the position, so the check
+        //     does not have to agree with the implementation about which way +yaw turns.
+        {
+            std::map<std::string, screen_meta> sc;
+            sc["truss"] = mk("truss", 1.0f, 3.0f, -2.0f, 47.0f, 11.0f, -6.0f, "");
+            sc["panel"] = mk("panel", 2.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, "truss");
+            const auto w = resolve_world_poses(sc);
+            const auto& t = w.at("truss");
+            const auto& p = w.at("panel");
+            const double d = std::sqrt(std::pow(p.pos_x - t.pos_x, 2) + std::pow(p.pos_y - t.pos_y, 2) +
+                                       std::pow(p.pos_z - t.pos_z, 2));
+            check("parent/orbit-isometry", d, std::sqrt(2.0 * 2.0 + 0.5 * 0.5), 1e-4);
+
+            // And the parent itself must be untouched -- a resolve that moved a root screen
+            // would be caught by nothing else here.
+            check("parent/root-untouched-x", t.pos_x, 1.0, 1e-6);
+            check("parent/root-untouched-yaw", t.rot_yaw, 47.0, 1e-4);
+        }
+
+        // (d) AN UNROTATED PARENT ADDS ITS POSITION AND NOTHING ELSE. The plain case, and the one
+        //     an operator checks first -- kept alongside (c) rather than alone, because "the
+        //     child did not move" is also what a resolve that ignored the hierarchy produces.
+        {
+            std::map<std::string, screen_meta> sc;
+            sc["a"] = mk("a", 5.0f, 1.0f, -3.0f, 0.0f, 0.0f, 0.0f, "");
+            sc["b"] = mk("b", 0.5f, 2.0f, 0.25f, 12.0f, 0.0f, 0.0f, "a");
+            const auto w = resolve_world_poses(sc);
+            check("parent/translate-x", w.at("b").pos_x, 5.5, 1e-5);
+            check("parent/translate-y", w.at("b").pos_y, 3.0, 1e-5);
+            check("parent/translate-z", w.at("b").pos_z, -2.75, 1e-5);
+            check("parent/translate-keeps-yaw", w.at("b").rot_yaw, 12.0, 1e-4);
+        }
+
+        // (e) TWO LEVELS COMPOSE. A grandchild under a chain must equal the same screen attached
+        //     directly to a parent carrying the composed pose -- two configurations of the same
+        //     resolver that have to agree, which is the twin shape used throughout this tree and
+        //     needs no third derivation.
+        {
+            std::map<std::string, screen_meta> deep;
+            deep["root"]  = mk("root", 1.0f, 0.0f, 0.0f, 30.0f, 0.0f, 0.0f, "");
+            deep["mid"]   = mk("mid", 0.0f, 2.0f, 0.0f, 20.0f, 0.0f, 0.0f, "root");
+            deep["leaf"]  = mk("leaf", 1.5f, 0.0f, 0.0f, 10.0f, 0.0f, 0.0f, "mid");
+            const auto dw = resolve_world_poses(deep);
+
+            std::map<std::string, screen_meta> direct;
+            direct["mid"]  = deep["mid"];
+            direct["mid"].parent = "";
+            direct["mid"].pos_x  = dw.at("mid").pos_x;
+            direct["mid"].pos_y  = dw.at("mid").pos_y;
+            direct["mid"].pos_z  = dw.at("mid").pos_z;
+            direct["mid"].rot_yaw = dw.at("mid").rot_yaw;
+            direct["leaf"] = deep["leaf"];
+            const auto fw = resolve_world_poses(direct);
+
+            check("parent/two-levels-x", dw.at("leaf").pos_x, fw.at("leaf").pos_x, 1e-4);
+            check("parent/two-levels-z", dw.at("leaf").pos_z, fw.at("leaf").pos_z, 1e-4);
+            check("parent/two-levels-yaw", dw.at("leaf").rot_yaw, 60.0, 1e-3);
+        }
+
+        // (f) A CYCLE IS REFUSED, AND A LOOPED DOCUMENT STILL TERMINATES. The first is the
+        //     command's guard; the second is the resolver's, and it exists because a scene file
+        //     is hand-editable and a renderer is not the place to discover a malformed document.
+        {
+            std::map<std::string, screen_meta> sc;
+            sc["a"] = mk("a", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, "");
+            sc["b"] = mk("b", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, "a");
+            sc["c"] = mk("c", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, "b");
+
+            ++rep.checks;
+            if (!parent_would_cycle(sc, "a", "a"))
+                rep.failures.emplace_back("parent/self-cycle: a screen was allowed to parent to "
+                                          "itself");
+            ++rep.checks;
+            if (!parent_would_cycle(sc, "a", "c"))
+                rep.failures.emplace_back("parent/deep-cycle: parenting a to c closes a->b->c "
+                                          "and was allowed");
+            ++rep.checks;
+            if (parent_would_cycle(sc, "c", "a"))
+                rep.failures.emplace_back("parent/legal-refused: re-parenting c to a is not a "
+                                          "cycle and was refused -- a guard that refuses valid "
+                                          "documents is worse than none, because the operator "
+                                          "stops trusting the message");
+            ++rep.checks;
+            if (parent_would_cycle(sc, "b", ""))
+                rep.failures.emplace_back("parent/to-stage-refused: parenting back to the stage "
+                                          "is always legal");
+
+            // An ALREADY looped document -- the case the depth guard exists for. The answer does
+            // not matter; terminating does.
+            std::map<std::string, screen_meta> loop;
+            loop["x"] = mk("x", 1.0f, 0.0f, 0.0f, 10.0f, 0.0f, 0.0f, "y");
+            loop["y"] = mk("y", 0.0f, 1.0f, 0.0f, 20.0f, 0.0f, 0.0f, "x");
+            const auto lw = resolve_world_poses(loop);
+            ++rep.checks;
+            if (lw.size() != 2 || !std::isfinite(lw.at("x").pos_x))
+                rep.failures.emplace_back("parent/loop-terminates: resolving a looped document "
+                                          "did not return two finite screens");
+        }
+
+        // (g) NO PARENT IS BYTE-FOR-BYTE THE OLD BEHAVIOUR. Every screen in this tree was
+        //     unparented before 2026-09-21, so the resolver must be the identity on them -- the
+        //     regression check for a feature that touches the pose every other check reads.
+        {
+            std::map<std::string, screen_meta> sc;
+            sc["solo"] = mk("solo", 2.5f, -1.0f, 4.0f, 33.0f, -12.0f, 7.0f, "");
+            const auto w = resolve_world_poses(sc);
+            const auto& o = sc.at("solo");
+            const auto& r = w.at("solo");
+            check("parent/none-identity-x", r.pos_x, o.pos_x, 0.0);
+            check("parent/none-identity-y", r.pos_y, o.pos_y, 0.0);
+            check("parent/none-identity-z", r.pos_z, o.pos_z, 0.0);
+            check("parent/none-identity-yaw", r.rot_yaw, o.rot_yaw, 0.0);
+            check("parent/none-identity-pitch", r.rot_pitch, o.rot_pitch, 0.0);
+            check("parent/none-identity-roll", r.rot_roll, o.rot_roll, 0.0);
+        }
+    }
+
     return rep;
 }
 

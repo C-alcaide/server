@@ -530,6 +530,7 @@ on, the tab pushes `PREVIZ <channel> …` commands as you work:
 | `PREVIZ <ch> VIEW …` | Navigation view sync. |
 | `PREVIZ <ch> VIEW FRAME [<name>]` | Fit a screen or venue mesh in the viewport, keeping the angle you are looking from. With no name it frames the selection, and with nothing selected the whole stage — which is how to find a venue model you have just loaded and cannot see. |
 | `PREVIZ <ch> VIEW TOP\|FRONT\|SIDE` | Jump to a canonical orientation and frame the stage from it. |
+| `PREVIZ <ch> SCREEN <name> PARENT <parent>\|NONE` | Hang a screen off another, so moving the parent moves it too — a wall on a truss. **Its `POSITION` and `ROTATION` become LOCAL to the parent and are not rewritten, so the screen jumps when you attach it**; the published `world_position` is where it ended up. `NONE` detaches. A parent that does not exist, or one that would close a loop, is refused. |
 | `PREVIZ <ch> SCREEN <name> CLONE <newname>` | Copy a panel, placed edge to edge with it along its own width. Everything comes across, the mapped channel included. With `SNAP` on, this is how a wall gets built. |
 | `PREVIZ <ch> SNAP <metres> [<degrees>]` | Make dragging in the viewport land on a grid — position and size to the metre step, rotation to the angle step. `SNAP OFF` disables it. **Only dragging snaps**: a `SCREEN ... POSITION` command still sets exactly what you send, so a surveyed stage is safe with snapping left on. |
 | `PREVIZ <ch> SCREEN …` | A screen's geometry / parameters change. |

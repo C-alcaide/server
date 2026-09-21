@@ -11,6 +11,8 @@
 
 #include "stage_fields.h"
 
+#include "stage_math.h"
+
 #include <common/except.h>
 #include <common/log.h>
 
@@ -374,6 +376,13 @@ bool same_camera(const previz_camera& a, const previz_camera& b)
 
 bool same_screen(const screen_meta& a, const screen_meta& b)
 {
+    // THE PARENT IS PART OF THE POSE, so a re-parent is a change even when every number on the
+    // screen is untouched -- which is exactly what re-parenting looks like, since the local
+    // offset is deliberately left alone. Without this line the world pose moves and the tree
+    // never says so.
+    if (a.parent != b.parent)
+        return false;
+
     for (const auto& f : screen_fields())
         if (f.get(a) != f.get(b))
             return false;
@@ -499,8 +508,31 @@ void stage_publisher::refresh(const stage_snapshot& snap)
 
     publish_object(st, "camera", snap.camera, camera_fields());
     publish_object(st, "view_camera", snap.view_camera, camera_fields());
-    for (const auto& [name, sm] : snap.screens)
+    // THE WORLD POSES, resolved once for the whole map. A client drawing a stage needs where a
+    // screen IS; an operator editing one needs what they typed. Publishing only the first would
+    // make the numbers in the tree disagree with the numbers in the command, and publishing only
+    // the second leaves a client unable to place a parented screen at all.
+    const auto world = core::resolve_world_poses(snap.screens);
+
+    for (const auto& [name, sm] : snap.screens) {
         publish_object(st, "screen/" + name, sm, screen_fields());
+
+        // OUTSIDE THE DESCRIPTOR TABLE, deliberately, and this is the one place in this file
+        // that is. The table drives the generic write path, which coerces a number into a field;
+        // `parent` is a NAME whose legality depends on the rest of the document -- it must exist,
+        // and it must not close a cycle -- and a generic coerce cannot ask either question. It
+        // has its own command for that reason, so exposing it as a writable leaf would offer a
+        // route that accepts documents the command refuses. Published read-only instead.
+        st["screen/" + name + "/parent"] = sm.parent;
+
+        // Derived, and published even for an unparented screen, where it equals the local pose.
+        // An absent key would make a client test for the parent first and then choose which of
+        // two shapes to read -- and the first client to forget would place every root screen at
+        // the origin.
+        const auto& w = world.at(name);
+        st["screen/" + name + "/world_position"] = {w.pos_x, w.pos_y, w.pos_z};
+        st["screen/" + name + "/world_rotation"] = {w.rot_yaw, w.rot_pitch, w.rot_roll};
+    }
 
     state_ = std::move(st);
 }

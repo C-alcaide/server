@@ -1573,7 +1573,11 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
 
     const auto pick_at = [&](double sx, double sy) {
         std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
-        return core::compute_pick(view, aspect, sx, sy, impl_->scene_.screens);
+        // RESOLVED, because a pick tests the rectangle the operator can SEE. Handing it the
+        // local poses would hit-test a parented screen where its numbers say it is rather than
+        // where it is drawn -- the two agree only for an unparented one.
+        return core::compute_pick(view, aspect, sx, sy,
+                                  core::resolve_world_poses(impl_->scene_.screens));
     };
 
     switch (event.type) {
@@ -2025,6 +2029,9 @@ void previz_renderer::save_layout(const std::string& path) const
             s.put("design_eye_y", m.design_eye_y);
             s.put("design_eye_z", m.design_eye_z);
             s.put("icvfx_enable", m.icvfx_enable);
+            // Written even when empty, so the key is always present and a reader never has to
+            // distinguish "no parent" from "written by an older build".
+            s.put("parent", m.parent);
             screens.push_back(std::make_pair("", s));
         }
         root.put_child("screens", screens);
@@ -2092,6 +2099,9 @@ void previz_renderer::load_layout(const std::string& path)
                 m.design_eye_y = s.get("design_eye_y", 1.5f);
                 m.design_eye_z = s.get("design_eye_z", 3.0f);
                 m.icvfx_enable = s.get("icvfx_enable", false);
+                // The PARENT, by name. Defaults to empty, so a layout written before the
+                // hierarchy existed loads every screen as a root -- which is what it was.
+                m.parent       = s.get<std::string>("parent", "");
                 sc.screens[m.name] = m;
             }
         }
@@ -2484,7 +2494,7 @@ void previz_renderer::set_screen_position(const std::string& name, float x, floa
 
         for (auto& mesh : impl_->scene_.meshes) {
             if (mesh.name == name) {
-                apply_screen_transform(mesh, it->second);
+                apply_screen_transform(mesh, core::resolve_world_pose(impl_->scene_.screens, name));
                 break;
             }
         }
@@ -2505,7 +2515,7 @@ void previz_renderer::set_screen_rotation(const std::string& name, float yaw, fl
 
         for (auto& mesh : impl_->scene_.meshes) {
             if (mesh.name == name) {
-                apply_screen_transform(mesh, it->second);
+                apply_screen_transform(mesh, core::resolve_world_pose(impl_->scene_.screens, name));
                 break;
             }
         }
@@ -2541,7 +2551,7 @@ void previz_renderer::set_screen_size(const std::string& name, float width_m, fl
         derive_screen(it->second);
         for (auto& mesh : impl_->scene_.meshes) {
             if (mesh.name == name) {
-                apply_screen_transform(mesh, it->second);
+                apply_screen_transform(mesh, core::resolve_world_pose(impl_->scene_.screens, name));
                 break;
             }
         }
@@ -2560,7 +2570,7 @@ void previz_renderer::set_screen_arc(const std::string& name, float arc_deg)
         derive_screen(it->second);
         for (auto& mesh : impl_->scene_.meshes) {
             if (mesh.name == name) {
-                apply_screen_transform(mesh, it->second);
+                apply_screen_transform(mesh, core::resolve_world_pose(impl_->scene_.screens, name));
                 break;
             }
         }
@@ -2593,6 +2603,33 @@ void previz_renderer::set_screen_arc_v(const std::string& name, float arc_v_deg)
         it->second.arc_v_deg = arc_v_deg;
     }
     update_projections();
+}
+
+bool previz_renderer::set_screen_parent(const std::string& name, const std::string& parent)
+{
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto& screens = impl_->scene_.screens;
+        auto  it      = screens.find(name);
+        if (it == screens.end())
+            return false;
+        // A parent must EXIST. Accepting a dangling name would leave the resolver walking to a
+        // screen that is not there and silently treating the child as a root -- a hierarchy that
+        // reports a parent and behaves as though it has none.
+        if (!parent.empty() && screens.find(parent) == screens.end())
+            return false;
+        if (core::parent_would_cycle(screens, name, parent))
+            return false;
+        it->second.parent = parent;
+    }
+    // The frustum of an auto-projected screen is computed from its WORLD pose, so a re-parent
+    // moves it even though no number on the screen changed.
+    update_projections();
+    if (parent.empty())
+        CASPAR_LOG(info) << L"[previz] Screen " << u8(name) << L" parented to the stage";
+    else
+        CASPAR_LOG(info) << L"[previz] Screen " << u8(name) << L" parented to " << u8(parent);
+    return true;
 }
 
 void previz_renderer::set_screen_icvfx(const std::string& name, bool enable)
@@ -2942,7 +2979,10 @@ void previz_renderer::update_projections()
         for (const auto& [name, meta] : impl_->scene_.screens) {
             if (meta.channel < 1)
                 continue;
-            updates.push_back({meta.channel, compute_frustum(impl_->scene_.camera, meta)});
+            updates.push_back({meta.channel,
+                               compute_frustum(impl_->scene_.camera,
+                                               core::resolve_world_pose(impl_->scene_.screens,
+                                                                        meta.name))});
         }
     }
     // Lock released — safe to call external callbacks (stage transforms)
@@ -2956,7 +2996,8 @@ screen_projection previz_renderer::compute_screen_projection(const std::string& 
     auto it = impl_->scene_.screens.find(screen_name);
     if (it == impl_->scene_.screens.end())
         return {};
-    return compute_frustum(impl_->scene_.camera, it->second);
+    return compute_frustum(impl_->scene_.camera,
+                           core::resolve_world_pose(impl_->scene_.screens, screen_name));
 }
 
 }}} // namespace caspar::accelerator::ogl

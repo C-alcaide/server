@@ -7004,6 +7004,24 @@ std::wstring previz_screen_command(command_context& ctx)
             float arc_v = std::stof(u8(ctx.parameters.at(2)));
             ogl_mix->set_screen_arc_v(name, arc_v);
             return L"202 PREVIZ OK\r\n";
+        } else if (sub == L"PARENT") {
+            // SCREEN <name> PARENT <parent>|NONE   (hierarchy: a wall on a truss)
+            //
+            // The child's own position and rotation are NOT rewritten, which is the convention
+            // every stage visualiser with a hierarchy uses and the one thing an operator must be
+            // told: attaching a parent does not move the stored numbers, it changes what they are
+            // measured FROM. The screen therefore jumps when it gains a parent, and the published
+            // `world_position` is what says where it landed.
+            if (ctx.parameters.size() < 3)
+                return L"400 PREVIZ ERROR usage: SCREEN <name> PARENT <parent>|NONE\r\n";
+            const auto parent = u8(ctx.parameters.at(2));
+            const bool detach = boost::iequals(ctx.parameters.at(2), L"NONE") ||
+                                boost::iequals(ctx.parameters.at(2), L"STAGE");
+            if (!ogl_mix->set_screen_parent(name, detach ? std::string{} : parent))
+                return L"400 PREVIZ ERROR PARENT refused: no screen named " +
+                       ctx.parameters.at(2) +
+                       L", or it would close a cycle\r\n";
+            return L"202 PREVIZ OK\r\n";
         } else if (sub == L"ICVFX") {
             // SCREEN <name> ICVFX 1|0   (enable inner/outer frustum in-camera VFX)
             if (ctx.parameters.size() < 3)

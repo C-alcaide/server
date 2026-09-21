@@ -872,6 +872,52 @@ next battery on this surface:
 
 ---
 
+### 1.3 Hierarchy — `SCREEN <name> PARENT <parent>|NONE`
+
+A screen can be parented to another, so that moving the parent moves the child with it: a wall on
+a truss, a set of panels that travel as one piece. Added 2026-09-21, and it is the structural
+feature previz lacked rather than a convenience — every stage visualiser with a hierarchy has one,
+and without it a rig can only be modelled as independent rectangles that an operator must keep in
+step by hand.
+
+```
+PREVIZ 1 SCREEN ADD truss FLAT 2 1
+PREVIZ 1 SCREEN truss POSITION 1 3 -2
+PREVIZ 1 SCREEN ADD panel FLAT 2 1
+PREVIZ 1 SCREEN panel POSITION 2 0 0
+PREVIZ 1 SCREEN panel PARENT truss
+```
+
+**`POSITION` and `ROTATION` become LOCAL when a screen has a parent** — measured from the parent's
+origin and axes rather than from the stage. Attaching a parent does **not** rewrite them, so the
+screen JUMPS at the moment it is attached. That is the convention, and it is the one thing to tell
+an operator before they use the command.
+
+| | panel local | panel world |
+| :--- | :--- | :--- |
+| unparented | (2, 0, 0) | (2, 0, 0) |
+| parented to `truss` at (1, 3, -2) | (2, 0, 0) | (3, 3, -2) |
+| — then truss yawed 90 deg | (2, 0, 0) | (1, 3, -4) |
+
+The third row is the point: the child **orbits**. Its distance from the truss is 2.0 m in both
+poses, because a rotation is an isometry — and that property, rather than a second copy of the
+matrix maths, is what the self-test asserts.
+
+`PARENT NONE` (or `STAGE`) detaches, and the screen returns to reading its stored numbers as world
+coordinates. A parent that does not exist, a screen parented to itself, and any attachment that
+would close a cycle are all refused with `400`.
+
+**Both poses are published.** `previz/screen/<name>/position` is what the operator typed;
+`world_position` and `world_rotation` are where it is, and are published for every screen
+including unparented ones, where they are equal. Publishing only one of them would leave a client
+unable to answer either *"where is this"* or *"what did I set"*. `parent` is published read-only:
+it is a NAME whose legality depends on the rest of the document, and the generic value-write path
+coerces numbers into fields and cannot ask whether a screen exists or whether an attachment closes
+a loop.
+
+*What this does not do yet:* venue MESHES cannot be parented (they have a pose, but no parent),
+and nothing can be parented to a mesh or to a camera.
+
 ## 5. Known gaps
 
 1. **Picture coverage exists for `MAP` only, since 2026-09-05** — `cli.py previz-picture`, §4.

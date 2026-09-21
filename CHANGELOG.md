@@ -36,6 +36,49 @@ requires a refusal, then sends **both** `ON` and `OFF` and requires both to be a
 control is not enough, because a command that accepted only its ON word would still be unable to
 express the thing an operator most needs to say.
 
+### FEATURE: a previz screen can be PARENTED to another — a wall on a truss
+
+`PREVIZ <ch> SCREEN <name> PARENT <parent>|NONE`. Moving the parent moves the child with it, which
+is what lets a rig be modelled rather than a set of independent rectangles. Every stage visualiser
+with a hierarchy has this; previz had none, and it is the structural gap rather than a convenience.
+
+**The child's own position and rotation are NOT rewritten when it gains a parent** — they become
+LOCAL, measured from the parent instead of from the stage. That is the convention the products
+that have this feature use, and the one thing an operator must be told: the screen JUMPS on
+attach, and `world_position` is what says where it landed. Measured: a panel at (2, 0, 0) under a
+truss at (1, 3, -2) resolves to (3, 3, -2); yaw the truss 90 degrees and the panel ORBITS to
+(1, 3, -4), its distance from the truss unchanged at 2.0 m.
+
+**ONE RESOLVER, AND EVERY READER GOES THROUGH IT.** Forty-odd sites read `rot_yaw` and `pos_x`
+directly, so teaching each of them the hierarchy would be this tree's seven-readers trap at a
+larger scale. The pose is resolved ONCE, at the point a screen is drawn, picked or projected, and
+every one of those sites still reads the same fields — they simply receive world values.
+
+The composition is done in matrices and handed back as `Ry*Rx*Rz` Euler angles, because that is
+the convention the rest of `stage_math` is written in. The decomposition is exact for the
+composition: from `R = Ry(a)Rx(b)Rz(c)`, `b = asin(-R12)`, `c = atan2(R10, R11)`, `a = atan2(R02,
+R22)` — with the gimbal case (pitch at +/-90, where only the SUM of yaw and roll is observable)
+giving roll to 0 and the turn to yaw, which is a choice and is documented as one.
+
+**Both the LOCAL and the WORLD pose are published.** A client drawing a stage needs where a screen
+IS; an operator editing one needs what they typed. `parent` and `world_position`/`world_rotation`
+sit outside the descriptor table deliberately — `parent` is a NAME whose legality depends on the
+rest of the document, and the generic write path coerces numbers into fields and cannot ask
+whether a screen exists or whether an attachment closes a cycle.
+
+**A cycle is refused with a 400 and ALSO survived by the resolver.** The command checks; the
+resolver bounds its walk by the screen count anyway, because a layout file is hand-editable and a
+render thread is not the place to discover a malformed document.
+
+Verified: `stage_math_self_test` **176 checks, 0 divergences** (149 before — 27 new). The oracles
+are properties rather than the implementation restated: single-axis rotation is ADDITIVE
+(`Ry(a)Ry(b) == Ry(a+b)`, true of rotation and not of this code), the decomposition ROUND-TRIPS
+to the matrix product element for element, a parent rotation is an ISOMETRY so the child orbits at
+a fixed radius, two levels compose to the same place as one pre-composed level, and an unparented
+screen resolves BYTE-IDENTICALLY — the regression guard for a change that touches the pose every
+other check reads. Regression: `api-stage` 22/22, `previz-place` 21/21, `previz-gizmo` 43/43,
+`previz-colour` 6/6, `icvfx-mask` 21/21.
+
 ### BEHAVIOUR: a previz channel publishes WHICH TEXTURE PATH it is on
 
 `channel/N/mixer/previz/bridge` — `native`, `zero-copy` or `cpu-fallback`. New leaf, published

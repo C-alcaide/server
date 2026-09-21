@@ -37,6 +37,142 @@ namespace caspar { namespace core {
 // changes which slice of the equirectangular it displays.  The camera
 // position still affects the FOV (apparent angular size of the panel).
 
+void compose_rotation(const float parent_ypr[3], const float child_ypr[3], float out_ypr[3])
+{
+    const auto p = mat4::rotate_y(parent_ypr[0]) * mat4::rotate_x(parent_ypr[1]) *
+                   mat4::rotate_z(parent_ypr[2]);
+    const auto c = mat4::rotate_y(child_ypr[0]) * mat4::rotate_x(child_ypr[1]) *
+                   mat4::rotate_z(child_ypr[2]);
+    const auto r = p * c;
+
+    // COLUMN-MAJOR, m[col * 4 + row] -- the same reading `compute_frustum` below relies on when
+    // it takes the screen normal from m[8], m[9], m[10] as the third COLUMN.
+    const float R12 = r.m[9];   // row 1, col 2
+    const float R10 = r.m[1];
+    const float R11 = r.m[5];
+    const float R02 = r.m[8];
+    const float R22 = r.m[10];
+    const float R00 = r.m[0];
+    const float R20 = r.m[2];
+
+    const float sb    = std::clamp(-R12, -1.0f, 1.0f);
+    const float pitch = std::asin(sb);
+    const float cb    = std::cos(pitch);
+
+    float yaw, roll;
+    if (std::fabs(cb) > 1e-6f) {
+        roll = std::atan2(R10, R11);
+        yaw  = std::atan2(R02, R22);
+    } else {
+        // Gimbal: pitch is +/-90 and only the SUM of yaw and roll is observable. Roll takes 0
+        // and yaw carries the turn, which is a choice rather than a derivation -- stated here
+        // because a reader comparing two angle triples at that pitch will otherwise think one
+        // of them is wrong.
+        roll = 0.0f;
+        yaw  = std::atan2(-R20, R00);
+    }
+
+    constexpr float RAD2DEG = 57.295779513082320876798154814105f;
+    out_ypr[0]              = yaw * RAD2DEG;
+    out_ypr[1]              = pitch * RAD2DEG;
+    out_ypr[2]              = roll * RAD2DEG;
+}
+
+void compose_pose(const float parent_pos[3],
+                  const float parent_ypr[3],
+                  const float child_pos[3],
+                  const float child_ypr[3],
+                  float       out_pos[3],
+                  float       out_ypr[3])
+{
+    const auto p = mat4::rotate_y(parent_ypr[0]) * mat4::rotate_x(parent_ypr[1]) *
+                   mat4::rotate_z(parent_ypr[2]);
+
+    // The child's offset travels through the parent's rotation -- which is what makes a child
+    // ORBIT rather than slide. m[col * 4 + row] again.
+    const float lx = child_pos[0], ly = child_pos[1], lz = child_pos[2];
+    out_pos[0] = parent_pos[0] + p.m[0] * lx + p.m[4] * ly + p.m[8] * lz;
+    out_pos[1] = parent_pos[1] + p.m[1] * lx + p.m[5] * ly + p.m[9] * lz;
+    out_pos[2] = parent_pos[2] + p.m[2] * lx + p.m[6] * ly + p.m[10] * lz;
+
+    compose_rotation(parent_ypr, child_ypr, out_ypr);
+}
+
+bool parent_would_cycle(const std::map<std::string, screen_meta>& screens,
+                        const std::string&                        child,
+                        const std::string&                        parent)
+{
+    if (parent.empty())
+        return false;
+    if (parent == child)
+        return true;
+    // Walk UP from the proposed parent: if `child` is anywhere on that chain, attaching would
+    // close the loop. Bounded by the screen count so a document that is ALREADY looped cannot
+    // hang the check that exists to prevent loops.
+    std::string cur = parent;
+    for (size_t guard = 0; guard <= screens.size(); ++guard) {
+        auto it = screens.find(cur);
+        if (it == screens.end() || it->second.parent.empty())
+            return false;
+        if (it->second.parent == child)
+            return true;
+        cur = it->second.parent;
+    }
+    return true;
+}
+
+screen_meta resolve_world_pose(const std::map<std::string, screen_meta>& screens,
+                               const std::string&                        name)
+{
+    auto self = screens.find(name);
+    if (self == screens.end())
+        return screen_meta{};
+
+    screen_meta meta = self->second;
+    if (meta.parent.empty())
+        return meta;
+
+    // Collect the chain from this screen UP to the stage, then apply it downward. Built as a
+    // list rather than recursively so the depth guard is explicit: a cycle costs a wrong
+    // position, never a hung render thread.
+    std::vector<const screen_meta*> chain;
+    std::string                     cur = meta.parent;
+    for (size_t guard = 0; guard <= screens.size(); ++guard) {
+        auto it = screens.find(cur);
+        if (it == screens.end())
+            break;
+        chain.push_back(&it->second);
+        if (it->second.parent.empty())
+            break;
+        cur = it->second.parent;
+    }
+
+    float pos[3] = {meta.pos_x, meta.pos_y, meta.pos_z};
+    float ypr[3] = {meta.rot_yaw, meta.rot_pitch, meta.rot_roll};
+    // Innermost parent first: each step re-expresses the accumulated pose in the next frame out,
+    // which is the same order the chain was collected in.
+    for (const auto* p : chain) {
+        const float ppos[3] = {p->pos_x, p->pos_y, p->pos_z};
+        const float pypr[3] = {p->rot_yaw, p->rot_pitch, p->rot_roll};
+        float       npos[3], nypr[3];
+        compose_pose(ppos, pypr, pos, ypr, npos, nypr);
+        pos[0] = npos[0]; pos[1] = npos[1]; pos[2] = npos[2];
+        ypr[0] = nypr[0]; ypr[1] = nypr[1]; ypr[2] = nypr[2];
+    }
+
+    meta.pos_x = pos[0]; meta.pos_y = pos[1]; meta.pos_z = pos[2];
+    meta.rot_yaw = ypr[0]; meta.rot_pitch = ypr[1]; meta.rot_roll = ypr[2];
+    return meta;
+}
+
+std::map<std::string, screen_meta> resolve_world_poses(const std::map<std::string, screen_meta>& screens)
+{
+    std::map<std::string, screen_meta> out;
+    for (const auto& [name, _] : screens)
+        out[name] = resolve_world_pose(screens, name);
+    return out;
+}
+
 screen_projection compute_frustum(const previz_camera& cam, const screen_meta& meta)
 {
     // Build screen rotation matrix (same Ry*Rx*Rz order as apply_screen_transform)
