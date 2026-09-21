@@ -2695,7 +2695,16 @@ struct image_mixer::impl
         auto* r = previz_ready_.load(std::memory_order_acquire);
         if (!r)
             return {};
-        previz_publisher_.refresh(r->stage_snapshot());
+        auto snap = r->stage_snapshot();
+        // THE ONE FACT ABOUT PREVIZ THAT ONLY THIS BACKEND HAS, and it was readable from a single
+        // start-up log line and nowhere else. Zero-copy imports the Vulkan image into GL; the
+        // fallback moves the whole raster through the host every frame. Same picture either way.
+        if (snap.flags.active)
+            snap.previz_bridge = previz_bridge_
+                                     ? (previz_bridge_->interop_available() ? "zero-copy"
+                                                                            : "cpu-fallback")
+                                     : "none";
+        previz_publisher_.refresh(snap);
         return previz_publisher_.published();
     }
 };

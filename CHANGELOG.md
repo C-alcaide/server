@@ -36,6 +36,34 @@ requires a refusal, then sends **both** `ON` and `OFF` and requires both to be a
 control is not enough, because a command that accepted only its ON word would still be unable to
 express the thing an operator most needs to say.
 
+### BEHAVIOUR: a previz channel publishes WHICH TEXTURE PATH it is on
+
+`channel/N/mixer/previz/bridge` — `native`, `zero-copy` or `cpu-fallback`. New leaf, published
+only while previz is active.
+
+**The fact existed in exactly one place before this: a start-up log line.** The Vulkan mixer
+composites in Vulkan and must get the result to an OpenGL previz renderer, either by importing the
+image (`GL_EXT_memory_object`) or through a host copy. `previz_texture_bridge` decides once at
+construction, logs which it chose, and published nothing. The two paths are not a performance
+nuance: **the CPU fallback is NOT IMPLEMENTED and renders every previz channel texture BLACK**,
+which the server also says in a warning. So on a box without GPU interop, previz shows black walls
+by design, and nothing outside the log could tell you that was why.
+
+Measured by forcing the flag: the wall reads (0, 0, 0) against a source of (60, 143, 210), with
+`bridge` correctly reporting `cpu-fallback`. On this box the real answer is `zero-copy`, and previz
+costs **no late frame up to twelve channels of 2160p50 on both mixers**.
+
+**A STRING RATHER THAN A BOOL**, because there are three states and not two — the OpenGL mixer
+renders previz on the device it composites on and has no bridge at all. A boolean that can name one
+of two directions is the shape `draw_params::node_fp16` already cost this tree: the missing side is
+unreachable rather than merely untested.
+
+**Empty while previz is inactive, and that is load-bearing.** `same_stage` decides "untouched" by
+comparing against a default-constructed snapshot, so a value set unconditionally would make every
+idle channel look touched and publish a whole previz sub-tree every tick — the defect `api-stage`
+caught on its first run, reached from the other direction. `previz-colour` gates both halves:
+6/6 both mixers, `api-stage` 22/22.
+
 ### BEHAVIOUR: `inner_eye_distance` reaches a shader -- it had been inert since 2026-06-21
 
 The inner frustum's own eye distance was in the transform, the field registry, the tween, both

@@ -165,6 +165,27 @@ struct stage_snapshot
     /// name. Publishing it is what turns "which mesh is this?" from a question an operator
     /// answers by opening the model in another program into a click.
     std::string                        selected_mesh;
+    /// WHICH TEXTURE PATH THIS CHANNEL'S PREVIZ IS ON -- "native", "zero-copy", "cpu-fallback",
+    /// or EMPTY when previz is not active.
+    ///
+    /// A STRING RATHER THAN A BOOL, and deliberately. There are three states and not two: the
+    /// OpenGL mixer renders previz on its own device and has no bridge to speak of, while the
+    /// Vulkan mixer composites in Vulkan and must get the result to a GL renderer -- either
+    /// through imported memory or by a round trip through the host. A boolean can name one of
+    /// two directions and this tree has already paid for that once, in `draw_params::node_fp16`:
+    /// the missing side is unreachable rather than merely untested.
+    ///
+    /// AND IT IS PUBLISHED BECAUSE THE FALLBACK IS SILENT. `previz_texture_bridge` decides at
+    /// construction whether GL memory import is supported and logs one line saying which it
+    /// chose; after that the two paths differ by a per-frame copy of the whole raster and
+    /// nothing outside the process can tell them apart. An operator whose previz quietly went
+    /// through the CPU would see a slower show and no reason for it.
+    ///
+    /// EMPTY WHEN PREVIZ IS INACTIVE, which is not tidiness: `same_stage` decides "untouched" by
+    /// comparing against a default-constructed snapshot, so a value set unconditionally would
+    /// make every idle channel look touched and publish a whole previz sub-tree per tick. That
+    /// is the defect `api-stage` caught on its first run, from the other direction.
+    std::string                        previz_bridge;
 };
 
 // Equality is deliberately NOT defined here. Comparing these structs member by member would be a

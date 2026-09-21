@@ -2226,7 +2226,14 @@ void image_mixer::set_cpu_readback_needed(bool needed) { impl_->renderer_.set_cp
 
 core::monitor::state image_mixer::state() const
 {
-    impl_->previz_publisher_.refresh(impl_->previz_renderer_.stage_snapshot());
+    auto snap = impl_->previz_renderer_.stage_snapshot();
+    // "native": this backend renders previz on the same device it composites on, so there is no
+    // bridge and no fallback to be on the wrong side of. Set only when previz is ACTIVE, because
+    // an untouched stage must stay byte-identical to a default-constructed one -- see the
+    // comment on the field.
+    if (snap.flags.active)
+        snap.previz_bridge = "native";
+    impl_->previz_publisher_.refresh(snap);
     return impl_->previz_publisher_.published();
 }
 
