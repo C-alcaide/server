@@ -11,8 +11,42 @@
 Geometry calibration for projection-mapped surfaces, driven from a **camera that
 films the projected surface** and applied through CasparVP's existing per-layer
 mixer geometry commands. This mirrors the camera-vision approach used by systems
-like disguise OmniCal, but the solve runs in the client and the result is pushed
-to the server over AMCP.
+like disguise OmniCal.
+
+> ## DECIDED 2026-09-22: THE SERVER APPLIES A SOLVE. IT DOES NOT PERFORM ONE.
+>
+> This page used to say *"the solve runs in the client and the result is pushed to the server over
+> AMCP"*. **There is no client**, so that sentence described an arrangement that no longer exists
+> and left the solve with no owner at all. The decision, written down rather than left implied:
+>
+> **CasparVP does not solve calibration and is not going to.** A camera-based solve is a system
+> — capture, pattern detection, correspondence, optimisation, and a camera model to go with it
+> — and building one inside a playout server is a decade of somebody else's work. disguise built
+> OmniCal; PIXERA integrates VIOSO; Hippotizer has projector-alignment in SHAPE. The correct move
+> for this fork is the one chapter 65 §4.4 already argued: **integrate, do not build.**
+>
+> **What the server DOES do is complete, and every part of it is measured:**
+>
+> | stage | command | covered by |
+> | :--- | :--- | :--- |
+> | corner pin | `MIXER PERSPECTIVE` | `geometry` |
+> | arbitrary warp | `MIXER MESH <file>` — glTF/GLB/OBJ, positions normalised to 0..1, UVs passed through | `geometry` |
+> | soft-edge blend, parametric | `MIXER PROJECTION_BLEND` | `projection` |
+> | soft-edge blend, arbitrary | `MIXER PROJECTION_BLEND_MASK <png>` | `blend-mask` |
+> | lens distortion | `MIXER PROJECTION_DISTORTION` | `projection` |
+>
+> **So a solved result already has somewhere to land.** A warp is a mesh and the server loads
+> meshes; a blend is an image and the server loads images. What is missing is not capability but
+> **packaging**: MPCDI is the interchange format the industry uses, and it carries the geometry
+> warp, the alpha map and the beta map together with the region description that says which
+> projector each belongs to. Importing it is a bounded parse-and-dispatch job against commands
+> that already exist and are already covered.
+>
+> **Status: MPCDI import is NOT built, and is the one thing owed here.** Until it is, a solved
+> result is applied by hand — export the warp as a mesh and the blend as a PNG, then send the two
+> commands. That is a real workflow rather than a gap, and it is worth saying so plainly: the
+> reason this page reads as unfinished is that it was written for a client, not because the server
+> cannot do the work.
 
 > The Projection tab is organised into sub-tabs that follow the calibration
 > phases:
