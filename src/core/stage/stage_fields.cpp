@@ -394,6 +394,11 @@ bool same_screen(const screen_meta& a, const screen_meta& b)
         if (a.world_pos[i] != b.world_pos[i] || a.world_rot[i] != b.world_rot[i])
             return false;
 
+    // The coverage is derived from the CAMERA, so it moves while every field on the screen holds
+    // still -- the same reason the world pose is compared above, from a different direction.
+    if (a.icvfx_coverage != b.icvfx_coverage)
+        return false;
+
     for (const auto& f : screen_fields())
         if (f.get(a) != f.get(b))
             return false;
@@ -541,6 +546,9 @@ void stage_publisher::refresh(const stage_snapshot& snap)
         // the origin.
         st["screen/" + name + "/world_position"] = {sm.world_pos[0], sm.world_pos[1], sm.world_pos[2]};
         st["screen/" + name + "/world_rotation"] = {sm.world_rot[0], sm.world_rot[1], sm.world_rot[2]};
+        // 1.0 means the camera's inner frustum is entirely on this wall; below that, the shot is
+        // running off its edge and the rest of the frame is looking at whatever is behind it.
+        st["screen/" + name + "/icvfx_coverage"] = sm.icvfx_coverage;
     }
 
     state_ = std::move(st);

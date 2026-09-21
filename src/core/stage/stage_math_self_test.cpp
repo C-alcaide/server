@@ -1154,6 +1154,52 @@ stage_math_report stage_math_self_test()
         }
     }
 
+    // ── 20. ICVFX COVERAGE ──────────────────────────────────────────────────────────────
+    //
+    // How much of the camera's frustum quad lands on the screen, 0..1. Every case here has an
+    // area that can be worked out on paper, which is the point: the function clips a polygon and
+    // takes a ratio of shoelace areas, and a test that re-implemented either half would agree
+    // with a wrong version of itself.
+    {
+        // The raster's own corners -- the default quad, and the state of every screen with ICVFX
+        // off. Exactly 1: not "close to", because a coverage that read 0.999 here would have a
+        // client warning about a shot that is perfectly framed.
+        const float full[8] = {-1.f, 1.f, 1.f, 1.f, 1.f, -1.f, -1.f, -1.f};
+        check("coverage/full", quad_coverage(full), 1.0, 0.0);
+
+        // Half off the right-hand edge: x from 0 to 2, so exactly half the area survives.
+        const float half[8] = {0.f, 1.f, 2.f, 1.f, 2.f, -1.f, 0.f, -1.f};
+        check("coverage/half-off", quad_coverage(half), 0.5, 1e-6);
+
+        // A CORNER overrun, where the answer is a product rather than a half and an
+        // implementation that clipped one axis and forgot the other reads 0.5 instead of 0.25.
+        const float corner[8] = {0.f, 2.f, 2.f, 2.f, 2.f, 0.f, 0.f, 0.f};
+        check("coverage/corner", quad_coverage(corner), 0.25, 1e-6);
+
+        // Entirely outside. 0, and distinguishable from the degenerate case below -- which is the
+        // distinction that stops a client alarming on a screen that simply has ICVFX off.
+        const float away[8] = {2.f, 1.f, 4.f, 1.f, 4.f, -1.f, 2.f, -1.f};
+        check("coverage/outside", quad_coverage(away), 0.0, 1e-9);
+
+        // A quad SMALLER than the screen is fully covered: coverage is the fraction of the SHOT
+        // that is on the wall, not the fraction of the wall the shot fills. Those are different
+        // questions and this one is the operator's.
+        const float tight[8] = {-0.5f, 0.5f, 0.5f, 0.5f, 0.5f, -0.5f, -0.5f, -0.5f};
+        check("coverage/inside-small", quad_coverage(tight), 1.0, 1e-9);
+
+        // Degenerate: zero area. 1.0 rather than 0 -- "no frustum" is not "off the wall", and the
+        // alternative raises an alarm on every screen that has ICVFX switched off.
+        const float degenerate[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+        check("coverage/degenerate", quad_coverage(degenerate), 1.0, 0.0);
+
+        // WINDING DOES NOT MATTER. The same quad wound the other way is the same area, and a
+        // screen mirrored by a negative scale reverses it -- an implementation using a signed
+        // shoelace returns a NEGATIVE ratio there, which clamps to 0 and reads as "entirely off
+        // the wall" on a screen that is perfectly covered.
+        const float reversed[8] = {0.f, -1.f, 2.f, -1.f, 2.f, 1.f, 0.f, 1.f};
+        check("coverage/winding", quad_coverage(reversed), 0.5, 1e-6);
+    }
+
     return rep;
 }
 

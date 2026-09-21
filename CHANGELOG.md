@@ -36,6 +36,37 @@ requires a refusal, then sends **both** `ON` and `OFF` and requires both to be a
 control is not enough, because a command that accepted only its ON word would still be unable to
 express the thing an operator most needs to say.
 
+### FEATURE: previz says how much of the shot is ON THE WALL — `icvfx_coverage`
+
+`channel/N/mixer/previz/screen/<name>/icvfx_coverage`, 0..1. **1.0 means the camera's inner
+frustum is entirely on this screen; below that, the shot is running off its edge and the rest of
+the frame is looking at whatever is behind it.** That is the question an ICVFX operator asks before
+a take, and previz could not answer it — it could only DRAW the footprint and leave the judgement
+to an eye on a viewport.
+
+**Derived from the quad the MASK SHADES WITH**, `compute_frustum`'s own `icvfx_q`, for the reason
+the footprint overlay already gives: a second intersection is free to drift from the one that
+shades, and an operator would be acting on a number that disagreed with the picture.
+
+**1.0 for a degenerate quad, not 0.** "No frustum" is not "off the wall", and the alternative
+raises an alarm on every screen that simply has ICVFX switched off.
+
+Measured on a 6 x 3.4 m wall at 4 m under a 20 degree lens: **1.0 square on, 0.982 at 20 degrees of
+pan, 0.569 at 30, 0.121 at 45.**
+
+Verified: `stage_math_self_test` **183 checks, 0 divergences** (176 before — 7 new, each an area
+that can be worked out on paper: the full raster exactly 1 with NO tolerance, a half overrun at
+0.5, a CORNER overrun at 0.25 where an implementation that clipped one axis reads 0.5, entirely
+outside at 0, a quad smaller than the screen at 1, the degenerate case, and a REVERSED winding — a signed shoelace returns a negative ratio there and reads as "entirely off the wall" on a
+screen that is perfectly covered). `icvfx-mask` 23/23 both mixers, where the arm's oracle is the
+server's OWN published quad clipped independently in the harness: two implementations of one
+definition, agreeing to **0.00000** over four camera poses.
+
+**Mutation-verified, and the division of labour is the result worth keeping**: clipping one axis
+only turns the self-test's CORNER arm red (0.500 against 0.250) and the battery's AGREEMENT arm
+red, while the arm that watches coverage FALL as the camera pans stays green — it still falls, so
+monotonicity cannot see a wrong clip and the independent cross-check is what does.
+
 ### FEATURE: the previz hierarchy spans VENUE MESHES — a screen can hang off an imported truss
 
 `PREVIZ <ch> MESH <name> PARENT <parent>|NONE`, and `SCREEN ... PARENT` now accepts a mesh name.

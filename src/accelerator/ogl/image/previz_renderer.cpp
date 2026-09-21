@@ -3071,6 +3071,16 @@ core::stage_snapshot previz_renderer::stage_snapshot() const
         meta.world_rot[0] = it->second.rot_yaw;
         meta.world_rot[1] = it->second.rot_pitch;
         meta.world_rot[2] = it->second.rot_roll;
+
+        // AND HOW MUCH OF THE CAMERA'S FRUSTUM LANDS ON THIS WALL. From `compute_frustum`'s own
+        // quad -- the one the mask shader uses -- so the number an operator acts on and the
+        // shading they are looking at cannot disagree. Only for ICVFX screens: elsewhere the quad
+        // is the raster's own corners and the answer is 1 by construction.
+        meta.icvfx_coverage =
+            meta.icvfx_enable
+                ? static_cast<float>(core::quad_coverage(
+                      compute_frustum(sc.camera, it->second).icvfx_q))
+                : 1.0f;
     }
     return out;
 }

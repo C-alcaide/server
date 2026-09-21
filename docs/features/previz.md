@@ -927,6 +927,33 @@ rebuilt when the mesh moves; a mesh hung off a screen is not rebuilt, only re-dr
 
 *What this does not do yet:* nothing can be parented to a CAMERA.
 
+### 1.4 How much of the shot is on the wall — `icvfx_coverage`
+
+Published per screen, 0..1, and derived from the same quad the ICVFX mask shades with:
+
+```
+GET /v1/value/channel/1/mixer/previz/screen/wall/icvfx_coverage
+```
+
+**1.0 means the camera's inner frustum is entirely on that screen.** Below that, the shot is
+running off its edge — 0.7 means three tenths of the frame is looking at whatever is behind the
+LED. It is the question an operator asks before a take, and previz could previously only draw the
+footprint and leave the judgement to an eye.
+
+Measured on a 6 x 3.4 m wall at 4 m under a 20 degree lens, panning the production camera:
+
+| camera yaw | coverage |
+| :--- | :--- |
+| 0 deg | 1.000 |
+| 20 deg | 0.982 |
+| 30 deg | 0.569 |
+| 45 deg | 0.121 |
+
+**It is 1.0 while ICVFX is off**, because the quad is then the raster's own corners — "no
+frustum" is not "off the wall", and reporting 0 there would alarm on every ordinary screen. A check
+written against this has to bear that in mind: *1.0 is also what an unwired coverage reports*, so
+the useful assertion is that it FALLS.
+
 ## 5. Known gaps
 
 1. **Picture coverage exists for `MAP` only, since 2026-09-05** — `cli.py previz-picture`, §4.

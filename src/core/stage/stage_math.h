@@ -196,6 +196,22 @@ struct pick
 /// Input is x0,y0,x1,y1,... Empty when the polygon misses the rectangle entirely.
 std::vector<std::pair<float, float>> clip_to_unit_rect(const float* pts, int count);
 
+/// How much of a frustum quad lands ON the screen: the clipped area over the whole area, 0..1.
+///
+/// THE OPERATOR'S QUESTION, and the one previz could not answer. `icvfx_q` is where the camera's
+/// frustum meets this screen's PLANE, which is unbounded -- so a lens wider than the wall, or a
+/// camera panned past its edge, puts corners outside the raster and part of the shot is simply
+/// not on LED. 1.0 is entirely on the wall; 0.0 is entirely off it; 0.6 means two fifths of the
+/// frame is looking at whatever is behind the screen.
+///
+/// Derived from `clip_to_unit_rect` rather than from a second intersection, for the reason the
+/// footprint overlay gives: the quad the SHADER masks with is the only one whose answer an
+/// operator can act on, and a second implementation is free to drift from it.
+///
+/// Returns 1.0 for a degenerate quad (zero area), because "no frustum" is not "off the wall" --
+/// reporting 0 there would raise an alarm on a screen that simply has ICVFX switched off.
+double quad_coverage(const float q[8]);
+
 /// Where the pointer meets a screen's PLANE, in the screen's own axes -- with NO bounds test.
 ///
 /// `compute_pick` answers "is the pointer on this screen", which means it rejects everything

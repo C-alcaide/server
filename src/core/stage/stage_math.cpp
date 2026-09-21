@@ -121,6 +121,37 @@ bool parent_would_cycle(const std::map<std::string, screen_meta>& screens,
     return true;
 }
 
+namespace {
+/// Shoelace, unsigned. Any winding, which matters because a mirrored screen reverses it.
+double polygon_area(const std::vector<std::pair<float, float>>& p)
+{
+    if (p.size() < 3)
+        return 0.0;
+    double a = 0.0;
+    for (size_t i = 0, n = p.size(); i < n; ++i) {
+        const auto& u = p[i];
+        const auto& v = p[(i + 1) % n];
+        a += double(u.first) * double(v.second) - double(v.first) * double(u.second);
+    }
+    return std::fabs(a) * 0.5;
+}
+} // namespace
+
+double quad_coverage(const float q[8])
+{
+    std::vector<std::pair<float, float>> whole;
+    whole.reserve(4);
+    for (int i = 0; i < 4; ++i)
+        whole.emplace_back(q[i * 2], q[i * 2 + 1]);
+
+    const double total = polygon_area(whole);
+    if (total <= 1e-9)
+        return 1.0;                       // degenerate: no frustum is not "off the wall"
+
+    const double inside = polygon_area(clip_to_unit_rect(q, 4));
+    return std::clamp(inside / total, 0.0, 1.0);
+}
+
 screen_meta resolve_world_pose(const std::map<std::string, screen_meta>& screens,
                                const std::string&                        name)
 {

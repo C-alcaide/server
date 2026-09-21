@@ -108,6 +108,12 @@ struct screen_meta
     /// instead of once per reader.
     float world_pos[3] = {0.0f, 0.0f, 0.0f};
     float world_rot[3] = {0.0f, 0.0f, 0.0f};
+    /// How much of the camera's inner frustum lands on this screen, 0..1. Derived, like the world
+    /// pose, and filled by the renderer from the same quad the mask shader uses.
+    ///
+    /// 1.0 while ICVFX is off, because the quad is then the raster's own corners -- "no frustum"
+    /// is not "off the wall", and reporting 0 there would raise an alarm on every ordinary screen.
+    float icvfx_coverage = 1.0f;
 };
 
 /// What `compute_frustum` produces for one screen: the orientation and field of view a channel
