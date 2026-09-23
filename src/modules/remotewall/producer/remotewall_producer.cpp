@@ -498,7 +498,15 @@ class remotewall_producer : public core::frame_producer
                     init_receiver();
                 }
                 result = ok ? L"" : L"402 CALL ERROR (unknown REMOTEWALL SET key)\r\n";
+            } else {
+                // NAMED, not silence. `result` starts empty and every unrecognised sub-verb fell
+                // straight past these branches to it, so `CALL 1-10 REMOTEWALL BANANA` answered
+                // 202 with an empty payload -- and so did `CALL 1-10 BANANA`, from the outer
+                // `if`. Same fall-through class as the four producers fixed on 2026-09-18.
+                result = L"403 CALL ERROR (REMOTEWALL takes INFO, CAMERA or SET <key> <value>)\r\n";
             }
+        } else {
+            result = L"403 CALL ERROR (this producer answers REMOTEWALL INFO | CAMERA | SET)\r\n";
         }
         std::promise<std::wstring> pr;
         pr.set_value(result);

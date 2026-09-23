@@ -159,12 +159,27 @@ static std::wstring tracking_bind_command(command_context& ctx)
             camera_id = std::stoi(cam_str);
 
         std::wstring mode_str = kwparam(ctx.parameters, L"MODE", L"360");
-        if (boost::iequals(mode_str, L"2D"))
+        // `360` IS NAMED rather than left as the initialiser, and the `else` is the fix. Until
+        // 2026-09-23 `mode` was initialised to `mode_360` above and this chain had no `else`, so
+        // `MODE=PREVIS` -- or any other typo -- bound a 360 tracker and answered 202. The
+        // operator gets a tracker that receives packets and moves nothing they were looking at,
+        // which reads as a broken tracker rather than a mistyped word.
+        //
+        // The 2026-09-19 sweep fixed `GENLOCK` and the other verbs that take a positional
+        // argument; `BIND`'s KEYWORD parameters were not swept, and this is the one that was
+        // hiding in them. `parse_protocol` above already throws, which is why the protocol
+        // half was never wrong.
+        if (boost::iequals(mode_str, L"360"))
+            mode = tracking_mode::mode_360;
+        else if (boost::iequals(mode_str, L"2D"))
             mode = tracking_mode::mode_2d;
         else if (boost::iequals(mode_str, L"PREVIZ"))
             mode = tracking_mode::mode_previz;
         else if (boost::iequals(mode_str, L"TARGET"))
             mode = tracking_mode::mode_target;
+        else
+            return L"400 TRACKING ERROR MODE takes 360, 2D, PREVIZ or TARGET, not " + mode_str +
+                   L"\r\n";
 
         // Grab stage from the current channel context
         auto stage_ptr = ctx.channel.stage;

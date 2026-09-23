@@ -893,6 +893,13 @@ origin and axes rather than from the stage. Attaching a parent does **not** rewr
 screen JUMPS at the moment it is attached. That is the convention, and it is the one thing to tell
 an operator before they use the command.
 
+**The hierarchy survives `SCENE SAVE`/`LOAD` since 2026-09-23, and did not when it shipped.** The
+parent was written to the file and read back into the map correctly; the rebuild loop then threw it
+away, because `add_screen_flat` assigns a default-constructed `screen_meta` over the entry and only
+eight fields were restored after it. So a rig built with this command came back as independent
+rectangles — the exact thing the feature exists to avoid — and every published number said it had
+worked. See §1.4a, which lost its panel size the same way.
+
 | | panel local | panel world |
 | :--- | :--- | :--- |
 | unparented | (2, 0, 0) | (2, 0, 0) |
@@ -1003,6 +1010,15 @@ boundaries says why.
 
 They are drawn for **every** screen that has them, not only the selected one — they describe the
 wall rather than the operator's current focus.
+
+**They survive `SCENE SAVE`/`LOAD` since 2026-09-23, and did not before.** `save_layout` never
+wrote them, and `load_layout` would have lost them anyway: its rebuild loop goes through
+`add_screen_flat`, which assigns a **default-constructed** `screen_meta` over the map entry, and it
+then restored only eight fields by hand. `parent` went the same way and was worse — it *was*
+written to the file and *was* read back into the map, and was then destroyed by the rebuild, so
+`SCREEN <name> PARENT` did not survive a round trip at all. The whole `screen_meta` is put back
+now, which is what `clone_screen` in the same file has always done and why it has never lost a
+field.
 
 ### 1.5 Reading the venue
 

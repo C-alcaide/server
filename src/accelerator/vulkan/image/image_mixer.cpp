@@ -63,6 +63,7 @@
 
 #include <any>
 #include <atomic>
+#include <mutex>
 #include <functional>
 #include <vector>
 
@@ -545,22 +546,99 @@ class image_renderer
     float                                   calibration_strength_ = 1.0f;
     bool                                    calibration_bypass_   = false;
 
+    // ── EVERYTHING ABOVE THAT AN AMCP COMMAND WRITES, UNDER ONE LOCK ──────────────────────
+    //
+    // `CALIBRATION LUT/BYPASS/CLEAR`, `MIXER OCIO_DISPLAY` and `MIXER OCIO_LOOK` reach their
+    // setters ON THE AMCP COMMAND THREAD, with no hop through the channel executor -- and the
+    // render thread reads all six of these every frame, once for the draw and once for the
+    // fingerprint. A `std::string` assignment racing a copy, and a `shared_ptr` assignment
+    // racing a read, are both HEAP-level races: they do not produce a wrong colour, they
+    // produce a corrupted allocator.
+    //
+    // That is not a hypothetical here. It is the same shape as `arm_node_preview` clearing
+    // `prev_fingerprint_` from the API executor, which corrupted the heap on 2026-09-11 and was
+    // misattributed twice -- first to a stale vtable, then to the mask code -- because heap
+    // corruption surfaces wherever it lands rather than where it was caused.
+    //
+    // ONE MUTEX, taken ONCE PER FRAME on the render side, rather than an atomic per member: the
+    // six have to be read as a SET (a display and its view are one selection, a LUT and its
+    // strength are one calibration), and six atomics read one at a time can straddle a write and
+    // give a combination that was never set. The cost is one uncontended acquire per frame
+    // against the string copies the same block already makes.
+    mutable std::mutex config_mutex_;
+
+    struct config_snapshot
+    {
+        std::shared_ptr<const core::lut3d_data> calibration_lut;
+        float                                   calibration_strength = 1.0f;
+        bool                                    calibration_bypass   = false;
+        std::string                             ocio_display;
+        std::string                             ocio_view;
+        std::string                             ocio_look;
+    };
+
+    config_snapshot snapshot_config() const
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        config_snapshot             s;
+        s.calibration_lut      = calibration_lut_;
+        s.calibration_strength = calibration_strength_;
+        s.calibration_bypass   = calibration_bypass_;
+        s.ocio_display         = ocio_display;
+        s.ocio_view            = ocio_view;
+        s.ocio_look            = ocio_look;
+        return s;
+    }
+
     void set_calibration_lut(std::shared_ptr<const core::lut3d_data> lut, float strength)
     {
-        calibration_lut_      = std::move(lut);
-        calibration_strength_ = strength;
-        // Invalidate the still-frame cache so the new LUT takes effect immediately.
-        prev_fingerprint_ = {};
-        cached_result_wrapper_.reset();
-        cached_result_cpu_ = {};
+        {
+            std::lock_guard<std::mutex> lock(config_mutex_);
+            calibration_lut_      = std::move(lut);
+            calibration_strength_ = strength;
+        }
+        // THE STILL-FRAME CACHE, DROPPED BY FLAG rather than from here. `prev_fingerprint_` owns
+        // a vector and belongs to the render thread; clearing it from this one is the 2026-09-11
+        // defect exactly. The render thread clears it at the top of the next frame, which is
+        // still "immediately" as far as the picture is concerned -- and clearing the fingerprint
+        // is enough on its own, because the cache hit tests it before it looks at the texture.
+        preview_drop_cache_.store(true, std::memory_order_release);
     }
 
     void set_calibration_bypass(bool bypass)
     {
-        calibration_bypass_ = bypass;
-        prev_fingerprint_ = {};
-        cached_result_wrapper_.reset();
-        cached_result_cpu_ = {};
+        {
+            std::lock_guard<std::mutex> lock(config_mutex_);
+            calibration_bypass_ = bypass;
+        }
+        preview_drop_cache_.store(true, std::memory_order_release);
+    }
+
+    /// The OCIO selection, written from the AMCP thread like the calibration above and read by
+    /// the render thread through `snapshot_config`.
+    void set_ocio_selection(const std::string& display, const std::string& view)
+    {
+        {
+            std::lock_guard<std::mutex> lock(config_mutex_);
+            ocio_display = display;
+            ocio_view    = view;
+        }
+        preview_drop_cache_.store(true, std::memory_order_release);
+    }
+
+    void set_ocio_look_value(const std::string& look)
+    {
+        {
+            std::lock_guard<std::mutex> lock(config_mutex_);
+            ocio_look = look;
+        }
+        preview_drop_cache_.store(true, std::memory_order_release);
+    }
+
+    std::string ocio_look_value() const
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        return ocio_look;
     }
 
     explicit image_renderer(const spl::shared_ptr<device>& vulkan,
@@ -782,13 +860,19 @@ class image_renderer
         // synchronisation. The command-buffer reset stays on the device thread with its pool.
         kernel_.wait_for_next_slot();
 
+        // ONE SNAPSHOT for all six AMCP-written values -- see `config_mutex_`. Read as a set and
+        // once per frame, so the draw and the fingerprint cannot disagree about what the channel
+        // was configured with halfway through a frame. Taken BEFORE the capture list, because a
+        // capture initialiser reading the member directly is the race this exists to close.
+        const auto cfg = snapshot_config();
+
         auto f = std::move(vulkan_->dispatch_async(
-            [this, format_desc, cal_lut = calibration_lut_, cal_strength = calibration_strength_,
-             cal_bypass = calibration_bypass_, ws_composite = working_space_composite,
-             ch_display = ocio_display, ch_view = ocio_view,
+            [this, format_desc, cal_lut = cfg.calibration_lut, cal_strength = cfg.calibration_strength,
+             cal_bypass = cfg.calibration_bypass, ws_composite = working_space_composite,
+             ch_display = cfg.ocio_display, ch_view = cfg.ocio_view,
              // Applies to the primary AND every consumer view: a look is creative intent,
              // a view is the screen it goes to.
-             ch_look = ocio_look,
+             ch_look = cfg.ocio_look,
              views = (working_space_composite ? consumer_views_ : std::vector<core::ocio_view_key>{}),
              layers = std::move(layers)]() mutable -> core::render_output {
                 // THE RASTER IS `width x height`, NOT `square_width x square_height`.
@@ -974,12 +1058,18 @@ class image_renderer
         fp.auto_gamut_compress    = auto_gamut_compress;
         fp.straight_alpha_grading = straight_alpha_grading;
         fp.working_space_composite = working_space_composite;
-        fp.ocio_display           = ocio_display;
-        fp.ocio_view              = ocio_view;
-        fp.ocio_look              = ocio_look;
-        fp.calibration_lut        = calibration_lut_.get();
-        fp.calibration_strength   = calibration_strength_;
-        fp.calibration_bypass     = calibration_bypass_;
+        // THROUGH THE SNAPSHOT, like the draw above: these six are written by the AMCP thread
+        // and reading them raw here was half of the race `config_mutex_` closes. Reading them as
+        // a set also keeps the fingerprint honest -- a cache key assembled from a display taken
+        // before a write and a view taken after it names a configuration that never existed, and
+        // would go on matching a cached frame drawn with neither.
+        const auto cfg            = snapshot_config();
+        fp.ocio_display           = cfg.ocio_display;
+        fp.ocio_view              = cfg.ocio_view;
+        fp.ocio_look              = cfg.ocio_look;
+        fp.calibration_lut        = cfg.calibration_lut.get();
+        fp.calibration_strength   = cfg.calibration_strength;
+        fp.calibration_bypass     = cfg.calibration_bypass;
 
         int                                           path = 0;
         std::function<void(const std::vector<layer>&)> collect = [&](const std::vector<layer>& ls) {
@@ -2209,17 +2299,18 @@ struct image_mixer::impl
     void set_ocio_look(const std::string& look)
     {
         CASPAR_LOG(info) << L"[mixer] set_ocio_look look=\"" << u16(look) << L"\"";
-        renderer_.ocio_look = look;
+        renderer_.set_ocio_look_value(look);
     }
 
-    std::string get_ocio_look() const { return renderer_.ocio_look; }
+    std::string get_ocio_look() const { return renderer_.ocio_look_value(); }
 
     void set_ocio_display(const std::string& display, const std::string& view)
     {
         CASPAR_LOG(info) << L"[mixer] set_ocio_display display=\"" << u16(display)
                          << L"\" view=\"" << u16(view) << L"\"";
-        renderer_.ocio_display = display;
-        renderer_.ocio_view    = view;
+        // Through the setter, not the members: this runs on the AMCP command thread and the
+        // render thread reads both strings every frame. See `config_mutex_`.
+        renderer_.set_ocio_selection(display, view);
     }
 
     void set_consumer_views(std::vector<core::ocio_view_key> views)
@@ -2260,9 +2351,13 @@ struct image_mixer::impl
 
     core::ocio_display_state get_ocio_display() const
     {
+        // The SNAPSHOT, so the pair is read together: this is served to a client asking what
+        // the channel is set to, and a display from before a write beside a view from after it
+        // is a configuration the server was never in.
+        const auto               cfg = renderer_.snapshot_config();
         core::ocio_display_state st;
-        st.display = renderer_.ocio_display;
-        st.view    = renderer_.ocio_view;
+        st.display = cfg.ocio_display;
+        st.view    = cfg.ocio_view;
         st.enabled = !st.display.empty() && !st.view.empty();
         return st;
     }
@@ -2286,11 +2381,16 @@ struct image_mixer::impl
 
     core::calibration_lut_state get_calibration_state() const
     {
+        // The SNAPSHOT: this is `CALIBRATION INFO`'s answer, and the LUT pointer is dereferenced
+        // here -- reading it raw while `CALIBRATION CLEAR` runs on another connection is a read
+        // of a pointer being reassigned. The snapshot also keeps `size`, `strength` and `bypass`
+        // describing ONE calibration rather than two halves of a swap.
+        const auto                  cfg = renderer_.snapshot_config();
         core::calibration_lut_state s;
-        s.enabled  = static_cast<bool>(renderer_.calibration_lut_) && renderer_.calibration_lut_->size > 0;
-        s.bypass   = renderer_.calibration_bypass_;
-        s.size     = renderer_.calibration_lut_ ? renderer_.calibration_lut_->size : 0;
-        s.strength = renderer_.calibration_strength_;
+        s.enabled  = static_cast<bool>(cfg.calibration_lut) && cfg.calibration_lut->size > 0;
+        s.bypass   = cfg.calibration_bypass;
+        s.size     = cfg.calibration_lut ? cfg.calibration_lut->size : 0;
+        s.strength = cfg.calibration_strength;
         s.path     = calibration_path_;
         return s;
     }

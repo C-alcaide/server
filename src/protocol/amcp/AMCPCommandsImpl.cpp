@@ -144,6 +144,14 @@ namespace caspar { namespace protocol { namespace amcp {
 using namespace core;
 namespace pt = boost::property_tree;
 
+/// The ON/OFF parser and its error message, DECLARED here and defined beside the commands that
+/// were converted to them in the 2026-09-19 sweep. Declared at the top because the sweep's tenth
+/// instance -- `MIXER CHROMA`, found 2026-09-23 -- sits six hundred lines ABOVE the definition,
+/// and a boolean argument added above it should reach for these rather than write an eleventh
+/// parser because the name happened not to be in scope yet.
+std::optional<bool> parse_on_off(const std::wstring& arg);
+std::wstring on_off_error(const std::wstring& prefix, const std::wstring& what, const std::wstring& arg);
+
 std::wstring read_utf8_file(const boost::filesystem::path& file)
 {
     std::wstringstream           result;
@@ -1127,9 +1135,25 @@ std::future<std::wstring> mixer_chroma_command(command_context& ctx)
         duration = ctx.parameters.size() > 9 ? std::stoi(ctx.parameters.at(9)) : 0;
         tween    = ctx.parameters.size() > 10 ? ctx.parameters.at(10) : L"linear";
 
-        chroma.enable = ctx.parameters.at(0) == L"1";
+        // `at(0) == L"1"` until 2026-09-23, so `ON`, `true` and every typo silently DISABLED the
+        // key and answered 202 -- an operator asking for a chroma key and getting a hard cut,
+        // with nothing to read but success. Same class as the nine `parse_on_off` conversions of
+        // 2026-09-19; this one is a bare comparison rather than an if/else chain, which is why
+        // that sweep's grep did not reach it.
+        const auto chroma_on = parse_on_off(ctx.parameters.at(0));
+        if (!chroma_on)
+            return make_ready_future<std::wstring>(on_off_error(L"MIXER", L"CHROMA", ctx.parameters.at(0)));
+        chroma.enable = *chroma_on;
 
         if (chroma.enable) {
+            // The eight values the enabled form needs, named rather than thrown at. `at(8)`
+            // on a short command used to leave `std::out_of_range` to become a 500, which tells
+            // an operator the server broke rather than that they left an argument off.
+            if (ctx.parameters.size() < 9)
+                return make_ready_future<std::wstring>(
+                    L"400 MIXER ERROR CHROMA <1> takes 8 values: "
+                    L"target_hue hue_width min_saturation min_brightness softness "
+                    L"spill_suppress spill_suppress_saturation show_mask\r\n");
             chroma.target_hue                = std::stod(ctx.parameters.at(1));
             chroma.hue_width                 = std::stod(ctx.parameters.at(2));
             chroma.min_saturation            = std::stod(ctx.parameters.at(3));
@@ -1160,7 +1184,16 @@ std::future<std::wstring> mixer_blend_command(command_context& ctx)
         return reply_value(ctx, [](const frame_transform& t) { return get_blend_mode(t.image_transform.blend_mode); });
 
     transforms_applier transforms(ctx);
-    auto               value = get_blend_mode(ctx.parameters.at(0));
+    // REFUSED rather than read as `normal`. `get_blend_mode` used to answer `normal` for any
+    // name it did not know, and `normal` is how an operator turns blending OFF -- so a typo and
+    // a deliberate clear were the same command and both answered 202. The list comes from the
+    // enum so the message cannot drift from what is accepted.
+    const auto parsed = get_blend_mode(ctx.parameters.at(0));
+    if (!parsed)
+        return make_ready_future<std::wstring>(L"400 MIXER ERROR BLEND takes one of " +
+                                              blend_mode_names() + L", not " +
+                                              ctx.parameters.at(0) + L"\r\n");
+    const auto value = *parsed;
     transforms.add(stage::transform_tuple_t(
         ctx.layer_index(),
         [=](frame_transform transform) -> frame_transform {

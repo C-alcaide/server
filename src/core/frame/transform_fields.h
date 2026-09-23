@@ -359,4 +359,41 @@ self_test_report compose_self_test(void (*reference)(image_transform&, const ima
                                    unsigned iterations = 256,
                                    uint32_t seed       = 0x5EED5EEDu);
 
+/// TWEENING A TRANSFORM TO ITSELF MUST BE THE IDENTITY, and that is the whole of this check.
+///
+/// `image_transform::tween` builds a DEFAULT-CONSTRUCTED `result` and then assigns every field
+/// by hand. A field nobody assigns there is not left alone -- it is silently RESET to its
+/// default for the whole duration of the tween and snaps back at the end. That has now happened
+/// three times: `grade_nodes` (the look vanished for the length of every fade on a graphed
+/// layer), `node_plan`/`node_values` with it, and `ocio` (the input colour space switched off
+/// for the length of every fade on an OCIO layer). Each was found in a picture, months apart,
+/// by someone who happened to tween the right field on the right layer.
+///
+/// `tween(t, X, X, d, linear) == X` catches all of them and needs no model: with both endpoints
+/// equal, every interpolation returns its endpoint exactly, every snap-to-destination returns
+/// `X`, and `blur.enable`'s `source || dest` returns `X` too. So it holds for every field with
+/// NO exception list -- which is what makes it a check the next field addition cannot quietly
+/// fall outside of.
+///
+/// NOT written as "at `t == d` the result equals `dest`", which is the form that first suggests
+/// itself. That one is false by design for `blur.enable`, so it would need an exception list --
+/// and an exception list is the same hand-written thing whose drift this exists to catch.
+///
+/// And note what the expected value is NOT: `X` is randomised away from the default, so "nothing
+/// happened" reads as the DEFAULT transform and is distinguishable from a pass. An identity
+/// oracle whose expected value is also its failure mode cannot fail; this one can.
+///
+/// `fields` counts the members the fixture perturbs. The registry drives every declared field;
+/// the members it does not declare -- the blobs, the node plan, `ocio` -- are set by the block
+/// in the body, and THAT block is the one thing here that can go stale. A member added to
+/// `image_transform` and left out of it makes this test weaker for that member rather than
+/// wrong, so add it there when you add it to the struct.
+self_test_report tween_self_test(unsigned iterations = 64, uint32_t seed = 0x7EEEA000u);
+
+/// Run it at boot and log the outcome. THROWS on a divergence rather than warning, unlike
+/// `run_compose_self_test`: a divergence there is two rules disagreeing about a value, and both
+/// still render; a divergence here is a parameter that reverts to its default for the length of
+/// every fade, which is indistinguishable on air from an operator's own mistake.
+void run_tween_self_test();
+
 }}} // namespace caspar::core::fields

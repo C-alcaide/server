@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include <string>
 
 namespace caspar { namespace core {
@@ -60,7 +62,26 @@ enum class blend_mode
     blend_mode_count
 };
 
-blend_mode   get_blend_mode(const std::wstring& str);
-std::wstring get_blend_mode(blend_mode mode);
+/// A NAME THIS SERVER CAN ACTUALLY COMPOSITE, or nothing.
+///
+/// `std::optional`, not a `blend_mode`, and that is the fix. It returned `blend_mode::normal`
+/// for any name it did not recognise -- and `normal` is also the legitimate way to turn blending
+/// OFF, so a typo was indistinguishable from an operator clearing the mode and `MIXER <ch> BLEND
+/// bannana` answered `202 MIXER OK`. This tree's most repeated defect, in the one shape the
+/// 2026-09-19 sweep could not see: no `if/else if` chain over `boost::iequals` with a missing
+/// `else`, just a bare `return` at the bottom of a list of `if`s.
+///
+/// `mix` IS DELIBERATELY NOT ACCEPTED. It is the last enumerator of `blend_mode` and it is
+/// implemented by neither shader, so it composited as `normal` while the control API -- whose
+/// value list is generated from the same enum -- accepted it and read it back as "mix". A name
+/// that three facades disagree about is worse than one that does not exist, so both refuse it
+/// now and `BLEND_MODES` in `transform_fields.cpp` omits it. The enumerator stays where it is,
+/// because removing it would renumber `blend_mode_count` and every value above it.
+std::optional<blend_mode> get_blend_mode(const std::wstring& str);
+std::wstring              get_blend_mode(blend_mode mode);
+
+/// Every name `get_blend_mode` accepts, comma-separated, for an error message that tells the
+/// operator what to type instead of only that they were wrong.
+std::wstring blend_mode_names();
 
 }} // namespace caspar::core

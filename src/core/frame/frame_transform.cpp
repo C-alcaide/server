@@ -70,6 +70,15 @@ image_transform image_transform::tween(double                 time,
 {
     image_transform result;
 
+    // CARRIED, though nothing has depended on it. `stage::receive` sets this true on the
+    // foreground frame's own transform immediately after `tween.fetch()`, so the value the tween
+    // produced was overwritten before it could matter -- which is exactly why it was never
+    // noticed missing, and exactly the shape of the three fields that WERE missing and did
+    // matter. A tween that quietly drops a field it was handed is wrong whether or not somebody
+    // downstream happens to put it back, and `run_tween_self_test` -- which named this on its
+    // first run -- is the thing that would otherwise need an exception list to stay green.
+    result.enable_geometry_modifiers = dest.enable_geometry_modifiers;
+
     result.brightness          = do_tween(time, source.brightness, dest.brightness, duration, tween);
     result.contrast            = do_tween(time, source.contrast, dest.contrast, duration, tween);
     result.saturation          = do_tween(time, source.saturation, dest.saturation, duration, tween);
@@ -186,6 +195,24 @@ image_transform image_transform::tween(double                 time,
     result.gc_cyan    = do_tween(time, source.gc_cyan,    dest.gc_cyan,    duration, tween);
     result.gc_magenta = do_tween(time, source.gc_magenta, dest.gc_magenta, duration, tween);
     result.gc_yellow  = do_tween(time, source.gc_yellow,  dest.gc_yellow,  duration, tween);
+    // THE OCIO INPUT TRANSFORM, SNAPPED TO THE DESTINATION -- and this line is a BUG FIX, the
+    // same one the node graph got below and for the same reason. `result` is default-constructed
+    // and every field is assigned by hand here, so a field nobody assigns is not "left alone":
+    // it is RESET to its default. `ocio_transform::enable` defaults to false, so for the whole
+    // duration of any in-flight `MIXER <field> <v> <duration>` -- or any transition -- on a layer
+    // carrying `MIXER OCIO`, the tweened transform arrived at the kernel with OCIO switched OFF,
+    // and it snapped back on at the end. A colour pop for exactly the length of the fade.
+    //
+    // It shipped because nothing tweens a layer while an OCIO input space is set: the `ocio`
+    // battery drives the colour and never a duration, and every grading battery that uses a
+    // duration leaves `ocio` at its default, where the bug is invisible.
+    //
+    // SNAP rather than interpolate: `source_space` is a NAME, and there is no halfway between
+    // two colour spaces. `cache_id` rides along with it because it is the mixer's key for the
+    // processor built from that name -- carrying one without the other would key a shader
+    // variant on the wrong space.
+    result.ocio           = dest.ocio;
+
     result.lut3d          = dest.lut3d;  // snap to destination (can't interpolate LUT data)
     result.lut3d_strength = static_cast<float>(do_tween(time, static_cast<double>(source.lut3d_strength),
                                                          static_cast<double>(dest.lut3d_strength), duration, tween));
@@ -550,11 +577,25 @@ audio_transform audio_transform::tween(double                 time,
 {
     audio_transform result;
     result.volume = do_tween(time, source.volume, dest.volume, duration, tween);
+    // SNAPPED, for the same reason every discrete field in `image_transform::tween` is: there is
+    // no halfway between ramped and immediate. It is here at all because `result` is
+    // default-constructed and a member nobody assigns REVERTS -- the trap `run_tween_self_test`
+    // now guards on the image side. `immediate_volume` is a registered read_write field, so a
+    // client can set it, and before this line any tweened `MIXER VOLUME` on the same layer put it
+    // back to false mid-fade.
+    result.immediate_volume = dest.immediate_volume;
 
     return result;
 }
 
-bool operator==(const audio_transform& lhs, const audio_transform& rhs) { return eq(lhs.volume, rhs.volume); }
+// BOTH members. `immediate_volume` decides whether the audio mixer ramps across the frame's
+// samples (`audio_mixer.cpp`), so two transforms that differ only in it are not the same
+// transform -- and `stage::publish_layer_transform` had to compare it by hand, in its own
+// expression, precisely because this operator did not.
+bool operator==(const audio_transform& lhs, const audio_transform& rhs)
+{
+    return eq(lhs.volume, rhs.volume) && lhs.immediate_volume == rhs.immediate_volume;
+}
 
 bool operator!=(const audio_transform& lhs, const audio_transform& rhs) { return !(lhs == rhs); }
 

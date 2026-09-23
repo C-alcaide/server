@@ -33,6 +33,17 @@ std::shared_ptr<const stored_timeline> timeline_store::put(timeline_document doc
     const auto name = entry->document.name;
     {
         std::lock_guard<std::mutex> l(lock_);
+        // THE HIGHER REVISION WINS, not the slower resolve. Two clients PUTting the same name at
+        // once take revisions N and N+1 under the lock above and then resolve OUTSIDE it, so the
+        // one that took N can finish last and overwrite N+1 -- leaving the store holding the
+        // older document while the client that received N+1 has been told theirs is current.
+        //
+        // `retrigger` below already guards its own version of this and says why; `put` did not,
+        // and the window is exactly as long as `resolve()` takes, which for a large document is
+        // the most expensive thing in this file.
+        const auto it = docs_.find(name);
+        if (it != docs_.end() && it->second && it->second->document.revision > entry->document.revision)
+            return it->second;
         docs_[name] = entry;
     }
     return entry;

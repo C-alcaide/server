@@ -13,7 +13,13 @@
 
 #include <core/mixer/image/blend_modes.h>
 
+// For the tween self-test's fixture: `node_plan` is only forward-declared in frame_transform.h,
+// and the fixture has to construct one to give the pointer comparison something to compare.
+#include <core/graph/plan.h>
+
 #include <common/except.h>
+#include <common/log.h>
+#include <common/utf.h>
 
 #include <algorithm>
 #include <cmath>
@@ -97,7 +103,16 @@ namespace {
 constexpr const char* BLEND_MODES =
     "normal,lighten,darken,multiply,average,add,subtract,difference,negation,exclusion,screen,overlay,"
     "soft_light,hard_light,color_dodge,color_burn,linear_dodge,linear_burn,linear_light,vivid_light,"
-    "pin_light,hard_mix,reflect,glow,phoenix,contrast,saturation,color,luminosity,mix";
+    "pin_light,hard_mix,reflect,glow,phoenix,contrast,saturation,color,luminosity";
+// `mix` -- index 29, the last enumerator -- IS DELIBERATELY ABSENT, and its absence is the whole
+// of the fix. It is implemented by NEITHER shader, so a layer set to it composited as `normal`;
+// AMCP's `get_blend_mode` had no case for it either way, so `MIXER BLEND mix` also gave
+// `normal`; and this list DID carry it, so `PUT .../blend_mode = "mix"` was accepted and read
+// back as "mix". Three facades, three different answers, one of them a picture that matched
+// none of them. Omitting the name here makes the enumeration's published value list agree with
+// what the server can draw: a write of "mix" is now refused, and a layer somehow holding 29
+// reports "29" rather than a name that claims a mode. The enumerator itself stays, because
+// removing it would renumber `blend_mode_count`.
 
 constexpr const char* BLUR_TYPES  = "gaussian,box,directional,zoom,tilt_shift,lens";
 constexpr const char* SHAPE_TYPES = "rect,rounded_rect,circle,ellipse";
@@ -970,6 +985,11 @@ void apply_enables(image_transform& tf, const field_desc& field)
     if (!field.enables)
         return;
 
+    // A HAND-WRITTEN SWITCH OVER FOUR SENTINELS, which is a fifth place the registry can drift
+    // from. The `ENABLES` column holds a MEMBER PATH (`blur.enable`), not a registered field
+    // name, so nothing checks it: a new group whose sentinel is not one of these four compiles,
+    // stores, publishes and enables nothing -- a parameter that is written correctly and does not
+    // render, which is this file's whole subject. Add the arm when you add the group.
     const std::string_view e{field.enables};
     if (e == "enable_geometry_modifiers")
         tf.enable_geometry_modifiers = true;
@@ -1067,6 +1087,151 @@ self_test_report compose_self_test(void (*reference)(image_transform&, const ima
     }
 
     return rep;
+}
+
+// ---------------------------------------------------------------------------------------
+// The tween self-test
+//
+// `tween(t, X, X, d, linear) == X`. The header carries the account of why this form and not
+// the "arrives at dest" one.
+// ---------------------------------------------------------------------------------------
+
+self_test_report tween_self_test(unsigned iterations, uint32_t seed)
+{
+    self_test_report rep;
+    rep.iterations = iterations;
+
+    std::mt19937                           rng{seed};
+    std::uniform_real_distribution<double> unit{0.0, 1.0};
+    std::bernoulli_distribution            coin{0.5};
+
+    // THE MEMBERS THE REGISTRY DOES NOT DECLARE. Everything else is driven by the table, so
+    // this is the only part that can go stale -- see the header. Each is given a value that
+    // differs from the default in the way `operator==` compares it: the four blobs by POINTER
+    // IDENTITY (that is what `operator==` tests), `node_values` by content, `geometry_override`
+    // by being engaged at all, and the curve control points by their count.
+    const auto perturb_unregistered = [&](image_transform& t) {
+        t.lut3d       = std::make_shared<const lut3d_data>();
+        t.hue_curves  = std::make_shared<const hue_curve_data>();
+        t.blend_mask  = std::make_shared<const blend_mask_data>();
+        t.node_plan   = std::make_shared<const graph::node_plan>();
+        t.node_values = {0.25, 0.5, 0.75};
+        t.geometry_override = frame_geometry::get_default();
+        for (auto* c : {&t.curves.master, &t.curves.red, &t.curves.green, &t.curves.blue}) {
+            c->count     = 2;
+            c->points[0] = {0.0, 0.0};
+            c->points[1] = {1.0, 1.0};
+        }
+    };
+
+    const auto randomise = [&](image_transform& t) {
+        for (const auto& f : all()) {
+            if (f.type == value_type::blob || f.type == value_type::string || !f.set)
+                continue;
+            if (f.type == value_type::boolean) {
+                f.set(t, monitor::vector_t{coin(rng)});
+                continue;
+            }
+            if (f.type == value_type::enumeration) {
+                const auto names = split_list(f.values);
+                if (!names.empty())
+                    f.set(t, monitor::vector_t{static_cast<int32_t>(rng() % names.size())});
+                continue;
+            }
+            if (f.type == value_type::integer) {
+                f.set(t, monitor::vector_t{static_cast<int32_t>(rng() % 5)});
+                continue;
+            }
+            monitor::vector_t v;
+            for (uint8_t i = 0; i < f.arity; ++i) {
+                const double lo = f.range ? f.range->lo : -1.0;
+                const double hi = f.range ? f.range->hi : 1.0;
+                v.push_back(lo + unit(rng) * (hi - lo));
+            }
+            f.set(t, v);
+        }
+        perturb_unregistered(t);
+    };
+
+    rep.fields = static_cast<unsigned>(all().size()) + 7u; // + the unregistered block above
+
+    // Several points along the tween, INCLUDING both ends. 0 and `duration` take different
+    // paths through a tweener, and a field assigned only under a condition would otherwise be
+    // sampled at the one time the condition holds.
+    const double         duration = 50.0;
+    const double         times[]  = {0.0, 1.0, 12.5, 25.0, 49.0, 50.0};
+    const tweener        linear{L"linear"};
+    std::vector<bool>    already(all().size(), false);
+
+    for (unsigned i = 0; i < iterations; ++i) {
+        image_transform x;
+        randomise(x);
+
+        for (const double time : times) {
+            const auto out = image_transform::tween(time, x, x, duration, linear);
+            if (out == x)
+                continue;
+
+            ++rep.divergences;
+
+            // Name the field, as `compose_self_test` does: "they differ" sends the next reader
+            // to a 250-line function, "ocio_enable" sends them to a line.
+            const auto& tbl = all();
+            for (std::size_t k = 0; k < tbl.size(); ++k) {
+                if (already[k] || !tbl[k].get)
+                    continue;
+                if (tbl[k].get(out) == tbl[k].get(x))
+                    continue;
+                already[k] = true;
+                rep.diverged.emplace_back(tbl[k].path);
+            }
+            // The unregistered members have no table row to name them, so they are named here.
+            const auto note = [&](bool differs, const char* what) {
+                if (!differs)
+                    return;
+                if (std::find(rep.diverged.begin(), rep.diverged.end(), what) == rep.diverged.end())
+                    rep.diverged.emplace_back(what);
+            };
+            note(out.lut3d.get() != x.lut3d.get(), "lut3d");
+            note(out.hue_curves.get() != x.hue_curves.get(), "hue_curves");
+            note(out.blend_mask.get() != x.blend_mask.get(), "blend_mask");
+            note(out.node_plan.get() != x.node_plan.get(), "node_plan");
+            note(out.node_values != x.node_values, "node_values");
+            note(out.ocio != x.ocio, "ocio");
+            note(out.geometry_override.has_value() != x.geometry_override.has_value(),
+                 "geometry_override");
+            note(out.curves.master.count != x.curves.master.count, "curves");
+        }
+    }
+
+    return rep;
+}
+
+void run_tween_self_test()
+{
+    const auto rep = tween_self_test();
+
+    if (rep.divergences == 0) {
+        CASPAR_LOG(info) << L"[core] tween self-test: " << rep.fields << L" members, "
+                         << rep.iterations << L" iterations, 0 divergences.";
+        return;
+    }
+
+    // FATAL, unlike the compose self-test's warning, and for the reason the header gives: a
+    // field dropped here is not a disagreement between two rules that both render something --
+    // it is a parameter that silently reverts to its default for the length of every fade, and
+    // the three instances so far were each found in a picture months after they shipped.
+    std::wstring names;
+    for (const auto& d : rep.diverged) {
+        if (!names.empty())
+            names += L", ";
+        names += u16(d);
+    }
+    CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(
+        u8(L"[core] tween self-test FAILED: " + std::to_wstring(rep.divergences) +
+           L" divergences. `image_transform::tween` does not assign: " + names +
+           L" -- so the field reverts to its default for the length of every tween. "
+           L"Add it to `image_transform::tween` in core/frame/frame_transform.cpp.")));
 }
 
 }}} // namespace caspar::core::fields

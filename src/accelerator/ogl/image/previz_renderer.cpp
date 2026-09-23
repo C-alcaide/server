@@ -2276,6 +2276,11 @@ void previz_renderer::save_layout(const std::string& path) const
             s.put("pos_x", m.pos_x); s.put("pos_y", m.pos_y); s.put("pos_z", m.pos_z);
             s.put("rot_yaw", m.rot_yaw); s.put("rot_pitch", m.rot_pitch); s.put("rot_roll", m.rot_roll);
             s.put("res_w", m.res_w); s.put("res_h", m.res_h);
+            // The LED PANEL size. Written because it is a property an operator sets and a
+            // reloaded layout that has lost it draws no panel boundaries -- which is
+            // indistinguishable from the feature not working. `tile_cols`/`tile_rows` are
+            // DERIVED from this and the resolution, so they are not written.
+            s.put("tile_w_px", m.tile_w_px); s.put("tile_h_px", m.tile_h_px);
             s.put("channel", m.channel);
             s.put("eye_mode", m.eye_mode);
             s.put("design_eye_x", m.design_eye_x);
@@ -2288,6 +2293,36 @@ void previz_renderer::save_layout(const std::string& path) const
             screens.push_back(std::make_pair("", s));
         }
         root.put_child("screens", screens);
+
+        // ── THE VENUE MESHES' CORRECTIONS, not their geometry ────────────────────────────
+        //
+        // `model_path` above restores the meshes themselves; what it cannot restore is what an
+        // operator did to them afterwards. `PREVIZ MESH <name> POSE`, `PARENT` and
+        // `PREVIZ SHOW` were all stored, published and lost on the next `LOAD` -- a correction
+        // an operator spent a session getting right, gone with no message.
+        //
+        // Skipped for a mesh that carries a SCREEN (`is_screen`), whose pose lives in the
+        // `screens` block above and would otherwise be written twice and disagree, and for one
+        // sitting at its model-given defaults -- which is most of a venue, and writing those
+        // rows would make the file grow with the model rather than with the edits.
+        pt::ptree meshes;
+        for (const auto& mesh : sc.meshes) {
+            if (mesh.is_screen)
+                continue;
+            const bool moved = mesh.pos != std::array<float, 3>{0.0f, 0.0f, 0.0f} ||
+                               mesh.rot != std::array<float, 3>{0.0f, 0.0f, 0.0f};
+            if (!moved && mesh.parent.empty() && mesh.visible)
+                continue;
+            pt::ptree n;
+            n.put("name", mesh.name);
+            n.put("pos_x", mesh.pos[0]); n.put("pos_y", mesh.pos[1]); n.put("pos_z", mesh.pos[2]);
+            n.put("rot_yaw", mesh.rot[0]); n.put("rot_pitch", mesh.rot[1]); n.put("rot_roll", mesh.rot[2]);
+            n.put("parent", mesh.parent);
+            n.put("visible", mesh.visible);
+            meshes.push_back(std::make_pair("", n));
+        }
+        if (!meshes.empty())
+            root.put_child("meshes", meshes);
     }
 
     pt::write_json(path, root);
@@ -2346,6 +2381,8 @@ void previz_renderer::load_layout(const std::string& path)
                 m.rot_roll  = s.get("rot_roll", 0.0f);
                 m.res_w     = s.get("res_w", 0);
                 m.res_h     = s.get("res_h", 0);
+                m.tile_w_px = s.get("tile_w_px", 0);
+                m.tile_h_px = s.get("tile_h_px", 0);
                 m.channel   = s.get("channel", -1);
                 m.eye_mode  = s.get("eye_mode", 0);
                 m.design_eye_x = s.get("design_eye_x", 0.0f);
@@ -2368,14 +2405,35 @@ void previz_renderer::load_layout(const std::string& path)
             restored = impl_->scene_.screens;
         }
         for (const auto& [name, m] : restored) {
+            // A SCREEN IS A MESH AS WELL AS A `screen_meta`, so it is rebuilt through the same
+            // path that creates one -- and `add_screen_flat` assigns a DEFAULT-CONSTRUCTED
+            // `screen_meta` over the map entry, wiping everything the loop above just read.
+            //
+            // THEN THE WHOLE META IS PUT BACK, rather than eight fields by hand. The hand-written
+            // form is what this was and it silently lost `parent` -- written to the file, read
+            // back into the map, and destroyed here -- so screen parenting did not survive a
+            // save/load at all, and the LED tile size did not either. `clone_screen` in this file
+            // has always done it this way and has never lost a field; the two now agree.
             if (m.radius_m > 1e-4f && m.arc_deg > 1e-4f)
                 add_screen_curved(name, m.width_m, m.height_m, m.radius_m, m.arc_deg);
             else
                 add_screen_flat(name, m.width_m, m.height_m);
+            {
+                std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                const auto                  it = impl_->scene_.screens.find(name);
+                if (it != impl_->scene_.screens.end())
+                    it->second = m;
+            }
+            // Still driven through the setters, because each of these does work BEYOND the
+            // struct: a resize rebuilds the mesh and re-derives the pitch, a resolution change
+            // re-derives the panel counts, and a channel mapping registers with the texture
+            // store. Writing the meta alone would leave the map right and the scene wrong.
             set_screen_position(name, m.pos_x, m.pos_y, m.pos_z);
             set_screen_rotation(name, m.rot_yaw, m.rot_pitch, m.rot_roll);
             if (m.res_w > 0 && m.res_h > 0)
                 set_screen_resolution(name, m.res_w, m.res_h);
+            if (m.tile_w_px > 0 && m.tile_h_px > 0)
+                set_screen_tile(name, m.tile_w_px, m.tile_h_px);
             set_screen_arc_v(name, m.arc_v_deg);
             set_screen_eye_mode(name, m.eye_mode, m.design_eye_x, m.design_eye_y, m.design_eye_z);
             set_screen_icvfx(name, m.icvfx_enable);
@@ -2383,6 +2441,25 @@ void previz_renderer::load_layout(const std::string& path)
                 set_screen_channel(name, m.channel);
         }
     }
+    // The venue meshes' corrections, AFTER the screens: a mesh may be parented to a screen and
+    // the parent has to exist for the write to be accepted. Applied through the setters for the
+    // same reason the screens are -- `set_mesh_parent` refuses a cycle and rebuilds the meshes
+    // the move affects, neither of which a straight field write would do.
+    if (auto meshes = root.get_child_optional("meshes")) {
+        for (const auto& [_, n] : *meshes) {
+            const auto name = n.get("name", std::string());
+            if (name.empty())
+                continue;
+            const float pos[3] = {n.get("pos_x", 0.0f), n.get("pos_y", 0.0f), n.get("pos_z", 0.0f)};
+            const float rot[3] = {n.get("rot_yaw", 0.0f), n.get("rot_pitch", 0.0f), n.get("rot_roll", 0.0f)};
+            set_mesh_pose(name, pos, rot);
+            const auto parent = n.get("parent", std::string());
+            if (!parent.empty())
+                set_mesh_parent(name, parent);
+            set_mesh_visible(name, n.get("visible", true));
+        }
+    }
+
     update_projections();
     CASPAR_LOG(info) << L"[previz] Loaded stage layout from " << u16(path);
 }

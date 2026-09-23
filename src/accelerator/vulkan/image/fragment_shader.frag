@@ -337,6 +337,10 @@ float BlendHardMixf(float b,float l){ return (BlendVividLightf(b,l)<0.5)?0.0:1.0
 float BlendReflectf(float b,float l){ return (l==1.0)?l:min(b*b/(1.0-l),1.0); }
 
 vec3 Blend3Screen(vec3 b,vec3 l){ return vec3(BlendScreenf(b.r,l.r),BlendScreenf(b.g,l.g),BlendScreenf(b.b,l.b)); }
+// Added 2026-09-23 with `case 12`: `BlendSoftLightf` was defined above and called by nothing,
+// exactly as in the OpenGL shader. The per-channel formula is character-identical to that one,
+// which is what makes the two backends agree without a parity check having to discover it.
+vec3 Blend3SoftLight(vec3 b,vec3 l){ return vec3(BlendSoftLightf(b.r,l.r),BlendSoftLightf(b.g,l.g),BlendSoftLightf(b.b,l.b)); }
 vec3 Blend3Overlay(vec3 b,vec3 l){ return vec3(BlendOverlayf(b.r,l.r),BlendOverlayf(b.g,l.g),BlendOverlayf(b.b,l.b)); }
 vec3 Blend3ColorDodge(vec3 b,vec3 l){ return vec3(BlendColorDodgef(b.r,l.r),BlendColorDodgef(b.g,l.g),BlendColorDodgef(b.b,l.b)); }
 vec3 Blend3ColorBurn(vec3 b,vec3 l){ return vec3(BlendColorBurnf(b.r,l.r),BlendColorBurnf(b.g,l.g),BlendColorBurnf(b.b,l.b)); }
@@ -365,6 +369,7 @@ vec3 get_blend_color(vec3 b, vec3 fg) {
     case 9: return b+fg-2.0*b*fg;
     case 10: return Blend3Screen(b,fg);
     case 11: return Blend3Overlay(b,fg);
+    case 12: return Blend3SoftLight(b,fg);
     case 13: return Blend3Overlay(fg,b);
     case 14: return Blend3ColorDodge(b,fg);
     case 15: return Blend3ColorBurn(b,fg);

@@ -566,18 +566,26 @@ std::future<std::wstring> replay_producer::call(const std::vector<std::wstring>&
         // Capture params by value (copy)
         std::vector<std::wstring> args(params.begin() + 2, params.end());
         
-        // Reject if a previous export is still running
-        if (export_running_.load()) {
+        // ONE ATOMIC EXCHANGE, not a load followed by a store. The pair was a check-then-set:
+        // two `CALL ... EXPORT` arriving together could both read false, both fall through, and
+        // both reach the assignment below -- and move-assigning over a JOINABLE `std::thread`
+        // calls `std::terminate`. A busy server answering "BUSY" to the second export is the
+        // intended behaviour; taking the whole process down is not.
+        if (export_running_.exchange(true)) {
             auto promise = std::promise<std::wstring>();
-            promise.set_value(L"400 EXPORT BUSY");
+            promise.set_value(L"400 EXPORT BUSY\r\n");
             return promise.get_future();
         }
-        // Join finished thread if any
+        // The previous export's thread, now finished (its lambda cleared `export_running_` as its
+        // last act). Joined AFTER the claim above, so this is the only thread that can be here.
         if (export_thread_.joinable()) {
             export_thread_.join();
         }
-        export_running_.store(true);
-        
+
+        // The claim above is released by the thread's own last statement, so if the thread never
+        // STARTS -- the one way out of here that does not run it -- it has to be released by
+        // hand, or this producer refuses every later export for the rest of its life.
+        try {
         export_thread_ = std::thread([this, current_path_str, output_filename_w, args, fps]() {
             try {
                 CASPAR_LOG(info) << L"Export Thread Started for: " << output_filename_w;
@@ -710,8 +718,12 @@ std::future<std::wstring> replay_producer::call(const std::vector<std::wstring>&
             }
             export_running_.store(false);
         });
+        } catch (...) {
+            export_running_.store(false);
+            throw;
+        }
 
-        return caspar::make_ready_future(std::wstring(L"Export Started"));
+        return caspar::make_ready_future(std::wstring(L"Export Started\r\n"));
     }
 
     // The fall-through used to answer "OK" for ANY verb this producer does not implement, so

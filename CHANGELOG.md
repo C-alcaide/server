@@ -1,6 +1,187 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: `MIXER OCIO` was switched OFF for the whole of every tween
+
+`image_transform::tween` builds a default-constructed `result` and then assigns every field by
+hand, so a field nobody assigns there is not left alone — it is **reset to its default** for the
+length of the tween and snaps back at the end. `ocio` was one of those fields, and
+`ocio_transform::enable` defaults to false.
+
+So on a layer carrying `MIXER <ch> OCIO <space>`, every `MIXER <field> <value> <duration>` and
+every transition dropped the input colour space for exactly as long as the fade lasted. A colour
+pop at the start of the move and another at the end, on the one command whose whole job is that
+the colour does not change.
+
+It shipped because nothing tweens a layer with an OCIO input space set: the `ocio` battery drives
+colour and never a duration, and every battery that uses a duration leaves `ocio` at its default,
+where the bug is invisible.
+
+**This is the THIRD field lost the same way** — `grade_nodes`, then `node_plan`/`node_values`
+(the look vanished for the length of every fade on a graphed layer), now `ocio`. Each was found
+in a picture, months apart, by somebody who happened to tween the right field on the right layer.
+
+**So the class is closed rather than the instance.** `core::fields::run_tween_self_test()` runs at
+boot and asserts `tween(t, X, X, d, linear) == X` over a randomised transform at six points
+including both ends. With both endpoints equal, every interpolation returns its endpoint exactly
+and every snap-to-destination returns `X`, so the invariant holds for every field **with no
+exception list** — which is what makes it something the next field addition cannot quietly fall
+outside of. It is FATAL rather than a warning: a field dropped here is not two rules disagreeing,
+it is a parameter that reverts under every fade, and on air that is indistinguishable from an
+operator's own mistake.
+
+It found a fourth field on its first run: `enable_geometry_modifiers`, which `stage::receive` sets
+on the frame immediately after `tween.fetch()` — so the tween's answer was overwritten before it
+could matter, which is exactly why nobody had noticed. Now carried, like the rest.
+
+Also fixed beside it: `audio_transform::immediate_volume` was in neither `tween()` nor
+`operator==`, so a client write was reset by any tweened `MIXER VOLUME` on the same layer and no
+change detection could see it.
+
+Verified: `conformance` 100/100 and `grading` 13/13 single, 8/8 stack, 8/8 shuffled at 1 LSB on
+both mixers; `ocio` clean on both; `timeline-tween-survives` 8/8; `grade-graph` 60/60 both mixers.
+
+### BEHAVIOUR: `MIXER BLEND soft_light` composited `normal`, and two of thirty modes were undrawable
+
+`case 12` was commented out in `ogl/image/shader.frag` and simply absent from the Vulkan shader's
+switch, with `BlendSoftLight` and `BlendSoftLightf` defined in both and called by neither. So a
+mode named in the enum, published in the control API's value list and listed in the operations
+guide answered `202 MIXER OK` and composited the foreground unchanged. Both shaders implement it
+now, from the per-channel formula that was already there.
+
+`blend_mode::mix` (index 29) had a worse version of the same problem: implemented by neither
+shader, absent from both directions of `get_blend_mode`, and **present in the control API's value
+list** — so `PUT .../blend_mode = "mix"` was accepted and read back as `"mix"`, `MIXER <ch> BLEND`
+reported `normal`, and the picture was `normal`. Three facades, three answers. It is refused by
+both now and omitted from `BLEND_MODES`; the enumerator stays where it is, because removing it
+would renumber `blend_mode_count`.
+
+And `MIXER <ch> BLEND <typo>` answered `202` with `normal`, which is also the legitimate way to
+turn blending **off** — the leftover-branch defect again, in the one shape neither existing grep
+could find: not an `if/else if` chain and not `at(0) == L"1"`, but a list of bare `if`s ending in
+`return blend_mode::normal`, in `core/mixer/image/blend_modes.cpp` rather than in
+`AMCPCommandsImpl.cpp` where both sweeps looked. `get_blend_mode` returns `std::optional` now and
+the command answers `400` naming every mode it does accept — a list generated from the enum by a
+round trip, so it cannot drift from what the parser takes or offer a mode no shader draws.
+
+Verified: `mix-stage` 25/25 on both mixers, with `soft_light` newly modelled in `BLEND_FORMULAS`
+and gated at 1 LSB. The check cannot pass vacuously: `normal` and `soft_light` are both in the
+battery and their expectations sit about 99 LSB apart, so a shader falling through to `normal` —
+which is what the old one did — fails the soft_light arm. `refusals` 39/39 on both mixers.
+
+### BEHAVIOUR: a screen's PARENT and its LED panel size did not survive a layout reload
+
+`PREVIZ <ch> LOAD` read every field of every screen out of the file and then threw most of them
+away: its rebuild loop calls `add_screen_flat`/`add_screen_curved`, which assign a
+**default-constructed** `screen_meta` over the map entry, and it then restored only eight fields
+by hand. `parent` was written to the file, read back into the map, and destroyed — so screen
+parenting did not survive a save/load at all. `tile_w_px`/`tile_h_px` were not written in the
+first place, so LED panel boundaries did not either.
+
+The whole `screen_meta` is put back now, which is what `clone_screen` in the same file has always
+done and why it has never lost a field. The setters still run afterwards, because each does work
+beyond the struct — a resize rebuilds the mesh and re-derives the pitch, a resolution change
+re-derives the panel counts, a channel mapping registers with the texture store.
+
+Venue-mesh corrections are persisted too (`PREVIZ MESH <name> POSE`/`PARENT`, `PREVIZ SHOW`):
+`model_path` restores the meshes, and nothing restored what an operator did to them afterwards.
+Written only for a mesh that has been moved, re-parented or hidden, so the file grows with the
+edits rather than with the model.
+
+Verified: `previz-place` 27/27, `previz-gizmo` 49/49, `api-stage` 22/22, all on both mixers.
+
+### BEHAVIOUR: the AMCP thread wrote render-thread state in both mixers
+
+`CALIBRATION LUT`/`BYPASS`/`CLEAR`, `MIXER OCIO_DISPLAY` and `MIXER OCIO_LOOK` reach their setters
+on the AMCP command thread with no hop through the channel executor, and those setters assigned a
+`std::string` and a `shared_ptr` that the render thread reads **every frame**, and cleared
+`prev_fingerprint_` — a vector-owning member the render thread owns.
+
+That is the same shape as `arm_node_preview` clearing `prev_fingerprint_` from the API executor,
+which corrupted the heap on 2026-09-11 and was misattributed twice before it was found, because
+heap corruption surfaces wherever it lands rather than where it was caused. `set_scopes_enabled`
+already followed the fix; these five call sites did not.
+
+All six values now sit behind one `config_mutex_` and are read as a **set**, once per frame, by
+`snapshot_config()` — one uncontended acquire against the string copies the same block already
+made. A set rather than six atomics because a display and its view are one selection and a LUT and
+its strength are one calibration: six atomics read one at a time can straddle a write and produce a
+combination that was never configured, which would then also be baked into the still-frame cache's
+key. The cache is dropped by the existing `preview_drop_cache_` flag, on the render thread, the way
+`arm_node_preview` does it.
+
+Verified: `calibration`, `ocio`, `ocio-display` and `ocio-look` clean on both mixers. **A race is
+not proved absent by a green run** — these batteries drive the commands but cannot schedule the
+collision — so the argument here is the code's, and the measurement only says nothing else broke.
+
+### BEHAVIOUR: a DMX recording with more than one universe played back one of them
+
+`dmx_producer` binary-searches for the single NDJSON line covering the current instant and sent
+only that. A recording interleaves universes — each line carries one universe's 512 slots — so a
+two-universe show played back at half rate on each, and with `UNIVERSE=n` set, every line
+belonging to another universe consumed the tick **and advanced the cursor**, so the selected
+universe went out on roughly one tick in two and was never retried. A filter that dropped the
+thing it selected.
+
+It now keeps the newest line per universe across the span a tick covers and sends one packet for
+each. A seek scans backwards until every universe in the recording has been seen, so it lands with
+all of them at their correct values rather than with whichever was last; the scan is bounded by the
+universe count, not the recording length. Frames are `stable_sort`ed, because `dt` is not unique —
+several universes written at one instant share a timestamp, and `std::sort` was free to reorder
+them differently between runs of the same file.
+
+The Art-Net sequence counter also stepped 1, 3, 5, … : `(sequence_ + 1) | 1` forces the low bit
+set, so it never produced an even value and had half the range the protocol gives it, while its
+own comment said "keep 1-255, skip 0".
+
+### FIX: refusals, races and one terminate, from an audit sweep
+
+* **Four more producers answered `202` for a verb they do not implement** — `dmx` returned the
+  literal `"OK"`, and `remotewall`, `image_scroll` and a **generative** `[ISF]` layer fell past
+  their branches to an empty reply. The isf one is the interesting case: the sourced form was
+  fixed on 2026-09-08 and forwards correctly, so the defect survived in the single configuration
+  that has nothing to forward to — which is also the one nobody was driving.
+* **`MIXER <ch> CHROMA <not-"1">`** silently disabled the key and answered `202`: an operator
+  asking for a chroma key and getting a hard cut. It goes through `parse_on_off` now, and the
+  enabled form names its eight missing arguments instead of letting `at(8)` become a 500.
+* **`TRACKING <ch> BIND ... MODE=<typo>`** bound a **360** tracker and answered `202` — a tracker
+  that receives packets and moves nothing the operator was watching. The 2026-09-19 sweep fixed
+  the verbs that take a positional argument; `BIND`'s keyword parameters were never swept.
+* **`CALL ... EXPORT` on a replay layer could call `std::terminate`.** The busy guard was a
+  check-then-set on an atomic, so two concurrent exports could both pass it and both reach
+  `export_thread_ = std::thread(...)` — and move-assigning over a joinable thread terminates the
+  process. One `exchange(true)` now, and the claim is released if the thread fails to start.
+* **The LTC seqlock had the wrong memory order on both sides.** The writer's opening store was
+  `relaxed`, so the payload writes were unordered against the odd counter and a reader could see
+  `seq_` still while `current_` was already being overwritten; the reader used an acquire *load*
+  where it needed an acquire *fence*, which does not order the payload copy that precedes it.
+  Both are fences now. And `get_current_device_name()` read `current_device_name` with no lock
+  while `set_capture_device` rewrote it under one — the only one of three getters that skipped it,
+  so `INFO LTC` arriving during an `LTC LOAD` was a `std::string` copy racing a reallocation.
+* **LTC drop-frame was discarded.** `ltc_frame_to_time` does not carry `dfbit` into
+  `SMPTETimecode`, so a 29.97DF signal was counted as though its labels ran straight through —
+  two frames per minute out, 108 an hour, growing through the hour rather than sitting still where
+  somebody would see it. The bit is kept now and the 12M rule applied as a subtraction, the same
+  form `core/timeline/expression.cpp` uses for a `hh:mm:ss;ff` literal, so the two places in this
+  tree that convert drop-frame timecode agree by construction.
+* **`timeline_store::put` could store the older of two concurrent PUTs.** The revision is taken
+  under the lock and `resolve()` runs outside it, so the writer that took N could finish last and
+  overwrite N+1, leaving the store holding the older document while the client that received N+1
+  had been acknowledged. `retrigger` already guarded its own version of this; `put` now does too.
+* **`on_end: commit` did nothing for a node parameter.** `commit_final_values` handled `image` and
+  `audio` only. The call site's comment justifies that for producer parameters and previz fields —
+  neither has a constant to write — and the reasoning does not hold for a node parameter, which has
+  one in the attached graph document. It commits through `patch_params` now, at the same rank as a
+  mixer field's constant, so a later cue can still move it.
+* **`destroy_producer_proxy` did not forward `following_producer` or `auto_play_delta`.** Harmless
+  today only because the two producers that implement them are constructed directly by AMCP and
+  never wrapped; the day a registry-created producer implements either, an `AUTO` would simply
+  never fire with nothing logged.
+* Two dead copies of the DMX rasteriser (`artnet/util/fixture_calculation.cpp`,
+  `sacn/util/fixture_calculation.cpp`) are removed. Neither was in a `CMakeLists`, both still
+  carried the pre-fix `average_color` whose degenerate-scanline bug `dmx_common/fixture_geometry.cpp`
+  was written to fix, and a grep for `average_color` found the broken one first.
+
 ### BEHAVIOUR: eight commands stop reading a typo as an answer -- one ON/OFF parser
 
 `MIXER PROJECTION_ICVFX BANANA` answered `202` and turned ICVFX **off**. On a live volume that is

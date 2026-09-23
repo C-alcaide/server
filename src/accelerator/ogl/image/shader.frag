@@ -1054,7 +1054,12 @@ vec3 get_blend_color(vec3 back, vec3 fore)
     case  9: return BlendExclusion(back, fore);
     case 10: return BlendScreen(back, fore);
     case 11: return BlendOverlay(back, fore);
-//	case 12: return BlendSoftLight(back, fore);
+    // ENABLED 2026-09-23. It had been commented out since the shaders were split into their own
+    // files, with no reason recorded -- so `MIXER <ch> BLEND soft_light` answered 202 and
+    // composited `normal`, on both backends, for a mode named in the enum, in the registry's
+    // published value list and in the operations guide. `BlendSoftLight` and `BlendSoftLightf`
+    // were defined right here the whole time and called by nothing.
+    case 12: return BlendSoftLight(back, fore);
     case 13: return BlendHardLight(back, fore);
     case 14: return BlendColorDodge(back, fore);
     case 15: return BlendColorBurn(back, fore);

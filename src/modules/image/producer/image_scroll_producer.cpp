@@ -325,9 +325,14 @@ struct image_scroll_producer : public core::frame_producer
             int          duration = params.size() > 2 ? boost::lexical_cast<int>(params.at(2)) : 0;
             std::wstring tween    = params.size() > 3 ? params.at(3) : L"linear";
             speed_                = speed_tweener(speed_.fetch(), -val, duration, tween);
+            return make_ready_future<std::wstring>(L"");
         }
 
-        return make_ready_future<std::wstring>(L"");
+        // REFUSED. Every verb but `SPEED` used to fall past the `if` to this empty reply, so
+        // `CALL 1-10 BANANA` on a scroll answered 202 with nothing -- the fall-through class the
+        // 2026-09-18 sweep fixed in four producers and did not reach here.
+        CASPAR_THROW_EXCEPTION(invalid_argument() << msg_info(
+            u8(L"[image_scroll_producer] CALL: unknown '" + cmd + L"'. Supported: SPEED.")));
     }
 
     std::vector<core::draw_frame> get_visible()

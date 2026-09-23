@@ -132,6 +132,17 @@ class destroy_producer_proxy : public frame_producer
     {
         return producer_->leading_producer(producer);
     }
+    /// The two that were missing until 2026-09-23, and the reason they cost nothing SO FAR is
+    /// worth stating rather than relying on: only `transition_producer` and `sting_producer`
+    /// implement them, and AMCP constructs both DIRECTLY -- they never pass through
+    /// `create_producer`, so they are never wrapped by this proxy. The day any registry-created
+    /// producer implements either, `layer::receive` would read the base class's "no" through
+    /// this class and an AUTO would simply never fire, with nothing logged.
+    spl::shared_ptr<frame_producer> following_producer() const override
+    {
+        return producer_->following_producer();
+    }
+    std::optional<int64_t> auto_play_delta() const override { return producer_->auto_play_delta(); }
     uint32_t             frame_number() const override { return producer_->frame_number(); }
     uint32_t             nb_frames() const override { return producer_->nb_frames(); }
     draw_frame           last_frame(const core::video_field field) override { return producer_->last_frame(field); }

@@ -44,6 +44,8 @@
 #include <atomic>
 #include <cstdint>
 #include <fstream>
+#include <map>
+#include <set>
 #include <iomanip>
 #include <string>
 #include <vector>
@@ -151,9 +153,12 @@ static dmx_recording load_ndjson(const std::wstring& path)
         line_no++;
     }
 
-    // Sort by timestamp (should already be sorted, but be safe)
-    std::sort(recording.frames.begin(), recording.frames.end(),
-              [](const dmx_frame& a, const dmx_frame& b) { return a.dt < b.dt; });
+    // STABLE, because `dt` is not a unique key: a recorder writing several universes at one
+    // instant gives them all the same timestamp, and `std::sort` is free to reorder equal
+    // elements -- so which universe a tick ends up reading could differ between runs of the
+    // same file. The file's own order is the recorder's order and is the one to keep.
+    std::stable_sort(recording.frames.begin(), recording.frames.end(),
+                     [](const dmx_frame& a, const dmx_frame& b) { return a.dt < b.dt; });
 
     // Cache duration
     if (!recording.frames.empty()) {
@@ -302,6 +307,10 @@ struct dmx_file_producer : public core::frame_producer
     // Playback state
     int64_t  base_dt_         = 0;  // timestamp of first frame
     int      last_idx_        = -1; // last sent frame index (to avoid redundant sends)
+    /// Every universe the recording contains, collected once at load. It is what bounds the
+    /// backward scan a seek does: without it that scan has no way to know when it has seen
+    /// them all and would have to walk to the start of the file.
+    std::set<int> universes_;
     uint32_t total_frames_    = 0;  // total producer frames (based on channel fps)
     int64_t  position_us_     = 0;  // current playback position (microseconds)
     std::atomic<int64_t>  seek_offset_us_{0};  // offset applied by seek commands
@@ -337,6 +346,9 @@ struct dmx_file_producer : public core::frame_producer
         }
 
         base_dt_ = recording_.frames.front().dt;
+
+        for (const auto& f : recording_.frames)
+            universes_.insert(f.universe);
 
         // Calculate total producer frames based on channel framerate
         double duration_s    = static_cast<double>(recording_.duration_us) / 1000000.0;
@@ -417,17 +429,46 @@ struct dmx_file_producer : public core::frame_producer
             idx = static_cast<int>(std::distance(recording_.frames.begin(), it) - 1);
         }
 
-        // Only send if we moved to a new NDJSON frame
+        // ── ONE PACKET PER UNIVERSE, not one packet ───────────────────────────────────────
+        //
+        // A recording interleaves universes: each NDJSON line carries ONE universe's 512 slots,
+        // so a two-universe show alternates them. The binary search above finds a single line,
+        // and sending only that line meant a two-universe recording played back at half its rate
+        // on each universe -- and with `UNIVERSE=n` set, every line belonging to another universe
+        // consumed the tick AND advanced `last_idx_`, so the filtered universe was sent on
+        // roughly one tick in two and never retried. A filter that drops the thing it selects.
+        //
+        // So: walk the lines this tick covers and keep the NEWEST per universe, then send one
+        // packet for each. A tick that covers no new line sends nothing, exactly as before.
         if (idx != last_idx_) {
-            last_idx_ = idx;
-            const auto& frame = recording_.frames[idx];
+            // WHERE TO START. Forward play resumes after the last line already sent. A seek --
+            // or the first frame -- has no such point, so it scans BACKWARDS from the target
+            // until every universe the recording contains has been seen, which is what makes a
+            // seek land with all universes at their correct values rather than with whichever
+            // one happened to be last. Bounded by the universe count times their spacing, not by
+            // the recording length.
+            int from = (last_idx_ >= 0 && idx > last_idx_) ? last_idx_ + 1 : idx;
+            if (from == idx) {
+                std::set<int> seen;
+                while (from > 0 && seen.size() < universes_.size()) {
+                    seen.insert(recording_.frames[from].universe);
+                    if (seen.size() >= universes_.size())
+                        break;
+                    --from;
+                }
+            }
 
-            // Send Art-Net packet(s)
-            if (universe_filter_ < 0) {
-                // Send this frame's universe
-                send_dmx(frame.universe, frame.data.data(), static_cast<int>(frame.data.size()));
-            } else if (frame.universe == universe_filter_) {
-                send_dmx(frame.universe, frame.data.data(), static_cast<int>(frame.data.size()));
+            last_idx_ = idx;
+
+            std::map<int, int> newest; // universe -> index of its latest line in [from, idx]
+            for (int i = from; i <= idx; ++i)
+                newest[recording_.frames[i].universe] = i;
+
+            for (const auto& [uni, fi] : newest) {
+                if (universe_filter_ >= 0 && uni != universe_filter_)
+                    continue;
+                const auto& frame = recording_.frames[fi];
+                send_dmx(uni, frame.data.data(), static_cast<int>(frame.data.size()));
             }
         }
 
@@ -549,8 +590,13 @@ struct dmx_file_producer : public core::frame_producer
                              << L" (" << std::fixed << std::setprecision(1)
                              << (seek_offset_us_ / 1000000.0) << L"s)";
         } else {
-            // Unknown command — ignore gracefully
-            result = L"OK";
+            // THROWN, not answered "OK". This returned the literal `L"OK"` for any verb it does
+            // not implement, so `CALL 1-10 BANANA` on a DMX layer replied 202 -- the same
+            // fall-through `replay`, `hap`, `cuda_prores` and `cuda_notchlc` were fixed for in
+            // the 2026-09-18 sweep, which did not reach this producer. `ffmpeg_producer` is the
+            // model: throw `invalid_argument` and let `AMCPCommandQueue`'s reply table map it.
+            CASPAR_THROW_EXCEPTION(caspar::invalid_argument() << caspar::msg_info(
+                u8(L"[dmx_producer] CALL: unknown '" + cmd + L"'. Supported: SEEK.")));
         }
 
         auto promise = std::promise<std::wstring>();
@@ -589,7 +635,11 @@ struct dmx_file_producer : public core::frame_producer
             uint8_t buffer[18 + 512] = {};
             int     send_len = std::min(length, 512);
             build_artnet_packet(buffer, universe, data, send_len, sequence_);
-            sequence_ = (sequence_ + 1) | 1; // keep 1-255, skip 0
+            // 1..255, wrapping past 0 -- which is what the old `(sequence_ + 1) | 1` claimed and
+            // did not do. Forcing the low bit set steps 1, 3, 5, ... and never produces an even
+            // value, so the counter a receiver uses to spot a reordered or duplicated packet had
+            // half the range the protocol gives it, and its own comment said otherwise.
+            sequence_ = sequence_ == 255 ? 1 : static_cast<uint8_t>(sequence_ + 1);
             socket_.send_to(boost::asio::buffer(buffer, 18 + send_len), remote_endpoint_, 0, err);
         } else {
             uint8_t buffer[638] = {};

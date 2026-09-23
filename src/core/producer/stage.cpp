@@ -1106,6 +1106,59 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         if (at_end.empty())
             return;
 
+        // ── A NODE PARAMETER COMMITS INTO THE GRAPH DOCUMENT ──────────────────────────────
+        //
+        // `commit` means "this is the new normal", and for a mixer field the new normal is the
+        // layer's CONSTANT -- the weakest rank, so a later cue can still move it. A node
+        // parameter's constant is not on the transform at all: it is the value in the attached
+        // graph document, which is what `graph_constant_unlocked` reads and what
+        // `patch_params` writes. So this is the same write at the same rank, through the store.
+        //
+        // NOT into `drivers_[layer].dominant`, which is where `hold_field` puts a node parameter.
+        // That overlay OUTRANKS the timeline, which is right for HOLD ("take it off the document
+        // and let me move it") and wrong for COMMIT: a committed value a later object could not
+        // override would be a stronger promise than `commit` makes anywhere else.
+        //
+        // Until this, the arms below handled `image` and `audio` and nothing else, so an object
+        // with `on_end: commit` keying a node parameter reverted at its end with no error -- the
+        // class this file's own release-path comment calls a no-op and documents as one for
+        // producer parameters and previz fields, neither of which has a constant to write. A
+        // node parameter does.
+        if (graphs_) {
+            std::string                                      doc;
+            std::map<std::string, monitor::vector_t>         patch;
+            {
+                std::lock_guard<std::mutex> lock(binding_lock_);
+                const auto                  ga = graph_attach_.find(layer);
+                if (ga != graph_attach_.end()) {
+                    doc = ga->second;
+                    for (const auto& pv : at_end) {
+                        const auto target = address::parse(pv.first);
+                        if (target.kind != address::target_kind::node)
+                            continue;
+                        // WHOLE PARAMETERS ONLY -- `patch_params` says so, and the read-modify-write
+                        // for one component is the caller's because only the caller knows what the
+                        // other components were. Seeded from the document's own constant so an
+                        // object keying `.0` alone leaves `.1` and `.2` where the document had them.
+                        const auto whole = "node/" + target.object + "/" + target.field;
+                        auto&      v     = patch[whole];
+                        if (v.empty())
+                            v = graph_constant_unlocked(layer, whole);
+                        if (v.empty())
+                            continue;
+                        v[std::min<std::size_t>(target.component, v.size() - 1)] = pv.second;
+                    }
+                }
+            }
+            // OUTSIDE `binding_lock_`: `patch_params` takes the store's own lock, and the store
+            // is reached from the API thread as well. Taking the two in one order here and the
+            // other order there is the deadlock this avoids by never holding both.
+            for (auto it = patch.begin(); it != patch.end();)
+                it = it->second.empty() ? patch.erase(it) : std::next(it);
+            if (!doc.empty() && !patch.empty())
+                graphs_->patch_params(doc, patch, "timeline commit");
+        }
+
         tweens_[layer].patch([&](frame_transform& t) {
             for (const auto& pv : at_end) {
                 const auto target = address::parse(pv.first);

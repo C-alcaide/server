@@ -25,9 +25,11 @@
 
 #include <boost/algorithm/string.hpp>
 
+#include <optional>
+
 namespace caspar { namespace core {
 
-blend_mode get_blend_mode(const std::wstring& str)
+std::optional<blend_mode> get_blend_mode(const std::wstring& str)
 {
     if (boost::iequals(str, L"normal"))
         return blend_mode::normal;
@@ -88,7 +90,31 @@ blend_mode get_blend_mode(const std::wstring& str)
     if (boost::iequals(str, L"luminosity"))
         return blend_mode::luminosity;
 
-    return blend_mode::normal;
+    // NOT `blend_mode::normal`. `normal` is a real answer -- it is how an operator turns
+    // blending off -- so returning it for a name nobody wrote made a typo indistinguishable
+    // from the command working. See the header; `mix` falls out here too, on purpose.
+    return std::nullopt;
+}
+
+std::wstring blend_mode_names()
+{
+    // Built from the enum rather than a second literal list, so it cannot drift from what the
+    // parser above accepts -- and the test is a ROUND TRIP rather than "the reverse map answered
+    // something". `mix` has no case in the reverse map, so it answers `normal`, and a check that
+    // merely asked whether the answer parses would have offered `mix` under the name `normal`.
+    // Requiring the round trip to return the SAME mode is what excludes it.
+    std::wstring out;
+    for (int i = 0; i < static_cast<int>(blend_mode::blend_mode_count); ++i) {
+        const auto m    = static_cast<blend_mode>(i);
+        const auto name = get_blend_mode(m);
+        const auto back = get_blend_mode(name);
+        if (!back || *back != m)
+            continue; // not round-trippable: unimplemented, and so not offered
+        if (!out.empty())
+            out += L", ";
+        out += name;
+    }
+    return out;
 }
 
 std::wstring get_blend_mode(blend_mode mode)

@@ -58,6 +58,7 @@
 #include <core/binding/binding_math.h>
 #include <core/mixer/audio/audio_analysis.h>
 #include <core/address/target.h>
+#include <core/frame/transform_fields.h>
 #include <core/graph/graph_store.h>
 #include <modules/cluster/sync/frame_clock.h>
 #include <core/graph/plan.h>
@@ -282,6 +283,10 @@ struct server::impl
         // module exists to prevent.
         cluster::sync::frame_clock_self_test();
         core::graph::graph_store_self_test();
+        // `image_transform::tween` against every member it is supposed to carry. Backend-neutral,
+        // so it runs before the two accelerator checks: the list it guards is one hand-written
+        // list, not one per mixer, and it has now lost a field three times.
+        core::fields::run_tween_self_test();
         accelerator::ogl::run_compose_self_test();
         accelerator::ogl::run_node_uv_self_test();
 #ifdef ENABLE_VULKAN

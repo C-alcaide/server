@@ -72,6 +72,7 @@ catch its mutation cannot fail*.
 | **a NODE PARAMETER as a target -- the address grammar, an ownership arm, the write path, the publication** | `graph-stack`, **both mixers** -- and note what it is measuring: a node parameter is an ADDRESS, so a timeline key, `add_binding`, `apply_binding`, `hold_field`, the write path and the publication each have their own switch over `target_kind`, and any one missing its node arm gives a parameter that is accepted everywhere and driven by nothing. It uses FOUR distinct numbers so each rank's departure is visible. **It still touches no pixel** -- it measures the VALUE stream -- so the `MIXER EXPOSURE` class is the failure it cannot catch and `grade-graph` is what does. That division was not academic: the `DETACH` defect of 2026-09-11 left the plan on the layer's tween so the look kept rendering after being taken off air, and this battery reads the published leaf and could not see it. Also run `api-tree` (the tree gained a source) and `api-roundtrip` |
 | **a grading NODE, or where a node pass sits in the chain** | `grade-window` for what it computes (**migrated to the node graph 2026-09-11; `MIXER GRADE_NODE` is deleted**), **`grade-graph` for WHICH SPACE it computes in** -- both mixers. And note the trap the second one exists to record: `grade-window`'s oracle is `inside == measured outside x exposure`, which is only true if the node multiplies the **already display-encoded** value. It passes at 1 LSB because that is what the prototype does, so it is a correct measurement of a placement the design says is wrong, and it **cannot see** the placement at all -- its config is a pass-through, where the two placements are provably indistinguishable. Measured 2026-09-11, and the number moved the same day the split landed: with a linear middle in the chain, a node CDL and `MIXER CDL` landed **42 LSB apart**; a graph declaring `stage: working` now agrees at **0.00 LSB** while the same graph declaring `stage: display` still reads those 42 LSB away — identically on both mixers, and it is the `display` reading that makes the zero attributable rather than merely agreeable |
 | a new `image_transform` field | the battery owning that command, **both mixers** — and check the allowlist trap below, which no battery can see for you |
+| **`image_transform::tween`, or any field that has to survive a fade** | the `tween` boot self-test is UNCONDITIONAL and FATAL -- `run_tween_self_test`, `core/frame/transform_fields.cpp` -- so the server will not start if a field is dropped. Plus `timeline-tween-survives` and the battery owning the command. Read the tween section below: three fields were lost this way before the check existed, each found in a picture months later |
 | a **screen or previz camera** property, or anything the stage publishes | `api-stage`, **both mixers** — and add the row to `core/stage/stage_fields.*`, because a property that is not in that table is invisible to the tree, to the publisher's change detection and to the write path all three at once. **And `previz-place` if the property has a POSITION in it** (a screen's `position`, `rotation` or `size`, a camera's `position`, `rotation` or `fov`): `api-stage` proves it stores, `previz-place` proves it renders where it says, and A16 is those two disagreeing |
 | **a binding, a source, or the transform maths** | `binding-lfo`, `binding-input`, `binding-owner`, `binding-cost`, **both mixers** — plus `binding-audio` for the audio source and `binding-osc` for the receiver. And note what a value-stream check CANNOT see: with the in-tick write disabled, `binding-lfo`'s trajectory FIT still passes and only its picture checks fail, because the fit measures the evaluation and only a pixel measures the write. Three of the four look at a picture for that reason |
 | **an OUTBOUND binding -- `binding::sink`, `add_outbound`, `evaluate_outbound`, the `osc_sink`, or `SINK` / `BIND ... OUT`** | `binding-out`, **both mixers** -- it LISTENS on the far end, which is the only way to know a value left the building. An explicit write must arrive EXACTLY (float32-representable fixtures, so "close" is never the verdict); nothing may be sent while the value holds and one change must move the server's `sends` by exactly ONE (a delta -- a misread counter reads 0 both times); an inbound LFO must drive the same parameter the desk receives, because in AND out on one target is the whole point; a removed sink must read BROKEN. The cost arm binds 32 at 1080p50, because L383 found a binding's cost is its PUBLICATION and an outbound row is seven leaves. It cannot see a sink kind but OSC (there is none), a remote host, or `LAG` |
@@ -85,7 +86,7 @@ catch its mutation cannot fail*.
 | an OCIO stage | `ocio`, `ocio-display`, `ocio-look`, `ocio-lut3d`, `consumer-view` as the stage dictates |
 | **the PortAudio enumeration, `INFO PORTAUDIO`, or the audio consumer's device selection** | `portaudio`, **both mixers** -- and its load-bearing idea is the DISCOVERY CONTRACT: **a device name the server LISTS must be a name the server ACCEPTS**, checked by taking a name from `INFO PORTAUDIO`'s own reply and feeding it straight back. That contract was broken in TWO modules found on one day -- LTC reported the requested name as though it had opened it, and this one could not open the default device at all. **`PaHostApiInfo::defaultInput/OutputDevice` IS A GLOBAL DEVICE INDEX** (PortAudio's own header says so) and six sites converted it as a host-API-relative one, so the conversion returned `paInvalidDevice` and the lookup returned THAT instead of falling through -- `ADD 1 PORTAUDIO` with no `DEVICE=` answered 501 on any box with ASIO or WASAPI present. It hid because the log said *"Using default"* and then threw: **when a message and a behaviour disagree, the message is not evidence**. Note the battery cannot see whether SOUND COMES OUT -- `ltc` covers that end to end, playing LTC through this consumer into a virtual cable and decoding it back |
 | **the LTC input, `INFO LTC`, or `LTC LOAD`** | `ltc`, **both mixers**. Three of its four checks drive DEVICE BOOKKEEPING and **would all pass on a server whose decoder did nothing** -- the fourth is the only one that reads a timecode off a wire, and it needs no hardware: libltc's OWN encoder generates the signal (`core/ltc_fixture/ltcgen.c`), the PortAudio consumer plays it into VB-Audio's `CABLE Input`, and the LTC input reads `CABLE Output`. **Do not write a second LTC encoder in the harness** -- the server links libltc for decode, so a hand-written one could be wrong in the same direction and agree, which is a fixture that cannot fail. And note what this battery had to get right that the FEATURE DOC had wrong: `ltc-timecode.md` §4 proposed asserting **404** for an impossible device name and the server answers **202**, so that check would have been red against correct behaviour and the natural response would have been to weaken it. Assert what the server should do, not what a sentence in a doc predicts. Still measured by nothing: drop-frame, 24/30/60 fps, and jam-sync on signal loss |
-| the composite / blend / alpha domain | `blend-domain`, `alpha-domain`, `mix-stage` |
+| the composite / blend / alpha domain | `blend-domain`, `alpha-domain`, `mix-stage` -- and `mix-stage` is the only thing that models a BLEND MODE's arithmetic. It covers 14 of the 29 the server draws; the other 15 are branchy or work in another colour space and are listed in its `SCENARIOS_NOT_YET_MODELLED`. **An unmodelled mode is one the server can stop drawing without anything going red** -- `soft_light` was commented out of one shader and absent from the other for years, answering 202 and compositing `normal` |
 | the decode path | `flat-decoded` (the only 1 LSB decode gate), `sdi-input`, `source-colorspace` |
 | **the replay module** — the recorder, the segmented store, the growing-file producer, the factory probe | `replay`, **both mixers**. And note what makes it runnable at all: both segmentation parameters are per-recording, so `?segment=1&max_duration=4` rolls the retention path in about ten seconds where the DEFAULTS need **24 hours**. A battery that needed a day to exercise its own subject would never be run. **Its load-bearing check is "the reported timeline does not exceed what is on disk", and the first version of it could not fail**: the reader's error is proportional to how long the PRODUCER has been open, so reading the timeline two seconds after `PLAY` gave 82 frames on the un-pruned build against 78 on the fixed one and a 125-frame gate — **5/5 green on the mutation it was written to catch**. Holding playback for 20 s while the writer keeps rolling makes the same mutation report **624 against 125**. **And its COST arm is what closed gap 0**, the record path running on the channel thread: `send()` encoded and called `WriteFrame` -- `fwrite` + `fflush` twice -- inline, and `output.cpp` measures the wait on that future as the channel's headroom, so one recording spent an eighth of the frame budget of the channel it was recording. The arm runs a SECOND server at **1080p50** because the main arm's 1080p25 is half the flush rate and half the bytes, and gates on LATE FRAMES rather than on the load -- a load figure is a number to track, a late frame is the cadence actually missed. `consume_load` **0.127 before, 0.0475 (ogl) / 0.041 (vulkan) after**, 0 late frames either side. Still measured by nothing: interrupted-recording recovery, `400 EXPORT BUSY`, and `LIVE` freshness and tearing |
 | consumer **metadata** — colour signalling, HDR static data | `signalling` (DeckLink), `signalling --stream` (FFmpeg). **Vulkan output has no coverage — see below** |
@@ -784,13 +785,40 @@ wrong reflex.
 
 ## A command that accepts a typo and answers OK is this tree's most repeated defect
 
-**TWENTY-FOUR instances in twelve modules.** Nine more landed 2026-09-19 from a sweep the existing grep could not do (below), and eight of the nine were real. The first six were each found by accident, by a different
+**THIRTY-ONE instances in sixteen modules.** Nine more landed 2026-09-19 from a sweep the existing grep could not do (below), and eight of the nine were real. The first six were each found by accident, by a different
 route, and only the sixth by anyone looking. The last eight came from the audit of 2026-09-18,
 which extended the grep below to the FIVE MODULES THAT REGISTER THEIR OWN AMCP COMMANDS —
 `AMCPCommandsImpl.cpp` had been swept and they never had — and found three in one pass plus the
 variant. **The sweep is now a battery**, `cli.py refusals` in the harness: each arm sends a value
 that names nothing and requires a refusal, then sends the documented value and requires success,
-because a module that refused everything would pass the refusal half alone. 11/11 both mixers:
+because a module that refused everything would pass the refusal half alone. **39/39 both mixers**:
+
+**SEVEN MORE ON 2026-09-23, and the two greps in this section found none of them** — which is the
+part worth keeping, because the section's own advice is to run those greps. The instances were
+found by reading every producer's `call()` and every enum-from-string in the tree, and each sat
+outside what a grep over `AMCPCommandsImpl.cpp` can see:
+
+* **`MIXER BLEND <typo>` → `normal`**, and `normal` is how an operator turns blending OFF. Not an
+  `if/else if` chain and not `at(0) == L"1"` — a list of bare `if`s ending in
+  `return blend_mode::normal`, and in `core/mixer/image/blend_modes.cpp` rather than in the file
+  both sweeps looked at. `get_blend_mode` returns `std::optional` now.
+* **`MIXER BLEND mix`** — a value DECLARED in the enum and in the control API's published list
+  that NO shader draws. It is the accept-a-typo defect with a valid-looking name: `PUT` took it
+  and read it back, AMCP said `normal`, the picture was `normal`. **Three facades, three answers.**
+* **`MIXER CHROMA <not-"1">`** → the key DISABLED, 202. An operator asking for a chroma key and
+  getting a hard cut.
+* **`TRACKING BIND ... MODE=<typo>`** → a **360** tracker, 202. The 2026-09-19 sweep covered the
+  verbs that take a POSITIONAL argument; `BIND`'s KEYWORD parameters were never swept, and the
+  default it falls to is the one an operator is least likely to notice.
+* **Four more producers' `call()`** — `dmx` (returned the literal `"OK"`), `remotewall`,
+  `image_scroll`, and a **generative** `[ISF]` layer. That last one is the shape to remember: the
+  SOURCED form was fixed on 2026-09-08 and forwards correctly, so the defect survived in the one
+  configuration that has nothing to forward to, which is also the one nobody was driving.
+
+**So the standing lesson is about the greps rather than the instances.** Both are keyed to a
+SHAPE (`boost::iequals` chains, `== L"1"`) and to a FILE, and the defect is neither — it is
+*"an unrecognised value selects a valid answer"*, which can be written any number of ways
+anywhere. The greps are a cheap first pass and they have never once been the whole list.
 
 | where | what an unrecognised value gave |
 | :--- | :--- |
@@ -813,6 +841,13 @@ because a module that refused everything would pass the refusal half alone. 11/1
 | `PREVIZ SHOW <mesh> [1\|0]` | **visible** |
 | `PREVIZ SCREEN <name> ICVFX <1\|0>` | **off** |
 | `CALIBRATION BYPASS <1\|0>` | **not** bypassed |
+| `MIXER BLEND <mode>` | **NORMAL** -- which is also the legitimate way to turn blending off |
+| `MIXER BLEND mix` | **NORMAL**, for a name the enum and the control API both publish and no shader draws |
+| `MIXER CHROMA <enable>` | the key **DISABLED** -- an operator asking for a key and getting a hard cut |
+| `TRACKING BIND ... MODE=` | a **360** tracker: it receives packets and moves nothing they were watching |
+| `CALL … <verb>` on `dmx` | the literal **"OK"**, the fall-through return |
+| `CALL … <verb>` on `remotewall` / `image_scroll` | an **empty 202** |
+| `CALL … <verb>` on a GENERATIVE `[ISF]` layer | an **empty 202** -- the SOURCED form forwards correctly, so only the configuration with nothing to forward to was wrong |
 
 **The shape is always the same**: a variable initialised to one of the valid values, an
 `if/else if` chain over the others, and no `else`. The initialiser is then indistinguishable from
@@ -1036,6 +1071,49 @@ Then confirm `build/shell/casparcg.exe` is newer than
 ```
 & "C:\VulkanSDK\1.4.341.1\Bin\glslangValidator.exe" -S frag <path to .frag>
 ```
+
+### A field missing from `image_transform::tween` REVERTS for the length of every fade — and that is now a boot self-test
+
+`image_transform::tween` builds a **default-constructed** `result` and then assigns every field by
+hand. A field nobody assigns there is not left alone: it is reset to its default for every
+intermediate tick of a tween and snaps back at the end. `tweened_transform::fetch()` returns
+`dest_` only when `time_ == duration_`, so a zero-duration command is fine and every
+`MIXER <field> <v> <duration>` — and every transition — is not.
+
+**THREE FIELDS HAVE BEEN LOST THIS WAY, months apart, each found in a picture**: `grade_nodes`,
+then `node_plan`/`node_values` (a graphed layer's whole look vanished for the length of every
+fade), then `ocio` on 2026-09-23 (the input colour space switched off, so a fade produced a colour
+pop at each end — on the command whose entire job is that the colour does not change). Every one
+shipped because the batteries that use a DURATION leave the field at its default, and the
+batteries that set the field never use a duration.
+
+**`core::fields::run_tween_self_test()` closes the class rather than the instance.** The invariant
+is `tween(t, X, X, d, linear) == X` over a randomised transform at six points including both ends:
+with the endpoints equal, every interpolation returns its endpoint exactly, every snap-to-dest
+returns `X`, and even `blur.enable`'s `source || dest` returns `X` — so it holds for every field
+**with no exception list**, which is the whole reason it is worth having. FATAL at boot, not a
+warning: a dropped field is not two rules disagreeing about a value, it is a parameter that
+reverts under every fade, and on air that is indistinguishable from an operator's own mistake.
+
+*Two things about writing it are worth more than the fix.* **The obvious form is the wrong one**:
+"at `t == d` the result equals `dest`" is false by design for `blur.enable`, so it would need an
+exception list — the same hand-written thing whose drift the check exists to catch. And it is not
+the identity-oracle trap two sections down, because `X` is randomised AWAY from the default, so
+"nothing happened" reads as the default transform and is distinguishable from a pass.
+
+**It named a fourth field on its first run**: `enable_geometry_modifiers`, which `stage::receive`
+sets on the frame immediately after `tween.fetch()` — so the tween's answer was overwritten before
+it could matter, which is exactly why nobody had noticed it missing. Carried now, because a tween
+that drops a field it was handed is wrong whether or not somebody downstream puts it back.
+
+The one part that can still go stale is named in the header: the registry drives every DECLARED
+field, and the six members it does not declare — the blobs, the node plan, `geometry_override` —
+are perturbed by a hand-written block in the body. A member added to the struct and left out of
+that block makes the test weaker for that member rather than wrong.
+
+`audio_transform` had the same defect in miniature: `immediate_volume` was in neither `tween()`
+nor `operator==`, so a client write was reset by any tweened `MIXER VOLUME` and no change
+detection could see it.
 
 ### A new `image_transform` field is dead until you add it to the allowlist
 

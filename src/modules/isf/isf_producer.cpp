@@ -961,9 +961,15 @@ class isf_producer : public core::frame_producer
         if (source_)
             return source_->call(params);
 
-        std::promise<std::wstring> pr;
-        pr.set_value(result);
-        return pr.get_future();
+        // NO SOURCE TO FORWARD TO, so the verb stops here and is REFUSED rather than answered
+        // with the empty `result`. A GENERATIVE `[ISF]` layer has no producer underneath it, so
+        // every non-ISF verb fell through both forwards to a 202 with no payload -- the same
+        // silence this block's own comment above calls "the worst possible failure mode" for the
+        // forwarding case, reached by the one path that has nothing to forward to.
+        CASPAR_THROW_EXCEPTION(invalid_argument() << msg_info(
+            u8(L"[isf_producer] CALL: unknown '" + params.at(0) +
+               L"'. This layer is generative, so there is no source to forward to. "
+               L"Supported: ISF LIST, ISF SET <input> <v...>.")));
     }
 };
 

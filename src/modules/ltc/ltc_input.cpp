@@ -58,6 +58,14 @@ class LTCInputImpl {
         SMPTETimecode tc = {0};
         std::chrono::steady_clock::time_point signal_time;
         bool has_data = false;
+        /// THE DROP-FRAME BIT OFF THE WIRE, which `SMPTETimecode` does not carry.
+        ///
+        /// `ltc_frame_to_time` fills hours/minutes/seconds/frames and drops this, so every reader
+        /// here treated a 29.97 drop-frame signal as though its labels counted straight through.
+        /// They do not: 12M skips labels :00 and :01 at the top of every minute except every
+        /// tenth, so `(h*3600 + m*60 + s) * fps + f` over-counts by two per minute -- 108 frames
+        /// an hour, and growing through the hour rather than a constant offset anyone would spot.
+        bool drop_frame = false;
     };
     std::atomic<uint32_t> seq_{0}; // even = stable, odd = write in progress
     TimecodeSlot current_;
@@ -71,7 +79,13 @@ class LTCInputImpl {
             uint32_t s1 = seq_.load(std::memory_order_acquire);
             if (s1 & 1u) continue; // writer in progress — spin
             snap = current_;
-            uint32_t s2 = seq_.load(std::memory_order_acquire);
+            // AN ACQUIRE FENCE, not an acquire LOAD, and the difference is the whole point.
+            // An acquire load is a one-way barrier: it stops later reads moving BEFORE it and
+            // says nothing about the payload copy above, which the compiler or the CPU is
+            // therefore free to sink past the second read of `seq_`. A tear would then happen
+            // after the check that exists to detect it. The fence orders both directions.
+            std::atomic_thread_fence(std::memory_order_acquire);
+            uint32_t s2 = seq_.load(std::memory_order_relaxed);
             if (s1 == s2) return snap;
         }
     }
@@ -104,8 +118,12 @@ class LTCInputImpl {
         LTCFrameExt ltc_frame;
         bool got_frame = false;
         SMPTETimecode temp_tc = {0};
+        bool temp_df = false;
         while(ltc_decoder_read(self->decoder_, &ltc_frame)) {
            ltc_frame_to_time(&temp_tc, &ltc_frame.ltc, 0);
+           // Taken from the FRAME, because the converter above does not carry it into
+           // `SMPTETimecode`. See `TimecodeSlot::drop_frame`.
+           temp_df = ltc_frame.ltc.dfbit != 0;
            got_frame = true;
         }
 
@@ -114,7 +132,13 @@ class LTCInputImpl {
             // or allocations here — this runs on the realtime audio thread.
             uint32_t s = self->seq_.load(std::memory_order_relaxed);
             self->seq_.store(s + 1, std::memory_order_relaxed);
+            // A RELEASE FENCE between the odd counter and the payload. Without it the opening
+            // store is unordered against the writes below, so a reader can see `seq_` still even
+            // while `current_` is already being overwritten -- and the tear it is watching for
+            // goes undetected. The closing store's release does not cover this half.
+            std::atomic_thread_fence(std::memory_order_release);
             self->current_.tc          = temp_tc;
+            self->current_.drop_frame  = temp_df;
             self->current_.signal_time = std::chrono::steady_clock::now();
             self->current_.has_data    = true;
             self->seq_.store(s + 2, std::memory_order_release);
@@ -334,7 +358,13 @@ public:
         return start_unlocked();
     }
 
+    /// LOCKED, like the two getters below it. `set_capture_device` rewrites
+    /// `current_device_name` under `device_mutex` from the AMCP thread, and this read it
+    /// without -- a `std::string` copy racing an assignment that can reallocate, which is a
+    /// heap race rather than a stale answer. It was the only one of the three that skipped
+    /// the lock, so `INFO LTC` arriving during an `LTC LOAD` was the way in.
     std::string get_current_device_name() {
+         std::lock_guard<std::mutex> lock(device_mutex);
          return current_device_name.empty() ? "Default" : current_device_name;
     }
 
@@ -407,7 +437,35 @@ public:
              return (tstruct.tm_hour * 3600 + tstruct.tm_min * 60 + tstruct.tm_sec) * fps;
          }
 
-         return (slot.tc.hours * 3600 + slot.tc.mins * 60 + slot.tc.secs) * fps + slot.tc.frame;
+         return timecode_to_frames(slot, fps);
+    }
+
+    /// A TIMECODE LABEL turned into a frame COUNT, honouring drop-frame.
+    ///
+    /// The two are not the same thing and treating them as the same is what this fixes. A 29.97
+    /// drop-frame signal labels its frames so the clock tracks wall time, which it does by
+    /// SKIPPING the labels :00 and :01 at the top of every minute except every tenth. The
+    /// straight `(h*3600 + m*60 + s) * fps + f` therefore counts frames that were never sent:
+    /// two per minute, 108 per hour, and the error grows through the hour rather than sitting
+    /// still where somebody would notice it.
+    ///
+    /// The 12M rule, as a SUBTRACTION from the nominal count -- the same form
+    /// `core/timeline/expression.cpp` uses for a `hh:mm:ss;ff` literal, deliberately, so the two
+    /// places in this tree that convert drop-frame timecode agree by construction.
+    static uint32_t timecode_to_frames(const TimecodeSlot& slot, int fps)
+    {
+        const int rate = fps > 0 ? fps : 25;
+        int64_t   frame = (static_cast<int64_t>(slot.tc.hours) * 3600 +
+                         static_cast<int64_t>(slot.tc.mins) * 60 + slot.tc.secs) * rate +
+                        slot.tc.frame;
+        if (slot.drop_frame) {
+            // Four per minute at 59.94, two at 29.97 -- the count scales with the rate because
+            // the rule drops whole FRAME PAIRS per nominal second of error.
+            const int     per_minute    = rate >= 60 ? 4 : 2;
+            const int64_t total_minutes = static_cast<int64_t>(slot.tc.hours) * 60 + slot.tc.mins;
+            frame -= per_minute * (total_minutes - total_minutes / 10);
+        }
+        return static_cast<uint32_t>(frame < 0 ? 0 : frame);
     }
 
     bool is_valid() {
@@ -428,9 +486,11 @@ public:
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - slot.signal_time).count() > 1000)
             return false;
-        const int  rate = fps > 0 ? fps : 25;
-        const auto& tc  = slot.tc;
-        out_frame = static_cast<uint32_t>((tc.hours * 3600 + tc.mins * 60 + tc.secs) * rate + tc.frame);
+        // Through the SAME converter `get_current_frame_number` uses, so an anchor and a
+        // reading of the same signal cannot disagree about drop-frame -- this one did the
+        // straight multiply, and would have placed the anchor up to 108 frames off on a
+        // 29.97DF house clock while the reading beside it was right.
+        out_frame = timecode_to_frames(slot, fps);
         out_time  = slot.signal_time;
         return true;
     }
