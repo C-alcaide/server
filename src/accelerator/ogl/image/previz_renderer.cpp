@@ -1685,6 +1685,34 @@ void previz_renderer::set_camera(float x, float y, float z, float yaw, float pit
     update_projections();
 }
 
+bool previz_renderer::update_camera(bool                                             view,
+                                    const std::function<bool(core::previz_camera&)>& edit,
+                                    core::previz_camera*                             before,
+                                    core::previz_camera*                             after)
+{
+    {
+        std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+        auto&                       cam = view ? impl_->scene_.view_camera : impl_->scene_.camera;
+        if (before)
+            *before = cam;
+        auto next = cam;
+        if (!edit(next)) {
+            if (after)
+                *after = cam;
+            return false;
+        }
+        cam = next;
+        if (view)
+            impl_->scene_.has_view_override = true;
+        if (after)
+            *after = cam;
+    }
+    // Outside the lock, as `set_camera` does: the production camera drives the projections.
+    if (!view)
+        update_projections();
+    return true;
+}
+
 void previz_renderer::reset_camera()
 {
     {

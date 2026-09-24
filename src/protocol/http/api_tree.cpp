@@ -868,6 +868,36 @@ api_reply read_value(const state_hub& hub, const api_context& ctx, const std::st
         }
     }
 
+    // A NODE PARAMETER AT ITS DEFAULT is not published either (the stage writes node parameters
+    // sparsely), and the write route resolves `.../mixer/node/<id>/<param>` against the attached
+    // document -- so a PUT succeeded at a path this read then answered `unknown_path` for, the
+    // read/write asymmetry recorded for producer parameters, one layer over. Asked the same way.
+    {
+        const auto seg = split_path(path);
+        if (seg.size() == 9 && seg[0] == "channel" && seg[2] == "stage" && seg[3] == "layer" &&
+            seg[5] == "mixer" && seg[6] == "node" && ctx.stage && !seg[4].empty() &&
+            seg[4].find_first_not_of("0123456789") == std::string::npos) {
+            const int  layer     = std::atoi(seg[4].c_str());
+            const auto node_path = "node/" + seg[7] + "/" + seg[8];
+            if (auto stage = ctx.stage(ch)) {
+                try {
+                    for (const auto& q : stage->describe_graph(layer).get()) {
+                        if (q.name != node_path)
+                            continue;
+                        json::object r;
+                        r["path"]       = full;
+                        r["value"]      = vector_to_json(q.value);
+                        r["type"]       = osc_tags(q.value);
+                        r["is_default"] = q.value == q.default_value;
+                        return api_reply::ok_with(std::move(r));
+                    }
+                } catch (const std::exception&) {
+                    // No graph on the layer, or the layer went away: fall through to unknown_path.
+                }
+            }
+        }
+    }
+
     // Not published. If it names a registry field on a layer that exists, the value IS the
     // descriptor default -- sparse publication omits defaults, so "absent" and "at its
     // default" are the same state. Answering `unknown_path` here would make an untouched

@@ -13,6 +13,7 @@
 
 #include "json_state.h"
 
+#include <cstdio>
 #include <core/address/target.h>
 #include <core/timeline/curve.h>
 #include <core/timeline/timeline_store.h>
@@ -183,7 +184,7 @@ bool decode_enable(const json::value& v, const tl::parse_context& ctx, tl::enabl
             }
         } else if (w->is_bool() && w->as_bool()) {
             e.k = tl::time_expr::kind::always;
-        } else if (as_double(*w, *(new double(0)))) {
+        } else if (double ignored = 0; as_double(*w, ignored)) { // was `*(new double(0))`: a leak per call
             // Deliberately not accepted: `while: 1` as a NUMBER is the ambiguity that
             // `parse_while_expr` exists to remove. A client means "always", and a number in
             // every other position in this document is a time -- so it is refused and the
@@ -687,10 +688,19 @@ json::value encode_expr(const tl::time_expr& e)
         default:
             break;
     }
+    // THE OFFSET AT FULL PRECISION. `std::to_string` is `%f` -- six decimals -- and a frame at
+    // 30000/1001 is not a six-decimal number of seconds: one frame (23,543,520 flicks) printed as
+    // 0.033367 and parsed back 235 flicks late, which moved the first frame an object is active on
+    // by one. `%.17g` round-trips a double exactly, and the parser rounds to the nearest flick.
+    const auto exact = [](double secs) {
+        char buf[40];
+        std::snprintf(buf, sizeof(buf), "%.17g", secs);
+        return std::string(buf);
+    };
     if (e.literal > 0)
-        s += " + " + std::to_string(tl::to_seconds(e.literal));
+        s += " + " + exact(tl::to_seconds(e.literal));
     else if (e.literal < 0)
-        s += " - " + std::to_string(-tl::to_seconds(e.literal));
+        s += " - " + exact(-tl::to_seconds(e.literal));
     return json::value(s);
 }
 
@@ -980,7 +990,10 @@ api_reply parse_timeline_document(const std::string& body, const std::string& na
             const auto* n = member(r->as_object(), "num");
             const auto* dd = member(r->as_object(), "den");
             double      nv = 0, dv = 0;
-            if (!n || !dd || !as_double(*n, nv) || !as_double(*dd, dv) || dv == 0)
+            // Both halves POSITIVE, as the number form requires `d > 0`. `{"num":0,"den":1}` and
+            // `{"num":25,"den":-1}` used to be stored, and `flicks_per_frame` reads a non-positive
+            // rate as 1 fps -- so every `Nf` and timecode in the document meant N seconds.
+            if (!n || !dd || !as_double(*n, nv) || !as_double(*dd, dv) || nv <= 0 || dv <= 0)
                 return api_reply::fail(api_code::bad_request,
                                         "rate takes a number, or {\"num\": n, \"den\": d}");
             out.rate = boost::rational<int>(static_cast<int>(nv), static_cast<int>(dv));
@@ -1226,6 +1239,12 @@ api_reply timeline_verb(const api_context& ctx, const std::string& name, const s
     // which the transport deliberately knows nothing about; chase is configuration rather than
     // an action, so it has no queue and no `at_frame`.
     if (verb == "next" || verb == "previous" || verb == "prev") {
+        // REFUSED BY NAME rather than ignored: this seeks at once, and a client that scheduled it
+        // for a frame was told ok and got it immediately.
+        if (member(args, "at_frame"))
+            return api_reply::fail(api_code::bad_request,
+                                   verb + " seeks at once and takes no at_frame in this release; schedule a seek "
+                                          "to the cue's start instead");
         auto st = ctx.concrete_stage(channel);
         if (!st || !st->timeline_seek_relative(name, verb == "next").get())
             return api_reply::fail(api_code::bad_request,
@@ -1370,12 +1389,20 @@ api_reply get_timeline_resolved(const api_context& ctx, const std::string& name,
                 // other for a spread of positions.
                 if (const auto* obj = find_object(e->document.objects, inst->object_id)) {
                     json::object values;
-                    for (const auto& sv : obj->content)
+                    // CONTENT AND STEP KEYFRAMES, by the tick's own function -- this applied
+                    // `content` and skipped the keyframes, so a step that had changed on air read
+                    // back here as the value it started with.
+                    for (const auto& sv : tl::step_values_at(*obj, local))
                         values[sv.first] = vector_to_json(sv.second);
                     for (const auto& pv : obj->curves.interpolate(local, tl::kind_of))
                         values[pv.first] = pv.second;
                     if (!values.empty())
                         o["values"] = values;
+                    // A REBASED object's first segment starts from the live value it found on
+                    // entry, which exists only inside the tick. The curve values above are the
+                    // authored ones, and this says so rather than presenting them as on air.
+                    if (obj->rebase)
+                        o["rebased"] = true;
                 }
                 active[kv.first] = o;
             }

@@ -51,8 +51,9 @@ void graph_store::remember(slot& s, const std::string& label, const char* kind, 
     // An unlabelled write never coalesces, because with no label there is nothing to say two
     // writes belong together -- guessing from timing alone would fold two deliberate nudges into
     // one. (Time-based coalescing is the alternative and is flagged as unmeasured in the plan.)
-    const bool fold = coalesce && !label.empty() && !s.entries.empty() &&
+    const bool fold = coalesce && !s.fold_barrier && !label.empty() && !s.entries.empty() &&
                       s.entries.back().label == label && s.entries.back().kind == kind;
+    s.fold_barrier  = false;
 
     if (!fold) {
         if (s.current)
@@ -74,6 +75,7 @@ void graph_store::remember(slot& s, const std::string& label, const char* kind, 
     // REDO IS CLEARED BY ANY FORWARD CHANGE, folded or not: once the document has moved, the old
     // future was computed against something that no longer exists.
     s.future.clear();
+    s.future_entries.clear();
 }
 
 std::shared_ptr<const stored_graph> graph_store::put(graph_document doc, const std::string& label)
@@ -84,7 +86,7 @@ std::shared_ptr<const stored_graph> graph_store::put(graph_document doc, const s
     const auto name = doc.name;
     {
         std::lock_guard<std::mutex> l(lock_);
-        doc.revision = ++revision_;
+        doc.revision = ++document_revision_;
     }
     auto entry = build(std::move(doc));
 
@@ -95,6 +97,8 @@ std::shared_ptr<const stored_graph> graph_store::put(graph_document doc, const s
     remember(s, label, "put", /*coalesce*/ false);
     s.current    = entry;
     s.last_label = label;
+    // THE STRUCTURE REVISION MOVES WHERE THE DOCUMENT LANDS, in the same critical section.
+    ++revision_;
     return entry;
 }
 
@@ -298,8 +302,12 @@ std::shared_ptr<const stored_graph> graph_store::undo(const std::string& name)
     s.future.push_back(s.current);
     s.current = s.past.back();
     s.past.pop_back();
-    if (!s.entries.empty())
+    // SET ASIDE, not thrown away, so redo can put the real entry back.
+    if (!s.entries.empty()) {
+        s.future_entries.push_back(s.entries.back());
         s.entries.pop_back();
+    }
+    s.fold_barrier = true;
     // UNDO IS A STRUCTURE CHANGE even when what it undoes was a value patch, because the client
     // that is drawing this document has to re-read it: the values it is showing are no longer the
     // ones in the store, and there is no per-value notification. The asymmetry with
@@ -319,12 +327,14 @@ std::shared_ptr<const stored_graph> graph_store::redo(const std::string& name)
     s.past.push_back(s.current);
     s.current = s.future.back();
     s.future.pop_back();
-    history_entry h;
-    h.label    = "redo";
-    h.kind     = "put";
-    h.at       = std::chrono::system_clock::now();
-    h.revision = s.current ? s.current->document.revision : 0;
-    s.entries.push_back(h);
+    // THE ENTRY UNDO SET ASIDE, with its own label, kind and destination revision. Redo used to
+    // fabricate one -- label "redo", kind "put" whatever was undone, and the revision of the NEW
+    // current rather than the one the entry returns to.
+    if (!s.future_entries.empty()) {
+        s.entries.push_back(s.future_entries.back());
+        s.future_entries.pop_back();
+    }
+    s.fold_barrier = true;
     ++revision_;
     return s.current;
 }

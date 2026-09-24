@@ -1,6 +1,46 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: twenty-two control-API defects from the audit backlog
+
+The transport, values, events, batches, timelines, graphs and the OpenAPI document, each driven by
+the new `api-hardening` battery (13/13 on both mixers):
+
+* **Browsers could not write**: `OPTIONS` got `bad_request` with no Allow headers. Preflight is
+  answered `204` now.
+* **A body over 1 MiB closed the connection with no reply.** The limit is 64 MiB, and past it the
+  reply is `413` with an envelope.
+* **Every `/v1/events` subscriber was disconnected about 30 s after connecting**, and a reply
+  written 30 s after its request began was dropped: the read's timer was never turned off.
+* **`+` in a path became a space**, so a name with a `+` was unreachable; query values were never
+  percent-decoded; `/v1/graph/preview` was captured by the preview route.
+* **A node parameter at its default answered `unknown_path`** on GET while PUT worked.
+  **`{"value", "hold": true}` dropped the value.** **cas never matched an integer field or an
+  enumeration given by ordinal.** An audio or previz field returning to its default **reverted to
+  `null`** on `/v1/events`.
+* **A missing clip answered HTTP 404**; a negative `at_frame` was read as "that many frames from
+  now"; a batch refusal was always reported as `timeline_not_found`; clip names and typed text were
+  pasted into AMCP unescaped (backslashes vanished, a quote split the argument); an exception in a
+  scheduled batch lost every batch queued behind it.
+* **Timelines**: `/resolved` skipped step keyframes; NEXT/PREVIOUS ignored `at_frame` (refused by
+  name now); a `{num, den}` rate of 0 was stored and read as 1 fps; an expression offset was printed
+  with six decimals and came back a frame late at 29.97; and **`#a.end + 1f` never parsed** — the
+  literal kept the space after its sign, so a frame or timecode offset in the spaced form the
+  grammar requires was refused. The boot self-test checked offsets in seconds only.
+* **Graphs**: an id-less edge before an explicit `e1` collided with it; REDO invented an entry
+  (`"redo"`, `put`) instead of restoring the undone one, and a patch after an undo folded into the
+  entry before it; the store's revision moved before the new document was stored.
+* **OpenAPI** omitted every graph, node-catalogue and scopes route; a camera write over HTTP and a
+  timeline driving the same camera could undo each other (now one locked read-modify-write); the
+  OSC source's channel map was unbounded; and a `catch (...)` around the timeline clip check could
+  swallow an access violation under `/EHa`.
+
+Verified: `api-hardening` 13/13 on both mixers, plus the owning batteries (see the harness
+commit). Not measured, and argued from the code: a reply after a 30 s stall, the scheduled-batch
+drain's exception safety, the camera race, and the clip check's catch-all. A node parameter's
+revert on `/v1/events` is still `null`: its default lives in the attached document, which the event
+path cannot see.
+
 ### BEHAVIOUR: nine tracking defects from the audit backlog
 
 All in `src/modules/tracking`, each driven to what an operator sees by `tracking-previz`:

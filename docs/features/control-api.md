@@ -608,6 +608,30 @@ The reply carries `effective`, `shadowed_by` and `stack`, so a client that write
 something else owns the path is told so rather than left wondering. See `timeline.md` §10 for the
 full ownership stack.
 
+**`{"value": v, "hold": true}` writes v and then holds it** — one round trip for "set it and keep
+it", on a mixer field as on a node parameter. Until 2026-09-24 the mixer route held what was on air,
+never read `value`, and answered ok with the old value. The order matters and was measured: a hold
+pins what is on air when it is taken, so the write lands first.
+
+### Transport rules a client can rely on
+
+* **CORS.** Every reply carries `Access-Control-Allow-Origin: *`, `-Allow-Methods` and
+  `-Allow-Headers`, and an `OPTIONS` preflight is answered `204` before authentication. Before
+  2026-09-24 a browser could read but not write: every PUT, DELETE, JSON POST and anything carrying
+  `Authorization` was preflighted and refused. A browser still cannot put `Authorization` on a
+  WebSocket, so with `<auth>password</auth>` it cannot open `/v1/events`.
+* **Bodies up to 64 MiB.** Over that, the reply is HTTP `413` with an envelope. Beast's default
+  was 1 MiB and crossing it closed the connection with no reply.
+* **Timeouts cover transfers, not the server's work.** The 30 s timer runs while a request is read
+  and while its reply is written, and never on an event socket — every `/v1/events` subscriber used
+  to be disconnected about 30 s after it connected.
+* **`+` is literal in a path**; only a query value spells a space that way, and query values are
+  percent-decoded.
+* **A missing clip is an application error** (`200` + `bad_request` with AMCP's text), not HTTP
+  `404`, which is reserved for a path that does not exist.
+* **`at_frame` is 0 or more**, and `in_frames` likewise; a negative `at_frame` used to be read as
+  "that many frames from now".
+
 ### `state_leaves` — how big the tree you are subscribed to actually is
 
 `channel/{n}/stage/state_leaves` is the number of keys **the stage** publishes into
@@ -1226,6 +1250,7 @@ success.
 | `api-diag` | the `/diag` publication: toggle, tree, events, a provoked tag, removal, cost | **11/11** on both mixers. OFF by default on both facades; `DIAG PUBLISH BANANA` -> 403 with the state unchanged; 6 graphs captioned, 4 publishing `frame-time` as `[last, max]`; a `/diag` subscriber receives values, a `/channel/1` subscriber receives none of them with a positive control; `CALL SEEK` moves `tag/seek` from `[2, "info"]` to `[3, "info"]`; OFF reverts `/diag/interval` and the root is gone; late frames over 8 s at 2x1080p25, OFF then ON: ogl 0/0 -> 0/0, vulkan 3/1 -> 1/0 -- noise in both directions at this load, so the arm gates on "ON adds none", not on a figure | 2026-09-18 |
 | `scopes` | one 1080p50 channel: toggle, oracle, change, cost, removal, and the three pulled scopes | **11/11** on both mixers. OFF by default on both facades; `SCOPES 1 BANANA` -> 403 with the state unchanged; two flat asymmetric layers -> the published 3 x 256 counts equal the IMAGE consumer PNG's histogram bin for bin, 2,073,600 pixels, exactly two populated bins per channel; a colour change moves the counts; the three pulled scopes checked against a SPLIT-SCREEN fixture, which is what makes them able to fail: with one colour on each half the waveform must put two known levels in two known COLUMN RANGES, so a reduction that ignored x cannot pass; measured exact on both mixers (luma levels 115 and 84, parade R 60/30, G 140/90, B 30/180, vectorscope exactly two cells at (82, 162) and (179, 162)); late frames over 8 s on a looping clip, OFF then ON: ogl 0 -> 0, vulkan 1 -> 1 | 2026-09-18 |
 | `api-write` | validation, contention, batches | **9/9** on both mixers. Eight refusals each with their own code and **the value read back unchanged after all eight**; **200 concurrent toggles forming one unbroken chain**; a failed batch applied nothing; a two-channel batch landed on **frame 215 on both** | 2026-09-05 |
+| `api-hardening` | the audit backlog's control-API fixes, one check each | **13/13** on both mixers: CORS preflight, the 64 MiB limit and its 413, an event socket past 35 s, `+` in a path, a node parameter at its default, hold-with-value, cas on an integer and an ordinal, an audio revert's default, a missing clip's status, negative `at_frame`, NEXT + `at_frame`, a zero rate, `/resolved` step keys, an NTSC expression offset round trip, edge-id collisions, redo's entry, openapi's routes. Cannot see: a reply after a 30 s stall, the batch drain's exception safety, the camera write race | 2026-09-25 |
 | `api-atframe` | 10 scheduled batches | **7/7** on both mixers. **Spread between channels 0 frames on all ten**; offset from `at_frame` **2 frames on all ten** | 2026-09-05 |
 | `api-readiness` | a 75-frame clip | **7/7** on both mixers. Readiness observable **113-133 ms after PLAY**; transport followed pause/resume/stop; `file/frame` **(22, 75)** against **ffprobe's 75** | 2026-09-05 |
 

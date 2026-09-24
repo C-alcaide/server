@@ -85,8 +85,9 @@ api_code code_from_amcp(int amcp_code)
 {
     if (amcp_code >= 200 && amcp_code < 300)
         return api_code::ok;
-    if (amcp_code == 404)
-        return api_code::unknown_path;
+    // AMCP's 404 is a CLIP it cannot find, not an endpoint -- and `unknown_path` becomes HTTP 404
+    // outside the tree, which control-api.md reserves for a path that does not exist. So a
+    // missing file is the request's fault like any other bad argument; the AMCP text says which.
     if (amcp_code >= 400 && amcp_code < 500)
         return api_code::bad_request;
     if (amcp_code >= 500)
@@ -94,9 +95,26 @@ api_code code_from_amcp(int amcp_code)
     return api_code::internal;
 }
 
-std::wstring quote_if_needed(const std::wstring& s)
+/// ONE AMCP TOKEN, ALWAYS QUOTED, with `\` and `"` escaped and a newline written as `\n`.
+///
+/// This used to quote only a string containing a space, and escape nothing -- and the line then
+/// goes through `IO::tokenize`, which treats `\` as an escape (an unknown one drops BOTH
+/// characters) and a bare `"` as a quote toggle. So a clip path's backslashes vanished, and typed
+/// text with a quote in it split into two arguments. The same encoding `cluster.cpp`'s relay uses.
+std::wstring amcp_token(const std::wstring& s)
 {
-    return s.find(L' ') == std::wstring::npos ? s : (L"\"" + s + L"\"");
+    std::wstring out = L"\"";
+    for (const wchar_t c : s) {
+        if (c == L'\\' || c == L'"')
+            out += L'\\';
+        if (c == L'\n') {
+            out += L"\\n";
+            continue;
+        }
+        out += c;
+    }
+    out += L'"';
+    return out;
 }
 
 /// Build the AMCP line for a `load`/`play` that carries a clip.
@@ -114,7 +132,7 @@ std::wstring build_amcp(const action_target& t, const json::object& body, bool p
 
     if (auto* c = body.if_contains("clip"))
         if (c->is_string())
-            cmd << L" " << quote_if_needed(u16(std::string(c->as_string().c_str())));
+            cmd << L" " << amcp_token(u16(std::string(c->as_string().c_str())));
 
     if (auto* s = body.if_contains("seek"))
         if (s->is_int64() || s->is_uint64() || s->is_double())
@@ -224,7 +242,7 @@ std::wstring build_input_amcp(const action_target& t, const json::object& body, 
             return {};
         }
         // Quoted, because AMCP splits on whitespace and typed text routinely contains it.
-        cmd << L" TEXT \"" << u16(text) << L"\"";
+        cmd << L" TEXT " << amcp_token(u16(text));
 
     } else {
         why = "type must be mouse, key or text, not \"" + type + "\"";
@@ -763,12 +781,19 @@ api_reply validate_batch(const api_context& ctx, const std::string& body, batch_
         if (!at->is_int64() && !at->is_uint64() && !at->is_double())
             return api_reply::fail(api_code::field_wrong_type, "at_frame must be a frame number");
         out.at_frame = static_cast<std::int64_t>(at->to_number<double>());
+        // `in_frames` is encoded as a NEGATIVE at_frame for the caller, so a negative at_frame
+        // was silently read as "that many frames from now" instead of being refused.
+        if (out.at_frame < 0)
+            return api_reply::fail(api_code::field_out_of_range,
+                                   "at_frame is a channel frame number, 0 or more; give in_frames for a relative time");
     }
     if (auto* in = o.if_contains("in_frames")) {
         if (out.at_frame != 0)
             return api_reply::fail(api_code::bad_request, "give at_frame or in_frames, not both");
         if (!in->is_int64() && !in->is_uint64() && !in->is_double())
             return api_reply::fail(api_code::field_wrong_type, "in_frames must be a number of frames");
+        if (in->to_number<double>() < 0)
+            return api_reply::fail(api_code::field_out_of_range, "in_frames is a number of frames from now, 0 or more");
         out.at_frame = -static_cast<std::int64_t>(in->to_number<double>()); //< resolved by the caller
     }
 
@@ -788,8 +813,10 @@ api_reply apply_batch(const api_context& ctx, const batch_plan& plan)
     std::map<int, std::shared_ptr<core::stage_delayed>> delayed;
     std::vector<std::future<void>>                     results;
     std::vector<std::unique_lock<std::mutex>>          locks;
-    /// (op index, document name, "did the channel own it") for each `timeline` op.
-    std::vector<std::tuple<std::size_t, std::string, std::future<bool>>> verdicts;
+    /// (op index, name, "did it land", which kind of op) for each timeline, graph and node op --
+    /// the KIND because a refusal was reported as `timeline_not_found` whatever the op was.
+    enum class verdict_kind { timeline, graph, node };
+    std::vector<std::tuple<std::size_t, std::string, std::future<bool>, verdict_kind>> verdicts;
 
     try {
         for (const auto& pl : plan.ops) {
@@ -821,7 +848,8 @@ api_reply apply_batch(const api_context& ctx, const batch_plan& plan)
                 // the document, which validation could not rule out -- the store is mutable and
                 // a `DELETE` can land between the two.
                 verdicts.emplace_back(pl.index, pl.timeline.name,
-                                      st->timeline_command(pl.timeline.name, pl.timeline.cmd));
+                                      st->timeline_command(pl.timeline.name, pl.timeline.cmd),
+                                      verdict_kind::timeline);
                 continue;
             }
             if (pl.is_graph) {
@@ -830,7 +858,8 @@ api_reply apply_batch(const api_context& ctx, const batch_plan& plan)
                 // between validation and the frame, and the store is mutable in between.
                 verdicts.emplace_back(pl.index, pl.graph.name,
                                       st->graph_command(pl.graph.name, pl.graph.verb,
-                                                        pl.graph.layer));
+                                                        pl.graph.layer),
+                                      verdict_kind::graph);
                 continue;
             }
             if (pl.is_node) {
@@ -840,7 +869,8 @@ api_reply apply_batch(const api_context& ctx, const batch_plan& plan)
                 // did nothing while the batch reported success.
                 verdicts.emplace_back(pl.index, pl.node.path,
                                       st->set_node_param(pl.node.layer, pl.node.path,
-                                                         pl.node.value, pl.node.label));
+                                                         pl.node.value, pl.node.label),
+                                      verdict_kind::node);
                 continue;
             }
             if (pl.is_set) {
@@ -898,13 +928,35 @@ api_reply apply_batch(const api_context& ctx, const batch_plan& plan)
     // been applied by the time this is knowable, so the honest answer is "the batch landed and
     // this op did not" instead of a rollback the design cannot perform.
     for (auto& v : verdicts) {
-        if (std::get<2>(v).get())
-            continue;
+        // INSIDE A TRY: a stage task that threw rethrows from get(), and out of here it escaped the
+        // scheduled-batch drain and lost every batch still waiting behind this one.
+        std::string threw;
+        try {
+            if (std::get<2>(v).get())
+                continue;
+        } catch (const std::exception& e) {
+            threw = e.what();
+        }
         json::object dd;
-        dd["index"]   = static_cast<std::int64_t>(std::get<0>(v));
-        dd["code"]    = to_string(api_code::timeline_not_found);
-        dd["message"] = "the channel no longer owns document '" + std::get<1>(v) +
-                        "' -- it was deleted or replaced between validation and apply";
+        dd["index"] = static_cast<std::int64_t>(std::get<0>(v));
+        switch (std::get<3>(v)) {
+            case verdict_kind::timeline:
+                dd["code"]    = to_string(api_code::timeline_not_found);
+                dd["message"] = "the channel no longer owns document '" + std::get<1>(v) +
+                                "' -- it was deleted or replaced between validation and apply";
+                break;
+            case verdict_kind::graph:
+                dd["code"]    = to_string(api_code::graph_attached);
+                dd["message"] = "graph '" + std::get<1>(v) +
+                                "' could not be applied: attached elsewhere, or deleted, between validation and apply";
+                break;
+            case verdict_kind::node:
+                dd["code"]    = to_string(api_code::unknown_path);
+                dd["message"] = "no attached graph on that layer has " + std::get<1>(v);
+                break;
+        }
+        if (!threw.empty())
+            dd["message"] = dd["message"].as_string().c_str() + std::string(" (") + threw + ")";
         return api_reply::fail(api_code::batch_op_failed,
                                "op " + std::to_string(std::get<0>(v)) +
                                    " was refused after the rest of the batch had landed",

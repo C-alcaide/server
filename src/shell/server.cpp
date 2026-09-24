@@ -813,17 +813,13 @@ struct server::impl
                         // object is read first. `stage_snapshot()` is the same read the http
                         // bridge does, and it is the one place a per-tick round trip is
                         // unavoidable: there is no partial setter to write into.
-                        const auto  snap = previz->stage_snapshot();
-                        auto        cam  = view ? snap.view_camera : snap.camera;
-                        const auto* cf   = core::fields::find_camera_field(field);
-                        if (!cf || !cf->set || !cf->set(cam, value))
+                        const auto* cf = core::fields::find_camera_field(field);
+                        if (!cf || !cf->set)
                             return false;
-
-                        if (view)
-                            previz->set_view_camera(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.roll, cam.fov);
-                        else
-                            previz->set_camera(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.roll, cam.fov);
-                        return true;
+                        // Under the renderer's lock, as the HTTP writer does, so neither can
+                        // re-send a stale camera over the other's write.
+                        return previz->update_camera(
+                            view, [&](core::previz_camera& c) { return cf->set(c, value); });
                     });
             }
             channels_->emplace_back(channel, channel->stage(), lifecycle_key);
@@ -1246,9 +1242,11 @@ struct server::impl
                         (void)p; //< discarded: see api_context.h for why it is not reused
                         return {};
                     } catch (const std::exception& e) {
+                        // std::exception ONLY. This tree is built with /EHa, under which a
+                        // catch-all also takes an access violation -- and a fault inside a
+                        // producer factory then read as "the producer registry threw" to the
+                        // timeline author while the process carried on with corrupted memory.
                         return e.what();
-                    } catch (...) {
-                        return "the producer registry threw";
                     }
                 };
 
@@ -1396,16 +1394,25 @@ struct server::impl
                             return out;
                         }
                         const bool view = object == "view_camera";
-                        auto       cam  = view ? snap.view_camera : snap.camera;
-                        out.previous    = cf->get(cam);
-                        if (!cf->set(cam, value)) {
+                        // ONE READ-MODIFY-WRITE UNDER THE RENDERER'S LOCK. This read a snapshot,
+                        // changed one field and re-sent all seven components -- as the timeline's
+                        // writer does on the stage thread -- so the two could interleave and the
+                        // timeline re-sent the old value over a write this reply reported applied.
+                        core::previz_camera before, cam;
+                        bool                fits = true;
+                        (void)previz->update_camera(
+                            view,
+                            [&](core::previz_camera& c) {
+                                fits = cf->set(c, value);
+                                return fits;
+                            },
+                            &before,
+                            &cam);
+                        out.previous = cf->get(before);
+                        if (!fits) {
                             out.reason = "value does not fit camera field " + path;
                             return out;
                         }
-                        if (view)
-                            previz->set_view_camera(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.roll, cam.fov);
-                        else
-                            previz->set_camera(cam.x, cam.y, cam.z, cam.yaw, cam.pitch, cam.roll, cam.fov);
                         // READ BACK FROM THE RENDERER, not from the local copy. Echoing `cam`
                         // would report what was INTENDED; the point of a reply is what the
                         // server now holds. See the screen branch below, where the difference

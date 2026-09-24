@@ -13,6 +13,7 @@
 #include "json_state.h"
 
 #include <core/frame/transform_fields.h>
+#include <core/stage/stage_fields.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -67,13 +68,37 @@ bool any_prefix_matches(const std::string& path, const std::vector<std::string>&
 /// what "absent" means on this wire. Anything else that disappears (a layer that was
 /// cleared, a producer key that stopped being written) has no default to report, so the
 /// event carries `null` and says `reverted`, which is honest about the difference.
+///
+/// EVERY TABLE THAT PUBLISHES SPARSELY, not only the image transform's. The audio fields and the
+/// previz camera and screen fields vanish at their defaults too, and until 2026-09-24 all of them
+/// reverted to `null` here while `/v1/value` answered their defaults -- the fix `read_value` got for
+/// audio, not made on this path. A NODE PARAMETER still reverts to `null`: its default lives in the
+/// attached document, which this reader, working from snapshots alone, cannot see.
 json::value reverted_value(const std::string& path)
 {
     const auto pos = path.find("/mixer/");
     if (pos == std::string::npos)
         return nullptr;
-    const auto* f = fields::find(path.substr(pos + 7));
-    return f ? vector_to_json(f->defaults()) : json::value(nullptr);
+    const auto name = path.substr(pos + 7);
+    if (const auto* f = fields::find(name))
+        return vector_to_json(f->defaults());
+    if (const auto* a = fields::find_audio_field(name))
+        return vector_to_json(a->defaults());
+    static const std::string previz = "previz/";
+    if (name.rfind(previz, 0) == 0) {
+        const auto rest = name.substr(previz.size());
+        if (rest.rfind("camera/", 0) == 0 || rest.rfind("view_camera/", 0) == 0) {
+            if (const auto* cf = fields::find_camera_field(rest.substr(rest.find('/') + 1)))
+                return vector_to_json(cf->defaults());
+        } else if (rest.rfind("screen/", 0) == 0) {
+            const auto body  = rest.substr(std::string("screen/").size());
+            const auto slash = body.find('/');
+            if (slash != std::string::npos)
+                if (const auto* sf = fields::find_screen_field(body.substr(slash + 1)))
+                    return vector_to_json(sf->defaults());
+        }
+    }
+    return nullptr;
 }
 
 } // namespace

@@ -170,4 +170,29 @@ struct timeline_document
     std::vector<timeline_object> objects;
 };
 
+/// An object's STEP values at `local` time: its `content`, then every step keyframe whose literal
+/// span contains `local`, in order, the last one winning -- which is what "step" means: it changes
+/// AT the key and holds until the next. ONE implementation, called by the stage's tick and by
+/// `GET /v1/timeline/{name}/resolved`, because the endpoint exists so a client draws the server's
+/// answer rather than its own, and until 2026-09-24 it applied `content` and skipped the keyframes.
+inline std::map<std::string, monitor::vector_t> step_values_at(const timeline_object& obj, flicks local)
+{
+    std::map<std::string, monitor::vector_t> steps = obj.content;
+    for (const auto& kf : obj.keyframes) {
+        // Literal times only, and the PUT refuses anything else -- a step keyframe referencing
+        // another object would need the resolver, and the resolver works on objects rather than
+        // on keys inside them.
+        const auto& spec = kf.enable;
+        if (!spec.start || spec.start->k != time_expr::kind::literal)
+            continue;
+        if (local < spec.start->literal)
+            continue;
+        if (spec.end && spec.end->k == time_expr::kind::literal && local >= spec.end->literal)
+            continue;
+        for (const auto& c : kf.content)
+            steps[c.first] = c.second;
+    }
+    return steps;
+}
+
 }}} // namespace caspar::core::timeline

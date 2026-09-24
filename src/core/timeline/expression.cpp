@@ -11,6 +11,7 @@
 
 #include "expression.h"
 
+#include <cstdio>
 #include <common/log.h>
 
 #include <algorithm>
@@ -84,8 +85,16 @@ bool parse_literal(std::string_view s, const parse_context& ctx, flicks& out, st
     }
 
     const bool negative = s.front() == '-';
-    if (negative || s.front() == '+')
+    if (negative || s.front() == '+') {
         s.remove_prefix(1);
+        // AND TRIMMED AGAIN. An offset arrives as `+ 1f` -- the grammar REQUIRES the space before
+        // the sign, which is what keeps `#lower-third` an id -- so after the sign comes off the
+        // literal still begins with a space. Seconds survived it because `stod` skips whitespace;
+        // a FRAME literal (`all_digits(" 1")`) and a timecode did not, so `#a.end + 1f` -- the
+        // form the server itself documents -- never parsed. The self-test below checked offsets in
+        // seconds only.
+        s = trim(s);
+    }
 
     const auto finish = [&](flicks v) {
         out = negative ? -v : v;
@@ -393,6 +402,24 @@ void expression_self_test()
 
     req(parse_time_expr("#interview.end - 2.5", ctx, e, err), "a negative offset parses");
     req(e.literal == from_seconds(-2.5), "and is -2.5 s");
+
+    // An offset in FRAMES and in TIMECODE, with the space the grammar requires -- the forms that
+    // failed until 2026-09-24 because the literal kept the space after its sign.
+    req(parse_time_expr("#interview.end + 1f", ctx, e, err), "a frame offset parses");
+    req(e.k == time_expr::kind::ref_end && e.literal == from_frames(1, ctx.rate), "and is one frame");
+    req(parse_time_expr("#interview.end - 00:00:01:00", ctx, e, err), "a timecode offset parses");
+    req(e.literal == -from_frames(25, ctx.rate), "and is minus one second");
+    {
+        // THE WIRE ROUND TRIP AT 29.97: the API writes an offset as `%.17g` seconds, and one frame
+        // must come back as exactly one frame. At six decimals it came back 235 flicks late.
+        parse_context nt;
+        nt.rate          = boost::rational<int>(30000, 1001);
+        const auto frame = from_frames(1, nt.rate);
+        char       buf[48];
+        std::snprintf(buf, sizeof(buf), "#interview.end + %.17g", to_seconds(frame));
+        req(parse_time_expr(buf, nt, e, err), "a %.17g seconds offset parses");
+        req(e.literal == frame, "and is exactly one frame at 30000/1001");
+    }
 
     req(parse_time_expr("(#interview.end) + 5", ctx, e, err), "parentheses are tolerated");
     req(e.k == time_expr::kind::ref_end && e.literal == from_seconds(5.0), "and change nothing");

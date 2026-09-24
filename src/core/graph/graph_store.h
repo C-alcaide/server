@@ -96,8 +96,8 @@ struct history_entry
     std::int64_t                          revision = 0;
     std::string                           label;   ///< what the client called the gesture
     std::chrono::system_clock::time_point at;
-    /// `put`, `patch`, `attach`, `detach` -- what KIND of change this was, so a client can
-    /// present "undo the last edit" differently from "undo taking it off air".
+    /// `put` or `patch` -- what KIND of change this was. (`attach` and `detach` were listed here
+    /// and never recorded: taking a look off air is not something an edit's undo reverses.)
     std::string kind;
 };
 
@@ -172,6 +172,12 @@ class graph_store
         std::deque<std::shared_ptr<const stored_graph>>  past;
         std::deque<std::shared_ptr<const stored_graph>>  future;
         std::deque<history_entry>                        entries;
+        /// The entries UNDO set aside, so REDO restores the real one -- label, kind and
+        /// revision -- instead of inventing `"redo"`/`put`.
+        std::deque<history_entry>                        future_entries;
+        /// Set by undo and redo: the next labelled patch must NOT fold into the entry before
+        /// them, or one undo would then revert two gestures.
+        bool                                             fold_barrier = false;
         std::optional<attachment>                        where;
         /// The label the last coalescing change carried, so a run of slider writes under one
         /// label folds into one entry instead of fifty.
@@ -186,6 +192,11 @@ class graph_store
     mutable std::mutex                     lock_;
     std::unordered_map<std::string, slot>  slots_;
     std::int64_t                           revision_        = 0;
+    /// Where a document's own `revision` comes from. SEPARATE from `revision_`, which a PUT used to
+    /// bump before its document was built: for the whole of `build()` the store's revision said
+    /// N+1 while `get()` still returned the previous document, and anything keyed on the counter
+    /// read a change that had not happened yet. `revision_` now moves where the document lands.
+    std::int64_t                           document_revision_ = 0;
     std::int64_t                           values_revision_ = 0;
 
     /// Build the entry for a document, validating it. Never called under the lock.

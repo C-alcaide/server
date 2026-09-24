@@ -147,12 +147,21 @@ struct osc_source::impl
 
             if (!running)
                 break;
-            if (ec || n == 0)
+            // A RECEIVE ERROR IS A DROPPED PACKET -- a datagram over kMaxPacket fails here with
+            // message-too-long -- and the header promises dropped packets are counted.
+            if (ec || n == 0) {
+                if (ec) {
+                    std::lock_guard<std::mutex> g(lock);
+                    ++dropped;
+                }
                 continue;
+            }
 
             try {
                 handle(::osc::ReceivedPacket(buf.data(), static_cast<::osc::int32>(n)));
-            } catch (...) {
+            } catch (const std::exception&) {
+                // std::exception, NOT `...`: under /EHa a catch-all also swallows an access
+                // violation, which is a fault to see rather than a packet to count.
                 // A MALFORMED packet must change nothing and must be visible. oscpack throws on
                 // a bad size or a bad type tag string, and swallowing that silently would make a
                 // sender with a bug indistinguishable from one that is not sending.
@@ -213,6 +222,16 @@ struct osc_source::impl
         }
 
         std::lock_guard<std::mutex> g(lock);
+        // BOUNDED. Every distinct address suffix became a channel, and nothing capped them, so any
+        // sender -- or anyone on the network -- could grow this map without limit; `channels()`
+        // copies it on every call besides. A NEW channel past the cap is dropped and counted.
+        constexpr std::size_t kMaxChannels = 256;
+        const auto            is_new       = [&](const std::string& c) { return values.find(c) == values.end(); };
+        if (values.size() >= kMaxChannels &&
+            (args.size() == 1 ? is_new(channel) : is_new(channel + "/0"))) {
+            ++dropped;
+            return;
+        }
         ++packets;
         if (args.size() == 1) {
             values[channel] = args[0];

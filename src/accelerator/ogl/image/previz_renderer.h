@@ -66,6 +66,15 @@ class previz_renderer
     /// Reset camera to default.
     void reset_camera();
 
+    /// ONE CAMERA, READ-MODIFY-WRITE UNDER THE SCENE LOCK: `edit` sees the current camera and
+    /// returns false to leave it alone. `view` selects the viewport camera (which also enables the
+    /// view override). For a writer that changes one field -- the HTTP stage route and the
+    /// timeline's stage-field writer both do -- so neither re-sends the other's stale components.
+    bool update_camera(bool                                          view,
+                       const std::function<bool(core::previz_camera&)>& edit,
+                       core::previz_camera*                          before = nullptr,
+                       core::previz_camera*                          after  = nullptr);
+
     /// Set an independent viewport/navigation camera (render POV only; never
     /// affects projection).  Enables the view override.
     void set_view_camera(float x, float y, float z, float yaw, float pitch, float roll, float fov);

@@ -280,9 +280,9 @@ json::object openapi(const http_config& cfg)
                       "Body: {\"value\": ..., \"duration\": frames, \"tween\": name, \"label\": text}, or an "
                       "in-place operation {\"op\": \"toggle\"|\"add\"|\"cas\", ...}. Out of range is refused, "
                       "never clipped. The reply's `value` is what the field now HOLDS. "
-                      "STAGE fields take `op: set` only and are not tweenable: the previz renderer "
-                      "cannot make a read-modify-write atomic, and KEYFRAMES is bound to "
-                      "image_transform so a screen cannot be animated in this build.",
+                      "STAGE fields take `op: set` only and are not tweenable over this route; a "
+                      "timeline document can animate a previz CAMERA field. `hold: true` WITH a value "
+                      "holds the path and writes the value, as on a node parameter.",
                       json::array{path_param("path", "channel/1/stage/layer/10/mixer/opacity")},
                       "#/components/schemas/ValueWrite");
         paths["/v1/value/{path}"] = std::move(p);
@@ -337,9 +337,9 @@ json::object openapi(const http_config& cfg)
                       "With its resolution and, if it has any, its faults.",
                       json::array{path_param("name", "show")});
         p["delete"] = op("Remove it",
-                         "The only DELETE in this API. A timeline is the first thing the API OWNS -- "
-                         "everything else it writes is a property of something the server already had, "
-                         "and there is no meaning to deleting an opacity.",
+                         "A timeline is the first thing the API OWNS -- everything else it writes is a "
+                         "property of something the server already had. A node graph is the second, and "
+                         "has a DELETE of its own.",
                          json::array{path_param("name", "show")});
         paths["/v1/timeline/{name}"] = std::move(p);
     }
@@ -381,6 +381,45 @@ json::object openapi(const http_config& cfg)
         p["get"] = op("This document", "Generated from the server's own field table.", {});
         paths["/v1/openapi.json"] = std::move(p);
     }
+    // THE ROUTES THIS DOCUMENT USED TO OMIT. The route table and this list are two hand-written
+    // lists, and every graph, node-catalogue, scopes and docs route had landed in the first
+    // without reaching the second -- so a generated client could not see half the API.
+    const auto simple = [&](const char* route, const char* verb, const char* summary, const char* description,
+                            json::array params) {
+        auto& node = paths[route];
+        if (!node.is_object())
+            node = json::object();
+        node.as_object()[verb] = op(summary, description, std::move(params));
+    };
+    simple("/v1/graph", "get", "The node graph documents that are stored", "Names, revisions and attachments.", {});
+    simple("/v1/graph/{name}", "get", "One graph document",
+           "As stored, with faults, evaluation order, attachment and undo flags.",
+           json::array{path_param("name", "look")});
+    simple("/v1/graph/{name}", "put", "Store a graph document",
+           "A broken document is STORED and answers graph_invalid; only a decode fault stores nothing.",
+           json::array{path_param("name", "look")});
+    simple("/v1/graph/{name}", "delete", "Remove a graph", "Detaches it first: deleting a look takes it off air.",
+           json::array{path_param("name", "look")});
+    simple("/v1/graph/{name}/history", "get", "The undo stack", "Labels, kinds, can_undo, can_redo.",
+           json::array{path_param("name", "look")});
+    simple("/v1/graph/{name}/{verb}", "post", "undo, redo, attach, detach", "The resulting document comes back.",
+           json::array{path_param("name", "look"), path_param("verb", "attach")});
+    simple("/v1/graph/{name}/preview", "get", "A node's output as image/png",
+           "?node=<id>[,<id>...][&max=<px>]. NOT an envelope; a refusal is. Omit max for a thumbnail, "
+           "max=0 for the full raster.",
+           json::array{path_param("name", "look")});
+    simple("/v1/graph/connections/preview", "get", "May these two ports join?",
+           "?from=<cls>.<port>&to=<cls>.<port>: legal, exact, and the coercion note.", {});
+    simple("/v1/catalog/node", "get", "Every node class", "Compiled in, with its ports.", {});
+    simple("/v1/catalog/node/{cls}", "get", "One node class", "", json::array{path_param("cls", "exposure")});
+    simple("/v1/catalog/node/{cls}/default", "get", "A node ready to PUT", "Every port at its default.",
+           json::array{path_param("cls", "exposure")});
+    simple("/v1/catalog/node/{cls}/suggest", "get", "What may feed a port", "?port=<name>: exact and lossy sources.",
+           json::array{path_param("cls", "exposure")});
+    simple("/v1/scopes/{channel}/{kind}", "get", "A scope as image/png",
+           "waveform, parade or vectorscope, pulled at the client's rate. NOT an envelope.",
+           json::array{path_param("channel", "1"), path_param("kind", "waveform")});
+    simple("/v1/docs", "get", "This API as a page", "HTML, not an envelope.", {});
     {
         json::object get;
         get["summary"]     = "Live changes (WebSocket)";
@@ -431,7 +470,8 @@ json::object openapi(const http_config& cfg)
         json::object ops;
         ops["type"]        = "array";
         ops["items"]       = json::object();
-        ops["description"] = "Each is {\"op\":\"set\"|\"action\", \"path\": ..., ...}.";
+        ops["description"] = "Each is {\"op\":\"set\"|\"action\"|\"timeline\"|\"graph\", ...}; a set "
+                             "whose path is a node parameter writes the attached graph.";
         props["ops"]       = std::move(ops);
         json::object at;
         at["type"]         = "integer";
@@ -514,7 +554,8 @@ std::string docs_page(const http_config& cfg)
         {"GET", "/v1/graph/connections/preview", "?from=<cls>.<port>&to=<cls>.<port>: may these join?"},
         {"GET", "/v1/graph/{name}/preview",
          "?node=<id>[&max=<px>]: that node's output as image/png -- NOT an envelope. `max` caps "
-         "the longest edge and is the whole of the cost; omit it for the layer's raster"},
+         "the longest edge and is the whole of the cost; omit it for a thumbnail, max=0 for the "
+         "layer's full raster"},
         {"GET", "/v1/graph", "The node graph documents that are stored"},
         {"PUT", "/v1/graph/{name}", "Store a document; a broken one is STORED and answers graph_invalid"},
         {"GET", "/v1/graph/{name}", "The document as stored, with faults, order, attachment and undo flags"},

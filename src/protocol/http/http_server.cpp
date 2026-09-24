@@ -50,22 +50,35 @@ namespace {
 /// Percent-decoding, because a path segment can legitimately contain one. Anything
 /// malformed is left as written rather than rejected: a stray `%` in a path is going to
 /// fail as `unknown_path` a moment later with a far more useful message than "bad escape".
-std::string url_decode(std::string_view in)
+///
+/// `+` IS LITERAL IN A PATH (RFC 3986); only a query value spells a space that way, which is what
+/// `plus_is_space` is for. And an escape is `%` followed by exactly two HEX digits: `strtol` also
+/// took `%-1` and `% f`. Until 2026-09-24 a path's `+` became a space, so a graph or timeline named
+/// `a+b` -- or a node id with a `+` in it -- could not be addressed at all.
+std::string url_decode(std::string_view in, bool plus_is_space = false)
 {
+    const auto hexval = [](char c) -> int {
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        if (c >= 'a' && c <= 'f')
+            return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F')
+            return c - 'A' + 10;
+        return -1;
+    };
     std::string out;
     out.reserve(in.size());
     for (size_t i = 0; i < in.size(); ++i) {
         if (in[i] == '%' && i + 2 < in.size()) {
-            const auto hex = std::string(in.substr(i + 1, 2));
-            char*      end = nullptr;
-            const auto v   = std::strtol(hex.c_str(), &end, 16);
-            if (end && *end == '\0') {
-                out.push_back(static_cast<char>(v));
+            const int hi = hexval(in[i + 1]);
+            const int lo = hexval(in[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>(hi * 16 + lo));
                 i += 2;
                 continue;
             }
         }
-        out.push_back(in[i] == '+' ? ' ' : in[i]);
+        out.push_back(plus_is_space && in[i] == '+' ? ' ' : in[i]);
     }
     return out;
 }
@@ -107,8 +120,11 @@ std::string query_param(const std::string& query, const char* key)
         if (amp == std::string::npos)
             amp = query.size();
         const auto part = query.substr(pos, amp - pos);
+        // PERCENT-DECODED, with `+` as a space: a client that encodes its query values the way
+        // `encodeURIComponent` does -- a node id with a comma, a timeline name with a space --
+        // used to be handed the escapes raw and match nothing.
         if (part.rfind(needle, 0) == 0)
-            return part.substr(needle.size());
+            return url_decode(part.substr(needle.size()), true);
         pos = amp + 1;
     }
     return {};
@@ -341,10 +357,17 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
                 CASPAR_LOG(warning) << L"[api] batch late by " << (now - plan.at_frame) << L" frame(s): scheduled for "
                                     << plan.at_frame << L", applying on " << now;
 
-            const auto reply = apply_batch(context_, plan);
-            if (reply.code != api_code::ok)
-                CASPAR_LOG(error) << L"[api] a scheduled batch failed on frame " << now << L": "
-                                  << u16(reply.message);
+            // A THROW HERE USED TO LOSE THE QUEUE. `keep` is assigned back at the end, so an
+            // exception out of one plan left every not-yet-due plan moved-from (silently lost) and
+            // every plan already applied this pass in place, to be applied AGAIN next tick.
+            try {
+                const auto reply = apply_batch(context_, plan);
+                if (reply.code != api_code::ok)
+                    CASPAR_LOG(error) << L"[api] a scheduled batch failed on frame " << now << L": "
+                                      << u16(reply.message);
+            } catch (const std::exception& e) {
+                CASPAR_LOG(error) << L"[api] a scheduled batch threw on frame " << now << L": " << u16(e.what());
+            }
         }
 
         pending_batches_ = std::move(keep);
@@ -650,24 +673,47 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
 
     void read(std::shared_ptr<beast::tcp_stream> stream, std::shared_ptr<beast::flat_buffer> buffer)
     {
-        auto self = shared_from_this();
-        auto req  = std::make_shared<bhttp::request<bhttp::string_body>>();
+        auto self   = shared_from_this();
+        auto parser = std::make_shared<bhttp::request_parser<bhttp::string_body>>();
+        // 64 MiB, not Beast's default 1 MiB. A timeline with thousands of keys, or a graph with a
+        // `ui` blob, crossed the default -- and the read then CLOSED THE CONNECTION WITH NO REPLY,
+        // logged at debug, so the client could not tell "too big" from "the server died".
+        parser->body_limit(64ull * 1024 * 1024);
 
         // A generous timeout rather than none: a half-open connection from a client that
-        // lost power would otherwise hold a socket for the life of the server.
+        // lost power would otherwise hold a socket for the life of the server. It covers the
+        // READ only -- see `handle` and `write`.
         stream->expires_after(std::chrono::seconds(30));
 
         bhttp::async_read(*stream,
                           *buffer,
-                          *req,
-                          [self, stream, buffer, req](boost::system::error_code ec, std::size_t) {
+                          *parser,
+                          [self, stream, buffer, parser](boost::system::error_code ec, std::size_t) {
+                              if (ec == bhttp::error::body_limit || ec == bhttp::error::header_limit) {
+                                  CASPAR_LOG(warning) << L"[http-api] refused a request over the size limit: "
+                                                      << u16(ec.message());
+                                  auto reply = api_reply::fail(
+                                      api_code::bad_request,
+                                      ec == bhttp::error::body_limit ? "the request body is over 64 MiB"
+                                                                     : "the request headers are too large");
+                                  auto body = json::serialize(json::value(envelope(reply, self->server_name_)));
+                                  self->write(stream, buffer, bhttp::status::payload_too_large, std::move(body),
+                                              bhttp::verb::post, false, 11);
+                                  return;
+                              }
                               if (ec) {
                                   if (ec != bhttp::error::end_of_stream && ec != asio::error::operation_aborted)
                                       CASPAR_LOG(debug) << L"[http-api] read: " << u16(ec.message());
                                   self->close(stream);
                                   return;
                               }
-                              self->handle(stream, buffer, req);
+                              // The server's processing time must not count against the connection:
+                              // the timer armed for the read would otherwise still be running when
+                              // a slow reply is written, and `async_write` would find it expired.
+                              stream->expires_never();
+                              self->handle(stream,
+                                           buffer,
+                                           std::make_shared<bhttp::request<bhttp::string_body>>(parser->release()));
                           });
     }
 
@@ -713,6 +759,20 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
                 websocket::stream<beast::tcp_stream>(std::move(*stream)), self);
             add_ws_session(session);
             session->run(std::move(*req));
+            return;
+        }
+
+        // A CORS PREFLIGHT, answered before authentication because a browser sends it without
+        // credentials. Every reply already carried `Access-Control-Allow-Origin: *`, and a
+        // browser still could not WRITE: a PUT, a DELETE, a JSON POST or anything carrying
+        // `Authorization` is preflighted, and OPTIONS was answered `bad_request` with no
+        // Allow-Methods or Allow-Headers, so the browser blocked the real request.
+        if (req->method() == bhttp::verb::options) {
+            const auto v = req->version();
+            const auto k = req->keep_alive();
+            asio::post(stream->get_executor(), [self, stream, buffer, v, k]() mutable {
+                self->write(stream, buffer, bhttp::status::no_content, std::string(), bhttp::verb::options, k, v);
+            });
             return;
         }
 
@@ -812,11 +872,14 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
             return;
         }
 
+        // `/v1/graph/preview` itself is NOT a preview: it is `GET` of a graph named `preview`, and
+        // this route used to capture it. The name is everything before the LAST `/preview`, as
+        // the POST verbs split theirs -- a name containing `/` resolved there and not here.
         if (starts_with(target.path, "/v1/graph/") && ends_with(target.path, "/preview") &&
-            target.path != "/v1/graph/connections/preview" &&
+            target.path != "/v1/graph/connections/preview" && target.path != "/v1/graph/preview" &&
             (method == bhttp::verb::get || method == bhttp::verb::head)) {
             const auto rest  = target.path.substr(std::string("/v1/graph/").size());
-            const auto gname = rest.substr(0, rest.find('/'));
+            const auto gname = rest.substr(0, rest.size() - std::string("/preview").size());
             // `?node=a,b,c` -- a SET, because the frame is the scarce thing: a node's
             // attachment exists only for the span of one draw, so one request per node means
             // one FRAME per node. A 16-node strip cost 1294 ms that way.
@@ -982,11 +1045,18 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
         // The tree is fetched by a browser-based client as often as by a native one, and
         // without this every such fetch fails in a way that looks like the server is down.
         res->set(bhttp::field::access_control_allow_origin, "*");
+        res->set(bhttp::field::access_control_allow_methods, "GET, PUT, POST, DELETE, HEAD, OPTIONS");
+        res->set(bhttp::field::access_control_allow_headers, "Authorization, Content-Type");
         res->keep_alive(keep_alive);
-        if (method != bhttp::verb::head)
+        if (method != bhttp::verb::head && method != bhttp::verb::options)
             res->body() = std::move(body);
         res->prepare_payload();
 
+        // THE TIMEOUT COVERS THE TRANSFER, armed here rather than inherited from the read: Beast's
+        // `expires_after` arms the read AND the write timer, so a reply posted more than 30 s after
+        // the read began -- a slow graph compile, a preview waiting on its frame -- was written onto
+        // an expired timer and dropped, the socket closed, logged at debug.
+        stream->expires_after(std::chrono::seconds(30));
         bhttp::async_write(*stream,
                            *res,
                            [self, stream, buffer, res, keep_alive](boost::system::error_code ec, std::size_t) {
@@ -1016,6 +1086,11 @@ struct http_server::impl : public std::enable_shared_from_this<http_server::impl
 
 void ws_session::run(bhttp::request<bhttp::string_body> req)
 {
+    // THE HTTP TIMER COMES OFF FIRST. The tcp_stream moved in here with the 30 s `expires_after`
+    // the HTTP read armed, and Beast checks that same expiry on every websocket transfer -- so
+    // every /v1/events subscriber was disconnected about 30 s after its upgrade, whatever the
+    // websocket's own keep-alive said. Beast's examples do exactly this.
+    beast::get_lowest_layer(ws_).expires_never();
     ws_.set_option(websocket::stream_base::timeout::suggested(beast::role_type::server));
     ws_.set_option(websocket::stream_base::decorator(
         [](websocket::response_type& res) { res.set(bhttp::field::server, "CasparCG"); }));

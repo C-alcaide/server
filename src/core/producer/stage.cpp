@@ -1342,25 +1342,10 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             //      one whose start has passed wins, which is what "step" means: it changes
             //      AT the key and holds until the next;
             //   3. the curves, so a path in both has the CURVE win (D7).
-            for (const auto& c : obj->content)
+            // Passes 1 and 2 are `step_values_at`, shared with `/resolved` so the endpoint and
+            // the tick cannot disagree about which step is on air.
+            for (const auto& c : timeline::step_values_at(*obj, local))
                 ov.steps[c.first] = c.second;
-
-            for (const auto& kf : obj->keyframes) {
-                // Literal times only, and the PUT refuses anything else -- a step keyframe
-                // referencing another object would need the resolver, and the resolver works
-                // on objects rather than on keys inside them.
-                for (const auto& spec : {kf.enable}) {
-                    if (!spec.start || spec.start->k != timeline::time_expr::kind::literal)
-                        continue;
-                    if (local < spec.start->literal)
-                        continue;
-                    if (spec.end && spec.end->k == timeline::time_expr::kind::literal &&
-                        local >= spec.end->literal)
-                        continue;
-                    for (const auto& c : kf.content)
-                        ov.steps[c.first] = c.second;
-                }
-            }
 
             for (const auto& pv : obj->curves.interpolate(
                      local, timeline::kind_of, obj->rebase ? &ent.captured : nullptr))

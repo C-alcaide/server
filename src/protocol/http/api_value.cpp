@@ -903,7 +903,18 @@ api_reply write_value(const api_context& ctx,
     // before the value is required: `PUT {"hold": true}` on a ramping parameter means "stop
     // there", and requiring a value would make the client read the position first and race the
     // next tick.
-    if (const auto* h = o.if_contains("hold")) {
+    //
+    // AND A HOLD WITH A VALUE IS HOLD-AND-WRITE, as the node-parameter route has always done it.
+    // Until 2026-09-24 this branch ran whenever "hold" was present, never read "value", held what
+    // was on air and answered ok with the OLD value -- so `{"value": 0.5, "hold": true}` dropped
+    // the 0.5 while reporting success, and the two routes disagreed about one body.
+    const auto* hold_v         = o.if_contains("hold");
+    const bool  hold_and_write = hold_v && hold_v->is_bool() && hold_v->as_bool() && o.if_contains("value");
+    // WRITE FIRST, HOLD SECOND -- the reverse of the node route, and measured rather than
+    // assumed: a mixer hold PINS what is on air when it is taken, so holding first pinned the old
+    // value and the write under it changed nothing on air. The hold is taken below, after the write
+    // has landed on the stage executor; both run there in order.
+    if (const auto* h = hold_v; h && !hold_and_write) {
         if (!h->is_bool())
             return api_reply::fail(api_code::bad_request, "\"hold\" takes a boolean");
         const bool want = h->as_bool();
@@ -1056,7 +1067,19 @@ api_reply write_value(const api_context& ctx,
                         next[i] = a + b;
                     }
                 } else if (op == "cas") {
-                    if (!(out->previous == expect)) {
+                    // THE EXPECTATION IN THE FIELD'S OWN TYPE. `json_to_value` makes every JSON
+                    // number a double, while an integer field reads back as int32 and an
+                    // enumeration as its NAME -- and variant equality compares the alternative
+                    // first, so `expect: 3` never matched an integer 3 and `expect: 1` never
+                    // matched the enum it names. Written through the field on a scratch copy and
+                    // read back, it is in exactly the form `previous` is.
+                    core::monitor::vector_t want = expect;
+                    {
+                        auto scratch = t;
+                        if (wr(scratch, expect))
+                            want = rd(scratch);
+                    }
+                    if (!(out->previous == want)) {
                         out->conflict = true;
                         return t;
                     }
@@ -1131,8 +1154,16 @@ api_reply write_value(const api_context& ctx,
     // The write was still kept: it takes effect the moment the driver ends. `effective` is
     // absent rather than true when nothing shadows it, so a client that does not look for it
     // behaves exactly as before.
+    if (hold_and_write) {
+        if (!stage->hold_field(target.layer, std::string(f.path)).get())
+            return api_reply::fail(api_code::not_writable,
+                                   std::string(f.path) + " was written but cannot be held: it has no setter");
+        CASPAR_LOG(info) << L"[api] " << u16(peer) << L" HOLD " << u16(path) << L" (after the write)";
+        r["hold"] = true;
+    }
+
     const auto owner_now = stage->driver_of(target.layer, f.path);
-    if (!owner_now.first.empty()) {
+    if (!owner_now.first.empty() && !hold_and_write) {
         r["effective"]   = false;
         r["shadowed_by"] = owner_now.first;
         if (owner_now.second != owner_now.first)

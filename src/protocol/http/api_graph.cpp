@@ -341,22 +341,26 @@ decode_error decode_document(const std::string& body, const std::string& path_na
                     return {"", e.id, "\"muted\" takes true or false"};
                 e.muted = m->as_bool();
             }
-            if (e.id.empty()) {
-                // SERVER-ASSIGNED, and assigned HERE rather than in the validator so that every
-                // fault the validator raises has an id to point at. Drawing an edge is a gesture
-                // with no natural name, so requiring one would only make clients invent `e17`.
-                for (;;) {
-                    auto       candidate = "e" + std::to_string(next_id++);
-                    const bool taken     = std::any_of(
-                        out.edges.begin(), out.edges.end(),
-                        [&](const gr::graph_edge& x) { return x.id == candidate; });
-                    if (!taken) {
-                        e.id = std::move(candidate);
-                        break;
-                    }
+            out.edges.push_back(std::move(e));
+        }
+        // SERVER-ASSIGNED ids, in a SECOND pass once every explicit id is known -- and assigned
+        // here rather than in the validator so that every fault the validator raises has an id to
+        // point at. The first pass checked a candidate only against the edges decoded so far, so an
+        // id-less edge BEFORE an explicit `e1` took `e1` too, and the validator then refused a
+        // document whose explicit ids were unique. Drawing an edge is a gesture with no natural
+        // name, so requiring one would only make clients invent `e17`.
+        for (auto& e : out.edges) {
+            if (!e.id.empty())
+                continue;
+            for (;;) {
+                auto       candidate = "e" + std::to_string(next_id++);
+                const bool taken     = std::any_of(out.edges.begin(), out.edges.end(),
+                                               [&](const gr::graph_edge& x) { return x.id == candidate; });
+                if (!taken) {
+                    e.id = std::move(candidate);
+                    break;
                 }
             }
-            out.edges.push_back(std::move(e));
         }
     }
     return {};
