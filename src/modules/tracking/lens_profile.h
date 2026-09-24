@@ -35,7 +35,7 @@ struct lens_sample
     double k3              = 0.0;
     double p1              = 0.0; ///< tangential (decentering) coefficient
     double p2              = 0.0;
-    double fov_rad         = 0.0; ///< horizontal field of view (radians); 0 = leave unchanged
+    double fov_rad         = 0.0; ///< field of view (radians) on the profile's `fov_axis`; 0 = leave unchanged
     double nodal_forward_m = 0.0; ///< entrance-pupil forward offset (metres)
 };
 
@@ -45,7 +45,10 @@ struct lens_sample
 /// JSON schema:
 ///   {
 ///     "name": "Canon CN7x17",
-///     "fov_unit": "deg",                 // "deg" (default) or "rad"
+///     "fov_unit": "deg",                 // "deg" (default) or "rad"; anything else is refused
+///     "fov_axis": "horizontal",          // "horizontal" (default) or "vertical"; anything else is
+///                                        // refused. Every consumer takes a VERTICAL fov, so a
+///                                        // horizontal one is converted through the channel aspect.
 ///     "zoom_axis":  [0, 16384, 32768, 49152, 65535],
 ///     "focus_axis": [0, 65535],          // optional; omit for a 1-D (zoom-only) profile
 ///     "samples": [                       // 2-D: rows = zoom_axis, cols = focus_axis
@@ -62,6 +65,8 @@ class lens_profile
     static std::shared_ptr<lens_profile> load(const std::string& path);
 
     const std::string& name() const { return name_; }
+    /// Whether `fov_rad` is HORIZONTAL (the default, and what lens calibration normally gives).
+    bool fov_horizontal() const { return fov_horizontal_; }
     const std::string& path() const { return path_; }
 
     /// Bilinearly interpolates a lens_sample for the given raw zoom and focus
@@ -70,6 +75,7 @@ class lens_profile
 
   private:
     std::string                            name_;
+    bool                                   fov_horizontal_ = true;
     std::string                            path_;
     std::vector<double>                    zoom_axis_;
     std::vector<double>                    focus_axis_;  ///< always size >= 1 (1-D uses a single node)

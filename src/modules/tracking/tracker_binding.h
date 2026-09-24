@@ -141,7 +141,9 @@ struct tracker_binding
     // ------- Rigid tracker→world alignment (xR survey) -------------
     // Maps the tracker's own coordinate frame to the previz/LED-wall world
     // frame, solved from a survey of known points (client-side Umeyama):
-    //     world_metres = align_scale · R · tracker_millimetres + align_t
+    //     world_metres = align_scale · R · M · tracker_millimetres + align_t,  M = diag(1,1,-1)
+    // (M takes camera_data's left-handed frame into the previz world's right-handed one, and the
+    // client's solver applies the same mirror; see inject_transform.)
     // R is row-major (tracker→world); align_t is in metres; align_scale folds
     // the millimetre→metre unit change into the fit. Orientation is aligned by
     // composing R with the tracker rotation (see tracker_registry::inject_transform).
@@ -168,6 +170,9 @@ struct tracker_binding
     bool   genlock_enable = false;
     double genlock_frames = 0.0;  ///< number of channel frames to delay the pose by
     double channel_fps    = 0.0;  ///< channel frame rate captured at bind (0 = unknown)
+    /// Square-pixel width / height of the channel, captured at bind: what turns a lens profile's
+    /// HORIZONTAL fov into the VERTICAL one every consumer takes. 0 = unknown (no conversion).
+    double channel_aspect = 0.0;
 
     // ------- Depth-of-field (faked rack-focus) ---------------------
     // Maps the decoded lens focus value to a blur radius (lens-bokeh type).

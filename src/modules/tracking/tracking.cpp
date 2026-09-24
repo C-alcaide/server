@@ -21,6 +21,7 @@
 
 #include "receiver_manager.h"
 #include "tracker_binding.h"
+#include "tracker_registry.h"
 #include "tracking_commands.h"
 
 #include <common/env.h>
@@ -154,6 +155,9 @@ void uninit()
 {
     CASPAR_LOG(info) << L"[tracking] Shutting down camera-tracking module";
     receiver_manager::instance().stop_all();
+    // The delay pump reads LTCInput and the stages; stop it while both still exist, rather than
+    // in the registry's static destructor, whose order against theirs is not defined.
+    tracker_registry::instance().stop_pump();
 }
 
 }} // namespace caspar::tracking

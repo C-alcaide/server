@@ -153,6 +153,14 @@ struct freed_plus_receiver::impl
     {
         if (recv_buf_[0] != FREED_MSG_TYPE)
             return;
+        // The plain D1 CHECKSUM, which this fallback never verified while the 41-byte path verifies
+        // its own: (sum of all 29 bytes) & 0xFF == 0x40. A corrupt datagram of the right length
+        // used to drive the camera.
+        unsigned sum = 0;
+        for (std::size_t i = 0; i < FREED_STD_PACKET_LEN; ++i)
+            sum += recv_buf_[i];
+        if ((sum & 0xFF) != 0x40)
+            return;
 
         camera_data d;
         // The plain D1 layout -- see freed_receiver.cpp, where the account of what this read

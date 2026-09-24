@@ -150,17 +150,49 @@ static std::wstring tracking_bind_command(command_context& ctx)
         int         camera_id = 0;
         tracking_mode mode    = tracking_mode::mode_360;
 
+        // EVERY TOKEN AFTER THE PROTOCOL IS A KEYWORD AND ITS VALUE. `kwparam` searches for each
+        // keyword it knows and skips everything else, so `CAMRA 2` was ignored (camera 0), a
+        // trailing `PORT` with no value was ignored, and `stoi` read `6301x` as 6301 and `99999`
+        // as a port. The house defect, in keyword form: the operator is told OK and gets a
+        // binding on something they did not name.
+        for (std::size_t i = 1; i < ctx.parameters.size(); i += 2) {
+            const auto& k = ctx.parameters[i];
+            if (!boost::iequals(k, L"PORT") && !boost::iequals(k, L"HOST") && !boost::iequals(k, L"CAMERA") &&
+                !boost::iequals(k, L"MODE"))
+                return L"400 TRACKING ERROR BIND takes PORT, HOST, CAMERA and MODE, not " + k + L"\r\n";
+            if (i + 1 >= ctx.parameters.size())
+                return L"400 TRACKING ERROR " + k + L" needs a value\r\n";
+        }
+        const auto whole_int = [](const std::wstring& s, long& out) {
+            try {
+                std::size_t used = 0;
+                out              = std::stol(s, &used);
+                return used == s.size();
+            } catch (const std::exception&) {
+                return false;
+            }
+        };
+
         std::wstring port_str = kwparam(ctx.parameters, L"PORT");
-        if (!port_str.empty())
-            port = std::stoi(port_str);
+        if (!port_str.empty()) {
+            long v = 0;
+            if (!whole_int(port_str, v) || v < 1 || v > 65535)
+                return L"400 TRACKING ERROR PORT is a whole number from 1 to 65535, not " + port_str + L"\r\n";
+            port = static_cast<int>(v);
+        }
 
         std::wstring host_str = kwparam(ctx.parameters, L"HOST");
         if (!host_str.empty())
             host = caspar::u8(host_str);
 
         std::wstring cam_str = kwparam(ctx.parameters, L"CAMERA");
-        if (!cam_str.empty())
-            camera_id = std::stoi(cam_str);
+        if (!cam_str.empty()) {
+            long v = 0;
+            if (!whole_int(cam_str, v) || v < -1)
+                return L"400 TRACKING ERROR CAMERA is a whole number, or -1 for any camera, not " + cam_str +
+                       L"\r\n";
+            camera_id = static_cast<int>(v);
+        }
 
         std::wstring mode_str = kwparam(ctx.parameters, L"MODE", L"360");
         // `360` IS NAMED rather than left as the initialiser, and the `else` is the fix. Until
@@ -185,8 +217,15 @@ static std::wstring tracking_bind_command(command_context& ctx)
             return L"400 TRACKING ERROR MODE takes 360, 2D, PREVIZ or TARGET, not " + mode_str +
                    L"\r\n";
 
-        // Grab stage from the current channel context
-        auto stage_ptr = ctx.channel.stage;
+        // THE CHANNEL'S OWN STAGE, not `ctx.channel.stage`. Inside BEGIN ... COMMIT that is the
+        // batch's temporary `stage_delayed`, and a binding holds its stage by weak_ptr -- so a BIND
+        // in a batch went dead the moment the batch ended, every later sample finding nothing to
+        // drive. A binding is not a transform and has no reason to wait for the commit.
+        std::shared_ptr<core::stage_base> stage_ptr;
+        if (auto raw_ch = ctx.channel.raw_channel)
+            stage_ptr = raw_ch->stage();
+        if (!stage_ptr)
+            stage_ptr = ctx.channel.stage;
         if (!stage_ptr)
             return L"403 TRACKING ERROR Invalid channel\r\n";
 
@@ -198,10 +237,26 @@ static std::wstring tracking_bind_command(command_context& ctx)
         // socket and immediately recreates it — losing packets in between —
         // and if the new acquire then throws, the old binding is left
         // pointing at a receiver that was already torn down.
-        receiver_manager::instance().ensure_receiver(proto, port, host);
-
-        if (tracker_registry::instance().has_binding(ch, layer)) {
-            auto old_b = tracker_registry::instance().get_binding(ch, layer);
+        //
+        // EXCEPT when the old binding holds the SAME PORT under another protocol -- switching a
+        // layer from FREED to FREED_PLUS on 6301 -- because one unicast port takes one receiver
+        // (receiver_manager::ensure_receiver), so acquiring first would refuse the switch. That
+        // one releases first, and puts the old receiver back if the new one cannot start.
+        auto old_b = tracker_registry::instance().get_binding(ch, layer);
+        const bool same_port_switch =
+            old_b && old_b->receiver.port == port && old_b->receiver.protocol != proto;
+        if (same_port_switch) {
+            receiver_manager::instance().release_receiver(
+                old_b->receiver.protocol, old_b->receiver.port, old_b->receiver.host);
+            try {
+                receiver_manager::instance().ensure_receiver(proto, port, host);
+            } catch (const std::exception&) {
+                receiver_manager::instance().ensure_receiver(
+                    old_b->receiver.protocol, old_b->receiver.port, old_b->receiver.host);
+                throw;
+            }
+        } else {
+            receiver_manager::instance().ensure_receiver(proto, port, host);
             if (old_b)
                 receiver_manager::instance().release_receiver(
                     old_b->receiver.protocol, old_b->receiver.port, old_b->receiver.host);
@@ -218,8 +273,13 @@ static std::wstring tracking_bind_command(command_context& ctx)
         b.receiver.host     = host;
 
         // Capture the channel frame rate for frame-native genlock latency comp.
-        if (auto raw_ch = ctx.channel.raw_channel)
-            b.channel_fps = raw_ch->stage()->video_format_desc().fps;
+        if (auto raw_ch = ctx.channel.raw_channel) {
+            const auto fd = raw_ch->stage()->video_format_desc();
+            b.channel_fps = fd.fps;
+            // Square-pixel aspect, which is what a lens's horizontal fov converts through.
+            if (fd.square_width > 0 && fd.square_height > 0)
+                b.channel_aspect = static_cast<double>(fd.square_width) / fd.square_height;
+        }
 
         // For PREVIZ mode, set up the callback to drive the previz camera
         if (mode == tracking_mode::mode_previz) {

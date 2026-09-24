@@ -285,7 +285,7 @@ TRACKING <ch>-<layer> DELAY              // Query current delay
 | Value | Behaviour |
 | :--- | :--- |
 | `0` | Disabled — the newest sample is injected immediately (default; identical to pre-feature behaviour). |
-| `> 0` | The pose is reconstructed for `now − delay` by interpolating the sample history (max 2000 ms window). |
+| `> 0` | The pose is reconstructed for `now − delay` by interpolating the sample history (max 2000 ms window), on a clock rather than only when a packet arrives — so the last pose of a tracker that sends only on change lands `delay` after it arrived. Before 2026-09-24 it never landed: the last packet showed the pose from `delay` before it, and nothing followed. |
 
 **Example** — the camera SDI feed is delayed by ~80 ms through a switcher; match it:
 ```amcp
@@ -828,7 +828,8 @@ A lens profile is a JSON file stored under the server **media folder**. It tabul
 | Field | Required | Description |
 | :--- | :--- | :--- |
 | `name` | no | Human-readable profile name (reported by `TRACKING LENS`). Default `"lens"`. |
-| `fov_unit` | no | `"deg"` (default) or `"rad"` — the unit of every `fov` value in `samples`. |
+| `fov_unit` | no | `"deg"` (default) or `"rad"` — the unit of every `fov` value in `samples`. Anything else is refused (it used to be read as degrees, so `"radians"` arrived 57× too wide). |
+| `fov_axis` | no | `"horizontal"` (default) or `"vertical"` — which angle every `fov` value in `samples` is. Anything else is refused. Every consumer takes a VERTICAL fov, so a horizontal one is converted through the channel's aspect; before 2026-09-24 it was used as it was, 1.78× too wide on a 16:9 channel. |
 | `zoom_axis` | **yes** | Ascending array of raw zoom encoder values at each grid column. |
 | `focus_axis` | no | Ascending array of raw focus values. Omit (or give a single value) for a **1-D** zoom-only profile; two or more entries make it a **2-D** zoom × focus grid. |
 | `samples` | **yes** | The grid of per-node lens samples (see below). |

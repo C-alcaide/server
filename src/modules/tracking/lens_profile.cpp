@@ -92,8 +92,22 @@ std::shared_ptr<lens_profile> lens_profile::load(const std::string& path)
     profile->path_ = path;
     profile->name_ = root.get<std::string>("name", "lens");
 
-    const std::string fov_unit   = root.get<std::string>("fov_unit", "deg");
-    const double      fov_to_rad = (fov_unit == "rad") ? 1.0 : DEG2RAD;
+    // BOTH KEYS REFUSE A WORD THEY DO NOT KNOW. `fov_unit` used to test for exactly "rad" and read
+    // anything else -- "radians", "RAD" -- as degrees, so a profile in radians arrived 57x too wide
+    // with no complaint. Same house defect as the AMCP commands, in a file format.
+    const std::string fov_unit = root.get<std::string>("fov_unit", "deg");
+    if (fov_unit != "deg" && fov_unit != "rad")
+        throw std::runtime_error("lens profile: 'fov_unit' is \"deg\" or \"rad\", not \"" + fov_unit + "\"");
+    const double fov_to_rad = (fov_unit == "rad") ? 1.0 : DEG2RAD;
+
+    // The fov is HORIZONTAL unless the profile says otherwise -- which is what this file always
+    // documented -- and every consumer (the rectilinear 360 projection, the previz camera) takes a
+    // VERTICAL one. Until 2026-09-24 the horizontal value was handed to them as it was, so a 16:9
+    // channel rendered 1.78x the vertical angle the lens has. `inject_transform` converts.
+    const std::string fov_axis = root.get<std::string>("fov_axis", "horizontal");
+    if (fov_axis != "horizontal" && fov_axis != "vertical")
+        throw std::runtime_error("lens profile: 'fov_axis' is \"horizontal\" or \"vertical\", not \"" + fov_axis + "\"");
+    profile->fov_horizontal_ = (fov_axis == "horizontal");
 
     auto zoom_axis = root.get_child_optional("zoom_axis");
     if (!zoom_axis || zoom_axis->empty())

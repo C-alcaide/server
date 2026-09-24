@@ -22,6 +22,8 @@
 #include "camera_data.h"
 #include "tracker_binding.h"
 
+#include <atomic>
+#include <chrono>
 #include <deque>
 #include <map>
 #include <tuple>
@@ -29,6 +31,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -91,9 +94,12 @@ class tracker_registry
     /// is driven by and so what its INFO and ZERO must read.
     std::optional<camera_data> get_latest_data(const receiver_handle& source, int camera_id) const;
 
+    /// Stop the delay pump thread. Called at module uninit; idempotent.
+    void stop_pump();
+
   private:
-    tracker_registry()  = default;
-    ~tracker_registry() = default;
+    tracker_registry() = default;
+    ~tracker_registry();
 
     mutable std::mutex                               mutex_;
     std::map<std::pair<int, int>, tracker_binding>   bindings_;
@@ -106,6 +112,23 @@ class tracker_registry
     std::map<source_key, std::deque<camera_data>>    sample_history_;
 
     void inject_transform(const tracker_binding& binding, const camera_data& data);
+
+    // ── THE DELAY PUMP ──────────────────────────────────────────────────────────────────
+    // A DELAY or GENLOCK binding shows the pose from `delay` ago, and until 2026-09-24 it was
+    // only ever computed when a PACKET arrived -- so a tracker that sends on change, as most OSC
+    // and many FreeD sources do when the camera is still, never landed its final pose: the last
+    // packet injected the pose from `delay` before it, and nothing ever injected the last sample
+    // itself. The pump re-injects the delayed pose on a clock between packets, and stops once the
+    // newest sample has been shown (`settled`). Packet-driven injection is unchanged.
+    struct pump_state
+    {
+        std::tuple<int, int, int> source;          ///< the source_key the binding last heard from
+        bool                      settled = false; ///< the newest sample has been injected
+    };
+    std::map<std::pair<int, int>, pump_state> pump_;
+    std::thread                               pump_thread_;
+    std::atomic<bool>                         pump_run_{false};
+    void                                      pump_loop();
 };
 
 }} // namespace caspar::tracking

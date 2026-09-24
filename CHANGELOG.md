@@ -1,6 +1,38 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: nine tracking defects from the audit backlog
+
+All in `src/modules/tracking`, each driven to what an operator sees by `tracking-previz`:
+
+* **A lens profile's horizontal fov was used as a vertical one.** The profile format always said
+  its `fov` is horizontal; the 360 projection and the previz camera take a vertical one, so a 16:9
+  channel drew 1.78× the lens's vertical angle. It converts through the channel's aspect now, and a
+  profile can declare `"fov_axis": "vertical"`. `fov_unit` and `fov_axis` refuse a word they do not
+  know — `"radians"` used to be read as degrees.
+* **`TRACKING DELAY` never landed the last pose** of a tracker that sends on change: the delayed
+  pose was only computed when a packet arrived. A 2 ms pump now injects it between packets and
+  stops once the newest sample is showing.
+* **`DOF 0` and `LENS CLEAR` left their last values on the layer** — the blur and the distortion
+  coefficients — so turning DOF off left the picture as soft as it was.
+* **2D and TARGET scaled about the layer's top-left corner**, so a zoom slid the picture towards
+  it. They scale about the frame centre now; roll still turns about the corner.
+* **`TRACKING BIND` inside `BEGIN … COMMIT` went dead** when the batch ended: it held the batch's
+  temporary stage. It takes the channel's own stage.
+* **Two protocols on one unicast port split its packets** (FREED and FREED_PLUS both default to
+  6301, and every receiver sets `SO_REUSEADDR`). The second is refused, naming the reason; a layer
+  switching its own binding between them still works.
+* **`TRACKING BIND` ignored what it did not recognise**: an unknown keyword, a keyword with no
+  value, `PORT 6301x`, `PORT 99999`. All refused now.
+* **The FREED_PLUS 29-byte fallback accepted a packet with a bad checksum.**
+* **A receiver whose start failed left a map entry holding its socket** (structural; not measured).
+
+Verified: `tracking-previz` 41/41 on both mixers, eight checks new. Mutation-verified: with the
+tracking module at the previous commit all eight turn red and the other 33 stay green. Not measured:
+the receiver start failure, VRPN (not in this build — its Euler extraction still treats Z as up
+while its positions are Y-up, recorded rather than changed, because a fix nothing compiles is a
+claim), and a real tracker.
+
 ### BEHAVIOUR: a tracked PREVIZ camera turns the way the real one does -- and three protocols' frames
 
 **BREAKING for every tracked setup tuned against the old behaviour**, and for any `WORLDALIGN`

@@ -267,25 +267,66 @@ void tracker_registry::update_world_align(
     }
 }
 
+// DOF OFF and LENS CLEAR TAKE WHAT THEY WROTE BACK OFF THE LAYER. Both only stop WRITING, and
+// until 2026-09-24 that was all they did: the last tracking-driven blur, and the last profile's
+// distortion coefficients, stayed on the layer's transform for as long as nothing else touched
+// it -- so turning DOF off left the picture exactly as soft as it was. One write clears them, and
+// only in the modes that set them (blur: 360 and 2D; distortion: 360), so an operator's own
+// MIXER BLUR or PROJECTION_DISTORTION on a layer in another mode is not touched.
 void tracker_registry::update_dof(int channel, int layer, bool enable, double near_raw, double far_raw, double max_radius)
 {
-    std::lock_guard<std::mutex> lk(mutex_);
-    auto it = bindings_.find({channel, layer});
-    if (it == bindings_.end())
-        throw std::runtime_error("No binding at channel/layer");
-    it->second.dof_enable         = enable;
-    it->second.dof_focus_near_raw = near_raw;
-    it->second.dof_focus_far_raw  = far_raw;
-    it->second.dof_max_radius     = max_radius;
+    std::weak_ptr<core::stage_base> stage;
+    bool                            turned_off = false;
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        auto it = bindings_.find({channel, layer});
+        if (it == bindings_.end())
+            throw std::runtime_error("No binding at channel/layer");
+        turned_off = it->second.dof_enable && !enable &&
+                     (it->second.mode == tracking_mode::mode_360 || it->second.mode == tracking_mode::mode_2d);
+        it->second.dof_enable         = enable;
+        it->second.dof_focus_near_raw = near_raw;
+        it->second.dof_focus_far_raw  = far_raw;
+        it->second.dof_max_radius     = max_radius;
+        stage                         = it->second.stage;
+    }
+    if (turned_off)
+        if (auto s = stage.lock())
+            s->apply_transform(
+                layer,
+                [](core::frame_transform t) {
+                    t.image_transform.blur.enable = false;
+                    t.image_transform.blur.radius = 0.0;
+                    return t;
+                },
+                0,
+                tweener(L"linear"));
 }
 
 void tracker_registry::update_lens(int channel, int layer, std::shared_ptr<lens_profile> lens)
 {
-    std::lock_guard<std::mutex> lk(mutex_);
-    auto it = bindings_.find({channel, layer});
-    if (it == bindings_.end())
-        throw std::runtime_error("No binding at channel/layer");
-    it->second.lens = std::move(lens);
+    std::weak_ptr<core::stage_base> stage;
+    bool                            cleared = false;
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        auto it = bindings_.find({channel, layer});
+        if (it == bindings_.end())
+            throw std::runtime_error("No binding at channel/layer");
+        cleared            = it->second.lens && !lens && it->second.mode == tracking_mode::mode_360;
+        it->second.lens    = std::move(lens);
+        stage              = it->second.stage;
+    }
+    if (cleared)
+        if (auto s = stage.lock())
+            s->apply_transform(
+                layer,
+                [](core::frame_transform t) {
+                    auto& p   = t.image_transform.projection;
+                    p.lens_k1 = p.lens_k2 = p.lens_k3 = p.lens_p1 = p.lens_p2 = 0.0;
+                    return t;
+                },
+                0,
+                tweener(L"linear"));
 }
 
 void tracker_registry::update_target_camera(int channel, int layer, bool enable,
@@ -421,7 +462,16 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
     if (has_lens)
         lens = binding.lens->sample(static_cast<double>(data.zoom), static_cast<double>(data.focus));
 
-    const double fov = (has_lens && lens.fov_rad > 0.0) ? lens.fov_rad : compute_fov(binding, data.zoom);
+    // A lens profile's fov is HORIZONTAL unless it says otherwise, and every consumer below takes a
+    // VERTICAL one -- the rectilinear 360 projection (latitude = atan(ndc.y tan(fov/2))) and the
+    // previz camera. Until 2026-09-24 the horizontal value went straight through, so a 16:9
+    // channel drew 1.78x the vertical angle the lens has. DEFAULT_FOV and ZOOM_LUT are vertical.
+    double fov = compute_fov(binding, data.zoom);
+    if (has_lens && lens.fov_rad > 0.0) {
+        fov = lens.fov_rad;
+        if (binding.lens->fov_horizontal() && binding.channel_aspect > 0.0)
+            fov = 2.0 * std::atan(std::tan(fov * 0.5) / binding.channel_aspect);
+    }
 
     // Entrance-pupil (nodal) offset: shift the tracked position by the lens-local
     // nodal vector expressed in world space, so an off-axis pupil produces correct
@@ -604,8 +654,11 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
                     // Behind the camera → hide via opacity rather than smearing across frame.
                     t.image_transform.opacity = visible ? 1.0 : 0.0;
                     if (visible) {
-                        t.image_transform.fill_translation[0] = fill_x;
-                        t.image_transform.fill_translation[1] = fill_y;
+                        // Scale about the frame CENTRE: fill_scale pivots about the top-left
+                        // corner, so without the 0.5·(1-s) the graphic slid towards the corner as
+                        // the subject walked away, instead of shrinking in place.
+                        t.image_transform.fill_translation[0] = fill_x + 0.5 * (1.0 - t_scale);
+                        t.image_transform.fill_translation[1] = fill_y + 0.5 * (1.0 - t_scale);
                         t.image_transform.fill_scale[0]       = t_scale;
                         t.image_transform.fill_scale[1]       = t_scale;
                     }
@@ -625,8 +678,11 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
             layer,
             [pan, tilt, roll, scale, offset_x, offset_y, dof_on, dof_radius](core::frame_transform t) -> core::frame_transform {
                 t.image_transform.enable_geometry_modifiers = true;
-                t.image_transform.fill_translation[0]       = pan + offset_x;
-                t.image_transform.fill_translation[1]       = -tilt - offset_y;
+                // Zoom scales about the frame CENTRE, not fill_scale's top-left pivot -- a zoom-in
+                // used to slide the picture towards the corner. The roll below still turns about
+                // the corner; changing the anchor would change what every translation means.
+                t.image_transform.fill_translation[0]       = pan + offset_x + 0.5 * (1.0 - scale);
+                t.image_transform.fill_translation[1]       = -tilt - offset_y + 0.5 * (1.0 - scale);
                 t.image_transform.angle                     = roll;
                 t.image_transform.fill_scale[0]             = scale;
                 t.image_transform.fill_scale[1]             = scale;
@@ -662,6 +718,70 @@ void tracker_registry::on_data(camera_data data, tracking_protocol protocol, int
 // (PSN, OpenTrackIO), and VRPN, which has no port. Those need the host in the key; the
 // binding's `host` is empty when the default group is used while the receiver's is not, so
 // comparing it naively would match nothing.
+/// When a delayed binding should be showing, for a wall-clock instant: `delay_ms` before it, or
+/// `genlock_frames` channel frames before it snapped to the house LTC frame grid.
+static std::chrono::steady_clock::time_point delayed_target(const tracker_binding&                  binding,
+                                                            std::chrono::steady_clock::time_point at)
+{
+    auto to_dur = [](double seconds) {
+        return std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds));
+    };
+    if (binding.genlock_enable && binding.channel_fps > 0.0) {
+        const double fps    = binding.channel_fps;
+        auto         target = at - to_dur(binding.genlock_frames / fps);
+
+        uint32_t                              ltc_frame = 0;
+        std::chrono::steady_clock::time_point ltc_time;
+        if (ltc::LTCInput::instance().get_timecode_anchor(static_cast<int>(std::lround(fps)), ltc_frame, ltc_time)) {
+            const double rel = std::chrono::duration<double>(target - ltc_time).count();
+            const double k   = std::round(static_cast<double>(ltc_frame) + rel * fps);
+            target           = ltc_time + to_dur((k - static_cast<double>(ltc_frame)) / fps);
+        }
+        return target;
+    }
+    return at - to_dur(binding.delay_ms / 1000.0);
+}
+
+tracker_registry::~tracker_registry() { stop_pump(); }
+
+void tracker_registry::stop_pump()
+{
+    pump_run_ = false;
+    if (pump_thread_.joinable())
+        pump_thread_.join();
+}
+
+void tracker_registry::pump_loop()
+{
+    while (pump_run_) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+
+        std::vector<std::pair<tracker_binding, std::deque<camera_data>>> work;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            for (auto it = pump_.begin(); it != pump_.end();) {
+                const auto b = bindings_.find(it->first);
+                if (b == bindings_.end() || !(b->second.delay_ms > 0.0 || b->second.genlock_enable)) {
+                    it = pump_.erase(it); // unbound, or no longer delayed
+                    continue;
+                }
+                if (!it->second.settled) {
+                    const auto h = sample_history_.find(it->second.source);
+                    if (h != sample_history_.end() && !h->second.empty()) {
+                        const auto target = delayed_target(b->second, std::chrono::steady_clock::now());
+                        work.emplace_back(b->second, h->second);
+                        if (target >= h->second.back().timestamp)
+                            it->second.settled = true; // this injection shows the newest sample
+                    }
+                }
+                ++it;
+            }
+        }
+        for (auto& [binding, hist] : work)
+            inject_transform(binding, interpolate_history(hist, delayed_target(binding, std::chrono::steady_clock::now())));
+    }
+}
+
 void tracker_registry::on_data(const camera_data& data)
 {
     std::vector<tracker_binding> matched;
@@ -688,41 +808,26 @@ void tracker_registry::on_data(const camera_data& data)
                  (data.source_port < 0 || binding.receiver.port == data.source_port));
             if (from_its_receiver && (binding.camera_id == -1 || binding.camera_id == data.camera_id)) {
                 matched.push_back(binding);
-                if (binding.delay_ms > 0.0 || binding.genlock_enable)
-                    any_delay = true;
+                if (binding.delay_ms > 0.0 || binding.genlock_enable) {
+                    any_delay  = true;
+                    pump_[key] = pump_state{skey, false}; // a new sample to land
+                }
             }
         }
 
-        if (any_delay)
+        if (any_delay) {
             history_snapshot = hist; // copy for lock-free interpolation below
+            if (!pump_run_.exchange(true))
+                pump_thread_ = std::thread([this] { pump_loop(); });
+        }
     }
 
     for (auto& binding : matched) {
-        if (binding.genlock_enable && binding.channel_fps > 0.0) {
-            // Frame-native genlock: hold the pose back by N channel frames, and
-            // snap the sampled time to the house frame grid when LTC is valid so
-            // pose updates align to video frame boundaries.
-            const double fps = binding.channel_fps;
-            auto to_dur = [](double seconds) {
-                return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                    std::chrono::duration<double>(seconds));
-            };
-            auto target = data.timestamp - to_dur(binding.genlock_frames / fps);
-
-            uint32_t                              ltc_frame = 0;
-            std::chrono::steady_clock::time_point ltc_time;
-            if (ltc::LTCInput::instance().get_timecode_anchor(
-                    static_cast<int>(std::lround(fps)), ltc_frame, ltc_time)) {
-                const double rel    = std::chrono::duration<double>(target - ltc_time).count();
-                const double k      = std::round(static_cast<double>(ltc_frame) + rel * fps);
-                target = ltc_time + to_dur((k - static_cast<double>(ltc_frame)) / fps);
-            }
-            inject_transform(binding, interpolate_history(history_snapshot, target));
-        } else if (binding.delay_ms > 0.0) {
-            const auto target =
-                data.timestamp - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                                     std::chrono::duration<double, std::milli>(binding.delay_ms));
-            inject_transform(binding, interpolate_history(history_snapshot, target));
+        if (binding.genlock_enable || binding.delay_ms > 0.0) {
+            // Frame-native genlock holds the pose back by N channel frames and snaps to the house
+            // LTC grid; a plain DELAY holds it back by milliseconds. Both via delayed_target,
+            // which the pump uses too, so the two paths cannot disagree about the rule.
+            inject_transform(binding, interpolate_history(history_snapshot, delayed_target(binding, data.timestamp)));
         } else {
             inject_transform(binding, data);
         }
