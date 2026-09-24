@@ -72,19 +72,11 @@ static int32_t decode_24bit_signed(const uint8_t* p)
     return v;
 }
 
-static int32_t decode_32bit_signed(const uint8_t* p)
+static uint32_t decode_24bit_unsigned(const uint8_t* p)
 {
-    return static_cast<int32_t>( (static_cast<uint32_t>(p[0]) << 24) |
-                                  (static_cast<uint32_t>(p[1]) << 16) |
-                                  (static_cast<uint32_t>(p[2]) <<  8) |
-                                  (static_cast<uint32_t>(p[3])      ) );
+    return (static_cast<uint32_t>(p[0]) << 16) | (static_cast<uint32_t>(p[1]) << 8) |
+           static_cast<uint32_t>(p[2]);
 }
-
-static uint16_t decode_16bit_unsigned(const uint8_t* p)
-{
-    return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | p[1]);
-}
-
 static bool verify_checksum(const std::array<uint8_t, FREED_PACKET_LEN>& buf)
 {
     // (sum of all 29 bytes) & 0xFF == 0x40
@@ -181,25 +173,50 @@ struct freed_receiver::impl
 
         camera_data d;
 
-        // Angles: 24-bit signed, 1/32768 degrees per unit → radians
-        d.pan  = decode_24bit_signed(&pkt[1]) * FREED_ANGLE_SCALE * DEG2RAD;
-        d.tilt = decode_24bit_signed(&pkt[4]) * FREED_ANGLE_SCALE * DEG2RAD;
-        d.roll = decode_24bit_signed(&pkt[7]) * FREED_ANGLE_SCALE * DEG2RAD;
+        // ── THE PUBLISHED D1 LAYOUT (FreeD, 29 bytes, big-endian) ─────────────────────────
+        //
+        //   [0]      0xD1                    [11..13] X     24-bit signed, 1/64 mm
+        //   [1]      CAMERA ID, whole byte   [14..16] Y     24-bit signed, 1/64 mm
+        //   [2..4]   pan   24-bit, 1/32768 deg  [17..19] Z  24-bit signed, 1/64 mm
+        //   [5..7]   tilt                    [20..22] zoom  24-bit unsigned
+        //   [8..10]  roll                    [23..25] focus 24-bit unsigned
+        //   [26..27] spare / user            [28]     checksum
+        //
+        // THIS DECODER DID NOT READ THAT. It had no camera-ID byte, so pan started on the ID and
+        // every field after byte 0 was misaligned; it read the positions as 32-bit words at
+        // 10/14/18 and zoom and focus as 16-bit at 22/24, and took the camera ID from a nibble of
+        // a spare byte. Self-consistent -- it adds up to 29 -- and matching no real tracker: a
+        // Mo-Sys, Stype, Ncam or PTZ FreeD output decoded to garbage angles and positions, and
+        // its camera ID came out 0 whatever the device sent. It went unnoticed because the
+        // harness's packet builder was written FROM this decoder, so the two agreed byte for byte
+        // -- the "wrong in the same direction" trap CLAUDE.md records for LTC. The field widths
+        // are fixed independently by TouchDesigner's FreeD CHOP reference (camera ID 0-255,
+        // positions +/-131.07 m = 2^23/64 mm, zoom and focus 24-bit), which no 32-bit position
+        // or 16-bit zoom can produce.
+        //
+        // ZOOM AND FOCUS are narrowed 24 -> 16 bits, the width `camera_data` carries, by dropping
+        // the low byte: the normalised range is kept (0..0xFFFFFF -> 0..0xFFFF), which is what
+        // `ZOOM_LUT` and `SCALE`'s full-range calibrate against.
+        //
+        // THE AXIS ASSIGNMENT IS UNCHANGED (X, Y, Z -> x, y, z). Whether FreeD's third axis is
+        // HEIGHT, as camera_data's `y = Up` would then require, is a frame-convention question
+        // held together with the tracker-to-previz handedness; it is not settled here.
+        d.pan  = decode_24bit_signed(&pkt[2]) * FREED_ANGLE_SCALE * DEG2RAD;
+        d.tilt = decode_24bit_signed(&pkt[5]) * FREED_ANGLE_SCALE * DEG2RAD;
+        d.roll = decode_24bit_signed(&pkt[8]) * FREED_ANGLE_SCALE * DEG2RAD;
 
-        // Position: 32-bit signed, 1/64 mm per unit → mm
-        d.x = decode_32bit_signed(&pkt[10]) * FREED_POSITION_SCALE;
-        d.y = decode_32bit_signed(&pkt[14]) * FREED_POSITION_SCALE;
-        d.z = decode_32bit_signed(&pkt[18]) * FREED_POSITION_SCALE;
+        d.x = decode_24bit_signed(&pkt[11]) * FREED_POSITION_SCALE;
+        d.y = decode_24bit_signed(&pkt[14]) * FREED_POSITION_SCALE;
+        d.z = decode_24bit_signed(&pkt[17]) * FREED_POSITION_SCALE;
 
-        d.zoom  = decode_16bit_unsigned(&pkt[22]);
-        d.focus = decode_16bit_unsigned(&pkt[24]);
+        d.zoom  = static_cast<uint16_t>(decode_24bit_unsigned(&pkt[20]) >> 8);
+        d.focus = static_cast<uint16_t>(decode_24bit_unsigned(&pkt[23]) >> 8);
 
-        // Byte 26 user bits: high nibble = device ID (0-15)
-        d.camera_id = (pkt[26] >> 4) & 0x0F;
+        d.camera_id = pkt[1];
 
         d.timestamp = std::chrono::steady_clock::now();
 
-        tracker_registry::instance().on_data(d);
+        tracker_registry::instance().on_data(d, tracking_protocol::freed, port_);
     }
 };
 

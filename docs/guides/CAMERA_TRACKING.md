@@ -59,7 +59,7 @@ Protocol Receiver          (freed_receiver / osc_receiver / …)
      │ decoded camera_data struct (radians, mm, raw zoom)
      ▼
 tracker_registry::on_data()
-     │ look up each binding that matches camera_id
+     │ look up each binding on THIS receiver that matches camera_id
      ▼
 stage::apply_transform()   (duration=0, tween=linear)
      │ same path as MIXER PROJECTION / MIXER FILL AMCP commands
@@ -75,8 +75,8 @@ Tracking data is injected directly into the stage transform pipeline on the rece
 
 | Protocol | Default Port | Description |
 | :--- | :--- | :--- |
-| `FREED` | 6301 | FreeD D1 UDP (29-byte, big-endian, XOR checksum). The de-facto industry standard. Most tracking vendors support it natively: Mo-Sys, Stype, Ncam, Trackmen, OptiTrack, Vicon (via bridge). Multiple cameras share one port using the camera ID nibble in byte 26. |
-| `FREED_PLUS` | 6301 | Stype FreeD+ extended format: identical to FreeD D1 for the first 26 bytes, then adds a 12-byte extension with 32-bit high-precision angles (1/8 388 608 degree per unit). Falls back to standard D1 automatically when a 29-byte packet arrives. |
+| `FREED` | 6301 | FreeD D1 UDP (29-byte, big-endian, checksum `sum & 0xFF == 0x40`). The de-facto industry standard. Most tracking vendors support it natively: Mo-Sys, Stype, Ncam, Trackmen, OptiTrack, Vicon (via bridge). Multiple cameras share one port using the camera-ID byte (byte 1, 0-255). |
+| `FREED_PLUS` | 6301 | Stype FreeD+ extended format: identical to FreeD D1 for bytes 0-26, then adds a 12-byte extension with 32-bit high-precision angles (1/8 388 608 degree per unit). Falls back to standard D1 automatically when a 29-byte packet arrives. |
 | `OSC` | 9000 | OSC 1.0 UDP. No external library required. Uses the address schema `/camera/{id}/pan`, `/tilt`, `/roll`, `/zoom`, `/focus`, `/x`, `/y`, `/z`. Angles in degrees; position in mm; zoom/focus in raw 0–65535 or normalised 0.0–1.0. |
 | `VRPN` | — | VRPN tracker client (`vrpn_Tracker_Remote`). Quaternion pose converted to yaw/pitch/roll. Analogue channel 0 used as zoom. Optional — requires `-DBUILD_TRACKING_VRPN=ON` at CMake configure time. |
 | `PSN` | 56565 | PosiStageNet v2.0 UDP multicast. Open protocol for live 3D stage position data (BlackTrax, MA Lighting grandMA, Disguise, etc.). Joins multicast group `236.10.10.10` by default. Carries position and orientation per tracker but no zoom/focus — those fields remain at 0. Position is converted from metres to mm; orientation from degrees to radians. |
@@ -970,6 +970,8 @@ TRACKING 1-3 BIND FREED PORT 6301 CAMERA 2 MODE 360
 
 Both cameras share the same UDP port (standard FreeD multiplexing). The registry routes each packet to the correct layer based on the camera ID.
 
+A sample drives only the bindings made on the receiver it arrived on (protocol and port). Two trackers on **different** ports that both send camera ID 1 each drive their own binding; before 2026-09-24 they drove each other's.
+
 ---
 
 ### Example 5 — Full virtual-production lens realism
@@ -1046,17 +1048,29 @@ src/modules/tracking/
 
 ```
 Byte  0      : Message type (0xD1)
-Bytes  1– 3  : Pan   (24-bit signed, 1/32768 degree/unit)
-Bytes  4– 6  : Tilt  (24-bit signed, 1/32768 degree/unit)
-Bytes  7– 9  : Roll  (24-bit signed, 1/32768 degree/unit)
-Bytes 10–13  : X position (32-bit signed, 1/64 mm/unit)
-Bytes 14–17  : Y position (32-bit signed, 1/64 mm/unit)
-Bytes 18–21  : Z position (32-bit signed, 1/64 mm/unit)
-Bytes 22–23  : Zoom  (16-bit unsigned, vendor-raw)
-Bytes 24–25  : Focus (16-bit unsigned, vendor-raw)
-Byte  26     : User bits — high nibble = camera ID (0–15)
-Bytes 27–28  : Checksum (sum of all 29 bytes & 0xFF == 0x40)
+Byte  1      : Camera ID (0–255)
+Bytes  2– 4  : Pan   (24-bit signed, 1/32768 degree/unit)
+Bytes  5– 7  : Tilt  (24-bit signed, 1/32768 degree/unit)
+Bytes  8–10  : Roll  (24-bit signed, 1/32768 degree/unit)
+Bytes 11–13  : X position (24-bit signed, 1/64 mm/unit, ±131.07 m)
+Bytes 14–16  : Y position (24-bit signed, 1/64 mm/unit)
+Bytes 17–19  : Z position (24-bit signed, 1/64 mm/unit)
+Bytes 20–22  : Zoom  (24-bit unsigned, vendor-raw)
+Bytes 23–25  : Focus (24-bit unsigned, vendor-raw)
+Bytes 26–27  : Spare / user
+Byte  28     : Checksum (sum of all 29 bytes & 0xFF == 0x40)
 ```
+
+`camera_data` carries zoom and focus as 16 bits, so the receiver keeps the **top 16 bits** of each
+24-bit field. A `ZOOM_LUT` or `SCALE` zoom range is written in those 16-bit units.
+
+**Until 2026-09-24 the receiver used a different layout** — no camera-ID byte, 32-bit positions,
+16-bit zoom/focus, and the camera ID from a nibble of byte 26. That is the table this section used
+to show, and no real tracker sends it: every field after byte 0 was misaligned and the camera ID
+always read 0. It went unnoticed because the harness built its test packets from the receiver, so
+both agreed. The layout above is the published D1 one, corroborated independently by
+TouchDesigner's FreeD CHOP reference. **Re-calibrate any `ZOOM_LUT`, `SCALE` or camera-ID choice
+made against the old decode.**
 
 ### OSC Address Schema
 

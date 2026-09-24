@@ -59,15 +59,19 @@ std::wstring virtual_channel_map::rewrite_command(const std::wstring& command, i
         return command; // No rewrite needed
     }
 
-    // AMCP commands use format: "VERB channel-layer ..." or "VERB SUBVERB channel-layer ..."
-    // Multi-word verbs (e.g., DATA STORE, DATA RETRIEVE, DATA LIST, DATA REMOVE, MIXER CLEAR)
-    // have the channel token as 3rd space-delimited token instead of 2nd.
-    // We detect known multi-word verbs and adjust the token index accordingly.
+    // THE CHANNEL IS ALWAYS THE SECOND TOKEN. AMCP's command repository pops the command's FIRST
+    // word and parses the channel from the token right after it (`parse_channel_id`, which takes
+    // `tokens.front()`), and only then matches the sub-verb: `MIXER 3-10 OPACITY`, `CG 3-10 ADD`,
+    // `PREVIZ 3 SCREEN ...`, `MIXER 3 COMMIT`. This used to treat DATA, CG, THUMBNAIL and MIXER as
+    // two-word verbs and look for the channel in the THIRD token -- so for MIXER and CG it
+    // inspected the sub-verb, found no channel, and forwarded the command with the VIRTUAL number.
+    // Every MIXER and CG command to a remapped channel ran on the wrong channel of the remote node.
+    // (DATA and THUMBNAIL carry no channel at all, so the list was wrong for every entry.)
+    //
+    // SWAP's second channel is NOT rewritten: a swap between two channels is only meaningful on
+    // one node, and a virtual pair that maps to two different hosts has no swap to perform.
     std::wstring vchan_str = std::to_wstring(virtual_channel);
     std::wstring pchan_str = std::to_wstring(physical);
-
-    // Known multi-word AMCP verb prefixes (first word)
-    static const std::wstring multi_word_verbs[] = {L"DATA", L"CG", L"THUMBNAIL", L"MIXER"};
 
     // Find the first token (verb)
     auto first_space = command.find(L' ');
@@ -75,19 +79,7 @@ std::wstring virtual_channel_map::rewrite_command(const std::wstring& command, i
         return command; // Single-word command, nothing to rewrite
     }
 
-    std::wstring verb = command.substr(0, first_space);
-    // Uppercase for comparison
-    std::wstring verb_upper = verb;
-    for (auto& c : verb_upper) c = towupper(c);
-
-    // Determine how many verb tokens to skip before the channel token
-    int tokens_to_skip = 1; // Default: single-word verb, channel is 2nd token
-    for (const auto& mv : multi_word_verbs) {
-        if (verb_upper == mv) {
-            tokens_to_skip = 2; // Two-word verb, channel is 3rd token
-            break;
-        }
-    }
+    const int tokens_to_skip = 1;
 
     // Skip the specified number of tokens to reach the channel token
     size_t pos = 0;

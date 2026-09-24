@@ -77,7 +77,9 @@ The producer periodically calls `Refresh()` on the segmented reader to discover 
 
 ### Overwrite Protection
 
-If the consumer detects that the target filename already exists, it automatically appends a timestamp suffix (e.g., `my_recording_20260511_143022.mav`) and logs a warning. Existing recordings are never silently overwritten.
+If the consumer detects that a recording of that name already exists, the NEW recording gets a timestamp suffix down to the millisecond (e.g. `media/my_recording_20260511_143022_417/my_recording_20260511_143022_417.mav.000`) and a warning is logged. The existing recording is left untouched.
+
+**Until 2026-09-24 this was false for every recording this build makes.** The probe looked only for the old flat layout (`my_recording.mav.idx`, `my_recording.mav.000`), and the writer has put each recording in a directory of its own since the segmented writer landed. So the probe found nothing, the second recording truncated the first from segment 000, and the first recording's later segments stayed on disk where the reader spliced them onto the new one. It probes both layouts now.
 
 ### Export Pipeline
 

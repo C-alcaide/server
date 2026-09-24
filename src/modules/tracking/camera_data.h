@@ -46,6 +46,13 @@ struct camera_data
     uint16_t iris  = 0; ///< Aperture/iris (0 = closed, 65535 = open). OSC/VRPN only; FreeD leaves 0.
 
     std::chrono::steady_clock::time_point timestamp = std::chrono::steady_clock::now();
+
+    /// WHICH RECEIVER produced this sample: `tracking_protocol` as an integer and the UDP port.
+    /// Stamped by `tracker_registry::on_data(data, protocol, port)`. -1 means "not stamped",
+    /// which matches any binding -- the behaviour before sources existed, kept for any caller
+    /// that has not been told. See `tracker_registry::on_data` for why this exists at all.
+    int source_protocol = -1;
+    int source_port     = -1;
 };
 
 }} // namespace caspar::tracking

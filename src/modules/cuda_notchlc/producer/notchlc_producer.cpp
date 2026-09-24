@@ -33,6 +33,7 @@
 #include "../util/cuda_gl_texture.h"
 #include "../../cuda_gl_interop_lock.h"
 
+#include <limits>
 #include <accelerator/ogl/image/image_mixer.h>
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
@@ -117,6 +118,9 @@ struct Lz4DoneItem {
     NotchBlockHeader hdr     = {};
     size_t           actual_uncompressed = 0;
     std::vector<int32_t> audio_samples;
+    /// A frame that FAILED to decompress, carrying only its sequence number. See the LZ4
+    /// worker's failure branch: without it, `read_loop` waits for this seq for ever.
+    bool             skipped = false;
 };
 
 // Min-heap comparator: ensures GPU thread always gets the lowest-seq item first.
@@ -897,6 +901,26 @@ struct notchlc_producer_impl final : public core::frame_producer
                 // Return slot to pool (frame dropped).
                 { std::lock_guard<std::mutex> slk(slot_pool_mutex_); slot_pool_.push(slot); }
                 slot_pool_cv_.notify_one();
+
+                // AND SAY SO, by sequence number. `read_loop` consumes items strictly in `seq`
+                // order and its wait has no timeout, so a seq that is never pushed is a seq it
+                // waits on for ever: later frames pile up in the reorder heap, each holding a
+                // slot, until the pool is empty and every worker blocks too. One LZ4 failure --
+                // a truncated packet, a header this decoder refuses, a dimension mismatch -- froze
+                // playback until the next SEEK, because the loop wrap keeps `seq` monotonic and
+                // never bumps the epoch. `hap_producer` fixed exactly this with its own `skipped`
+                // item, and its comment is the right standard: one bad frame should BLINK, not end
+                // playback.
+                {
+                    std::lock_guard<std::mutex> lk(lz4_done_mutex_);
+                    Lz4DoneItem skip;
+                    skip.seq     = rp.seq;
+                    skip.epoch   = rp.epoch;
+                    skip.slot    = -2; // NOT -1, which `read_loop` reads as the EOF sentinel
+                    skip.skipped = true;
+                    lz4_done_pq_.push(std::move(skip));
+                }
+                lz4_done_cv_.notify_one();
                 continue;
             }
 
@@ -1071,6 +1095,11 @@ struct notchlc_producer_impl final : public core::frame_producer
             }
 
             ++next_seq;
+
+            // A frame the LZ4 stage could not decompress: its seq is accounted for, its slot
+            // is already back in the pool, and the picture simply holds the previous frame.
+            if (item.skipped)
+                continue;
 
             //  EOF 
             if (item.slot < 0) {
@@ -1734,6 +1763,47 @@ struct notchlc_producer_impl final : public core::frame_producer
         // Guard: draw_frame::still() dereferences impl_ — crash if frame is empty.
         if (!cached_frame_) return core::draw_frame{};
         return core::draw_frame::still(cached_frame_);
+    }
+
+    /// The LENGTH in the same unit as `frame_number()` -- which is the whole contract, because
+    /// `layer::receive` fires an AUTO transition when `nb_frames() - frame_number() - delta`
+    /// drops below 1, and reports `eof` when `frame_number() >= nb_frames()`.
+    ///
+    /// MISSING UNTIL 2026-09-23, so the base class answered UINT32_MAX and neither ever happened:
+    /// `LOADBG ... AUTO` behind one of these layers waited for ever, and a transport could never
+    /// read `eof`. `ffmpeg_producer` has always overridden it, so the two producer families
+    /// disagreed about the most basic playout question there is. The `frame_number()` fix above
+    /// (playhead, not IO clock) was written so an AUTO would fire at the right frame -- and until
+    /// this it could not fire at all.
+    ///
+    /// ABSOLUTE, like `frame_number()`, and it answers the INDEX OF THE LAST FRAME rather than a
+    /// count -- deliberately, because `frame_number()` here reports the index ON SCREEN (the
+    /// playhead fix of 2229346f3, gated against the burnt-in marker), which tops out at
+    /// `end - 1` and never reaches `end`. With a count, `layer`'s `nb - fn - delta` would bottom
+    /// out at 1 and a plain cut (delta 0) would still never fire. With the last index it counts
+    /// exactly the frames REMAINING after the one on screen: a cut fires once the last frame has
+    /// been shown ONCE, and a MIX of D frames starts D frames before the end so the outgoing
+    /// clip's last frame lands in the transition's last frame. `eof` then reads true while the
+    /// last frame is on screen. The end is the OUT point when one is set and the file's length
+    /// otherwise, scaled by channel/file fps exactly as `frame_number()` scales.
+    ///
+    /// Unbounded -- UINT32_MAX, the base class's "no end" --
+    /// while looping or ping-ponging (there is no last frame), while playing BACKWARDS (the
+    /// formula in `layer` assumes forward play, and an AUTO fired by a reverse scrub would be
+    /// wrong), and when the length is not known.
+    uint32_t nb_frames() const override
+    {
+        if (loop_.load(std::memory_order_relaxed) || pingpong_.load(std::memory_order_relaxed) ||
+            speed_.load(std::memory_order_relaxed) < 0.0)
+            return std::numeric_limits<uint32_t>::max();
+        const int64_t end = out_frame_ >= 0 ? out_frame_ : total_frames_;
+        if (end <= 0)
+            return std::numeric_limits<uint32_t>::max();
+        const int64_t last = end - 1;
+        if (file_fps_ > 0.0 && format_desc_.fps > 0.0 && file_fps_ != format_desc_.fps)
+            return static_cast<uint32_t>(
+                std::llround(static_cast<double>(last) * (format_desc_.fps / file_fps_)));
+        return static_cast<uint32_t>(last);
     }
 
     uint32_t frame_number() const override

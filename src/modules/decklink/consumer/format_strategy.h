@@ -70,6 +70,16 @@ class format_strategy
                                                          const core::const_frame&       frame1,
                                                          const core::const_frame&       frame2,
                                                          BMDFieldDominance              field_dominance)       = 0;
+
+    /// Does this strategy READ THE PICTURE BACK ITSELF, so the mixer need not?
+    ///
+    /// The consumer's `needs_cpu_frame_data()` used to answer from the CONFIG -- "a GPU readback
+    /// mode was asked for" -- and a GPU factory that fell back to the CPU packer (no CUDA device,
+    /// `vkCreateInstance` failing, a constructor throwing) still told the mixer to skip the host
+    /// readback. The CPU packer then read `image_data(0)` off a GPU-only frame, which is empty.
+    /// Asking the strategy that was actually BUILT is the only answer that cannot drift from
+    /// what will run.
+    virtual bool does_own_readback() const { return false; }
 };
 
 spl::shared_ptr<format_strategy> create_sdr_bgra_strategy();

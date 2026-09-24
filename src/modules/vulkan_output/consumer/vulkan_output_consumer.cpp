@@ -242,6 +242,31 @@ class vulkan_output_consumer : public core::frame_consumer
                     const core::channel_info&      channel_info,
                     int                            port_index) override
     {
+        // REFUSED, the way `ffmpeg_consumer` refuses -- because the alternative was
+        // `std::terminate`. `output` re-initialises every consumer when the channel format
+        // changes (`SET <ch> MODE`), and this function has no teardown: it ends by running
+        // `init_vulkan` again, which move-assigns `present_thread_`, `watchdog_thread_` and (on
+        // the fullscreen-exclusive path) `fse_msg_thread_` over threads that are still running.
+        // `std::thread::operator=` on a joinable thread terminates the process -- the whole
+        // server, every channel, because one output was asked to follow a format change.
+        //
+        // Throwing here makes `output` log it and erase this consumer, which is a far smaller
+        // failure: the display goes dark and says why, and `ADD <ch> VULKAN_OUTPUT` brings it back
+        // at the new format. A true re-initialisation would run `destroy_resources` and then
+        // `init_vulkan` on the executor; it is not done here because `destroy_resources` can end
+        // in `terminate_process_now()` when the present thread refuses to join, and a code path
+        // that is only reached on a format change is the last place to introduce that.
+        bool already = present_thread_.joinable() || watchdog_thread_.joinable();
+#ifdef _WIN32
+        // Windows-only member, so the test is too -- this file's non-MSVC branch is compiled only
+        // by the WSL syntax check CLAUDE.md names, and an unguarded reference breaks it silently.
+        already = already || fse_msg_thread_.joinable();
+#endif
+        if (already)
+            CASPAR_THROW_EXCEPTION(invalid_operation() << msg_info(
+                "Cannot reinitialize vulkan_output on a format change -- the consumer is removed; "
+                "ADD it again to follow the new format."));
+
         format_desc_ = format_desc;
         port_index_  = port_index;
         channel_index_ = channel_info.index;
@@ -447,7 +472,18 @@ class vulkan_output_consumer : public core::frame_consumer
         core::av_pipeline_info info;
         std::lock_guard<std::mutex> lock(config_mutex_);
         info.has_video               = true;
-        info.video_depth_frames      = config_.delay_frames + 1;
+        // THE DEPTH THAT IS REAL, not the one configured. On the OpenGL-mixer zero-copy route
+        // `send` blits every frame into the shared pool at once and the present thread blits
+        // `pool->current_vk_image()` -- the NEWEST slot -- whichever buffered entry it popped.
+        // So `<delay>` delays the TIMING of the present and not its CONTENT: the picture on
+        // screen is the latest frame. Reporting `delay + 1` there told `output` to hold the
+        // audio back for a video delay that was not happening, which is an A/V offset of
+        // exactly `delay` frames on the one route where a delay is most often set to line a
+        // wall up. The VK-native and CPU routes present the buffered frame itself and keep
+        // the configured depth. (Making the pool route honour the delay needs the slot
+        // recorded with each buffered entry; that is the real fix and is not attempted here.)
+        const bool pool_route        = ogl_device_ && frame_cache_ && !frame_cache_->is_cross_gpu();
+        info.video_depth_frames      = pool_route ? 1 : config_.delay_frames + 1;
         info.video_delay_ms          = config_.delay_ms;
         info.video_delay_adjustable  = true;
         return info;
@@ -777,6 +813,12 @@ class vulkan_output_consumer : public core::frame_consumer
                 frame_cache_->add_consumer();
                 CASPAR_LOG(info) << print() << L" Frame cache acquired (consumers="
                                  << frame_cache_->consumer_count() << L")";
+                // Said once, here, because nothing else on this route can: see `av_pipeline`.
+                if (config_.delay_frames > 0 && !frame_cache_->is_cross_gpu())
+                    CASPAR_LOG(warning) << print() << L" <delay> " << config_.delay_frames
+                                        << L" is not applied on the OpenGL-mixer zero-copy route: "
+                                           L"the newest pooled frame is presented, so the picture is not "
+                                           L"delayed. Audio is not delayed for it either.";
             } catch (const std::exception& e) {
                 CASPAR_LOG(warning) << print()
                     << L" Frame cache unavailable, falling back to CPU: " << e.what();
@@ -1062,10 +1104,20 @@ class vulkan_output_consumer : public core::frame_consumer
         }
 
         if (config_.transfer == hdr_transfer::pq || config_.transfer == hdr_transfer::hlg) {
-            // Prefer 10-bit or 16-bit for HDR
+            // Prefer 10-bit or 16-bit for HDR -- in the colour space the TRANSFER names.
+            //
+            // This accepted only `HDR10_ST2084_EXT` for both transfers, so `<transfer>hlg`
+            // signalled PQ: a display told to apply the ST 2084 EOTF to an HLG signal renders
+            // it far too dark in the mids and wrongly compressed in the highlights -- wrong
+            // everywhere and plausible everywhere. `HDR10_HLG_EXT` was listed in the reporting
+            // table below and never requested. There is deliberately no fallback from HLG to
+            // the PQ space: the 16-bit branch below is taken instead, and `hw-hdr`/the reported
+            // colour space say what the swapchain actually got.
+            const VkColorSpaceKHR want = config_.transfer == hdr_transfer::hlg
+                                             ? VK_COLOR_SPACE_HDR10_HLG_EXT
+                                             : VK_COLOR_SPACE_HDR10_ST2084_EXT;
             for (const auto& f : formats) {
-                if (f.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
-                    f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT)
+                if (f.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 && f.colorSpace == want)
                     return f;
             }
             for (const auto& f : formats) {
@@ -1157,7 +1209,12 @@ class vulkan_output_consumer : public core::frame_consumer
 
     void set_hdr_metadata()
     {
-        if (config_.transfer == hdr_transfer::sdr)
+        // SDR has none, and neither does HLG: ST 2086 mastering-display metadata and
+        // MaxCLL/MaxFALL are HDR10 (PQ) signalling. HLG is scene-referred and defines no
+        // static metadata, and a sink handed ST 2086 alongside an HLG signal is being told
+        // it is looking at HDR10 -- which is the same wrong-curve error as the colour space
+        // this consumer used to request for it.
+        if (config_.transfer == hdr_transfer::sdr || config_.transfer == hdr_transfer::hlg)
             return;
 
         auto vkSetHdrMetadataEXT = reinterpret_cast<PFN_vkSetHdrMetadataEXT>(
@@ -1253,7 +1310,18 @@ class vulkan_output_consumer : public core::frame_consumer
 
         // Hardware HDR: let the display engine perform PQ encoding + gamut mapping
         // Source stays linear scRGB FP16 — no compute shader EOTF needed.
-        if (config_.transfer == hdr_transfer::pq || config_.transfer == hdr_transfer::hlg) {
+        //
+        // PQ ONLY. `enable_hdr_output` always sets `NV_HDR_MODE_UHDA`, which is HDR10 -- the
+        // ST 2084 curve -- so enabling it for `<transfer>hlg` told the display engine to
+        // PQ-encode a picture that was meant to be HLG. Until NvAPI grows an HLG mode here, an
+        // HLG output stays on the swapchain's own colour space (see `pick_surface_format`),
+        // and says so rather than signalling the wrong curve through the faster route.
+        if (config_.transfer == hdr_transfer::hlg) {
+            CASPAR_LOG(info) << print()
+                             << L" <transfer>hlg: hardware HDR (UHDA) is HDR10/PQ only, so it is not "
+                                L"used; HLG is signalled through the swapchain colour space.";
+        }
+        if (config_.transfer == hdr_transfer::pq) {
             nvapi_display_id_ = nvapi_->resolve_display_id(config_.gpu_index, config_.output_index);
             if (nvapi_display_id_ != 0 && nvapi_->supports_hdr_output(nvapi_display_id_)) {
                 int cll  = config_.max_cll  > 0 ? config_.max_cll  : 1000;

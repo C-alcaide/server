@@ -1437,7 +1437,15 @@ struct vk_readback_strategy::impl
 
         // Push constants and dispatch
         if (is_hdr_ || use_bt2020_ || needs_v210_) {
-            int groups_per_row = (dst_w + 5) / 6;
+            // THE PADDED ROW, in 16-byte v210 groups: ((w + 47) / 48) * 128 bytes, i.e. 8 groups per 48
+            // pixels -- the stride the staging buffer and `IDeckLinkVideoFrame::GetRowBytes` both use. This
+            // was `(w + 5) / 6`, the UNPADDED count, which agrees with the padded one only when the width is
+            // a multiple of 48 (720, 1920, 3840, 7680). At 1280 it wrote 3424-byte rows into a 3456-byte
+            // stride, so every row began 12 pixels further right than the one above: 720p, 2K-DCI and
+            // 4K-DCI out of the Vulkan mixer were SHEARED. The OpenGL packer and the CPU packer both use
+            // `row_bytes(w) / 16`. The groups past the picture fall outside `ox < dst_w` in the kernel and
+            // are written black, which is what the padding is.
+            int groups_per_row = ((dst_w + 47) / 48) * 8;
             int push_data[11] = {src_x, src_y, dst_w, dst_h, groups_per_row,
                                  use_bt2020_ ? 1 : 0, is_16bit ? 1 : 0,
                                  dest_x, dest_y, region_w, region_h};

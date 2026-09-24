@@ -118,8 +118,13 @@ None of those needs a camera. All three are absent.
    five protocols** (FreeD) and **two of eighteen commands** (`BIND`, `UNBIND`).
 
    It exists because two halves arrived in the same week. FreeD D1 turns out to be a **fixed
-   29-byte UDP packet** — `freed_receiver.cpp` is the whole specification, so a sample needs no
-   camera, no hardware and no vendor SDK. And the previz camera became **readable** at
+   29-byte UDP packet**, so a sample needs no camera, no hardware and no vendor SDK. *This
+   paragraph used to say `freed_receiver.cpp` "is the whole specification", and that sentence is
+   the defect:* the harness's packet builder was written from the receiver, the receiver had the
+   layout wrong (no camera-ID byte, 32-bit positions, 16-bit zoom), and the two agreed byte for byte
+   while every real tracker decoded to garbage. Fixed 2026-09-24; the builder now follows the
+   published D1 layout, with TouchDesigner's FreeD CHOP reference as the independent source for the
+   field widths. **A receiver is never the specification of the protocol it receives.** And the previz camera became **readable** at
    `/channel/{n}/mixer/previz/camera/position` when the 3D stage was published into the control
    API, so a tracked camera finally moves something a test can see. Neither half was available
    before, which is why this surface had no coverage rather than bad coverage.

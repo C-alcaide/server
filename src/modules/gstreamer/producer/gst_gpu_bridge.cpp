@@ -22,6 +22,7 @@
 #ifdef CASPAR_GST_GPU_BRIDGE
 
 #include "gst_gpu_bridge.h"
+#include "../util/gst_frame.h"
 
 #include <common/except.h>
 #include <common/log.h>
@@ -790,6 +791,9 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
                            ? core::color_range::full
                            : core::color_range::limited;
     desc.chroma_location = chroma_location_of(info);
+    // The TRANSFER too, from the one mapping both routes share (see `transfer_of`). Missing
+    // here as on the host path, so an HLG or PQ decode arrived tagged SDR.
+    desc.color_transfer  = transfer_of(info);
 
     // No host pixels. A consumer that needs them asks the channel, which reads back the
     // composited frame; host_image_state() reports this honestly as `unavailable` rather than

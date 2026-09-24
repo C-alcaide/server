@@ -204,7 +204,7 @@ struct opentrackio_receiver::impl
             return; // nothing usable in this sample
 
         d.timestamp = std::chrono::steady_clock::now();
-        tracker_registry::instance().on_data(d);
+        tracker_registry::instance().on_data(d, tracking_protocol::opentrackio, port_);
     }
 };
 

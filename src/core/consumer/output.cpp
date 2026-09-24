@@ -54,7 +54,7 @@ struct output::impl
     const channel_info                  channel_info_;
     video_format_desc                   format_desc_;
 
-    std::mutex                                     consumers_mutex_;
+    mutable std::mutex                             consumers_mutex_;
     std::map<int, spl::shared_ptr<frame_consumer>> consumers_;
 
     std::atomic<uint64_t>      tick_count_{0};
@@ -468,6 +468,13 @@ struct output::impl
 
     std::vector<ocio_view_key> distinct_consumer_views() const
     {
+        // LOCKED, like every other reader of `consumers_`. This runs on the CHANNEL thread every
+        // tick (`video_channel.cpp`, `set_consumer_views`), and `add`/`remove` erase and emplace
+        // the same std::map under this mutex from the AMCP thread -- so an unlocked range-for can
+        // step into a node `erase` just freed. The consumer object survives the erase (`old` holds
+        // it); the map node the iterator stands on does not. The 2026-09-11 heap-corruption class,
+        // on a routine command: `ADD`/`REMOVE` while a channel is on air.
+        std::lock_guard<std::mutex> lock(consumers_mutex_);
         std::vector<ocio_view_key> out;
         for (auto& p : consumers_) {
             auto [display, view] = p.second->ocio_view();

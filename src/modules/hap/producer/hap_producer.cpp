@@ -28,6 +28,7 @@
 #include "../gl/hap_gl_decode.h"
 #include "../util/hap_frame_parser.h"
 
+#include <limits>
 #include <accelerator/ogl/image/image_mixer.h>
 #include <accelerator/ogl/util/device.h>
 #include <accelerator/ogl/util/texture.h>
@@ -1839,6 +1840,47 @@ struct hap_producer_impl final : public core::frame_producer
         }
         if (!cached_frame_) return core::draw_frame{};
         return core::draw_frame::still(cached_frame_);
+    }
+
+    /// The LENGTH in the same unit as `frame_number()` -- which is the whole contract, because
+    /// `layer::receive` fires an AUTO transition when `nb_frames() - frame_number() - delta`
+    /// drops below 1, and reports `eof` when `frame_number() >= nb_frames()`.
+    ///
+    /// MISSING UNTIL 2026-09-23, so the base class answered UINT32_MAX and neither ever happened:
+    /// `LOADBG ... AUTO` behind one of these layers waited for ever, and a transport could never
+    /// read `eof`. `ffmpeg_producer` has always overridden it, so the two producer families
+    /// disagreed about the most basic playout question there is. The `frame_number()` fix above
+    /// (playhead, not IO clock) was written so an AUTO would fire at the right frame -- and until
+    /// this it could not fire at all.
+    ///
+    /// ABSOLUTE, like `frame_number()`, and it answers the INDEX OF THE LAST FRAME rather than a
+    /// count -- deliberately, because `frame_number()` here reports the index ON SCREEN (the
+    /// playhead fix of 2229346f3, gated against the burnt-in marker), which tops out at
+    /// `end - 1` and never reaches `end`. With a count, `layer`'s `nb - fn - delta` would bottom
+    /// out at 1 and a plain cut (delta 0) would still never fire. With the last index it counts
+    /// exactly the frames REMAINING after the one on screen: a cut fires once the last frame has
+    /// been shown ONCE, and a MIX of D frames starts D frames before the end so the outgoing
+    /// clip's last frame lands in the transition's last frame. `eof` then reads true while the
+    /// last frame is on screen. The end is the OUT point when one is set and the file's length
+    /// otherwise, scaled by channel/file fps exactly as `frame_number()` scales.
+    ///
+    /// Unbounded -- UINT32_MAX, the base class's "no end" --
+    /// while looping or ping-ponging (there is no last frame), while playing BACKWARDS (the
+    /// formula in `layer` assumes forward play, and an AUTO fired by a reverse scrub would be
+    /// wrong), and when the length is not known.
+    uint32_t nb_frames() const override
+    {
+        if (loop_.load(std::memory_order_relaxed) || pingpong_.load(std::memory_order_relaxed) ||
+            speed_.load(std::memory_order_relaxed) < 0.0)
+            return std::numeric_limits<uint32_t>::max();
+        const int64_t end = out_frame_ >= 0 ? out_frame_ : total_frames_;
+        if (end <= 0)
+            return std::numeric_limits<uint32_t>::max();
+        const int64_t last = end - 1;
+        if (file_fps_ > 0.0 && format_desc_.fps > 0.0 && file_fps_ != format_desc_.fps)
+            return static_cast<uint32_t>(
+                std::llround(static_cast<double>(last) * (format_desc_.fps / file_fps_)));
+        return static_cast<uint32_t>(last);
     }
 
     uint32_t frame_number() const override

@@ -109,7 +109,12 @@ class command_relay
     std::string   client_bind_address_;
     uint16_t      client_port_ = 0;
     uintptr_t     listen_socket_ = ~0ULL;
-    uintptr_t     master_socket_ = ~0ULL;
+    /// The master's connection on a CLIENT. ATOMIC, because three threads touch it -- the
+    /// listener publishes a new one, the receive thread retires its own, `stop()` retires
+    /// whatever is current -- and it was a plain integer written by two of them. ONE OWNER
+    /// closes the handle: the receive thread that reads it. Everyone else only `shutdown()`s
+    /// it, which wakes a blocked `recv` without the double close the old code allowed.
+    std::atomic<uintptr_t> master_socket_{~0ULL};
     std::thread   listener_thread_;
     std::thread   receive_thread_;
 

@@ -73,11 +73,11 @@ static int32_t decode_32bit_signed_fp(const uint8_t* p)
                                   (static_cast<uint32_t>(p[3])      ) );
 }
 
-static uint16_t decode_16bit_unsigned_fp(const uint8_t* p)
+static uint32_t decode_24bit_unsigned_fp(const uint8_t* p)
 {
-    return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | p[1]);
+    return (static_cast<uint32_t>(p[0]) << 16) | (static_cast<uint32_t>(p[1]) << 8) |
+           static_cast<uint32_t>(p[2]);
 }
-
 // ---------------------------------------------------------------------------
 
 struct freed_plus_receiver::impl
@@ -155,18 +155,23 @@ struct freed_plus_receiver::impl
             return;
 
         camera_data d;
-        d.pan       = decode_24bit_signed_fp(&recv_buf_[1])  * FREED_ANGLE_SCALE    * DEG2RAD;
-        d.tilt      = decode_24bit_signed_fp(&recv_buf_[4])  * FREED_ANGLE_SCALE    * DEG2RAD;
-        d.roll      = decode_24bit_signed_fp(&recv_buf_[7])  * FREED_ANGLE_SCALE    * DEG2RAD;
-        d.x         = decode_32bit_signed_fp(&recv_buf_[10]) * FREED_POSITION_SCALE;
-        d.y         = decode_32bit_signed_fp(&recv_buf_[14]) * FREED_POSITION_SCALE;
-        d.z         = decode_32bit_signed_fp(&recv_buf_[18]) * FREED_POSITION_SCALE;
-        d.zoom      = decode_16bit_unsigned_fp(&recv_buf_[22]);
-        d.focus     = decode_16bit_unsigned_fp(&recv_buf_[24]);
-        d.camera_id = (recv_buf_[26] >> 4) & 0x0F;
+        // The plain D1 layout -- see freed_receiver.cpp, where the account of what this read
+        // before, and why nothing caught it, is written once.
+        d.pan  = decode_24bit_signed_fp(&recv_buf_[2]) * FREED_ANGLE_SCALE * DEG2RAD;
+        d.tilt = decode_24bit_signed_fp(&recv_buf_[5]) * FREED_ANGLE_SCALE * DEG2RAD;
+        d.roll = decode_24bit_signed_fp(&recv_buf_[8]) * FREED_ANGLE_SCALE * DEG2RAD;
+
+        d.x = decode_24bit_signed_fp(&recv_buf_[11]) * FREED_POSITION_SCALE;
+        d.y = decode_24bit_signed_fp(&recv_buf_[14]) * FREED_POSITION_SCALE;
+        d.z = decode_24bit_signed_fp(&recv_buf_[17]) * FREED_POSITION_SCALE;
+
+        d.zoom  = static_cast<uint16_t>(decode_24bit_unsigned_fp(&recv_buf_[20]) >> 8);
+        d.focus = static_cast<uint16_t>(decode_24bit_unsigned_fp(&recv_buf_[23]) >> 8);
+
+        d.camera_id = recv_buf_[1];
         d.timestamp = std::chrono::steady_clock::now();
 
-        tracker_registry::instance().on_data(d);
+        tracker_registry::instance().on_data(d, tracking_protocol::freed_plus, port_);
     }
 
     // Full FreeD+ packet with 32-bit high-precision angles
@@ -186,12 +191,14 @@ struct freed_plus_receiver::impl
 
         camera_data d;
 
-        // Use low-precision values for position / zoom / focus from the standard D1 header
-        d.x     = decode_32bit_signed_fp(&recv_buf_[10]) * FREED_POSITION_SCALE;
-        d.y     = decode_32bit_signed_fp(&recv_buf_[14]) * FREED_POSITION_SCALE;
-        d.z     = decode_32bit_signed_fp(&recv_buf_[18]) * FREED_POSITION_SCALE;
-        d.zoom  = decode_16bit_unsigned_fp(&recv_buf_[22]);
-        d.focus = decode_16bit_unsigned_fp(&recv_buf_[24]);
+        // Position / zoom / focus from the standard D1 header -- which this file's own layout
+        // note says bytes 0-26 ARE, so they are read with the D1 offsets and widths. They were
+        // read with the same misaligned 32/16-bit layout as the plain decoder.
+        d.x     = decode_24bit_signed_fp(&recv_buf_[11]) * FREED_POSITION_SCALE;
+        d.y     = decode_24bit_signed_fp(&recv_buf_[14]) * FREED_POSITION_SCALE;
+        d.z     = decode_24bit_signed_fp(&recv_buf_[17]) * FREED_POSITION_SCALE;
+        d.zoom  = static_cast<uint16_t>(decode_24bit_unsigned_fp(&recv_buf_[20]) >> 8);
+        d.focus = static_cast<uint16_t>(decode_24bit_unsigned_fp(&recv_buf_[23]) >> 8);
 
         // High-precision angles from the extension block
         d.pan  = decode_32bit_signed_fp(&recv_buf_[27]) * FREED_PLUS_ANGLE_SCALE * DEG2RAD;
@@ -201,7 +208,7 @@ struct freed_plus_receiver::impl
         d.camera_id = (recv_buf_[39] >> 4) & 0x0F;
         d.timestamp = std::chrono::steady_clock::now();
 
-        tracker_registry::instance().on_data(d);
+        tracker_registry::instance().on_data(d, tracking_protocol::freed_plus, port_);
     }
 };
 

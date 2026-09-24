@@ -41,6 +41,7 @@
 
 #include "../util/util.h"
 
+#include <algorithm>
 #include <chrono>
 #include <sstream>
 #include <iomanip>
@@ -240,7 +241,10 @@ core::video_format_desc get_decklink_format(const port_configuration&      confi
     return fallback_format_desc;
 }
 
-spl::shared_ptr<format_strategy> create_format_strategy(const configuration& config, bool use_vulkan = false, bool ogl_gpu_direct = false)
+spl::shared_ptr<format_strategy> create_format_strategy(const configuration& config,
+                                                        bool                 use_vulkan     = false,
+                                                        bool                 ogl_gpu_direct = false,
+                                                        int                  field_count    = 1)
 {
     // HDR mode always signals BT.2020 on SDI, so v210 must use BT.2020 matrix.
     // SDR mode: use the configured color_space (bt709 or bt601; P3/Adobe falls back to bt709).
@@ -292,6 +296,39 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
     (void)is_hdr;
     (void)use_bt2020;
     auto strategy   = config.gpu_readback_mode;
+
+    // ── TWO THINGS THE VULKAN-MIXER GPU PACKERS DO NOT DO ────────────────────────────────
+    //
+    // KEY-ONLY. `port_configuration::key_only` is honoured by the CPU packer (the alpha
+    // shuffle), by the OpenGL GPU packer (`u_key_only`) and by vulkan-dma through its CPU
+    // stage -- and read NOWHERE in `cuda_vk_strategy`, `vk_readback_strategy` or their
+    // kernels. So a key port on the Vulkan mixer output the FILL, which on a keyer is the
+    // picture punched through where the matte should be.
+    //
+    // INTERLACED. `cuda_vk_strategy` takes its GPU path only for a progressive frame and hands
+    // anything else to its CPU fallback -- which, in a GPU mode, has no host pixels and emits a
+    // BLANK frame. `vk_readback_strategy`'s compute path packs field 1 as a whole frame and
+    // never reads field 2, and its DMA path weaves field 1 with itself. So 1080i on the Vulkan
+    // mixer was black on one strategy and half the vertical motion on the other.
+    //
+    // Both are ROUTED to the CPU packer here, which does both correctly, rather than refused:
+    // the output is right at a CPU cost, and the log says why. vulkan-dma keeps its own route,
+    // because its CPU stage already handles key-only; it is the interlaced case that it gets
+    // wrong, so it is routed for that one only.
+    const bool any_key_only =
+        config.primary.key_only ||
+        std::any_of(config.secondaries.begin(), config.secondaries.end(), [](const port_configuration& p) {
+            return p.key_only;
+        });
+    const bool interlaced = field_count > 1;
+    const bool dma        = strategy == configuration::gpu_readback_mode_t::vulkan_dma;
+    if (strategy != configuration::gpu_readback_mode_t::cpu && (interlaced || (any_key_only && !dma))) {
+        CASPAR_LOG(info) << L"[decklink] Vulkan mixer: "
+                         << (interlaced ? L"an interlaced mode" : L"a key-only port")
+                         << L" is packed on the CPU. The Vulkan GPU packers do not implement it, and "
+                            L"used to output " << (interlaced ? L"a blank frame or a single field." : L"the fill.");
+        return cpu_strategy;
+    }
 
     // Auto-select: try CUDA first (proven), then VK readback
     if (strategy == configuration::gpu_readback_mode_t::auto_select) {
@@ -643,7 +680,8 @@ struct decklink_secondary_port final : public IDeckLinkVideoOutputCallback
         , format_strategy_(create_format_strategy(
               config,
               use_vulkan,
-              ogl_gpu_pack_eligible(config, use_vulkan, main_decklink_format_desc.field_count)))
+              ogl_gpu_pack_eligible(config, use_vulkan, main_decklink_format_desc.field_count),
+              main_decklink_format_desc.field_count))
         , device_sync_group_(device_sync_group)
         , channel_format_desc_(std::move(channel_format_desc))
         , decklink_format_desc_(get_decklink_format(output_config_, main_decklink_format_desc))
@@ -851,6 +889,10 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
     const bool                       use_vulkan_;
     spl::shared_ptr<format_strategy> format_strategy_;
 
+    /// Whether the strategy that was actually BUILT reads the picture back itself. See
+    /// `format_strategy::does_own_readback` and the proxy's `needs_cpu_frame_data`.
+    bool does_own_readback() const { return format_strategy_->does_own_readback(); }
+
     com_ptr<IDeckLink>                        decklink_      = get_device(config_.primary.device_index);
     com_iface_ptr<IDeckLinkOutput>            output_        = iface_cast<IDeckLinkOutput>(decklink_);
     com_iface_ptr<IDeckLinkConfiguration>     configuration_ = iface_cast<IDeckLinkConfiguration>(decklink_);
@@ -921,7 +963,8 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
         , format_strategy_(create_format_strategy(
               config,
               use_vulkan,
-              ogl_gpu_pack_eligible(config, use_vulkan, get_decklink_format(config.primary, channel_format_desc).field_count)))
+              ogl_gpu_pack_eligible(config, use_vulkan, get_decklink_format(config.primary, channel_format_desc).field_count),
+              get_decklink_format(config.primary, channel_format_desc).field_count))
         , channel_format_desc_(std::move(channel_format_desc))
         , decklink_format_desc_(get_decklink_format(config.primary, channel_format_desc_))
     {
@@ -1626,6 +1669,10 @@ struct decklink_consumer_proxy : public core::frame_consumer
     core::video_format_desc            format_desc_;
     executor                           executor_;
     bool                               use_vulkan_ = false;
+    /// The built consumer's `does_own_readback()`, cached on the executor as it is built.
+    /// Atomic because `needs_cpu_frame_data` is asked from the channel thread every tick,
+    /// while `consumer_` itself is replaced on the executor during a re-initialisation.
+    std::atomic<bool>                  own_readback_{false};
 
   public:
     /// This port's own OCIO view, if it was configured with one. See config.h.
@@ -1680,6 +1727,7 @@ struct decklink_consumer_proxy : public core::frame_consumer
         executor_.invoke([=, this] {
             consumer_.reset();
             consumer_ = std::make_unique<decklink_consumer>(config_, format_desc, channel_info.index, use_vulkan_);
+            own_readback_.store(consumer_->does_own_readback(), std::memory_order_release);
         });
     }
 
@@ -1711,8 +1759,13 @@ struct decklink_consumer_proxy : public core::frame_consumer
         // (eColorAttachmentOptimal → eTransferSrcOptimal) on the VK mixer's
         // queue that races with the GPU strategy's texture import via CUDA
         // external memory or VK external memory, causing black/corrupt output.
-        if (use_vulkan_ && config_.gpu_readback_mode != configuration::gpu_readback_mode_t::cpu)
-            return false;
+        //
+        // ASKED OF THE STRATEGY THAT WAS BUILT, not of the mode that was requested. A GPU factory
+        // that fell back to the CPU packer -- no CUDA device, a failed `vkCreateInstance`, a
+        // key-only port or an interlaced mode routed above -- used to leave this answering
+        // `false`, so the mixer skipped the readback and the CPU packer read an empty frame.
+        if (use_vulkan_)
+            return !own_readback_.load(std::memory_order_acquire);
         // OpenGL mixer with GPU pack (<gpu-pack>gpu</>): the packed frame is produced on
         // the GPU, so skip the core's full-frame host readback (same rationale as Vulkan).
         if (!use_vulkan_ && format_desc_.width > 0 &&

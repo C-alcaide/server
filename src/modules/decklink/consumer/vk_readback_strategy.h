@@ -42,6 +42,7 @@ namespace caspar { namespace decklink {
 class vk_readback_strategy final : public format_strategy
 {
   public:
+    bool does_own_readback() const override { return true; }
     /// buffer_depth is how many frames the DeckLink driver can hold scheduled at
     /// once (configuration::buffer_depth()); staging slots must outlive that
     /// queue, so it sizes the slot pool.

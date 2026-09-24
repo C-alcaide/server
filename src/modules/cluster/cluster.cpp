@@ -184,6 +184,37 @@ std::wstring cluster_status_command(protocol::amcp::command_context& ctx)
 
 // ─── AMCP command: SCHEDULE ─────────────────────────────────────────────────
 
+/// One AMCP token, written back so `IO::tokenize` reads it as exactly this token again.
+///
+/// `ctx.parameters` arrives ALREADY TOKENIZED -- quotes stripped, `\\"` and `\\n` resolved -- and
+/// this handler used to join it back with bare spaces. So a clip name with a space became two
+/// arguments, a CG data string lost its quoting and split into words, and an escaped newline
+/// became a REAL newline inside the relay's line-framed `FRAME:N <cmd>` message, which the
+/// client splits on newline -- one command arriving as two, the second of them garbage. The
+/// inverse of the tokenizer: quote anything the tokenizer would split or interpret, and escape
+/// the three characters it unescapes.
+static std::wstring amcp_quote(const std::wstring& token)
+{
+    if (token.empty())
+        return L"\"\"";
+    const bool plain = token.find_first_of(L" \"\\\n()") == std::wstring::npos;
+    if (plain)
+        return token;
+    std::wstring out = L"\"";
+    for (const wchar_t c : token) {
+        if (c == L'\\')
+            out += L"\\\\";
+        else if (c == L'\"')
+            out += L"\\\"";
+        else if (c == L'\n')
+            out += L"\\n";
+        else
+            out += c;
+    }
+    out += L'\"';
+    return out;
+}
+
 std::wstring cluster_schedule_command(protocol::amcp::command_context& ctx)
 {
     // Copy out everything this command needs while holding the lock, so the
@@ -231,7 +262,7 @@ std::wstring cluster_schedule_command(protocol::amcp::command_context& ctx)
         std::wostringstream cmd;
         for (auto it = ctx.parameters.begin(); it != at_it; ++it) {
             if (it != ctx.parameters.begin()) cmd << L" ";
-            cmd << *it;
+            cmd << amcp_quote(*it);
         }
         command_text = cmd.str();
     } else {
@@ -239,7 +270,7 @@ std::wstring cluster_schedule_command(protocol::amcp::command_context& ctx)
         std::wostringstream cmd;
         for (const auto& p : ctx.parameters) {
             if (&p != &ctx.parameters[0]) cmd << L" ";
-            cmd << p;
+            cmd << amcp_quote(p);
         }
         command_text = cmd.str();
         target_frame = frame_clock->current_frame() + sync_margin;
@@ -266,7 +297,14 @@ std::wstring cluster_schedule_command(protocol::amcp::command_context& ctx)
         // Forward to remote member
         relay->route_command(target_frame, virtual_channel, command_text);
     } else {
-        // Schedule locally
+        // Schedule locally -- THROUGH THE MAP. Only the remote branch used to rewrite the
+        // channel (inside `route_command`), so a virtual channel mapped to `host="local"`
+        // with a different physical number ran on the VIRTUAL number: the guide's own
+        // example, `virtual="4" host="local" physical="1"` ("Master's own channel 1"),
+        // executed on channel 4. `rewrite_command` is the identity when the numbers agree,
+        // so an unmapped or same-numbered channel is untouched.
+        if (channel_map && virtual_channel > 0)
+            command_text = channel_map->rewrite_command(command_text, virtual_channel);
         scheduler->schedule(target_frame, command_text);
     }
 

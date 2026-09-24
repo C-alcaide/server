@@ -577,6 +577,26 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
     }
 }
 
+void tracker_registry::on_data(camera_data data, tracking_protocol protocol, int port)
+{
+    data.source_protocol = static_cast<int>(protocol);
+    data.source_port     = port;
+    on_data(data);
+}
+
+// ── A SAMPLE DRIVES THE BINDINGS OF THE RECEIVER THAT PRODUCED IT ────────────────────────
+//
+// Matched on camera_id ALONE until 2026-09-23, so every receiver drove every binding sharing
+// the ID -- across ports AND protocols. Two FreeD cameras on 6301 and 6302 both sending the
+// common default ID 1 drove each other's layers; an OSC tracker and a FreeD tracker on one ID
+// fought over one binding. And the caches were keyed by ID alone too, so INFO and the delay
+// history read whichever receiver spoke last. The key is (protocol, port, camera_id) now,
+// and a sample matches a binding only if it came from that binding's receiver.
+//
+// NOT DISTINGUISHED: two multicast receivers of one protocol on one PORT but different GROUPS
+// (PSN, OpenTrackIO), and VRPN, which has no port. Those need the host in the key; the
+// binding's `host` is empty when the default group is used while the receiver's is not, so
+// comparing it naively would match nothing.
 void tracker_registry::on_data(const camera_data& data)
 {
     std::vector<tracker_binding> matched;
@@ -584,10 +604,11 @@ void tracker_registry::on_data(const camera_data& data)
     bool                         any_delay = false;
     {
         std::lock_guard<std::mutex> lk(mutex_);
-        latest_data_[data.camera_id] = data;
+        const source_key skey{data.source_protocol, data.source_port, data.camera_id};
+        latest_data_[skey] = data;
 
         // Append to per-camera history and trim to the retention window/cap.
-        auto& hist = sample_history_[data.camera_id];
+        auto& hist = sample_history_[skey];
         hist.push_back(data);
         const auto cutoff = data.timestamp - std::chrono::milliseconds(HISTORY_WINDOW_MS);
         while (hist.size() > 1 && hist.front().timestamp < cutoff)
@@ -596,7 +617,11 @@ void tracker_registry::on_data(const camera_data& data)
             hist.pop_front();
 
         for (auto& [key, binding] : bindings_) {
-            if (binding.camera_id == -1 || binding.camera_id == data.camera_id) {
+            const bool from_its_receiver =
+                data.source_protocol < 0 ||
+                (static_cast<int>(binding.receiver.protocol) == data.source_protocol &&
+                 (data.source_port < 0 || binding.receiver.port == data.source_port));
+            if (from_its_receiver && (binding.camera_id == -1 || binding.camera_id == data.camera_id)) {
                 matched.push_back(binding);
                 if (binding.delay_ms > 0.0 || binding.genlock_enable)
                     any_delay = true;
@@ -641,11 +666,31 @@ void tracker_registry::on_data(const camera_data& data)
 
 std::optional<camera_data> tracker_registry::get_latest_data(int camera_id) const
 {
+    // Any receiver: the newest sample for this ID. Kept for callers with no binding to hand.
+    std::lock_guard<std::mutex>  lk(mutex_);
+    std::optional<camera_data>   best;
+    for (const auto& [key, d] : latest_data_)
+        if (std::get<2>(key) == camera_id && (!best || d.timestamp > best->timestamp))
+            best = d;
+    return best;
+}
+
+std::optional<camera_data> tracker_registry::get_latest_data(const receiver_handle& source, int camera_id) const
+{
     std::lock_guard<std::mutex> lk(mutex_);
-    auto it = latest_data_.find(camera_id);
-    if (it == latest_data_.end())
-        return std::nullopt;
-    return it->second;
+    std::optional<camera_data>  best;
+    for (const auto& [key, d] : latest_data_) {
+        const bool same_source = std::get<0>(key) < 0 ||
+                                 (std::get<0>(key) == static_cast<int>(source.protocol) &&
+                                  (std::get<1>(key) < 0 || std::get<1>(key) == source.port));
+        // The wildcard reads what an ANY binding is actually driven by: the newest sample from
+        // its receiver. It used to look up camera -1 literally, find nothing, and have INFO
+        // report no data and ZERO refuse on a binding that was moving the picture.
+        const bool same_camera = camera_id == -1 || std::get<2>(key) == camera_id;
+        if (same_source && same_camera && (!best || d.timestamp > best->timestamp))
+            best = d;
+    }
+    return best;
 }
 
 }} // namespace caspar::tracking

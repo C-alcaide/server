@@ -22,6 +22,7 @@
 #include <boost/algorithm/string/case_conv.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <map>
 #include <sstream>
@@ -442,10 +443,38 @@ api_reply parse_node_batch_op(const std::string& path, const json::object& op, b
     return api_reply{};
 }
 
+/// The verb table on its own, with no stage to act on. ONE table, consulted twice: by
+/// `validate_batch`, so a typo is refused before a batch builds anything, and by `queue_verb`
+/// below, so the two can never disagree about what a verb is.
+///
+/// It exists because the batch path used to consult the verb table only AFTER building a
+/// `stage_delayed` per channel -- and an unknown verb then aborted a delayed stage whose abort
+/// could not complete, hanging the single `http-api` executor (see `stage_delayed::abort`). Fixing
+/// the abort makes that failure recoverable; refusing here makes it unreachable, and is what the
+/// control-API doc already promised: "a batch with a bad op is refused immediately".
+api_reply check_verb(const action_target& target)
+{
+    static const std::array<const char*, 2> channel_verbs = {"clear", "clear_transforms"};
+    static const std::array<const char*, 7> layer_verbs   = {
+        "play", "stop", "pause", "resume", "preview", "clear", "clear_transforms"};
+    const auto has = [&](const auto& table) {
+        return std::find(table.begin(), table.end(), target.verb) != table.end();
+    };
+    if (target.layer < 0)
+        return has(channel_verbs)
+                   ? api_reply{}
+                   : api_reply::fail(api_code::unknown_path,
+                                     "a channel takes clear or clear_transforms, not " + target.verb);
+    return has(layer_verbs) ? api_reply{}
+                            : api_reply::fail(api_code::unknown_path, "no such action: " + target.verb);
+}
+
 api_reply queue_verb(const std::shared_ptr<core::stage_base>& stage,
                      const action_target&                     target,
                      std::future<void>&                       out)
 {
+    if (auto r = check_verb(target); r.code != api_code::ok)
+        return r;
     const auto& verb = target.verb;
 
     if (target.layer < 0) {
@@ -693,6 +722,11 @@ api_reply validate_batch(const api_context& ctx, const std::string& body, batch_
             // succeed is not knowable without running it, and pretending otherwise would
             // make the all-or-nothing promise a lie rather than a limit.
             if (auto r = parse_action_path(path, pl.action); r.code != api_code::ok)
+                return fail(std::move(r));
+            // ...and as far as its VERB, which is knowable without running it. An unknown verb
+            // used to pass validation and be discovered by `queue_verb` after a delayed stage
+            // had been built for the channel -- see `check_verb` for what that cost.
+            if (auto r = check_verb(pl.action); r.code != api_code::ok)
                 return fail(std::move(r));
 
             // A clip load inside a batch is refused rather than half-supported. It has to

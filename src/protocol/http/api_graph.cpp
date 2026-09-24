@@ -784,14 +784,37 @@ api_reply delete_graph(const api_context& ctx, const std::string& name)
         return no_store();
     if (name.empty())
         return api_reply::fail(api_code::bad_request, "DELETE /v1/graph/{name} takes a name");
+
+    // DETACH FIRST, THROUGH THE STAGE -- and this is the fix. The reply below always said
+    // `"detached": true`, but the store's `erase` only drops the store's half of the attachment.
+    // The stage keeps its own mirror (`graph_attach_`, which `apply_graphs` walks every tick) and
+    // nothing told it: the layer stayed "busy" for any other graph, and a PUT of the same name
+    // put the deleted look straight back on air, on a layer the operator had been told was free.
+    // `detach_graph` is the one path that clears both halves, so it is the one used here, before
+    // the document goes -- exactly as `verb == "detach"` below does.
+    bool detached = true;
+    if (const auto where = ctx.graphs->attached(name)) {
+        detached = false;
+        if (ctx.stage) {
+            if (auto stage = ctx.stage(where->channel)) {
+                try {
+                    detached = stage->detach_graph(where->layer).get();
+                } catch (const std::exception&) {
+                    detached = false;
+                }
+            }
+        }
+    }
+
     if (!ctx.graphs->erase(name))
         return api_reply::fail(api_code::graph_not_found, "no graph named '" + name + "'");
     json::object o;
     o["name"] = name;
     // DETACHED, not refused. A client deleting a look means "take it off air"; refusing would
     // leave them holding a document they cannot get rid of without first remembering where it
-    // was attached. Flagged as a policy call rather than an obvious one.
-    o["detached"] = true;
+    // was attached. Flagged as a policy call rather than an obvious one. The value now reports
+    // what the stage ANSWERED rather than a constant, so a detach that failed says so.
+    o["detached"] = detached;
     return api_reply::ok_with(std::move(o));
 }
 

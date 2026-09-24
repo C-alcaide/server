@@ -708,10 +708,29 @@ struct gst_producer : public core::frame_producer
         if (!is_running_)
             return;
 
+        // BUILT under the lock, STARTED outside it. This used to hold the exclusive lock across
+        // `set_state(PLAYING)` -- and the constructor above records why that is the wrong place:
+        // a live source can block INSIDE the state change (`srtsrc mode=listener` sits in accept()
+        // until a caller arrives), and a restart exists precisely for the live-source-dropped case.
+        // The channel thread takes the shared side of this mutex every tick (`state()` queries the
+        // position and duration, `layer` calls `nb_frames()` twice), so for as long as the source
+        // stayed away THE WHOLE CHANNEL STOPPED TICKING -- every layer on it, not only this one.
+        //
+        // Outside the lock, `pipeline_` does not change underneath a reader: only this thread
+        // replaces it, and the destructor joins this thread before it destroys anything. The
+        // GStreamer queries a reader makes are safe against a concurrent state change.
+        //
+        // What this does NOT fix, and is written down so it is not re-found: if the source never
+        // arrives, the destructor still waits on this thread for as long as `set_state` blocks.
+        // The constructor avoids that for its own call with a worker and a janitor; a restart
+        // that could hand its pipeline to the same janitor is the next step.
         try {
-            std::unique_lock<std::shared_mutex> lock(pipeline_mutex_);
-            build_pipeline();
+            {
+                std::unique_lock<std::shared_mutex> lock(pipeline_mutex_);
+                build_pipeline();
+            }
             if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
+                std::unique_lock<std::shared_mutex> lock(pipeline_mutex_);
                 destroy_pipeline();
                 CASPAR_LOG(warning) << print() << L" restart failed to start the pipeline.";
                 return;

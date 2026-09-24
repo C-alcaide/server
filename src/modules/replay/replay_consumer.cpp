@@ -35,6 +35,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
 #include <common/env.h>
+#include <common/except.h>
 #include <sstream>
 #include <iomanip>
 #include <chrono>
@@ -129,8 +130,30 @@ replay_consumer::replay_consumer(std::string path, VMX_PROFILE quality)
     boost::filesystem::path check_p = p;
     if (check_p.extension() == ".mav") check_p.replace_extension("");
     
-    // We check if the "base" files exist. The writer creates [base].mav.idx
-    if (boost::filesystem::exists(check_p.string() + ".mav.idx") || boost::filesystem::exists(check_p.string() + ".mav.000")) {
+    // We check if the "base" files exist -- in BOTH layouts. The flat one (`[base].mav.idx`,
+    // `[base].mav.000`) is what this probe was written for, and it is not what the writer has
+    // produced since `ReplaySegmentedWriter::Open` moved every recording into a directory of its
+    // own: `media/rec1/rec1.mav.NNN` and `media/rec1/rec1.idx.NNN`. So for every recording made by
+    // this build the probe found nothing, no rename happened, and a second `ADD ... REPLAY rec1`
+    // truncated the first recording from segment 000 with "wb" -- while the old recording's
+    // higher-numbered segments stayed on disk, where the reader (which scans every `rec1.idx.N`
+    // in the directory) spliced them onto the new one, timestamps running backwards. The doc's
+    // promise that "existing recordings are never silently overwritten" was false for exactly the
+    // layout this build writes.
+    const auto recording_in_directory = [](const boost::filesystem::path& dir) {
+        boost::system::error_code ec;
+        if (!boost::filesystem::is_directory(dir, ec))
+            return false;
+        const auto stem = dir.filename().string();
+        for (boost::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto name = it->path().filename().string();
+            if (name.rfind(stem + ".mav.", 0) == 0 || name.rfind(stem + ".idx.", 0) == 0)
+                return true;
+        }
+        return false;
+    };
+    if (boost::filesystem::exists(check_p.string() + ".mav.idx") || boost::filesystem::exists(check_p.string() + ".mav.000") ||
+        recording_in_directory(check_p)) {
          // Exists, append timestamp
          // Use strict ISO 8601 basic format or similar safe chars
          auto now = std::chrono::system_clock::now();
@@ -230,6 +253,22 @@ void replay_consumer::initialize(const core::video_format_desc& format_desc,
                     const core::channel_info&      channel_info,
                     int                            port_index)
 {
+    // REFUSED ON A SECOND CALL, before anything is touched. `output` re-initialises every
+    // consumer when the channel format changes, and this function used to run again underneath
+    // the live worker: `width_`/`height_` changed while `worker_loop` was encoding with them,
+    // `vmx_` was replaced (leaking the old codec, and freeing nothing the worker was holding),
+    // and `writer_->Open` restarted segment numbering at `.000` with "wb" -- truncating the
+    // recording in progress from its first segment onward.
+    //
+    // A recording cannot continue across a change of raster anyway: every segment of one
+    // recording shares its dimensions. So the honest outcome is that it STOPS, and the throw is
+    // how: `output` logs it and erases this consumer, and the destructor drains the queue,
+    // flushes and closes the writer -- so everything recorded before the change is kept.
+    if (worker_.joinable() || vmx_)
+        CASPAR_THROW_EXCEPTION(invalid_operation() << msg_info(
+            "replay: the channel format changed during a recording; the recording is stopped and "
+            "kept. ADD a new REPLAY consumer to record at the new format."));
+
     channel_index_ = channel_info.index;
     width_ = format_desc.width;
     height_ = format_desc.height;

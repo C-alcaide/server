@@ -605,6 +605,17 @@ struct spout_consumer_impl : public core::frame_consumer
 
     void initialize(const core::video_format_desc& format_desc, const core::channel_info& channel_info, int port_index) override
     {
+        // A BARRIER FIRST. `send` hands every frame to `executor_` and returns at once, and the
+        // job reads `format_desc_`, `out_w_`/`out_h_`, `out_buf_.data()` and `sws_ctxs_` for as
+        // long as a large `sws_scale` takes. A re-initialisation (`output` runs one on every
+        // channel format change) used to assign all of those on THIS thread while a job could
+        // still be inside them: `format_desc_` holds a wstring and a vector, `out_buf_.assign`
+        // reallocates when the size changes, and `free_sws_ctxs` frees contexts a scale is using.
+        // A synchronous no-op on the executor returns only after every job queued before it has
+        // finished, and `send` runs on this same thread, so nothing new can be queued until this
+        // function returns. Everything below then mutates state no job is touching.
+        executor_.invoke([] {});
+
         format_desc_ = format_desc;
 
         // Capture the mixer's GL context handle for shared-context creation.

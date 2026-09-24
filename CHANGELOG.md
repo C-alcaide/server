@@ -1,6 +1,202 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: FreeD was decoded with a layout no tracker sends
+
+`freed_receiver.cpp` had no camera-ID byte, so pan started on the ID and every field after byte 0
+was misaligned; it read positions as 32-bit words and zoom and focus as 16-bit, and took the camera
+ID from a nibble of a spare byte. A real Mo-Sys, Stype, Ncam or PTZ FreeD output decoded to garbage
+angles and positions, and its camera ID came out 0 whatever the device sent — so a binding set to
+the vendor's ID never matched, and the default binding moved on nonsense. It decodes the published
+D1 layout now: a whole camera-ID byte, 24-bit angles at 1/32768°, 24-bit positions at 1/64 mm,
+24-bit zoom and focus (narrowed to the 16 bits `camera_data` carries by dropping the low byte), two
+spare bytes, checksum. FreeD+'s D1 header and its 29-byte fallback read the same way.
+
+**It passed every check because the harness built its packets from the receiver**, so the two
+agreed byte for byte — the "wrong in the same direction" trap this tree already records for LTC.
+The builder is rebuilt from the protocol, with TouchDesigner's FreeD CHOP reference as the
+independent source for the field widths (camera ID 0–255, positions ±131.07 m = 2²³/64 mm, zoom
+and focus 24-bit).
+
+**BREAKING for any setup calibrated against the old decode** — a `ZOOM_LUT` or `SCALE` taken from
+the misread zoom, or a binding whose camera ID was chosen to match the misread 0. Re-calibrate.
+
+Not changed, and held deliberately: the ASSIGNMENT of FreeD's three positions to `camera_data`'s
+x/y/z, and the tracker-to-previz handedness. The documented tracker frame is left-handed (z toward
+the subject, "at rest forward +Z") and previz is right-handed looking along −Z; `mode_previz`
+passes z, yaw and roll straight through, so a PREVIZ-mode camera's view direction, pan, roll and
+nodal offset are reversed relative to the tracker. Correcting that changes camera motion for every
+existing PREVIZ-mode setup, so it is a decision rather than a fix.
+
+Verified: `tracking-previz` 27/27 on both mixers against the rebuilt builder (a camera-5 packet
+reads `d1 05 …` with `sum & 0xFF == 0x40`; the FreeD+ packet XORs to zero). Not measured: a real
+tracker's packets. There is none on this box, so the layout rests on the published D1 table and
+TouchDesigner's reference agreeing, not on a capture.
+
+### BEHAVIOUR: every tracker drove every binding that shared a camera ID
+
+Samples were matched to bindings on camera ID alone — across ports AND protocols — and the latest
+sample and the delay history were keyed by ID alone too. Two FreeD cameras on 6301 and 6302 both
+sending the common default ID 1 drove each other's layers; an OSC and a FreeD tracker on one ID
+fought over one binding. Every receiver now stamps its protocol and port on each sample, a sample
+drives only the bindings made on its own receiver, and the caches are keyed by
+(protocol, port, camera ID). `INFO` and `ZERO` read their own receiver — and for an `ANY` binding
+the newest sample from it, where they used to look up camera −1 literally and find nothing.
+Not distinguished yet: two multicast groups of one protocol on one port, and VRPN.
+
+Verified: `tracking-previz` 29/29 on both mixers, two checks new: a camera-1 packet sent to the port
+of a receiver bound for camera 2 leaves the camera-1 binding's camera at (-0.5, 1.25, 2.75), and the
+same packet on its own port moves it to (0.321, 0.654, 0.987). Argued, not mutation-verified:
+reverting the routing touches `tracker_registry.h`, and a header revert needs the full-tree rebuild.
+
+### BEHAVIOUR: a timeline's GO history survived STOP and DELETE, and was lost on an edit
+
+Three ways a cue stack went wrong, all from two copies of one history disagreeing:
+
+* **A re-PUT forgot every GO.** An edit to a running stack resolved as though no GO had been
+  pressed, so the on-air cue reverted to the first — and the next GO placed cue 2 at the old GO and
+  cue 3 at the new one, so the operator pressing GO for cue 2 got cue 3. `put` carries the stored
+  firings across an edit now.
+* **A STOP forgot nothing.** Stopped after a rehearsal and PLAYed again, a stack advanced its cues
+  BY ITSELF at the rehearsal's GO times. A STOP clears both copies now.
+* **A DELETE left the transport running.** A document PUT again under the same name found the old
+  transport still `playing` and started at once, from the old position plus the frames elapsed —
+  and its first GO resurrected the deleted show's firings. The stage prunes its transport, GO log
+  and pending commands for any document the store no longer holds, as it already did for media.
+
+Verified: `timeline-cue` 22/22 on both mixers, eight of them new — an edit keeps c2 on air and the
+next GO takes the edited c3 (0.91); PLAYed again after a STOP, the stack is still on c1 at 2.5 s,
+past the rehearsal's GO at 1.4 s; the name PUT again after a DELETE reads `stopped` at 0.0 and its
+first GO takes c2. Mutation-verified with the pre-fix `stage.cpp` and `timeline_store.cpp`: four of
+the eight turn red and the four companions stay green. The edit puts c1 back on air (0.21). After
+the STOP, c2 is on air by itself at 2.48 s. The re-PUT reads `playing` at 6.72 s, and its first GO
+lands on c3.
+
+### BEHAVIOUR: an HTTP write froze every other ramp on the layer
+
+`stage::apply_transform` replaced the layer's tween with one from the current value to
+`closure(current value)`, so every field the closure did not touch stopped where it was: a
+`MIXER 1-10 FILL ... 50` in flight halted the moment a control surface PUT a brightness, a tracking
+sample arrived, or auto-projection re-aimed the layer. On the HTTP refusal paths — a cas conflict,
+an out-of-range computed value — the closure returned its input, so a request answered
+`field_conflict` still froze the picture. Every caller is the fork's (upstream has none), so the
+semantics are fixed at the source: the closure runs once against what is on air, a refusal or a
+no-op leaves the tween alone, and only the fields it changed are carried — onto both ends of the
+running tween for an immediate write, or onto the destination of a new one for a timed write. The
+carry is found by diffing the field registry and checked: if it cannot reproduce the closure's
+result exactly, the old replace is used, so an unforeseen member loses the other ramps rather than
+the write.
+
+Verified: `api-write` 13/13 on both mixers — a brightness PUT during `MIXER OPACITY 1 150` reads
+opacity 0.08 then 0.18 over 0.6 s, the fade arrives at 1.0 and the brightness is still 0.7; a
+refused cas reads the same. Mutation-verified with the pre-fix `stage.cpp`: both turn red, with
+opacity frozen at 0.047 across the write. `api-roundtrip` 15/15, `graph-stack` 30/30,
+`timeline-targets` 12/12 and `icvfx-mask` 23/23 on both, because every one of them writes through
+this function.
+
+### BEHAVIOUR: `LOADBG ... AUTO` never fired behind HAP, ProRes or NotchLC
+
+None of the three GPU producers overrode `nb_frames()`, so the base class answered "no end": an
+AUTO behind one of these layers waited for ever and a transport never read `eof`. `ffmpeg` has
+always overridden it. Each now answers the index of its last frame (OUT point, else file length,
+scaled by channel/file fps like `frame_number()`), and "no end" while looping, ping-ponging,
+playing backwards, or when the length is unknown. The INDEX rather than a count because
+`frame_number()` reports the frame on screen and tops out one short of the length — so a plain cut
+fires once the last frame has been shown once, and a MIX of D starts D frames before the end.
+A sting's overlay duration, taken from the same number, is therefore one frame short on these
+three producers.
+
+Verified: `producer-params` on both mixers, three new checks — each producer is still on air with a
+second of the clip left and the colour is on air once it runs out (300, 300 and 75-frame fixtures).
+47/48, the one failure being the OFX arm, which this run gave no plug-in directory.
+Mutation-verified with the three pre-fix producers: all three turn red, each producer still on air
+after its clip has run out.
+
+### BEHAVIOUR: DeckLink on the Vulkan mixer — sheared rows, the fill on a key port, blank interlaced
+
+* **v210 at 720p, 2K-DCI and 4K-DCI was sheared.** Both Vulkan-mixer packers (Vulkan compute and
+  CUDA) laid rows out at the unpadded group count while the frame declares the 48-pixel-padded
+  stride; at 1280 every row began 12 pixels right of the one above. They use the padded stride now,
+  as the OpenGL and CPU packers always did.
+* **A key-only port output the FILL**, and **an interlaced mode output a blank frame** (CUDA) or
+  **field 1 twice** (Vulkan). The Vulkan GPU packers implement neither, so both are routed to the
+  CPU packer, which does both correctly, with a log line saying so.
+* **A GPU strategy that fell back to the CPU still told the mixer to skip the readback**, so the
+  CPU packer read an empty frame. `needs_cpu_frame_data()` asks the strategy that was actually built.
+
+Verified: `sdi-output` on the DeckLink loopback, Vulkan mixer, every readback mode. At 720p50 the
+Vulkan GPU packer's v210 reads 48.26 dB (8-bit) and 52.41 dB (16-bit), against the OpenGL mixer's
+48.26 / 52.44 at the same mode; rows sheared by 12 pixels could not reach that. At 1080i50 all four
+readback modes read 37.46 / 48.28 / 52.53 dB, now through the CPU packer. Not measured: a key-only
+port, which the loopback does not have, and the defect itself. Parity with OpenGL is the evidence;
+nothing reverted the fix.
+
+### BEHAVIOUR: `vulkan_output` signalled PQ for HLG, and a `<delay>` that did not delay
+
+`<transfer>hlg</transfer>` requested the ST 2084 swapchain colour space, enabled NvAPI's HDR10-only
+UHDA mode, and sent ST 2086 metadata. It requests `HDR10_HLG_EXT`, stays off UHDA, and sends no
+HDR10 metadata for HLG now. And on the OpenGL-mixer zero-copy route the newest pooled frame is
+presented whatever was buffered, so `<delay>` delayed the timing and not the picture — while the
+consumer still reported the configured depth, so audio was held back for a delay that was not
+happening. It reports the real depth there now and warns that `<delay>` is not applied on that
+route; making the route honour it is the remaining work.
+
+Verified only as far as this box allows: `vulkan-output-signalling` 3/3 consistent, and HLG
+degrades to an SDR surface here as PQ does — Windows 10 offers the fullscreen path no HDR surface
+— so the colour space HLG now REQUESTS is read from the code, not observed. The published
+`max-cll` remains the configured value; for HLG it is no longer sent.
+
+### FIX: crashes, hangs and races from a second audit pass
+
+* **`SET <ch> MODE` could kill the server** through `vulkan_output`, whose re-initialisation
+  move-assigned three running threads (`std::terminate`). It is refused now, as `ffmpeg_consumer`
+  refuses, so `output` removes it cleanly. `replay` and `gstreamer` consumers are refused the same
+  way — the recorder was truncating the recording in progress from segment 000, and the GStreamer
+  consumer was leaking a still-PLAYING pipeline. `spout` supports re-initialisation, and now drains
+  its executor before touching what its jobs read.
+* **`POST /v1/batch` with an unknown action verb hung the HTTP API** — every route and every
+  `/v1/events` delivery — until restart: an aborted delayed stage could not be destroyed. The verb is
+  refused at validation now, and `stage_delayed::abort()` releases its gate, which also closes the
+  same latent hang on AMCP's COMMIT path (upstream's code).
+* **`DELETE /v1/graph/{name}` answered `detached: true` and left the layer attached**; a PUT of the
+  same name put the look back on air. It detaches through the stage first, and the stage drops a
+  mirror entry whose document is gone.
+* **`output::distinct_consumer_views` walked the consumer map unlocked** every tick while
+  `ADD`/`REMOVE` erased from it — a heap race on a routine command.
+* **Re-recording to an existing replay name spliced two recordings.** The overwrite probe looked for
+  the old flat layout, which this build never writes, so nothing was renamed, segment 000 onward was
+  truncated, and the old recording's later segments were read as the new one's continuation. It
+  probes the directory layout too.
+* **One bad NotchLC frame froze playback until a SEEK**; it blinks now, as HAP's does.
+* **The cluster client never serviced a reconnecting master** after a half-open connection; the old
+  socket is shut down on reconnect, and one thread owns and closes it. **MIXER and CG commands to a
+  remapped virtual channel ran on the virtual number**; the channel is always the second token.
+  **A local mapping was never applied.** **`CLUSTER SCHEDULE` lost quoting**, so a clip name with a
+  space split and an escaped newline broke the relay's line framing.
+* **GStreamer:** a consumer dereferenced the null buffer `wrap` returns after the GPU egress gives
+  up; on an interlaced channel it stamped 50 buffers a second at 25 fps (a timeline at 2× real
+  time); a producer restart held its lock across a state change a listening source blocks in,
+  stopping the channel; the host path ignored range and siting, and neither path carried the
+  transfer, so PQ and HLG arrived tagged SDR.
+
+Verified: `api-graph` 54/54 on both mixers, four checks new. Mutation-verified: with the pre-fix
+`api_graph.cpp` and `stage.cpp`, the re-PUT puts `onair` back on the layer and the layer refuses
+another look. `replay` 14/14 on both mixers, three checks new. Mutation-verified: the first
+recording's index files are rewritten, and no renamed recording appears. The batch refusal is two
+checks in `api-write`, and they catch the HANG only: with the validation alone reverted, the refusal
+still arrives, from the apply stage. `gstreamer` 18/21 on both mixers; the three failures
+(`restart`, `consumer`, `audio`) are the documented cascade after `fallback`'s teardown
+(`handoff_2026-08-15.md`). Run alone, `restart` and `consumer` pass 4/4 on both. `cluster` 9/9 on
+both mixers, one check new: a `CLUSTER SCHEDULE MIXER 2-10 OPACITY 0.25` on the master reads 0.25 on
+the client's physical channel. Mutation-verified: with the pre-fix `virtual_channel_map.cpp` it
+reads 1.0 and turns red, and the other eight stay green. `refusals` 39/39, `api-tree` 23/23,
+`conformance` 100/100 and `grading` 13/13, 8/8, 8/8 on both.
+
+**Driven by no battery**, and said here rather than implied: re-initialisation by `SET MODE` on
+all four consumers; the cluster relay's reconnect, `CLUSTER SCHEDULE` quoting of a space or a
+newline, and a local mapping; NotchLC's bad-frame skip; the `distinct_consumer_views` race; and
+GStreamer's interlaced pacing, range, siting and transfer.
+
 ### BEHAVIOUR: `MIXER OCIO` was switched OFF for the whole of every tween
 
 `image_transform::tween` builds a default-constructed `result` and then assigns every field by

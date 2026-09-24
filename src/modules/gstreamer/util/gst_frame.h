@@ -23,6 +23,8 @@
 #include <core/frame/frame_metadata.h>
 
 #include <gst/gst.h>   // GstBuffer, GstSample
+#include <gst/video/video.h> // GstVideoInfo, for transfer_of
+#include <core/frame/pixel_format.h>
 #include <core/frame/frame_factory.h>
 
 #include <memory>
@@ -37,6 +39,13 @@ namespace caspar { namespace gstreamer {
 /// Anything else is converted by the videoconvert the producer appends, so this list
 /// decides what crosses the boundary without a CPU conversion — not what can be played.
 const char* supported_caps_formats();
+
+/// The source's TRANSFER FUNCTION, from its colorimetry -- one mapping for BOTH routes, the
+/// host `make_frame` below and the D3D11 GPU bridge, because two copies of it are how the two
+/// routes came to disagree about range and siting in the first place. PQ and HLG sources used
+/// to arrive tagged SDR on both, so a mixer converting for an HDR channel treated an ST 2084
+/// signal as if it were gamma -- a picture that looks plausible and is wrong everywhere.
+core::color_transfer transfer_of(const GstVideoInfo& info);
 
 /// Copies one sample into a mixer frame, with the audio the caller paired to it (which may be
 /// null). Returns an empty draw_frame — never throws — when the sample carries a format this

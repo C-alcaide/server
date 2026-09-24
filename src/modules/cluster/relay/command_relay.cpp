@@ -42,6 +42,7 @@ using socket_t = SOCKET;
 constexpr socket_t kInvalidSocket = INVALID_SOCKET;
 constexpr int      kSocketError   = SOCKET_ERROR;
 inline int         close_socket(socket_t s) { return closesocket(s); }
+inline int         shutdown_socket(socket_t s) { return ::shutdown(s, SD_BOTH); }
 inline int         last_error() { return WSAGetLastError(); }
 constexpr int      kWouldBlock = WSAEWOULDBLOCK;
 #else
@@ -49,6 +50,7 @@ using socket_t = int;
 constexpr socket_t kInvalidSocket = -1;
 constexpr int      kSocketError   = -1;
 inline int         close_socket(socket_t s) { return ::close(s); }
+inline int         shutdown_socket(socket_t s) { return ::shutdown(s, SHUT_RDWR); }
 inline int         last_error() { return errno; }
 constexpr int      kWouldBlock = EINPROGRESS;
 #endif
@@ -215,10 +217,12 @@ void command_relay::stop()
         close_socket(static_cast<socket_t>(listen_socket_));
         listen_socket_ = static_cast<uintptr_t>(kInvalidSocket);
     }
-    if (static_cast<socket_t>(master_socket_) != kInvalidSocket) {
-        close_socket(static_cast<socket_t>(master_socket_));
-        master_socket_ = static_cast<uintptr_t>(kInvalidSocket);
-    }
+    // WOKEN, not closed: the receive thread owns this handle and closes it on its way out,
+    // which `receive_thread_.join()` below waits for. Closing it here as well was a double
+    // close whenever the receive thread got there first.
+    if (const auto s = master_socket_.exchange(static_cast<uintptr_t>(kInvalidSocket));
+        static_cast<socket_t>(s) != kInvalidSocket)
+        shutdown_socket(static_cast<socket_t>(s));
 
     if (connection_thread_.joinable()) connection_thread_.join();
     if (listener_thread_.joinable()) listener_thread_.join();
@@ -482,7 +486,17 @@ void command_relay::client_listener_loop()
         setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &recv_tv, sizeof(recv_tv));
 #endif
 
-        master_socket_ = static_cast<uintptr_t>(client_sock);
+        // PUBLISH THE NEW CONNECTION, THEN WAKE THE OLD ONE, THEN WAIT FOR IT. The old order
+        // overwrote the socket and joined the old receive thread -- which, on a HALF-OPEN
+        // connection (the master's host lost power, a cable, a switch reboot: no FIN, no RST),
+        // never exits, because its 2 s receive timeout is deliberately treated as 'still
+        // connected'. So a master that came back was accepted and then never read: its sends
+        // succeeded into the kernel buffer, it reported the member as connected, and every
+        // command it relayed was silently discarded for the rest of the show. `shutdown` makes
+        // the old `recv` return at once, so the join is immediate.
+        const auto previous = master_socket_.exchange(static_cast<uintptr_t>(client_sock));
+        if (static_cast<socket_t>(previous) != kInvalidSocket)
+            shutdown_socket(static_cast<socket_t>(previous));
         CASPAR_LOG(info) << L"[cluster] Master connected to client relay";
 
         // Start receive loop in separate thread (replace if reconnected)
@@ -498,6 +512,23 @@ void command_relay::client_listener_loop()
 void command_relay::client_receive_loop(uintptr_t client_socket)
 {
     socket_t sock = static_cast<socket_t>(client_socket);
+
+    // THIS THREAD OWNS `sock` and closes it on every way out -- the error branch, a graceful
+    // disconnect, `running_` going false, and the two handshake refusals, which used to
+    // `return` with the socket still open. The current-socket slot is cleared only if it
+    // still names THIS socket: the listener may already have published a newer one.
+    struct owner
+    {
+        command_relay* self;
+        socket_t       s;
+        ~owner()
+        {
+            close_socket(s);
+            auto mine = static_cast<uintptr_t>(s);
+            self->master_socket_.compare_exchange_strong(mine, static_cast<uintptr_t>(kInvalidSocket));
+        }
+    } guard{this, sock};
+
     std::string buffer;
     char        recv_buf[4096];
     constexpr size_t MAX_BUFFER_SIZE = 1024 * 1024; // 1 MB max
@@ -526,10 +557,7 @@ void command_relay::client_receive_loop(uintptr_t client_socket)
             } else if (running_) {
                 CASPAR_LOG(warning) << L"[cluster] Lost connection to master";
             }
-            close_socket(sock);
-            if (static_cast<socket_t>(master_socket_) == sock)
-                master_socket_ = static_cast<uintptr_t>(kInvalidSocket);
-            break;
+            break; // `guard` closes the socket and retires it
         }
 
         buffer.append(recv_buf, received);

@@ -24,6 +24,7 @@
 
 #include <deque>
 #include <map>
+#include <tuple>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -70,10 +71,19 @@ class tracker_registry
     /// matching bindings.
     void on_data(const camera_data& data);
 
+    /// The same, STAMPED with the receiver it came from, so it drives only the bindings made
+    /// on that receiver. Every receiver in this module calls this form.
+    void on_data(camera_data data, tracking_protocol protocol, int port);
+
     // ----- Diagnostics --------------------------------------------------------
 
     /// Returns the latest received data for the given camera_id, if any.
     std::optional<camera_data> get_latest_data(int camera_id) const;
+
+    /// The latest sample from ONE receiver for `camera_id` -- or, for the wildcard -1, the
+    /// newest sample that receiver produced for any camera, which is what an `ANY` binding
+    /// is driven by and so what its INFO and ZERO must read.
+    std::optional<camera_data> get_latest_data(const receiver_handle& source, int camera_id) const;
 
   private:
     tracker_registry()  = default;
@@ -81,11 +91,13 @@ class tracker_registry
 
     mutable std::mutex                               mutex_;
     std::map<std::pair<int, int>, tracker_binding>   bindings_;
-    std::map<int, camera_data>                       latest_data_;
+    /// Keyed by (protocol, port, camera_id) -- a camera ID is only unique WITHIN a receiver.
+    using source_key = std::tuple<int, int, int>;
+    std::map<source_key, camera_data>                latest_data_;
 
     /// Per-camera_id time-ordered history of recent samples, used to reconstruct
     /// a delayed pose for latency compensation (see tracker_binding::delay_ms).
-    std::map<int, std::deque<camera_data>>           sample_history_;
+    std::map<source_key, std::deque<camera_data>>    sample_history_;
 
     void inject_transform(const tracker_binding& binding, const camera_data& data);
 };

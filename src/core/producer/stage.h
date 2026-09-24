@@ -37,6 +37,7 @@
 #include <core/video_format.h>
 
 #include <functional>
+#include <atomic>
 #include <future>
 #include <map>
 #include <mutex>
@@ -581,8 +582,23 @@ class stage_delayed final : public stage_base
     stage_delayed(const std::shared_ptr<stage>& st, int index);
 
     int64_t count_queued() const { return executor_.size(); }
-    void    release() { waiter_.set_value(); }
-    void    abort() { executor_.clear(); }
+    void    release() { release_once(); }
+    /// Drop every queued op AND let the gate open. `abort()` used to be `executor_.clear()` only,
+    /// which drops the queued ops but not the task the constructor posted -- the one blocked in
+    /// `waiter_.get_future().get()`. Nothing then fulfils `waiter_`, and because `executor_` is
+    /// declared after it, `~stage_delayed` destroys the executor first: `~executor` joins a
+    /// thread still blocked on a promise nobody will ever set, and the join never returns.
+    ///
+    /// Reached by `POST /v1/batch` with an unknown action verb, which hung the single `http-api`
+    /// executor -- every later route and every `/v1/events` delivery with it -- until restart. The
+    /// member order and the one-line `abort()` are upstream's, so `AMCPCommandQueue`'s COMMIT
+    /// catch path had the same latent hang. Clearing FIRST and releasing second is what keeps an
+    /// aborted batch from running anything: the gate opens onto an empty queue.
+    void    abort()
+    {
+        executor_.clear();
+        release_once();
+    }
     void    wait() { executor_.stop_and_wait(); }
 
     std::future<void>            apply_transforms(const std::vector<transform_tuple_t>& transforms) override;
@@ -640,6 +656,15 @@ class stage_delayed final : public stage_base
 
   private:
     std::promise<void>     waiter_;
+    /// Whether `waiter_` has been fulfilled. `release()` and `abort()` can both reach it, and a
+    /// second `set_value` throws `promise_already_satisfied` -- from a destructor path, which is
+    /// the one place a throw is least survivable.
+    std::atomic<bool>      released_{false};
+    void                   release_once()
+    {
+        if (!released_.exchange(true))
+            waiter_.set_value();
+    }
     // BY VALUE, and it has to be. This was a reference to the caller's `shared_ptr`, which
     // is safe only while that particular variable outlives the batch -- true for
     // `AMCPCommandQueue`, which passes a channel's own member, and false for any caller

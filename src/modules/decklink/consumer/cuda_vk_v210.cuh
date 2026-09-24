@@ -99,7 +99,15 @@ __global__ void k_vk_surface_to_v210(
 
     if (row >= dst_h) return;
 
-    const int groups_per_row = (dst_w + 5) / 6;
+    // THE PADDED ROW, in 16-byte v210 groups: ((w + 47) / 48) * 128 bytes, i.e. 8 groups per 48
+    // pixels -- the stride the staging buffer and `IDeckLinkVideoFrame::GetRowBytes` both use. This
+    // was `(w + 5) / 6`, the UNPADDED count, which agrees with the padded one only when the width is
+    // a multiple of 48 (720, 1920, 3840, 7680). At 1280 it wrote 3424-byte rows into a 3456-byte
+    // stride, so every row began 12 pixels further right than the one above: 720p, 2K-DCI and
+    // 4K-DCI out of the Vulkan mixer were SHEARED. The OpenGL packer and the CPU packer both use
+    // `row_bytes(w) / 16`. The groups past the picture fall outside `ox < dst_w` in the kernel and
+    // are written black, which is what the padding is.
+    const int groups_per_row = ((dst_w + 47) / 48) * 8;
     if (group_x >= groups_per_row) return;
 
     const int px_base = group_x * 6;
@@ -231,7 +239,15 @@ static inline cudaError_t launch_vk_surface_to_v210(
     cudaStream_t stream,
     int dest_x = 0, int dest_y = 0, int region_w = 0, int region_h = 0)
 {
-    const int groups_per_row = (dst_w + 5) / 6;
+    // THE PADDED ROW, in 16-byte v210 groups: ((w + 47) / 48) * 128 bytes, i.e. 8 groups per 48
+    // pixels -- the stride the staging buffer and `IDeckLinkVideoFrame::GetRowBytes` both use. This
+    // was `(w + 5) / 6`, the UNPADDED count, which agrees with the padded one only when the width is
+    // a multiple of 48 (720, 1920, 3840, 7680). At 1280 it wrote 3424-byte rows into a 3456-byte
+    // stride, so every row began 12 pixels further right than the one above: 720p, 2K-DCI and
+    // 4K-DCI out of the Vulkan mixer were SHEARED. The OpenGL packer and the CPU packer both use
+    // `row_bytes(w) / 16`. The groups past the picture fall outside `ox < dst_w` in the kernel and
+    // are written black, which is what the padding is.
+    const int groups_per_row = ((dst_w + 47) / 48) * 8;
     dim3 block(64, 1);
     dim3 grid((groups_per_row + 63) / 64, dst_h);
     k_vk_surface_to_v210<<<grid, block, 0, stream>>>(

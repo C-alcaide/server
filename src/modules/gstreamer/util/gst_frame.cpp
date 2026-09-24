@@ -95,7 +95,37 @@ core::color_space to_color_space(const GstVideoInfo& info)
     }
 }
 
+/// GStreamer's chroma site as the AVFrame field `ffmpeg::make_frame` reads -- the same
+/// decision table `gst_gpu_bridge.cpp`'s `chroma_location_of` uses for the GPU route.
+AVChromaLocation av_chroma_location_of(const GstVideoInfo& info)
+{
+    const auto site = GST_VIDEO_INFO_CHROMA_SITE(&info);
+    if (site == GST_VIDEO_CHROMA_SITE_UNKNOWN)
+        return AVCHROMA_LOC_UNSPECIFIED;
+    if ((site & GST_VIDEO_CHROMA_SITE_H_COSITED) && (site & GST_VIDEO_CHROMA_SITE_V_COSITED))
+        return AVCHROMA_LOC_TOPLEFT;
+    if (site & GST_VIDEO_CHROMA_SITE_H_COSITED)
+        return AVCHROMA_LOC_LEFT;
+    return AVCHROMA_LOC_CENTER;
+}
+
 } // namespace
+
+core::color_transfer transfer_of(const GstVideoInfo& info)
+{
+    switch (GST_VIDEO_INFO_COLORIMETRY(&info).transfer) {
+        case GST_VIDEO_TRANSFER_SMPTE2084:
+            return core::color_transfer::pq;
+        case GST_VIDEO_TRANSFER_ARIB_STD_B67:
+            return core::color_transfer::hlg;
+        case GST_VIDEO_TRANSFER_GAMMA10:
+            return core::color_transfer::linear;
+        default:
+            // BT.709, BT.601, BT.2020-10/12, sRGB and UNKNOWN: all the SDR curve as far as the
+            // mixer's transfer set goes, which is what every one of them was treated as before.
+            return core::color_transfer::sdr;
+    }
+}
 
 const char* supported_caps_formats()
 {
@@ -198,6 +228,15 @@ core::draw_frame make_frame(void*                    tag,
     av_frame->format = pix_fmt;
     av_frame->width  = GST_VIDEO_FRAME_WIDTH(&video_frame);
     av_frame->height = GST_VIDEO_FRAME_HEIGHT(&video_frame);
+    // RANGE AND SITING, which `ffmpeg::make_frame` reads off the AVFrame and this path never
+    // set -- so every host-path source was decoded as limited range and default-sited
+    // whatever its caps said, while the GPU bridge on the same source honoured both. A
+    // full-range camera through the host path came out with crushed blacks and clipped
+    // whites; the same camera through the bridge did not.
+    av_frame->color_range     = GST_VIDEO_INFO_COLORIMETRY(&info).range == GST_VIDEO_COLOR_RANGE_0_255
+                                    ? AVCOL_RANGE_JPEG
+                                    : AVCOL_RANGE_MPEG;
+    av_frame->chroma_location = av_chroma_location_of(info);
 
     const auto planes = GST_VIDEO_FRAME_N_PLANES(&video_frame);
     for (guint n = 0; n < planes && n < AV_NUM_DATA_POINTERS; ++n) {
@@ -210,7 +249,8 @@ core::draw_frame make_frame(void*                    tag,
     // `ffmpeg::make_frame` hands back a mutable_frame; metadata belongs on the const_frame,
     // after the hand-over, because that is the form the mixer and the consumers see.
     core::const_frame frame(
-        ffmpeg::make_frame(tag, frame_factory, std::move(av_frame), std::move(audio), to_color_space(info)));
+        ffmpeg::make_frame(tag, frame_factory, std::move(av_frame), std::move(audio), to_color_space(info),
+                           core::frame_geometry::scale_mode::stretch, false, transfer_of(info)));
 
     if (auto captions = captions_of(buffer))
         frame = frame.with_metadata(std::move(captions));

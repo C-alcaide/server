@@ -232,6 +232,19 @@ struct gst_consumer : public core::frame_consumer
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
+        // REFUSED ON A SECOND CALL, as `ffmpeg_consumer` refuses. `output` re-initialises every
+        // consumer when the channel format changes, and this function used to run again from the
+        // top: a new pipeline was parsed and set PLAYING and assigned over `pipeline_`, which was
+        // itself still PLAYING -- no EOS, no state change to NULL, no unref. The old pipeline kept
+        // its sink open (a file half-written without a trailer, an SRT/RTMP session that never
+        // closed) and leaked with every format change. Throwing makes `output` log it and erase
+        // this consumer, and the destructor then drains and tears down the pipeline properly --
+        // so a recording ends with a valid file and a stream closes cleanly.
+        if (pipeline_ != nullptr)
+            CASPAR_THROW_EXCEPTION(invalid_operation() << msg_info(
+                "GStreamer consumer cannot follow a format change; it is removed and its pipeline "
+                "finalised. ADD it again at the new format."));
+
         // The bare `GSTREAMER` form exists so `REMOVE 1 GSTREAMER` can construct one to read
         // its index; it is not a usable consumer. Rejecting it HERE rather than in the factory
         // is what lets removal work while `ADD 1 GSTREAMER` with no pipeline still fails.
@@ -339,6 +352,24 @@ struct gst_consumer : public core::frame_consumer
             configure_audio_src();
     }
 
+    // ── THE BUFFER RATE, which is not the frame rate on an interlaced channel ────────────────
+    //
+    // `output` calls `send` TWICE per tick when `field_count == 2` -- once per field -- and this
+    // consumer pushes one buffer per call. It stamped them all at the FRAME rate, so 1080i50
+    // delivered 50 buffers a second, each claiming to last 40 ms: the stream's timeline ran at
+    // twice real time, the caps advertised 25 fps for a 50-per-second feed, and the caption
+    // pacer budgeted 25p triplets while being called at 50. Every one of those sites now reads
+    // the rate from here, which is `framerate * field_count` -- a correct 50p stream, the same
+    // thing `ffmpeg_consumer` writes with field pairing off. Weaving the two fields into one
+    // interlaced picture is the other honest answer and is not attempted here: it needs the
+    // field dominance the core does not carry, which ffmpeg_consumer derives from the mode.
+    std::int64_t buffer_rate_num() const
+    {
+        return static_cast<std::int64_t>(format_desc_.framerate.numerator()) *
+               std::max(1, format_desc_.field_count);
+    }
+    std::int64_t buffer_rate_den() const { return format_desc_.framerate.denominator(); }
+
     void configure_video_src()
     {
         // BGRA because that is what a channel frame carries; converting here rather than in
@@ -347,8 +378,8 @@ struct gst_consumer : public core::frame_consumer
         const auto caps_text = std::string("video/x-raw, format=(string)BGRA, width=(int)") +
                                std::to_string(format_desc_.width) + ", height=(int)" +
                                std::to_string(format_desc_.height) + ", framerate=(fraction)" +
-                               std::to_string(format_desc_.framerate.numerator()) + "/" +
-                               std::to_string(format_desc_.framerate.denominator());
+                               std::to_string(buffer_rate_num()) + "/" +
+                               std::to_string(buffer_rate_den());
 
         GstCaps* caps = nullptr;
 #ifdef CASPAR_GST_CUDA_EGRESS
@@ -524,6 +555,16 @@ struct gst_consumer : public core::frame_consumer
 
         const auto index = frames_sent_.load();
         auto*      buffer = wrap(frame);
+        // `wrap` RETURNS NULL once the GPU egress has given up (see its own comment), and every
+        // line below dereferences `buffer` -- `gst_buffer_add_video_caption_meta` first, then the
+        // timestamps and the push. So the first frame after a CUDA egress failure was a null
+        // dereference on the channel thread, which under `/EHa` a `catch (...)` somewhere up the
+        // stack can turn into a tick failure that names nothing. A frame that cannot be wrapped is
+        // DROPPED and counted, which is what every other failure in this function already does.
+        if (buffer == nullptr) {
+            ++frames_dropped_;
+            return make_ready_future(true);
+        }
 
         // Captions the source attached, put back on the way out. Pass-through: the bytes are
         // the ones that arrived, because every decode-and-re-encode step is a chance to change
@@ -549,8 +590,8 @@ struct gst_consumer : public core::frame_consumer
                 // survives copies of one frame and differs between frames, so a repeat adds
                 // nothing to the queue.
                 repaced = cc_pacer_.pace(&frame.metadata(), cc.data,
-                                         format_desc_.framerate.numerator(),
-                                         format_desc_.framerate.denominator());
+                                         static_cast<int>(buffer_rate_num()),
+                                         static_cast<int>(buffer_rate_den()));
                 paced   = &repaced;
                 if (repaced.empty())
                     continue;
@@ -563,10 +604,10 @@ struct gst_consumer : public core::frame_consumer
             ++captions_sent_;
         }
 
-        GST_BUFFER_PTS(buffer)      = gst_util_uint64_scale(index, GST_SECOND * format_desc_.framerate.denominator(),
-                                                            format_desc_.framerate.numerator());
-        GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(1, GST_SECOND * format_desc_.framerate.denominator(),
-                                                            format_desc_.framerate.numerator());
+        GST_BUFFER_PTS(buffer)      = gst_util_uint64_scale(index, GST_SECOND * buffer_rate_den(),
+                                                            buffer_rate_num());
+        GST_BUFFER_DURATION(buffer) = gst_util_uint64_scale(1, GST_SECOND * buffer_rate_den(),
+                                                            buffer_rate_num());
 
         if (gst_app_src_push_buffer(GST_APP_SRC(video_src_), buffer) != GST_FLOW_OK) {
             ++frames_dropped_;
@@ -600,8 +641,8 @@ struct gst_consumer : public core::frame_consumer
                                                         held,
                                                         [](gpointer p) { delete static_cast<core::const_frame*>(p); });
 
-        GST_BUFFER_PTS(buffer) = gst_util_uint64_scale(index, GST_SECOND * format_desc_.framerate.denominator(),
-                                                       format_desc_.framerate.numerator());
+        GST_BUFFER_PTS(buffer) = gst_util_uint64_scale(index, GST_SECOND * buffer_rate_den(),
+                                                       buffer_rate_num());
 
         if (gst_app_src_push_buffer(GST_APP_SRC(audio_src_), buffer) != GST_FLOW_OK)
             ++frames_dropped_;

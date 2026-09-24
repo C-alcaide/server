@@ -27,6 +27,25 @@ std::shared_ptr<const stored_timeline> timeline_store::put(timeline_document doc
         doc.revision = ++revision_;
     }
 
+    // THE GO HISTORY CARRIES ACROSS A RE-PUT. The trigger log exists in two places -- here, as
+    // what the resolution was computed against, and in the stage's `trigger_logs_`, which
+    // accumulates every GO and hands the whole log to `retrigger`. A fresh `stored_timeline`
+    // has an EMPTY `triggers`, so an edit to a running cue stack used to resolve as though no GO
+    // had ever been pressed: the on-air cue reverted to the first one, and the next GO passed the
+    // stage's old log plus the new firing, placing cue 2 at the old GO and cue 3 at the new one --
+    // so the operator pressing GO to reach cue 2 got cue 3.
+    //
+    // An EDIT is not a reset. A STOP is (the stage clears both copies on one), and a DELETE
+    // followed by a PUT is a new show (`erase` drops the document, and the stage prunes its log
+    // for any name the store no longer holds). So the only case this carries is the one where the
+    // show is still the same show.
+    {
+        std::lock_guard<std::mutex> l(lock_);
+        const auto                  it = docs_.find(doc.name);
+        if (it != docs_.end() && it->second)
+            entry->triggers = it->second->triggers;
+    }
+
     entry->document = std::move(doc);
     entry->resolved = resolve(entry->document, entry->triggers);
 

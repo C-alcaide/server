@@ -268,7 +268,7 @@ struct osc_receiver::impl
             d.timestamp = std::chrono::steady_clock::now();
             // Fire after z — assume a sender bundles all values together;
             // sending z last is the trigger to push the complete frame.
-            tracker_registry::instance().on_data(d);
+            tracker_registry::instance().on_data(d, tracking_protocol::osc, port_);
         }
         else if (field == "zoom")  {
             // Accept 0-1 normalised or raw 0-65535

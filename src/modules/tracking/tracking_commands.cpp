@@ -351,7 +351,7 @@ static std::wstring tracking_info_command(command_context& ctx)
     if (!binding)
         return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
 
-    auto latest = tracker_registry::instance().get_latest_data(binding->camera_id);
+    auto latest = tracker_registry::instance().get_latest_data(binding->receiver, binding->camera_id);
 
     std::wostringstream ss;
     ss << L"201 TRACKING OK\r\n";
@@ -455,7 +455,7 @@ static std::wstring tracking_zero_command(command_context& ctx)
     if (!binding)
         return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
 
-    auto latest = tracker_registry::instance().get_latest_data(binding->camera_id);
+    auto latest = tracker_registry::instance().get_latest_data(binding->receiver, binding->camera_id);
     if (!latest)
         return L"404 TRACKING ERROR No data received yet for camera "
                + std::to_wstring(binding->camera_id) + L"\r\n";

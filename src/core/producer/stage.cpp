@@ -1657,11 +1657,18 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             // be read BEFORE `apply_all` consumes them. A stop counts too: it rewinds to zero,
             // which is a seek to zero as far as the constants are concerned.
             std::optional<timeline::flicks> seek_to;
+            // Read HERE, before `apply_all` consumes the list -- and only for a STOP that is due
+            // this tick: one scheduled for a later frame is held back by `apply_all` and has not
+            // happened yet. See the GO-history clear below.
+            bool stopped_now = false;
             for (const auto& c : pending_transport_[name]) {
                 if (c.v == timeline::transport_command::verb::seek)
                     seek_to = c.at;
-                else if (c.v == timeline::transport_command::verb::stop)
+                else if (c.v == timeline::transport_command::verb::stop) {
                     seek_to = 0;
+                    if (!c.at_frame || *c.at_frame <= frame_number)
+                        stopped_now = true;
+                }
             }
 
             // The pending commands for this tick, in the SAFE order rather than arrival order:
@@ -1670,6 +1677,30 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
             if (seek_to)
                 compile_seek(name, *seek_to);
+
+            // A STOP FORGETS THE GO HISTORY. It rewinds the playhead to zero, and until
+            // 2026-09-23 it left `trigger_logs_[name]` and the stored resolution -- which still
+            // carried the last run's firings from `retrigger` -- exactly as they were. The resolver
+            // places a trigger-gated cue at "the Nth firing at-or-after its group's start", so a
+            // show stopped after a rehearsal and PLAYed again advanced its cues BY ITSELF at the
+            // rehearsal's GO times, with nobody pressing anything. A rewound show is a show that
+            // has not been GOne yet.
+            //
+            // A SEEK does not clear it, deliberately: seeking inside a run is still that run, and
+            // the GOs already pressed are still where the operator pressed them.
+            // Both halves are cleared -- the stage's log AND the stored resolution -- and the test
+            // is "either still has a firing", because they are two copies of one history and a
+            // STOP that emptied only one of them would leave the next GO to resurrect the other.
+            if (stopped_now) {
+                auto&      log           = trigger_logs_[name];
+                const bool stage_has     = !log.fired.empty();
+                const bool store_has     = !entry->triggers.fired.empty();
+                if (stage_has || store_has) {
+                    log = {};
+                    if (auto re = timelines_->retrigger(name, log))
+                        entry = re;
+                }
+            }
 
             // A GO fired: the document has to be RE-RESOLVED, because an object whose end waits
             // on a trigger has no end until it fires, and everything downstream of it has no
@@ -1768,6 +1799,27 @@ struct stage::impl : public std::enable_shared_from_this<impl>
             }
         }
 
+        // AND THE THREE PER-DOCUMENT MAPS BESIDE IT, for the reason given above and the one
+        // `timeline_store::erase` gives for the playhead it drops: "a document PUT again under the
+        // same name resumes a show that no longer exists". The store dropped the playhead; the
+        // TRANSPORT that produces it every tick lived here and was never erased, so a DELETE
+        // followed by a PUT of the same name found the old transport still `playing` and started
+        // the new show at once, from the old position plus the frames elapsed -- driving layers
+        // nobody asked it to. Its first GO then resubmitted the deleted show's firings from
+        // `trigger_logs_`. Only `media_` was pruned, because only `media_` had been thought of.
+        if (timelines_ && (!transports_.empty() || !trigger_logs_.empty() || !pending_transport_.empty())) {
+            const auto live    = timelines_->names();
+            const auto is_live = [&](const std::string& n) {
+                return std::find(live.begin(), live.end(), n) != live.end();
+            };
+            for (auto it = transports_.begin(); it != transports_.end();)
+                it = is_live(it->first) ? std::next(it) : transports_.erase(it);
+            for (auto it = trigger_logs_.begin(); it != trigger_logs_.end();)
+                it = is_live(it->first) ? std::next(it) : trigger_logs_.erase(it);
+            for (auto it = pending_transport_.begin(); it != pending_transport_.end();)
+                it = is_live(it->first) ? std::next(it) : pending_transport_.erase(it);
+        }
+
         std::vector<int> ended;
         for (const auto& e : entries_)
             if (!owned.count(e.first))
@@ -1826,6 +1878,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         if (!graphs_ || graph_attach_.empty())
             return;
 
+        std::vector<int> stale;
         for (const auto& kv : graph_attach_) {
             const auto layer = kv.first;
             const auto entry = graphs_->get(kv.second);
@@ -1839,6 +1892,13 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                         t.image_transform.node_values.clear();
                     });
                 }
+                // AND THE MIRROR ENTRY GOES TOO, which it did not. Dropping only the plan left
+                // `graph_attach_[layer]` naming the deleted document, so the layer stayed busy for
+                // every other graph -- and the moment a document was PUT again under the same
+                // name, the next tick found it here and put it straight back on air, on a layer
+                // the operator had been told was free. `DELETE /v1/graph` now detaches through
+                // the stage first; this is the backstop for every other way a document can go.
+                stale.push_back(layer);
                 continue;
             }
 
@@ -1857,6 +1917,19 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 // an out-of-range read on the frame path.
                 t.image_transform.node_values = entry->values;
             });
+        }
+
+        // Erased AFTER the walk (it iterates the map) and under `binding_lock_`, which every
+        // other writer of `graph_attach_` holds because `is_bound` reads it from the API thread.
+        // Re-checked under the lock: an attach landing between the walk and here may have put a
+        // LIVE document on this layer, and that one must survive.
+        if (!stale.empty()) {
+            std::lock_guard<std::mutex> lock(binding_lock_);
+            for (const auto layer : stale) {
+                const auto it = graph_attach_.find(layer);
+                if (it != graph_attach_.end() && !graphs_->get(it->second))
+                    graph_attach_.erase(it);
+            }
         }
     }
 
@@ -2420,9 +2493,70 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                                       const tweener&                 tween)
     {
         return executor_.begin_invoke([=, this] {
-            auto src       = tweens_[index].fetch();
-            auto dst       = transform(src);
-            tweens_[index] = tweened_transform(src, dst, mix_duration, tween);
+            // ── A WRITE OF SOME FIELDS MUST NOT FREEZE THE OTHERS ─────────────────────────────
+            //
+            // This was `tweens_[index] = tweened_transform(fetch(), transform(fetch()), ...)`.
+            // Every field the closure did not touch then ran from its current value to that same
+            // value -- so an in-flight `MIXER 1-10 FILL ... 50 easeinoutsine` STOPPED where it was
+            // the moment a control surface PUT a brightness, a tracking sample arrived, or
+            // auto-projection re-aimed the layer. And on the HTTP facade's REFUSAL paths (a cas
+            // conflict, a computed value out of range, toggle on a non-boolean) the closure
+            // returns its input unchanged, so a request answered `field_conflict` still froze the
+            // picture. `tweened_transform::patch`'s own comment records this exact pattern for
+            // bindings and timelines; those got `patch`, and this function did not.
+            //
+            // Every caller is the fork's (upstream has none) and every one is "write these fields
+            // now", so the semantics are fixed here rather than per caller:
+            //
+            //   * the closure runs ONCE, against what is ON AIR, so `toggle`/`add`/`cas` read the
+            //     value the viewer sees, as before;
+            //   * a result EQUAL to the input -- a refusal or a no-op -- leaves the tween alone;
+            //   * only the fields the closure CHANGED are carried: onto both ends of the running
+            //     tween for an immediate write (so every other ramp continues exactly as it was),
+            //     or onto the destination of a new tween for a write with its own duration (so the
+            //     other fields still arrive where they were going, as `apply_transforms` does).
+            //
+            // The carry is found by DIFFING the registry, not by trusting a list of members this
+            // function thinks callers write. And it is CHECKED: applied to the on-air transform it
+            // must reproduce the closure's result exactly, or the write falls back to the old
+            // replace -- so a caller that one day writes a member the registry does not declare
+            // loses the other ramps, which it did before, rather than losing its own write.
+            auto&      tw  = tweens_[index];
+            const auto src = tw.fetch();
+            const auto dst = transform(src);
+            if (dst == src)
+                return;
+
+            std::vector<const fields::field_desc*> img_changed;
+            for (const auto& f : fields::all())
+                if (f.get && f.set && f.get(dst.image_transform) != f.get(src.image_transform))
+                    img_changed.push_back(&f);
+            std::vector<const fields::audio_field*> aud_changed;
+            for (const auto& a : fields::audio_fields())
+                if (a.get && a.set && a.get(dst.audio_transform) != a.get(src.audio_transform))
+                    aud_changed.push_back(&a);
+
+            const auto carry = [&](frame_transform& t) {
+                for (const auto* f : img_changed)
+                    f->set(t.image_transform, f->get(dst.image_transform));
+                for (const auto* a : aud_changed)
+                    a->set(t.audio_transform, a->get(dst.audio_transform));
+            };
+
+            auto probe = src;
+            carry(probe);
+            if (!(probe == dst)) {
+                tw = tweened_transform(src, dst, mix_duration, tween);
+                return;
+            }
+
+            if (mix_duration == 0) {
+                tw.patch(carry);
+                return;
+            }
+            auto target = tw.dest();
+            carry(target);
+            tw = tweened_transform(src, target, mix_duration, tween);
         });
     }
 

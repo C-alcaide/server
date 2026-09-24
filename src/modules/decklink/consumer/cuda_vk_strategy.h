@@ -43,6 +43,7 @@ namespace caspar { namespace decklink {
 class cuda_vk_strategy final : public format_strategy
 {
   public:
+    bool does_own_readback() const override { return true; }
     /// @param is_hdr       True for HDR v210 output, false for SDR BGRA
     /// @param use_bt2020   True for BT.2020 color matrix, false for BT.709
     /// @param fallback     CPU strategy to use as fallback

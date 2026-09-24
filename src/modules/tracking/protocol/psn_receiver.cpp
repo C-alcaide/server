@@ -157,7 +157,7 @@ struct psn_receiver::impl
 
             d.timestamp = std::chrono::steady_clock::now();
 
-            tracker_registry::instance().on_data(d);
+            tracker_registry::instance().on_data(d, tracking_protocol::psn, port_);
         }
     }
 };
