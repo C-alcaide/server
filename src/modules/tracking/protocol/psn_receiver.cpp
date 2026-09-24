@@ -40,8 +40,42 @@
 
 namespace caspar { namespace tracking {
 
-static constexpr double PSN_DEG2RAD = 3.141592653589793 / 180.0;
 static constexpr double PSN_M_TO_MM = 1000.0; // PSN positions are in metres; camera_data uses mm
+
+/// PSN's ORI is an axis-angle ROTATION VECTOR in RADIANS: its direction is the axis and its length
+/// the angle (PosiStageNet protocol v2.03, PSN_DATA_TRACKER_ORI). This receiver read it as three
+/// Euler angles in DEGREES until 2026-09-24 -- a pan of 0.3 rad arrived as 0.3 degrees, and any
+/// rotation about more than one axis came out as a different pose entirely.
+///
+/// The spec defines no axes for PSN's world, so the tracker's axes are taken to be camera_data's
+/// (x right, y up, z towards the subject, a tracker at rest facing +z) and the vector is turned
+/// into a rotation with the standard right-hand (Rodrigues) formula. The pose is then read back as
+/// the direction the tracker FACES and the way its top leans, which is what pan, tilt and roll
+/// describe -- so the answer is correct for any orientation, not only a single-axis one.
+/// `TRACKING ... AXES` and `INVERT` correct a server whose frame differs.
+static void psn_orientation(double vx, double vy, double vz, double& pan, double& tilt, double& roll)
+{
+    double       R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const double th   = std::sqrt(vx * vx + vy * vy + vz * vz);
+    if (th > 1e-12) {
+        const double kx = vx / th, ky = vy / th, kz = vz / th;
+        const double c = std::cos(th), s = std::sin(th), C = 1.0 - c;
+        R[0] = c + kx * kx * C;      R[1] = kx * ky * C - kz * s; R[2] = kx * kz * C + ky * s;
+        R[3] = ky * kx * C + kz * s; R[4] = c + ky * ky * C;      R[5] = ky * kz * C - kx * s;
+        R[6] = kz * kx * C - ky * s; R[7] = kz * ky * C + kx * s; R[8] = c + kz * kz * C;
+    }
+    // forward = R.(0,0,1), up = R.(0,1,0)
+    const double fx = R[2], fy = R[5], fz = R[8];
+    const double ux = R[1], uy = R[4], uz = R[7];
+    pan  = std::atan2(fx, fz);
+    tilt = std::atan2(fy, std::hypot(fx, fz));
+    // The un-rolled right and up for this pan and tilt -- the basis tracker_registry's nodal offset
+    // uses -- so a top leaning towards the camera's right is a positive (clockwise) roll.
+    const double cp = std::cos(pan), sp = std::sin(pan), ct = std::cos(tilt), st = std::sin(tilt);
+    const double r0[3] = {cp, 0.0, -sp};
+    const double u0[3] = {-sp * st, ct, -cp * st};
+    roll = std::atan2(ux * r0[0] + uy * r0[1] + uz * r0[2], ux * u0[0] + uy * u0[1] + uz * u0[2]);
+}
 
 // ---------------------------------------------------------------------------
 
@@ -148,9 +182,7 @@ struct psn_receiver::impl
 
             if (trk.is_ori_set()) {
                 ::psn::float3 ori = trk.get_ori();
-                d.pan  = static_cast<double>(ori.x) * PSN_DEG2RAD;
-                d.tilt = static_cast<double>(ori.y) * PSN_DEG2RAD;
-                d.roll = static_cast<double>(ori.z) * PSN_DEG2RAD;
+                psn_orientation(ori.x, ori.y, ori.z, d.pan, d.tilt, d.roll);
             }
 
             // PSN has no zoom/focus — leave at defaults (0)

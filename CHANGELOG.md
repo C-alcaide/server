@@ -1,6 +1,56 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: a tracked PREVIZ camera turns the way the real one does -- and three protocols' frames
+
+**BREAKING for every tracked setup tuned against the old behaviour**, and for any `WORLDALIGN`
+survey solved before it: solve that again with the current client.
+
+Three defects in one chain, found by asking how other tools map a tracker into their world and
+then reading the specifications they cite:
+
+* **FreeD, FreeD+ and OpenTrackIO put the camera's HEIGHT on the forward axis.** Both protocols
+  define right-handed axes with X right, Y the way a camera at zero pan faces, and Z up (Vinten
+  free-d Installation Manual V1.4.4, Appendix B; SMPTE RIS OSVP OpenTrackIO), and the receivers
+  copied X/Y/Z straight into `camera_data`'s x-right / y-up / z-forward. A crane raising the camera
+  moved it towards the wall. The OpenTrackIO receiver's own comment described the mapping it did
+  not perform.
+* **PSN's orientation was read as Euler angles in degrees.** PosiStageNet v2.03 defines it as an
+  axis-angle vector in RADIANS; a rotation of 0.3 rad arrived as 0.3 degrees. It is now turned
+  into the direction the tracker faces. The spec names no axes for PSN's world, so they are taken
+  to be `camera_data`'s -- stated in the guide rather than implied.
+* **`MODE PREVIZ` passed a left-handed frame into a right-handed one.** The previz camera looks
+  along -Z with `R = Ry(yaw)·Rx(pitch)·Rz(roll)`, under which a positive yaw turns LEFT, so a camera
+  that panned right turned left, one that dollied in moved back, and a roll went the wrong way. It
+  now converts `(x, y, z) -> (x, y, -z)`, `yaw = -pan`, `roll = -roll`, BEFORE the survey alignment
+  -- a mirror is not a rotation, so a survey fitted across the handedness change could never fit.
+  `casparcg-360-client`'s solver applies the same mirror; on a synthetic survey it fits to
+  2e-15 m RMS where the old solve leaves 1.34 m.
+
+**And the escape hatch every other host has:** `TRACKING <ch-l> AXES <x> <y> <z>` remaps the
+position axes (`X Z Y`, `-X Y Z`, ...) and `TRACKING <ch-l> INVERT NONE|PAN|TILT|ROLL` negates
+angles, applied to every sample before anything else and reported by `INFO`. Pixotope maps the
+incoming axis directions, Modulo Kinetic picks an axis order with per-axis inverts, Hippotizer
+remaps the up axis and Smode flips axes -- because the protocol fixes a frame and vendors do not
+all honour it. `ZERO` takes its reference after the inversion.
+
+**It shipped because the battery was written from the code.** `tracking-previz` asserted
+"1500 mm arrives as 1.5 m on the same axis" and "pan maps 1:1 onto yaw", which was the server's
+behaviour; its PSN builder sent degrees because the receiver read degrees. Its expectations now
+come from the specifications, and three new checks ask the physical question from previz's own
+convention -- where the camera LOOKS and which way its top leans -- so they cannot agree with the
+server by a shared sign. The same pattern the pass-2 FreeD layout fix recorded, one level up: a
+decoder that accepts the bytes proves the bytes, not their meaning.
+
+Verified: `tracking-previz` 33/33 on both mixers, six checks new (the three semantic ones, the
+remap, and the two refusals of a malformed `AXES`/`INVERT` in its sweep). A +30 pan now looks
+(0.5, 0, -0.866), towards +X; +1000 mm of FreeD height raises the camera 1.0 on previz y, and
++1000 mm of FreeD Y moves it 1.0 along -z, its view. Mutation-verified: with the PREVIZ
+conversion alone reverted, 17 checks turn red including all three semantic ones, while the binding
+source (which reads `camera_data` directly) and the wrong-port routing check stay green. Not
+measured: a real tracker of each protocol, and `MODE 360`'s yaw sense, which drives an equirect
+projection and was not part of this.
+
 ### BEHAVIOUR: FreeD was decoded with a layout no tracker sends
 
 `freed_receiver.cpp` had no camera-ID byte, so pan started on the ID and every field after byte 0
@@ -21,12 +71,9 @@ and focus 24-bit).
 **BREAKING for any setup calibrated against the old decode** — a `ZOOM_LUT` or `SCALE` taken from
 the misread zoom, or a binding whose camera ID was chosen to match the misread 0. Re-calibrate.
 
-Not changed, and held deliberately: the ASSIGNMENT of FreeD's three positions to `camera_data`'s
-x/y/z, and the tracker-to-previz handedness. The documented tracker frame is left-handed (z toward
-the subject, "at rest forward +Z") and previz is right-handed looking along −Z; `mode_previz`
-passes z, yaw and roll straight through, so a PREVIZ-mode camera's view direction, pan, roll and
-nodal offset are reversed relative to the tracker. Correcting that changes camera motion for every
-existing PREVIZ-mode setup, so it is a decision rather than a fix.
+The ASSIGNMENT of FreeD's three positions to `camera_data`'s x/y/z and the tracker-to-previz
+handedness were held from this fix as a decision, and are settled in the entry above: FreeD's Z is
+height, and `MODE PREVIZ` converts between the two frames.
 
 Verified: `tracking-previz` 27/27 on both mixers against the rebuilt builder (a camera-5 packet
 reads `d1 05 …` with `sum & 0xFF == 0x40`; the FreeD+ packet XORs to zero). Not measured: a real

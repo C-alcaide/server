@@ -64,6 +64,12 @@ class tracker_registry
                               double x, double y, double z,
                               double yaw_rad, double pitch_rad, double roll_rad, double fov_rad);
     void update_target_map(int channel, int layer, double gain, double ref_dist_m, double aspect);
+    void update_axes(int channel, int layer, const int src[3], const int sign[3]);
+    void update_invert(int channel, int layer, bool pan, bool tilt, bool roll);
+
+    /// A sample with the binding's AXES and INVERT applied -- the first thing done to every
+    /// sample, so everything after it (and ZERO, which captures a reference) sees one frame.
+    static camera_data remap(const tracker_binding& binding, const camera_data& data);
 
     // ----- Called by protocol receivers when a packet arrives -----------------
 

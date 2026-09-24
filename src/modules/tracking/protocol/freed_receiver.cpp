@@ -198,16 +198,17 @@ struct freed_receiver::impl
         // the low byte: the normalised range is kept (0..0xFFFFFF -> 0..0xFFFF), which is what
         // `ZOOM_LUT` and `SCALE`'s full-range calibrate against.
         //
-        // THE AXIS ASSIGNMENT IS UNCHANGED (X, Y, Z -> x, y, z). Whether FreeD's third axis is
-        // HEIGHT, as camera_data's `y = Up` would then require, is a frame-convention question
-        // held together with the tracker-to-previz handedness; it is not settled here.
+        // FreeD's third position is HEIGHT (free-d manual Appendix B.7) and its second is the
+        // direction a camera at zero pan faces, so the three go through `set_position_z_up`
+        // rather than straight into x, y, z -- see camera_data.h for the frame and its sources.
         d.pan  = decode_24bit_signed(&pkt[2]) * FREED_ANGLE_SCALE * DEG2RAD;
         d.tilt = decode_24bit_signed(&pkt[5]) * FREED_ANGLE_SCALE * DEG2RAD;
         d.roll = decode_24bit_signed(&pkt[8]) * FREED_ANGLE_SCALE * DEG2RAD;
 
-        d.x = decode_24bit_signed(&pkt[11]) * FREED_POSITION_SCALE;
-        d.y = decode_24bit_signed(&pkt[14]) * FREED_POSITION_SCALE;
-        d.z = decode_24bit_signed(&pkt[17]) * FREED_POSITION_SCALE;
+        set_position_z_up(d,
+                          decode_24bit_signed(&pkt[11]) * FREED_POSITION_SCALE,
+                          decode_24bit_signed(&pkt[14]) * FREED_POSITION_SCALE,
+                          decode_24bit_signed(&pkt[17]) * FREED_POSITION_SCALE);
 
         d.zoom  = static_cast<uint16_t>(decode_24bit_unsigned(&pkt[20]) >> 8);
         d.focus = static_cast<uint16_t>(decode_24bit_unsigned(&pkt[23]) >> 8);

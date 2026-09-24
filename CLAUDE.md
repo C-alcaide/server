@@ -120,8 +120,9 @@ Two rules that outrank the table:
   running the nearest battery. That sentence is what turns a gap into a tracked item; the
   Vulkan-consumer-metadata gap below was found exactly that way.
 
-**Closed 2026-08-27: all fork-specific AMCP commands are documented** — 91 then, **95 now**
-(`INFO OFX` and `INFO ISF` landed 2026-09-09; `PREVIZ SNAP` and `PREVIZ MESH` 2026-09-19). And the count is checked mechanically rather than
+**Closed 2026-08-27: all fork-specific AMCP commands are documented** — 91 then, **97 now**
+(`INFO OFX` and `INFO ISF` landed 2026-09-09; `PREVIZ SNAP` and `PREVIZ MESH` 2026-09-19;
+`TRACKING AXES` and `TRACKING INVERT` 2026-09-24). And the count is checked mechanically rather than
 remembered: `tests/test_docs_claims.py::test_every_fork_command_appears_in_some_doc` in the
 harness failed on both of them the moment they were registered, which is the only reason this
 paragraph is right. This block used to name
@@ -292,9 +293,21 @@ Still uncovered, and now the priority order for coverage rather than for docs:
   specification of the protocol it receives** -- the builder follows the published D1 layout now,
   with TouchDesigner's FreeD CHOP reference as the independent source for the field widths, and
   the same audit found every sample driving every binding that shared its camera ID across ports
-  AND protocols. Still HELD, as a decision rather than a fix: the tracker frame is left-handed
-  (+Z forward) and previz right-handed (-Z forward), and `mode_previz` passes z, yaw and roll
-  straight through.
+  AND protocols.
+
+  **And the frames were wrong one level up, the same way, the same day.** Asked how other tools
+  map a tracker into their world, the answer was the specifications they cite: FreeD's Z is HEIGHT
+  (free-d Appendix B.7), OpenTrackIO shares FreeD's axes, PSN's ORI is an axis-angle vector in
+  RADIANS, and previz is right-handed looking along -Z. The receivers put height on the forward
+  axis, PSN read degrees, and `mode_previz` passed a left-handed frame into a right-handed one --
+  so a tracked camera that panned right turned LEFT in previz. `tracking-previz` had pinned all of
+  it, because every expectation was "the same number on the same axis". **The fix for the
+  battery is the part to copy:** its expectations come from the specs now, and three checks ask the
+  physical question -- where does the camera LOOK -- through previz's own convention, so they
+  cannot agree with the server on a shared sign. Mutation-verified: reverting the conversion
+  alone turns 17 red. And `TRACKING AXES` / `INVERT` exist because every host surveyed (Pixotope,
+  Modulo Kinetic, Hippotizer, Smode) offers the same escape hatch for a vendor that reads the
+  frame differently.
 * **ICVFX beyond the gain and the mask.** `icvfx-parity` covers the gain exchange and
   `icvfx-mask` covers the mask geometry and the feather since 2026-09-19, against a closed form
   and mutation-verified. The quad driven by a REAL CAMERA through auto-projection is

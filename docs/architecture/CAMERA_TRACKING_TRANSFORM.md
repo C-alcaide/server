@@ -46,6 +46,8 @@ by rotating the position twice.
 From `inject_transform`, in order:
 
 ```
+0.  remap         AXES then INVERT, on the raw sample (camera_data's frame; see below)
+
 1.  rotation      pan  = data.pan  · pan_scale  + pan_offset
                   tilt = data.tilt · tilt_scale + tilt_offset
                   roll = data.roll             + roll_offset
@@ -55,11 +57,12 @@ From `inject_transform`, in order:
 
 3.  nodal offset  shift the tracked POSITION by the lens-local nodal vector,
                   expressed in world space via the camera-frame basis
-                  (at rest: forward +Z, right +X, up +Y)
+                  (at rest: forward +Z, right +X, up +Y -- camera_data's LEFT-handed frame)
                   lens.nodal_forward_m AUGMENTS a manual NODAL forward -- they add
 
 4.  position      legacy:  offset_x = pos_x · position_scale        (mm -> m)
-                  survey:  world_m  = align_scale · R · pos + align_t
+                  survey:  world_m  = align_scale · R · M · pos + align_t
+                  (mode_previz only, M = diag(1, 1, -1): into the previz world, below)
 
 5.  depth of field  map the decoded focus value to a bokeh blur radius
 ```
@@ -98,6 +101,24 @@ which looks like a wrong `DEFAULT_FOV` and is not.
 ---
 
 ## 4. Modes change which of this runs
+
+**The frames.** Every step above works in `camera_data`'s frame: LEFT-handed, x right, y up, z
+towards the subject, pan right / tilt up / roll clockwise-from-behind positive. Each receiver
+converts into it (`camera_data.h` has the FreeD/OpenTrackIO half and cites both specs), and
+`mode_previz` converts out of it into the previz world -- right-handed, looking along -Z,
+`R = Ry(yaw)·Rx(pitch)·Rz(roll)`:
+
+```
+previz position = (x, y, -z)      yaw = -pan      pitch = tilt      roll = -roll
+```
+
+**The survey alignment comes after that conversion**, because a mirror is not a rotation: the
+client's Umeyama solve returns det +1, so a fit straight from the left-handed frame to the
+right-handed one could only be least-squared towards the reflection. The client applies the same
+mirror before solving (`casparcg-360-client/tracker_align.py`), so `R` maps one right-handed frame
+to another. Until 2026-09-24 the conversion did not exist: a tracked previz camera that panned right
+turned left, and one that dollied in moved back. `CasparCG-TestRunner`'s `tracking-previz` now
+checks where the camera LOOKS, from previz's own convention, not only the numbers.
 
 `mode_previz` is the only mode where `WORLDALIGN` applies at all. In 360 mode the position is routed
 differently again — `tracker_binding.h:110` records that X and Y become

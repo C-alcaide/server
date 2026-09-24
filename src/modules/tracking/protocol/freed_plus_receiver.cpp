@@ -161,9 +161,10 @@ struct freed_plus_receiver::impl
         d.tilt = decode_24bit_signed_fp(&recv_buf_[5]) * FREED_ANGLE_SCALE * DEG2RAD;
         d.roll = decode_24bit_signed_fp(&recv_buf_[8]) * FREED_ANGLE_SCALE * DEG2RAD;
 
-        d.x = decode_24bit_signed_fp(&recv_buf_[11]) * FREED_POSITION_SCALE;
-        d.y = decode_24bit_signed_fp(&recv_buf_[14]) * FREED_POSITION_SCALE;
-        d.z = decode_24bit_signed_fp(&recv_buf_[17]) * FREED_POSITION_SCALE;
+        set_position_z_up(d,
+                          decode_24bit_signed_fp(&recv_buf_[11]) * FREED_POSITION_SCALE,
+                          decode_24bit_signed_fp(&recv_buf_[14]) * FREED_POSITION_SCALE,
+                          decode_24bit_signed_fp(&recv_buf_[17]) * FREED_POSITION_SCALE);
 
         d.zoom  = static_cast<uint16_t>(decode_24bit_unsigned_fp(&recv_buf_[20]) >> 8);
         d.focus = static_cast<uint16_t>(decode_24bit_unsigned_fp(&recv_buf_[23]) >> 8);
@@ -194,9 +195,11 @@ struct freed_plus_receiver::impl
         // Position / zoom / focus from the standard D1 header -- which this file's own layout
         // note says bytes 0-26 ARE, so they are read with the D1 offsets and widths. They were
         // read with the same misaligned 32/16-bit layout as the plain decoder.
-        d.x     = decode_24bit_signed_fp(&recv_buf_[11]) * FREED_POSITION_SCALE;
-        d.y     = decode_24bit_signed_fp(&recv_buf_[14]) * FREED_POSITION_SCALE;
-        d.z     = decode_24bit_signed_fp(&recv_buf_[17]) * FREED_POSITION_SCALE;
+        // FreeD's frame, not camera_data's: see camera_data.h.
+        set_position_z_up(d,
+                          decode_24bit_signed_fp(&recv_buf_[11]) * FREED_POSITION_SCALE,
+                          decode_24bit_signed_fp(&recv_buf_[14]) * FREED_POSITION_SCALE,
+                          decode_24bit_signed_fp(&recv_buf_[17]) * FREED_POSITION_SCALE);
         d.zoom  = static_cast<uint16_t>(decode_24bit_unsigned_fp(&recv_buf_[20]) >> 8);
         d.focus = static_cast<uint16_t>(decode_24bit_unsigned_fp(&recv_buf_[23]) >> 8);
 

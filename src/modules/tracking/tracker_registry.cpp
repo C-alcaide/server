@@ -200,6 +200,45 @@ void tracker_registry::update_genlock(int channel, int layer, bool enable, doubl
     it->second.genlock_frames = frames;
 }
 
+void tracker_registry::update_axes(int channel, int layer, const int src[3], const int sign[3])
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = bindings_.find({channel, layer});
+    if (it == bindings_.end())
+        throw std::runtime_error("No binding at channel/layer");
+    for (int i = 0; i < 3; ++i) {
+        it->second.axis_src[i]  = src[i];
+        it->second.axis_sign[i] = sign[i];
+    }
+}
+
+void tracker_registry::update_invert(int channel, int layer, bool pan, bool tilt, bool roll)
+{
+    std::lock_guard<std::mutex> lk(mutex_);
+    auto it = bindings_.find({channel, layer});
+    if (it == bindings_.end())
+        throw std::runtime_error("No binding at channel/layer");
+    it->second.invert_pan  = pan;
+    it->second.invert_tilt = tilt;
+    it->second.invert_roll = roll;
+}
+
+camera_data tracker_registry::remap(const tracker_binding& binding, const camera_data& data)
+{
+    camera_data out = data;
+    const double src[3] = {data.x, data.y, data.z};
+    out.x = src[binding.axis_src[0]] * binding.axis_sign[0];
+    out.y = src[binding.axis_src[1]] * binding.axis_sign[1];
+    out.z = src[binding.axis_src[2]] * binding.axis_sign[2];
+    if (binding.invert_pan)
+        out.pan = -data.pan;
+    if (binding.invert_tilt)
+        out.tilt = -data.tilt;
+    if (binding.invert_roll)
+        out.roll = -data.roll;
+    return out;
+}
+
 void tracker_registry::update_nodal(int channel, int layer, double forward_m, double right_m, double up_m)
 {
     std::lock_guard<std::mutex> lk(mutex_);
@@ -362,11 +401,14 @@ static camera_data interpolate_history(const std::deque<camera_data>&        his
     return out;
 }
 
-void tracker_registry::inject_transform(const tracker_binding& binding, const camera_data& data)
+void tracker_registry::inject_transform(const tracker_binding& binding, const camera_data& raw)
 {
     auto stage = binding.stage.lock();
     if (!stage)
         return; // channel has been destroyed
+
+    // AXES and INVERT first: everything below is written in camera_data's frame.
+    const camera_data data = remap(binding, raw);
 
     const int    layer     = binding.layer_index;
     const double pan       = data.pan * binding.pan_scale + binding.pan_offset;
@@ -392,7 +434,9 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
     if (nodal_fwd_m != 0.0 || binding.nodal_right_m != 0.0 || binding.nodal_up_m != 0.0) {
         const double cp = std::cos(pan),  sp = std::sin(pan);
         const double ct = std::cos(tilt), st = std::sin(tilt);
-        // Camera-frame basis (right-handed: at rest forward=+Z, right=+X, up=+Y).
+        // Camera-frame basis in camera_data's frame -- LEFT-handed: at rest forward=+Z, right=+X,
+        // up=+Y (this comment said right-handed, which that triple is not). mode_previz converts
+        // the result into the previz world's right-handed frame afterwards, with the position.
         const double fwd[3]   = {sp * ct, st, cp * ct};
         const double right[3] = {cp, 0.0, -sp};
         const double up[3]    = {-sp * st, ct, -cp * st};
@@ -454,30 +498,51 @@ void tracker_registry::inject_transform(const tracker_binding& binding, const ca
         // Angles are in radians from the tracker; convert to degrees for the previz API.
         // Positions are in mm from the tracker; convert to metres for the previz API.
         if (binding.previz_camera_fn) {
+            // FROM camera_data's frame INTO the previz world's. camera_data is LEFT-handed
+            // (x right, y up, z towards the subject; pan right, tilt up, roll clockwise from
+            // behind are positive). The previz world is RIGHT-handed, its camera looks along
+            // -Z, and R_cam = Ry(yaw)·Rx(pitch)·Rz(roll) (previz_renderer; `rot_ypr` above) --
+            // under which a positive YAW turns the camera LEFT and a positive ROLL is
+            // anticlockwise from behind. So the forward axis and those two angles change sign:
+            //
+            //     (x, y, z) -> (x, y, -z)      yaw = -pan    pitch = tilt    roll = -roll
+            //
+            // Checked by forward vectors rather than by sign: camera_data forward for a pan p is
+            // (sin p, 0, cos p); previz forward Ry(-p)·(0,0,-1) is (sin p, 0, -cos p) -- the same
+            // direction with z mirrored, as the position is. Until 2026-09-24 all six passed
+            // through unchanged, so a tracked camera that panned right turned left in previz,
+            // moved backwards when it dollied in, and rolled the wrong way.
+            //
+            // The conversion comes BEFORE the survey alignment: a mirror is not a rotation, so a
+            // survey fitted from the left-handed frame straight to the right-handed one (Umeyama
+            // returns det +1) could never fit, only be least-squared towards the reflection.
+            const double rh_x = pos_x, rh_y = pos_y, rh_z = -pos_z;
+            const double rh_yaw = -pan, rh_pitch = tilt, rh_roll = -roll;
+
             double cam_x_m, cam_y_m, cam_z_m;
-            double cam_yaw = pan, cam_pitch = tilt, cam_roll = roll;
+            double cam_yaw = rh_yaw, cam_pitch = rh_pitch, cam_roll = rh_roll;
 
             if (binding.align_enable) {
-                // Rigid tracker→world alignment (survey). Position uses the raw
-                // tracker millimetres directly (align_scale folds mm→m):
-                //   world_m = align_scale · R_align · (pos_x,pos_y,pos_z) + align_t
+                // Rigid tracker→world alignment (survey), in the RIGHT-handed frame above.
+                // align_scale folds mm→m:
+                //   world_m = align_scale · R_align · (x, y, -z) + align_t
                 const double* R = binding.align_r;
                 const double  s = binding.align_scale;
-                cam_x_m = s * (R[0] * pos_x + R[1] * pos_y + R[2] * pos_z) + binding.align_t[0];
-                cam_y_m = s * (R[3] * pos_x + R[4] * pos_y + R[5] * pos_z) + binding.align_t[1];
-                cam_z_m = s * (R[6] * pos_x + R[7] * pos_y + R[8] * pos_z) + binding.align_t[2];
+                cam_x_m = s * (R[0] * rh_x + R[1] * rh_y + R[2] * rh_z) + binding.align_t[0];
+                cam_y_m = s * (R[3] * rh_x + R[4] * rh_y + R[5] * rh_z) + binding.align_t[1];
+                cam_z_m = s * (R[6] * rh_x + R[7] * rh_y + R[8] * rh_z) + binding.align_t[2];
 
                 // Orientation: camera→world = R_align · R_track, decomposed back
                 // into the previz yaw/pitch/roll convention.
                 double R_track[9];
-                rot_ypr(pan, tilt, roll, R_track);
+                rot_ypr(rh_yaw, rh_pitch, rh_roll, R_track);
                 double R_world[9];
                 mat3_mul(R, R_track, R_world);
                 euler_yxz(R_world, cam_yaw, cam_pitch, cam_roll);
             } else {
-                cam_x_m = pos_x * binding.position_scale;
-                cam_y_m = pos_y * binding.position_scale;
-                cam_z_m = pos_z * binding.position_scale;
+                cam_x_m = rh_x * binding.position_scale;
+                cam_y_m = rh_y * binding.position_scale;
+                cam_z_m = rh_z * binding.position_scale;
             }
 
             binding.previz_camera_fn(

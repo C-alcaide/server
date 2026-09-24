@@ -2,7 +2,7 @@
 
 > **State:** shipped; one protocol and two commands measured, the other sixteen unmeasured
 > **Modules:** `src/modules/tracking`
-> **Commands:** **18** fork-specific AMCP commands, all registered by the module itself
+> **Commands:** **20** fork-specific AMCP commands, all registered by the module itself (`AXES` and `INVERT` since 2026-09-24)
 > **Architecture:** [`../architecture/CAMERA_TRACKING_TRANSFORM.md`](../architecture/CAMERA_TRACKING_TRANSFORM.md)
 > **Guide:** [`../guides/CAMERA_TRACKING.md`](../guides/CAMERA_TRACKING.md)
 > **Coverage:** `cli.py tracking-previz` — a synthetic FreeD D1 packet through `BIND ... MODE

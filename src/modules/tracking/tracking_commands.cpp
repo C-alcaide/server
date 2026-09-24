@@ -112,6 +112,10 @@ static std::wstring kwparam(const std::vector<std::wstring>& params,
     return fallback;
 }
 
+// Defined with TRACKING AXES / INVERT below; INFO reports both.
+static std::wstring axes_text(const tracker_binding& b);
+static std::wstring invert_text(const tracker_binding& b);
+
 static bool kwflag(const std::vector<std::wstring>& params, const std::wstring& key)
 {
     for (auto& p : params)
@@ -371,6 +375,8 @@ static std::wstring tracking_info_command(command_context& ctx)
         ss << L" " << ze.raw_value << L" " << (ze.fov_rad * RAD2DEG_CMD);
     ss << L"\r\n";
     ss << L"POSITION_SCALE "  << binding->position_scale                              << L"\r\n";
+    ss << L"AXES "            << axes_text(*binding)                                  << L"\r\n";
+    ss << L"INVERT "          << invert_text(*binding)                                << L"\r\n";
     ss << L"DELAY "           << binding->delay_ms                                    << L"\r\n";
     ss << L"GENLOCK "         << (binding->genlock_enable ? 1 : 0) << L" " << binding->genlock_frames << L"\r\n";
     ss << L"NODAL "           << binding->nodal_forward_m << L" " << binding->nodal_right_m
@@ -455,16 +461,19 @@ static std::wstring tracking_zero_command(command_context& ctx)
     if (!binding)
         return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
 
-    auto latest = tracker_registry::instance().get_latest_data(binding->receiver, binding->camera_id);
-    if (!latest)
+    auto raw = tracker_registry::instance().get_latest_data(binding->receiver, binding->camera_id);
+    if (!raw)
         return L"404 TRACKING ERROR No data received yet for camera "
                + std::to_wstring(binding->camera_id) + L"\r\n";
+    // The reference is taken in the frame the offsets are applied in, i.e. AFTER `INVERT` --
+    // zeroing an inverted pan against the un-inverted reading would double it instead.
+    const auto latest = tracker_registry::remap(*binding, *raw);
 
     // new_offset = -(decoded_angle)  so that next packet at the same position → 0
     // decoded = data.pan * pan_scale + pan_offset  →  set pan_offset = -(data.pan * pan_scale)
-    double new_pan_offset  = -(latest->pan  * binding->pan_scale);
-    double new_tilt_offset = -(latest->tilt * binding->tilt_scale);
-    double new_roll_offset = -(latest->roll);
+    double new_pan_offset  = -(latest.pan  * binding->pan_scale);
+    double new_tilt_offset = -(latest.tilt * binding->tilt_scale);
+    double new_roll_offset = -(latest.roll);
 
     tracker_registry::instance().update_offset(ch, layer, new_pan_offset, new_tilt_offset, new_roll_offset);
     return L"202 TRACKING OK\r\n";
@@ -996,6 +1005,115 @@ static std::wstring tracking_target_map_command(command_context& ctx)
 }
 
 // ---------------------------------------------------------------------------
+// TRACKING AXES / INVERT — a tracker whose frame differs from its protocol's
+//
+// Each receiver converts its protocol's frame into camera_data's (x right, y up, z towards the
+// subject; see camera_data.h), but that is only as right as the vendor's reading of the protocol,
+// and every tracking host offers a way round a vendor that reads it differently: Pixotope maps the
+// incoming axis directions, Modulo Kinetic picks an axis order and inverts X, Y, Z, pan, tilt and
+// roll one by one, Hippotizer remaps the up axis. These two are that, applied to every sample
+// before anything else. Live -- no rebind needed. With no argument, each queries.
+//
+// Syntax:
+//   TRACKING <ch>-<layer> AXES <x> <y> <z>        each one of X -X Y -Y Z -Z, every axis once
+//   TRACKING <ch>-<layer> INVERT NONE | [PAN] [TILT] [ROLL]
+// ---------------------------------------------------------------------------
+static std::wstring axes_text(const tracker_binding& b)
+{
+    static const wchar_t* names[3] = {L"X", L"Y", L"Z"};
+    std::wstring out;
+    for (int i = 0; i < 3; ++i) {
+        if (i)
+            out += L" ";
+        out += (b.axis_sign[i] < 0 ? L"-" : L"");
+        out += names[b.axis_src[i]];
+    }
+    return out;
+}
+
+static std::wstring invert_text(const tracker_binding& b)
+{
+    std::wstring out;
+    if (b.invert_pan)
+        out += L" PAN";
+    if (b.invert_tilt)
+        out += L" TILT";
+    if (b.invert_roll)
+        out += L" ROLL";
+    return out.empty() ? std::wstring(L"NONE") : out.substr(1);
+}
+
+static std::wstring tracking_axes_command(command_context& ctx)
+{
+    auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+    if (!binding)
+        return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+    if (ctx.parameters.empty())
+        return L"201 TRACKING OK\r\nAXES " + axes_text(*binding) + L"\r\n";
+
+    if (ctx.parameters.size() != 3)
+        return L"400 TRACKING ERROR Expected: AXES <x> <y> <z>, each one of X -X Y -Y Z -Z\r\n";
+
+    int  src[3], sign[3];
+    bool used[3] = {false, false, false};
+    for (int i = 0; i < 3; ++i) {
+        auto tok = ctx.parameters.at(i);
+        int  s   = 1;
+        if (!tok.empty() && (tok[0] == L'-' || tok[0] == L'+')) {
+            s   = tok[0] == L'-' ? -1 : 1;
+            tok = tok.substr(1);
+        }
+        int a = -1;
+        if (boost::iequals(tok, L"X"))
+            a = 0;
+        else if (boost::iequals(tok, L"Y"))
+            a = 1;
+        else if (boost::iequals(tok, L"Z"))
+            a = 2;
+        if (a < 0)
+            return L"400 TRACKING ERROR AXES takes X, -X, Y, -Y, Z or -Z, not " + ctx.parameters.at(i) +
+                   L"\r\n";
+        if (used[a])
+            return L"400 TRACKING ERROR AXES must name each of X, Y and Z once -- " +
+                   ctx.parameters.at(i) + L" is used twice\r\n";
+        used[a] = true;
+        src[i]  = a;
+        sign[i] = s;
+    }
+    tracker_registry::instance().update_axes(ctx.channel_index, ctx.layer_index(), src, sign);
+    return L"202 TRACKING OK\r\n";
+}
+
+static std::wstring tracking_invert_command(command_context& ctx)
+{
+    auto binding = tracker_registry::instance().get_binding(ctx.channel_index, ctx.layer_index());
+    if (!binding)
+        return L"404 TRACKING ERROR No binding on this channel/layer\r\n";
+    if (ctx.parameters.empty())
+        return L"201 TRACKING OK\r\nINVERT " + invert_text(*binding) + L"\r\n";
+
+    // NONE is how an inversion is CLEARED, and it is named rather than being the leftover branch
+    // -- the house defect this file has already been fixed for once (GENLOCK).
+    if (ctx.parameters.size() == 1 && boost::iequals(ctx.parameters.at(0), L"NONE")) {
+        tracker_registry::instance().update_invert(ctx.channel_index, ctx.layer_index(), false, false, false);
+        return L"202 TRACKING OK\r\n";
+    }
+    bool pan = false, tilt = false, roll = false;
+    for (const auto& p : ctx.parameters) {
+        if (boost::iequals(p, L"PAN"))
+            pan = true;
+        else if (boost::iequals(p, L"TILT"))
+            tilt = true;
+        else if (boost::iequals(p, L"ROLL"))
+            roll = true;
+        else
+            return L"400 TRACKING ERROR INVERT takes NONE, or any of PAN, TILT and ROLL, not " + p + L"\r\n";
+    }
+    tracker_registry::instance().update_invert(ctx.channel_index, ctx.layer_index(), pan, tilt, roll);
+    return L"202 TRACKING OK\r\n";
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -1019,6 +1137,8 @@ void register_amcp_commands(
     repo->register_channel_command(L"Tracking Commands", L"TRACKING LENS",           tracking_lens_command,           0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING TARGET_CAMERA",   tracking_target_camera_command,  0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING TARGET_MAP",      tracking_target_map_command,     0);
+    repo->register_channel_command(L"Tracking Commands", L"TRACKING AXES",            tracking_axes_command,           0);
+    repo->register_channel_command(L"Tracking Commands", L"TRACKING INVERT",          tracking_invert_command,         0);
     repo->register_channel_command(L"Tracking Commands", L"TRACKING INFO",        tracking_info_command,        0);
 
     // Global command (no channel required)

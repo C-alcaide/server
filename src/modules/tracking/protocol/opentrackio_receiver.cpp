@@ -163,15 +163,14 @@ struct opentrackio_receiver::impl
         if (auto transforms = root.get_child_optional("transforms")) {
             for (const auto& [_, xf] : *transforms) {
                 if (auto tr = xf.get_child_optional("translation")) {
-                    // Axis map: OpenTrackIO right-handed metric world → camera_data
-                    // (x = right, y = up, z = toward subject). Adjust here if a
-                    // source uses a different handedness/orientation.
-                    const double tx = tr->get("x", 0.0);
-                    const double ty = tr->get("y", 0.0);
-                    const double tz = tr->get("z", 0.0);
-                    d.x = tx * M_TO_MM;
-                    d.y = ty * M_TO_MM;
-                    d.z = tz * M_TO_MM;
+                    // OpenTrackIO's world is FreeD's -- right-handed, Z up, Y the camera's
+                    // forward at zero pan -- so it goes through the same mapping. This comment
+                    // used to promise that mapping while the three lines below it copied X/Y/Z
+                    // straight across; see camera_data.h.
+                    set_position_z_up(d,
+                                      tr->get("x", 0.0) * M_TO_MM,
+                                      tr->get("y", 0.0) * M_TO_MM,
+                                      tr->get("z", 0.0) * M_TO_MM);
                 }
                 if (auto rot = xf.get_child_optional("rotation")) {
                     d.pan  = rot->get("pan", 0.0) * DEG2RAD_OTRK;

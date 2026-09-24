@@ -17,14 +17,15 @@ The `tracking` module enables real-time camera tracking data to drive CasparCG l
 5. [AMCP Command Reference](#amcp-command-reference)
 6. [Transform Modes](#transform-modes)
 7. [Zoom Calibration](#zoom-calibration)
-8. [Axis Offsets and Scaling](#axis-offsets-and-scaling)
-9. [Lens & Timing Realism](#lens--timing-realism)
-10. [Lens Calibration File Format](#lens-calibration-file-format)
-11. [OpenTrackIO (SMPTE RIS OSVP)](#opentrackio-smpte-ris-osvp)
-12. [Configuration File](#configuration-file)
-13. [Building with VRPN](#building-with-vrpn)
-14. [Worked Examples](#worked-examples)
-15. [Architecture Reference](#architecture-reference)
+8. [Coordinate Frames](#coordinate-frames)
+9. [Axis Offsets and Scaling](#axis-offsets-and-scaling)
+10. [Lens & Timing Realism](#lens--timing-realism)
+11. [Lens Calibration File Format](#lens-calibration-file-format)
+12. [OpenTrackIO (SMPTE RIS OSVP)](#opentrackio-smpte-ris-osvp)
+13. [Configuration File](#configuration-file)
+14. [Building with VRPN](#building-with-vrpn)
+15. [Worked Examples](#worked-examples)
+16. [Architecture Reference](#architecture-reference)
 
 ---
 
@@ -79,7 +80,7 @@ Tracking data is injected directly into the stage transform pipeline on the rece
 | `FREED_PLUS` | 6301 | Stype FreeD+ extended format: identical to FreeD D1 for bytes 0-26, then adds a 12-byte extension with 32-bit high-precision angles (1/8 388 608 degree per unit). Falls back to standard D1 automatically when a 29-byte packet arrives. |
 | `OSC` | 9000 | OSC 1.0 UDP. No external library required. Uses the address schema `/camera/{id}/pan`, `/tilt`, `/roll`, `/zoom`, `/focus`, `/x`, `/y`, `/z`. Angles in degrees; position in mm; zoom/focus in raw 0–65535 or normalised 0.0–1.0. |
 | `VRPN` | — | VRPN tracker client (`vrpn_Tracker_Remote`). Quaternion pose converted to yaw/pitch/roll. Analogue channel 0 used as zoom. Optional — requires `-DBUILD_TRACKING_VRPN=ON` at CMake configure time. |
-| `PSN` | 56565 | PosiStageNet v2.0 UDP multicast. Open protocol for live 3D stage position data (BlackTrax, MA Lighting grandMA, Disguise, etc.). Joins multicast group `236.10.10.10` by default. Carries position and orientation per tracker but no zoom/focus — those fields remain at 0. Position is converted from metres to mm; orientation from degrees to radians. |
+| `PSN` | 56565 | PosiStageNet v2.0 UDP multicast. Open protocol for live 3D stage position data (BlackTrax, MA Lighting grandMA, Disguise, etc.). Joins multicast group `236.10.10.10` by default. Carries position and orientation per tracker but no zoom/focus — those fields remain at 0. Position is converted from metres to mm. Orientation arrives as an axis-angle vector in radians (the spec's definition) and is turned into the direction the tracker faces — see [Coordinate Frames](#coordinate-frames). |
 | `OPENTRACKIO` | 55555 | SMPTE RIS OSVP **OpenTrackIO** — JSON over UDP multicast. The modern successor to FreeD: a single stream carries camera transform, full lens metadata (focus / iris / zoom encoders), and timing in one packet. Joins multicast group `239.135.1.100` by default. See [OpenTrackIO](#opentrackio-smpte-ris-osvp). |
 
 > **Iris channel:** `OSC`, `VRPN`, and `OpenTrackIO` additionally decode an **iris** encoder (0–65535). FreeD/FreeD+ have no standard iris field and leave it at 0. Iris feeds the focus-driven depth-of-field system only when you map it; by default the focus channel drives DOF.
@@ -445,6 +446,38 @@ TRACKING 1-1 TARGET_MAP 0.5 3.0 1.7778
 
 ---
 
+### `TRACKING AXES`
+
+Remaps the position axes of every sample, for a tracker whose frame differs from its protocol's.
+Each argument names the SOURCE axis for internal x, y and z in turn, optionally negated; every
+axis must appear once. With no argument, reports the current map. Live — no rebind needed.
+
+```
+TRACKING 1-1 AXES X Z Y
+TRACKING 1-1 AXES -X Y Z
+TRACKING 1-1 AXES
+```
+
+A repeated axis, a missing one or a word that is not an axis is refused with `400`. See
+[Coordinate Frames](#coordinate-frames).
+
+---
+
+### `TRACKING INVERT`
+
+Negates pan, tilt or roll on every sample. `NONE` clears it; with no argument, reports it.
+
+```
+TRACKING 1-1 INVERT PAN
+TRACKING 1-1 INVERT PAN ROLL
+TRACKING 1-1 INVERT NONE
+```
+
+A word that is not `NONE`, `PAN`, `TILT` or `ROLL` is refused with `400`. `ZERO` takes its
+reference after the inversion, so zeroing an inverted pan leaves it at zero.
+
+---
+
 ### `TRACKING INFO`
 
 Returns the current binding configuration and the most recently received data for the bound camera.
@@ -494,6 +527,8 @@ The realism fields report the live state of the [lens & timing](#lens--timing-re
 | `DELAY` | Latency-compensation delay in milliseconds (`0` = live). |
 | `GENLOCK` | `enabled frames` — frame-native, LTC-anchored latency compensation (overrides `DELAY` when enabled). |
 | `NODAL` | Entrance-pupil offset `forward right up` in metres. |
+| `AXES` | The position remap, e.g. `X Y Z` (the protocol's frame) or `X Z Y`. |
+| `INVERT` | The inverted angles, `NONE` or any of `PAN TILT ROLL`. |
 | `DOF` | `enabled near_raw far_raw max_radius` for focus-driven depth of field. |
 | `LENS` | Active lens-profile name, or `NONE`. |
 | `TARGET_CAMERA` | `enabled x y z yaw pitch roll fov` — the virtual camera for `TARGET` mode (position in metres, angles in degrees). |
@@ -636,6 +671,58 @@ For lenses with non-linear zoom encoders, a per-binding lookup table can be spec
   </zoom_lookup>
 </binding>
 ```
+
+---
+
+## Coordinate Frames
+
+Every receiver converts its protocol's own frame into one internal frame, and every mode converts
+out of it. The internal frame (`camera_data`) is **left-handed**: x right, y up, z towards the
+subject, with a tracker at rest facing +z; pan right, tilt up and roll clockwise seen from behind
+the camera are positive.
+
+| protocol | its native frame | source |
+| :--- | :--- | :--- |
+| `FREED`, `FREED_PLUS` | right-handed; X right, **Y forward** (where a camera at zero pan looks), **Z up**. Pan right, tilt up, roll clockwise-from-behind positive | Vinten free-d Installation Manual V1.4.4, Appendix B |
+| `OPENTRACKIO` | the same axes as FreeD; translation in **metres** | SMPTE RIS OSVP OpenTrackIO |
+| `PSN` | positions in metres; orientation is an **axis-angle vector in radians**. The spec names no axes, so they are taken to be the internal frame's | PosiStageNet protocol v2.03 |
+| `OSC` | CasparVP's own schema, already in the internal frame | this module |
+
+**`MODE PREVIZ` converts into the previz world**, which is right-handed with the camera looking
+along −Z and `R = Ry(yaw)·Rx(pitch)·Rz(roll)`. A positive previz yaw turns the camera *left* and a
+positive previz roll is anticlockwise from behind, so the conversion is
+
+```
+previz position = (x, y, -z)      yaw = -pan      pitch = tilt      roll = -roll
+```
+
+and a FreeD camera at rest looks the way the previz camera looks at rest. `WORLDALIGN` is applied
+after this conversion, so its rotation maps one right-handed frame to another.
+
+**Before 2026-09-24 none of this held.** The FreeD, FreeD+ and OpenTrackIO receivers copied X/Y/Z
+straight across, putting the camera's height on the forward axis; the PSN receiver read the
+rotation vector as Euler angles in degrees; and `MODE PREVIZ` passed the left-handed frame into
+the right-handed one, so a tracked camera that panned right turned left in previz and moved
+backwards when it dollied in. **Re-check any setup tuned against the old behaviour**, especially a
+`WORLDALIGN` survey: solve it again with the current client, whose solver applies the same mirror.
+
+### When a vendor's frame differs: `TRACKING AXES` and `TRACKING INVERT`
+
+The protocol fixes a frame; not every vendor honours it, and every tracking host has a way round
+that (Pixotope's axis directions, Modulo Kinetic's axis order and per-axis inverts, Hippotizer's
+up-axis remap, Smode's axis flips). These two are CasparVP's, applied to every sample before
+anything else:
+
+| goal | command |
+| :--- | :--- |
+| a tracker that sends height as its Y and forward as its Z | `TRACKING 1-1 AXES X Z Y` |
+| a tracker whose X points left | `TRACKING 1-1 AXES -X Y Z` |
+| a tracker whose pan is positive to the left | `TRACKING 1-1 INVERT PAN` |
+| back to the protocol's frame | `TRACKING 1-1 AXES X Y Z` and `TRACKING 1-1 INVERT NONE` |
+
+To find which one a rig needs, move the camera one axis at a time and watch the previz camera:
+right, up and forward must move it right, up and along its view; a pan right, a tilt up and a
+clockwise roll must turn it the same way.
 
 ---
 
@@ -838,7 +925,7 @@ Samples without a usable transform are ignored.
 
 ### Coordinate / axis mapping
 
-OpenTrackIO uses a right-handed metric world. The receiver maps it to CasparVP's internal convention (`x = right`, `y = up`, `z = toward subject`) with the named Euler angles applied directly (`pan`→yaw, `tilt`→pitch, `roll`→roll). The mapping lives in a single clearly-marked block in `opentrackio_receiver.cpp`; if a particular source uses a different handedness or axis order, that block is the one place to adjust.
+OpenTrackIO's world is FreeD's: right-handed, Z up, Y the camera's forward at zero pan, X to camera-right. The receiver maps it into the internal frame with height as `y` and forward as `z`; the angles already share its senses. See [Coordinate Frames](#coordinate-frames) — and `TRACKING AXES` / `INVERT` for a source that reads the spec differently. Until 2026-09-24 this paragraph described that mapping while the receiver copied X/Y/Z straight across.
 
 > **Synergy with the realism features:** because one OpenTrackIO stream already carries lens encoders, a profile loaded with `TRACKING LENS` will track that stream's live zoom/focus, and `TRACKING DOF` can rack-focus from the same `focus` channel — no separate FreeD + lens-data plumbing required.
 
@@ -1078,9 +1165,9 @@ made against the old decode.**
 /camera/{id}/pan    f   degrees
 /camera/{id}/tilt   f   degrees
 /camera/{id}/roll   f   degrees
-/camera/{id}/x      f   millimetres
-/camera/{id}/y      f   millimetres
-/camera/{id}/z      f   millimetres  ← frame is pushed when this arrives
+/camera/{id}/x      f   millimetres, right
+/camera/{id}/y      f   millimetres, up
+/camera/{id}/z      f   millimetres, towards the subject  ← frame is pushed when this arrives
 /camera/{id}/zoom   f   0–65535 (or 0.0–1.0 normalised)
 /camera/{id}/focus  f   0–65535 (or 0.0–1.0 normalised)
 /camera/{id}/iris   f   0–65535 (or 0.0–1.0 normalised)

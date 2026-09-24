@@ -116,6 +116,19 @@ struct tracker_binding
     // Default 0.001 NDC/mm means 1 metre of camera travel ≈ 1.0 NDC of offset.
     double position_scale = 0.001;
 
+    // ------- Axis remap: a tracker whose frame differs from its protocol's -------
+    // Applied to every sample FIRST (tracker_registry::remap, used by inject_transform and ZERO),
+    // so every later step -- scale, offset, nodal, the mode -- sees camera_data's frame. Output
+    // axis i takes source axis axis_src[i] (0 = x, 1 = y, 2 = z) times axis_sign[i]; invert_*
+    // negate an angle. The escape hatch every tracking host offers -- Pixotope's axis directions,
+    // Modulo Kinetic's axis order and per-axis inverts, Hippotizer's up-axis remap -- because the
+    // protocol fixes a frame and vendors do not all honour it. Identity by default.
+    int  axis_src[3]  = {0, 1, 2};
+    int  axis_sign[3] = {1, 1, 1};
+    bool invert_pan   = false;
+    bool invert_tilt  = false;
+    bool invert_roll  = false;
+
     // ------- Entrance-pupil (nodal) offset -------------------------
     // Lens-local offset (metres) of the optical entrance pupil from the tracked
     // origin. Expressed in the camera frame: forward (+along view), right, up.
