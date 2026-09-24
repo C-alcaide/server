@@ -158,6 +158,7 @@ struct prores_producer_impl final : public core::frame_producer
     // When prores_decode_frame_async is used, the frame is pushed to ready_queue_
     // one iteration later (in flush_async_slot), using these stored values.
     ProResFrameInfo          slot_fi_       [NUM_SLOTS];   // frame metadata per slot
+    int64_t                  slot_frame_    [NUM_SLOTS] = {}; // the SOURCE frame each slot holds
     std::vector<int32_t>     slot_audio_    [NUM_SLOTS];   // audio samples per slot
     caspar::timer            slot_dec_timer_[NUM_SLOTS];   // decode timer per slot
 
@@ -206,7 +207,15 @@ struct prores_producer_impl final : public core::frame_producer
     // for both fields (video_field::a and video_field::b).
     core::draw_frame cached_frame_;
 
-    std::queue<core::draw_frame> ready_queue_;
+    /// A decoded frame and the SOURCE frame it is. The playhead is taken from the frame itself --
+    /// see `receive_impl` -- rather than from `frame_count_`, which the read thread used to reset at
+    /// every loop wrap and ping-pong turn while the lap's last frames were still queued here.
+    struct queued_frame
+    {
+        core::draw_frame df;
+        int64_t          frame = -1;
+    };
+    std::queue<queued_frame> ready_queue_;
     std::mutex                   queue_mutex_;
     std::condition_variable      queue_cv_;
 
@@ -238,6 +247,11 @@ struct prores_producer_impl final : public core::frame_producer
     double                fps_display_   = 0.0;  // last computed fps value
     // Seek: written by receive/call threads, consumed by read_loop.
     std::atomic<int64_t>  seek_request_{-1LL}; // -1 = none pending; >=0 = target frame
+    /// Raised by `set_speed` when a clip parked at an end is given a speed; served by the parked
+    /// reader, which alone knows where it stopped. Cleared by any seek the reader takes.
+    std::atomic<bool> resume_request_{false};
+    /// The frame the read thread read last before parking at an end -- where a resume steps from.
+    int64_t               park_last_ = -1;
     std::atomic_bool      seek_done_{false};    // set by read_loop after seek; forces one frame pop in receive_impl even when paused
     std::atomic_bool      eof_paused_{false};   // EOF/boundary reached; thread waits for seek rather than exiting
     int64_t               in_frame_  = 0;       // reverse-bounce boundary (also loop restart point)
@@ -727,7 +741,7 @@ struct prores_producer_impl final : public core::frame_producer
                 this, std::move(img_vec), std::move(audio_arr), pfd,
                 std::move(gpu_tex)));
 
-            { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push(std::move(df)); }
+            { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push({std::move(df), slot_frame_[ps]}); }
             queue_cv_.notify_one();
         };
 
@@ -769,15 +783,28 @@ struct prores_producer_impl final : public core::frame_producer
                 caspar::timer wait_timer;
                 std::unique_lock<std::mutex> lk(queue_mutex_);
                 queue_cv_.wait(lk, [this] {
-                    // When eof_paused_, only wake for a seek or destructor  not for queue space.
-                    // This keeps the thread alive at EOF without busy-looping.
-                    return stop_flag_ || seek_request_ >= 0 ||
+                    // When eof_paused_, only wake for a seek, a resume or destructor  not for
+                    // queue space. This keeps the thread alive at EOF without busy-looping.
+                    return stop_flag_ || seek_request_ >= 0 || (eof_paused_ && resume_request_.load()) ||
                            (!eof_paused_ && (int)ready_queue_.size() < max_queued_);
                 });
+
+                // A RESUME, served here where the last read is known -- see `set_speed`. With
+                // nowhere to go it stays parked: `continue` re-enters the wait above.
+                if (eof_paused_ && !stop_flag_ && seek_request_ < 0 && resume_request_.exchange(false)) {
+                    const double  s        = speed_.load();
+                    const int64_t next     = park_last_ + (s > 0.0 ? 1 : -1);
+                    const int64_t end_excl = out_frame_ >= 0 ? out_frame_ : total_frames_;
+                    if (s == 0.0 || park_last_ < 0 || next < in_frame_ || (end_excl > 0 && next >= end_excl))
+                        continue;
+                    seek_request_ = next;
+                }
 
                 // A seek request takes priority over everything  even a pending stop from EOF.
                 const int64_t seek_target = seek_request_.exchange(-1LL);
                 if (seek_target >= 0) {
+                    resume_request_.store(false);
+                    park_last_ = -1;
                     // Flush any pending async slot: sync the GPU so the GL resource is
                     // released, but don't push the frame (stale frames will be discarded).
                     flush_all_pending(false);
@@ -857,29 +884,26 @@ struct prores_producer_impl final : public core::frame_producer
             // ~~ Loop / EOF ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
             if (pkt.is_eof) {
                 if (pingpong_.load()) {
-                    // Sync/release pending async slot (discard — queue will be flushed).
-                    flush_all_pending(false);
-                    speed_.store(-current_speed);
+                    // THE TAIL IS KEPT, as the loop branch keeps it: push the in-flight slot and
+                    // let the consumer drain the queue before turning. This discarded both -- up to
+                    // max_queued_ of the clip's last frames, never shown, at every turnaround --
+                    // which is the defect c3103f996 fixed for LOOP and not here.
+                    flush_all_pending(true);
+                    drain_ready_queue();
+                    negate_speed();
                     // This branch positions the read head for the new direction itself, so the
                     // standing-start seek above must not fire and re-position it. Without this,
                     // every ping-pong turnaround re-seeked to the OUT end and flushed the packet
                     // queue: MEASURED as a 266-tick stall on one frame, and a reverse loop that
                     // lost its OUT frame entirely.
                     rev_started_ = true;
-                    // video_frame_count is one past the last decoded frame at EOF.
-                    video_frame_count = std::max(0LL, video_frame_count - 1);
-                    // Flush stale frames so receive_impl shows the turnaround immediately,
-                    // and so that last_frame() (when CasparCG-paused) gets seek_done_.
-                    {
-                        std::lock_guard<std::mutex> qlk(queue_mutex_);
-                        while (!ready_queue_.empty()) ready_queue_.pop();
-                    }
-                    queue_cv_.notify_all();
+                    // video_frame_count is one past the last decoded frame at EOF, and that frame
+                    // has now been SHOWN rather than discarded, so the reverse sweep starts one
+                    // below it -- HAP's rule. Re-reading it would show it twice.
+                    video_frame_count = std::max(in_frame_, video_frame_count - 2);
                     demuxer_->seek_to_frame(video_frame_count);
-                    frame_count_    = video_frame_count;
                     audio_accum.clear();
                     audio_frame_idx = 0;
-                    seek_done_      = true;
                     continue;
                 } else if (loop_) {
                     // PUSH the in-flight slot rather than discarding it: at a loop wrap it holds
@@ -900,6 +924,7 @@ struct prores_producer_impl final : public core::frame_producer
                 } else {
                     // Pause at EOF: push the pending async frame so it's the held still.
                     flush_all_pending(true);
+                    park_last_  = video_frame_count - 1;   // EOF: one past the last frame read
                     eof_paused_ = true;  // keep thread alive; a seek will revive it
                     queue_cv_.notify_all();  // wake receive_impl so it doesn't block 40ms
                 }
@@ -1041,6 +1066,7 @@ struct prores_producer_impl final : public core::frame_producer
 
                 // Save frame state for this slot; it will be pushed when flushed.
                 slot_fi_   [slot] = fi;
+                slot_frame_[slot] = video_frame_count;
                 // On the planar path nobody passes `cm` to a kernel -- the shader converts from
                 // the colour space the publish site derives out of THIS struct. So a forced
                 // matrix has to be written into it here, or `color_matrix_override_` would go on
@@ -1080,8 +1106,13 @@ struct prores_producer_impl final : public core::frame_producer
                 graph_->set_value("queue-fill",
                     static_cast<double>(ready_queue_.size() + 1) / (max_queued_ + 1));
 
-                const auto pfd_cs = (fi.color_matrix == 9)                         ? core::color_space::bt2020
-                                  : (fi.color_matrix == 5 || fi.color_matrix == 6) ? core::color_space::bt601
+                // TAGGED FROM `cm`, the matrix the kernel just decoded with -- as the async routes
+                // tag from the override written into `slot_fi_`. This read the file's own matrix, so
+                // with COLOR_MATRIX set the host-copy fallback converted with one matrix and
+                // labelled the frame as another, and the mixer then applied a gamut conversion the
+                // zero-copy routes did not: one command, two pictures, by route.
+                const auto pfd_cs = (cm == 9)             ? core::color_space::bt2020
+                                  : (cm == 5 || cm == 6)  ? core::color_space::bt601
                                   : core::color_space::bt709;
                 const auto pfd_ct = (fi.transfer_func == 16) ? core::color_transfer::pq
                                   : (fi.transfer_func == 18 || fi.transfer_func == 14) ? core::color_transfer::hlg
@@ -1094,7 +1125,7 @@ struct prores_producer_impl final : public core::frame_producer
                 std::memcpy(mf.image_data(0).begin(), h_bgra16_[slot], mf.image_data(0).size());
                 mf.audio_data() = std::move(frame_audio);
                 core::draw_frame df(std::move(mf));
-                { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push(std::move(df)); }
+                { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push({std::move(df), video_frame_count}); }
                 queue_cv_.notify_one();
 
                 // fps/title updated by receive_impl — no duplicate counting here.
@@ -1113,25 +1144,20 @@ struct prores_producer_impl final : public core::frame_producer
             check_bounds:
             if (current_speed >= 0.0 && out_frame_ >= 0 && video_frame_count >= out_frame_) {
                 if (pingpong_.load()) {
-                    flush_all_pending(false);
-                    speed_.store(-current_speed);
+                    flush_all_pending(true);   // the tail is real picture, as at EOF above
+                    drain_ready_queue();
+                    negate_speed();
                     // This branch positions the read head for the new direction itself, so the
                     // standing-start seek above must not fire and re-position it. Without this,
                     // every ping-pong turnaround re-seeked to the OUT end and flushed the packet
                     // queue: MEASURED as a 266-tick stall on one frame, and a reverse loop that
                     // lost its OUT frame entirely.
                     rev_started_ = true;
-                    video_frame_count = out_frame_ - 1;
-                    {
-                        std::lock_guard<std::mutex> qlk(queue_mutex_);
-                        while (!ready_queue_.empty()) ready_queue_.pop();
-                    }
-                    queue_cv_.notify_all();
+                    // OUT is exclusive and out_frame_ - 1 has been shown, so reverse starts below it.
+                    video_frame_count = std::max(in_frame_, out_frame_ - 2);
                     demuxer_->seek_to_frame(video_frame_count);
-                    frame_count_    = video_frame_count;
                     audio_accum.clear();
                     audio_frame_idx = 0;
-                    seek_done_      = true;
                 } else if (loop_) {
                     flush_all_pending(true);   // the tail is real picture; see drain_ready_queue
                     drain_ready_queue();
@@ -1145,30 +1171,27 @@ struct prores_producer_impl final : public core::frame_producer
                     fps_window_timer_.restart();
                 } else {
                     flush_all_pending(true);
+                    park_last_  = current_speed >= 0.0 ? video_frame_count - 1 : video_frame_count + 1;
                     eof_paused_ = true;
                 }
                 queue_cv_.notify_all();
             } else if (current_speed < 0.0 && video_frame_count < in_frame_) {
                 if (pingpong_.load()) {
-                    flush_all_pending(false);
-                    speed_.store(-current_speed);
+                    flush_all_pending(true);
+                    drain_ready_queue();
+                    negate_speed();
                     // This branch positions the read head for the new direction itself, so the
                     // standing-start seek above must not fire and re-position it. Without this,
                     // every ping-pong turnaround re-seeked to the OUT end and flushed the packet
                     // queue: MEASURED as a 266-tick stall on one frame, and a reverse loop that
                     // lost its OUT frame entirely.
                     rev_started_ = true;
-                    video_frame_count = in_frame_;
-                    {
-                        std::lock_guard<std::mutex> qlk(queue_mutex_);
-                        while (!ready_queue_.empty()) ready_queue_.pop();
-                    }
-                    queue_cv_.notify_all();
+                    // in_frame_ has been shown, so forward resumes past it (clamped for a range
+                    // too short to have a next frame).
+                    video_frame_count = (out_frame_ >= 0) ? std::min(in_frame_ + 1, out_frame_ - 1) : in_frame_ + 1;
                     demuxer_->seek_to_frame(video_frame_count);
-                    frame_count_    = video_frame_count;
                     audio_accum.clear();
                     audio_frame_idx = 0;
-                    seek_done_      = true;
                 } else if (loop_) {
                     flush_all_pending(true);   // the tail is real picture; see drain_ready_queue
                     int64_t target = (out_frame_ >= 0) ? out_frame_ - 1 : std::max(0LL, total_frames_ - 1);
@@ -1183,6 +1206,7 @@ struct prores_producer_impl final : public core::frame_producer
                     fps_window_timer_.restart();
                 } else {
                     flush_all_pending(true);
+                    park_last_  = current_speed >= 0.0 ? video_frame_count - 1 : video_frame_count + 1;
                     eof_paused_ = true;
                 }
                 queue_cv_.notify_all();
@@ -1298,14 +1322,23 @@ struct prores_producer_impl final : public core::frame_producer
         // ---- speed ---------------------------------------------------------------------
         {
             auto p = core::make_transport_param(transport_param::speed, idx++);
-            // No declared range: these producers play in reverse and at any rate.
+            // No declared range: these producers play in reverse and at any rate the decoder
+            // keeps up with -- BUT A TICK CONSUMES AT MOST WHAT IS QUEUED. The decoder reads every
+            // frame in order and the ready queue holds two (four for large ProRes), so a request
+            // above that many source frames per channel tick (|speed| x file fps / channel fps)
+            // is written off rather than carried: SPEED 4 on a 25p clip in a 25p channel plays at
+            // 2x. Said here because the number is accepted and reads back; making it true needs
+            // the decoder to skip packets, which it does not. See the audit backlog's
+            // `gpu-speed-capped-by-queue`.
+            p.description += ". Effective only up to the frames the ready queue holds per tick "
+                             "(2, or 4 for large ProRes) -- faster requests play at that cap";
             p.default_value.push_back(1.0);
             p.get = [this, scalar] { return scalar(speed_.load()); };
             p.set = [this, one_number](const core::monitor::vector_t& v) {
                 double n = 0;
                 if (!one_number(v, n))
                     return false;
-                speed_.store(n);
+                set_speed(n);
                 return true;
             };
             out.push_back(std::move(p));
@@ -1352,7 +1385,8 @@ struct prores_producer_impl final : public core::frame_producer
                 p.max = static_cast<double>(total);
             p.description += ". Write a value at or past the end to play to EOF, which is the "
                              "default";
-            p.default_value.push_back(static_cast<int64_t>(0));
+            // The DEFAULT IS THE END; it was declared 0, the empty range.
+            p.default_value.push_back(static_cast<int64_t>(total > 0 ? total : 0));
             p.get = [this, scalar] {
                 // The EFFECTIVE end. The member holds -1 for "play to EOF" and a client that
                 // read a literal -1 back would draw a negative range; `receive_impl` resolves
@@ -1364,6 +1398,9 @@ struct prores_producer_impl final : public core::frame_producer
                 if (!one_number(v, n) || n < 0)
                     return false;
                 const int64_t target = static_cast<int64_t>(n);
+                // An OUT at or before the IN is an empty range, refused as ffmpeg's `out` refuses it.
+                if (target <= in_frame_)
+                    return false;
                 // At or past the material is "no bound", stored as the -1 the rest of this
                 // producer already tests for -- so there is one representation of EOF rather
                 // than two that have to agree.
@@ -1425,22 +1462,20 @@ struct prores_producer_impl final : public core::frame_producer
                 double spd = speed_.load();
                 if (!val.empty())
                     spd = boost::lexical_cast<double>(val);
-                speed_.store(spd);
-                // If the thread is paused at EOF/boundary, resume from the current position
-                // so the caller doesn't need a separate CALL seek after changing speed.
-                if (eof_paused_.load() && spd != 0.0) {
-                    const int64_t resume_at = frame_count_.load();
-                    seek_request_ = resume_at;
-                    queue_cv_.notify_one();
-                }
+                set_speed(spd);
                 result = boost::lexical_cast<std::wstring>(spd);
 
             } else if (boost::iequals(cmd, L"seek") && !val.empty()) {
                 int64_t target;
+                // THE SAME WORDS AS `ffmpeg_producer::call`: IN/START are the IN point, not frame 0;
+                // REL/CURRENT the frame on SCREEN, not the read head; and OUT exists (it was refused).
+                const int64_t end_excl = out_frame_ >= 0 ? out_frame_ : total_frames_;
                 if      (boost::iequals(val, L"rel")   || boost::iequals(val, L"current"))
-                    target = frame_count_.load();
+                    target = display_frame_.load();
                 else if (boost::iequals(val, L"start") || boost::iequals(val, L"in"))
-                    target = 0;
+                    target = in_frame_;
+                else if (boost::iequals(val, L"out"))
+                    target = std::max<int64_t>(0, end_excl - 1);
                 else if (boost::iequals(val, L"end"))
                     target = std::max(0LL, total_frames_ - 1);
                 else
@@ -1469,6 +1504,40 @@ struct prores_producer_impl final : public core::frame_producer
         std::promise<std::wstring> p;
         p.set_value(result);
         return p.get_future();
+    }
+
+    //: THE TURNAROUND NEGATES THE SPEED AS IT IS NOW, atomically. It stored the negation of the
+    //: speed this thread loaded at the top of the iteration, so a `CALL SPEED` or parameter write
+    //: landing in between was overwritten with the old value's negation: SPEED 2 at the very end
+    //: of a ping-pong clip turned round at -1, and the parameter then read back -1.
+    void negate_speed()
+    {
+        double s = speed_.load();
+        while (!speed_.compare_exchange_weak(s, -s)) {
+        }
+    }
+
+    //: THE ONE SPEED WRITE, for `CALL SPEED` and the `speed` parameter alike. The parameter used to
+    //: store the number and nothing else, while CALL also resumed a clip parked at its end -- so
+    //: `PUT .../params/speed` on a clip that had played out was stored and moved nothing.
+    //:
+    //: A RESUME IS ONLY ASKED FOR HERE; the parked reader decides where it goes (`resume_request_`).
+    //: Computing the target in this thread raced the reader twice over, both measured on the
+    //: `producer-params` arm: a `position` write followed at once by this one was overwritten
+    //: (fixed with a compare-exchange), and then a seek the reader had ALREADY TAKEN but not yet
+    //: shown left `eof_paused_` true and `seek_request_` empty, so a resume from the stale frame
+    //: on screen was queued behind it and played from there -- 37 frames past the old OUT point
+    //: on NotchLC and HAP. The reader knows the frame it last read; nothing else does.
+    void set_speed(double spd)
+    {
+        speed_.store(spd);
+        if (eof_paused_.load() && spd != 0.0) {
+            {
+                std::lock_guard<std::mutex> lk(queue_mutex_);   // no lost wakeup against the park's wait
+                resume_request_.store(true);
+            }
+            queue_cv_.notify_all();
+        }
     }
 
     core::draw_frame receive_impl(const core::video_field field, int) override {
@@ -1605,7 +1674,8 @@ struct prores_producer_impl final : public core::frame_producer
             ++actually_consumed;
         }
 
-        cached_frame_ = std::move(ready_queue_.front());
+        const int64_t shown = ready_queue_.front().frame;
+        cached_frame_       = std::move(ready_queue_.front().df);
         ready_queue_.pop();
         lk.unlock();
         queue_cv_.notify_all();
@@ -1621,7 +1691,14 @@ struct prores_producer_impl final : public core::frame_producer
         // and playback continues at the correct timeline rate.
         speed_accum_ -= static_cast<double>(accum_advance);
 
-        auto fc = (frame_count_ += (spd >= 0.0) ? actually_consumed : -actually_consumed);
+        // THE FRAME SAYS WHICH IT IS -- see `queued_frame`.
+        int64_t fc = 0;
+        if (shown >= 0) {
+            fc = shown + ((spd >= 0.0) ? 1 : -1);
+            frame_count_.store(fc);
+        } else {
+            fc = (frame_count_ += (spd >= 0.0) ? actually_consumed : -actually_consumed);
+        }
 
         // The frame now in `cached_frame_` is the LAST one this tick consumed, and `fc` names
         // the NEXT one to consume -- so the visible frame is one behind, or one ahead playing
@@ -1684,12 +1761,16 @@ struct prores_producer_impl final : public core::frame_producer
             std::unique_lock<std::mutex> lk(queue_mutex_);
             if (!ready_queue_.empty()) {
                 seek_done_.store(false, std::memory_order_relaxed);
-                cached_frame_ = std::move(ready_queue_.front());
+                const int64_t shown = ready_queue_.front().frame;
+                cached_frame_       = std::move(ready_queue_.front().df);
                 ready_queue_.pop();
                 // No advance happens on this path, so the frame just made visible is the one
-                // `frame_count_` already names -- not one behind it as in `receive_impl`.
-                display_frame_.store(frame_count_.load(std::memory_order_relaxed),
-                                     std::memory_order_relaxed);
+                // It shows the frame it says it is, and the next to consume is PAST it -- this path
+                // used to leave `frame_count_` naming the frame just shown, so on resume the report
+                // was one behind the picture.
+                const int64_t here = shown >= 0 ? shown : frame_count_.load(std::memory_order_relaxed);
+                display_frame_.store(here, std::memory_order_relaxed);
+                frame_count_.store(here + ((speed_.load() >= 0.0) ? 1 : -1), std::memory_order_relaxed);
                 lk.unlock();
                 queue_cv_.notify_all();
 
@@ -1842,8 +1923,10 @@ create_prores_producer(const core::frame_producer_dependencies& deps, const std:
             else if (boost::iequals(val, L"2020")  || boost::iequals(val, L"BT2020")) color_matrix_override = 9;
             else if (boost::iequals(val, L"601")   || boost::iequals(val, L"BT601"))  color_matrix_override = 6;
             else if (boost::iequals(val, L"AUTO"))                                     color_matrix_override = -1;
-            else CASPAR_LOG(warning) << L"[prores_producer] Unknown COLOR_MATRIX value '" << val
-                                     << L"'  valid: 709, 2020, 601, AUTO. Using file metadata.";
+            // REFUSED: this logged, fell back to AUTO and PLAYed, answering 202 -- the house defect.
+            else
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info(u8(
+                    L"[prores_producer] COLOR_MATRIX takes 709, 2020, 601 or AUTO, not '" + val + L"'")));
         }
         else if (path.empty() && !p.empty() && p[0] != L'-')               path = p;
     }

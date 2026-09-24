@@ -53,7 +53,8 @@ namespace caspar { namespace cuda_notchlc {
 //    1 = BT.709
 //    6 = BT.601
 //    9 = BT.2020
-//  100 = LINEAR  (no gamma, just 12→16 bit shift)
+//  100 = LINEAR  (the BT.709 matrix -- AUTO's -- then the inverse BT.709 OETF to linear light;
+//                 the producer tags the frame `color_transfer::linear` so the mixer knows)
 static constexpr int NOTCHLC_CM_AUTO    = -1;
 static constexpr int NOTCHLC_CM_709     =  1;
 static constexpr int NOTCHLC_CM_601     =  6;
@@ -134,12 +135,16 @@ __global__ void k_notch_ycocg_to_bgra16(
     // BT.709:                  crv=1.5748, cgu=0.187324, cgv=0.468124, cbu=1.8556
     // BT.2020 (NCL):           crv=1.4746, cgu=0.164553, cgv=0.571353, cbu=1.8814
     float crv, cgu, cgv, cbu;
-    if (color_matrix == NOTCHLC_CM_709) {
+    // LINEAR selects the TRANSFER, not the matrix, so it takes the matrix AUTO takes (709; the
+    // producer maps AUTO to 709 before it reaches here). It fell into the 601 `else` below, so
+    // choosing LINEAR changed the hue as well as the curve.
+    if (color_matrix == NOTCHLC_CM_709 || color_matrix == NOTCHLC_CM_LINEAR) {
         crv = 1.5748f; cgu = 0.187324f; cgv = 0.468124f; cbu = 1.8556f;
     } else if (color_matrix == NOTCHLC_CM_2020) {
         crv = 1.4746f; cgu = 0.164553f; cgv = 0.571353f; cbu = 1.8814f;
     } else {
-        // BT.601, AUTO, and any unrecognised value → BT.601 (matches FFmpeg default)
+        // BT.601 (the producer never passes AUTO or an unknown value: it maps AUTO to 709 and
+        // refuses anything it does not recognise)
         crv = 1.402f; cgu = 0.344136f; cgv = 0.714136f; cbu = 1.772f;
     }
 

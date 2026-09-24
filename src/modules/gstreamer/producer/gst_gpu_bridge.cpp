@@ -347,6 +347,16 @@ bool gst_gpu_bridge::handles(GstSample* sample)
     return mem != nullptr && gst_is_d3d11_memory(mem);
 }
 
+/// The captions the buffer carries, attached as the HOST route attaches them (`make_frame`). This
+/// route built its frames with no metadata at all, so `captions-in` counted captions that never
+/// reached a consumer -- the GPU route was the one that lost them.
+static core::const_frame with_captions(core::const_frame frame, GstBuffer* buffer)
+{
+    if (auto captions = captions_of(buffer))
+        return frame.with_metadata(std::move(captions));
+    return frame;
+}
+
 core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
                                           core::frame_factory&        frame_factory,
                                           GstSample*                  sample,
@@ -637,8 +647,8 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
         if (!audio_samples.empty())
             baudio = array<const std::int32_t>(audio_samples);
 
-        return core::draw_frame(
-            core::const_frame(tag, std::move(bimage), std::move(baudio), bdesc, std::move(out)));
+        return core::draw_frame(with_captions(
+            core::const_frame(tag, std::move(bimage), std::move(baudio), bdesc, std::move(out)), buffer));
     }
 
     ID3D11Device3* dev3 = nullptr;
@@ -810,8 +820,8 @@ core::draw_frame gst_gpu_bridge::to_frame(void*                       tag,
     textures.push_back(std::move(y_out));
     textures.push_back(std::move(uv_out));
 
-    return core::draw_frame(
-        core::const_frame(tag, std::move(image_data), std::move(audio_data), desc, std::move(textures)));
+    return core::draw_frame(with_captions(
+        core::const_frame(tag, std::move(image_data), std::move(audio_data), desc, std::move(textures)), buffer));
 }
 
 }} // namespace caspar::gstreamer

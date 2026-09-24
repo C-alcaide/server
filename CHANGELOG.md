@@ -1,6 +1,55 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: twenty-four media-module defects from the audit backlog
+
+The GPU-direct producers (`hap`, `cuda_prores`, `cuda_notchlc`), GStreamer both ways, Spout, and
+three FFmpeg ones. Measured by `producer-params` (59/60 on both mixers, twice each; the one red is
+the OFX arm, which needs `--ofx-plugins`), `refusals` (43/43 both), `gstreamer` (every case except
+the documented fallback-teardown cascade, and those pass alone) and `spout-pixels`/`spout-signalling`
+(3/3 and 4/4 both). **Mutation-verified**: the three producers reverted to the previous commit turn
+11 of the 12 new `producer-params` arms and both new `refusals` arms red.
+
+* **The reported position ran ahead of the picture after a loop wrap** on HAP and NotchLC -- the IO
+  thread reset the counter while a lap was still queued -- and `last_frame` showed a frame without
+  advancing it, so after a paused seek the report was one behind. Every queued frame now carries
+  its source index and the playhead is read off the frame on screen.
+* **`CALL SEEK IN` sought frame 0** whatever the IN point, `REL` counted from the read head, and
+  `OUT` was refused. They mean what `ffmpeg_producer`'s do now.
+* **The `speed` parameter stored the number and resumed nothing**: a clip parked at its end stayed
+  there. It and `CALL SPEED` are one write, and the parked READER computes where to resume from the
+  frame it last read -- two setter-side versions raced a `position` write (measured: NotchLC and HAP
+  landing 37 frames past the old OUT point).
+* **`out` declared 0 as its default** (the empty range) and accepted `out <= in`; refused now.
+* **ProRes ping-pong turnarounds discarded** up to two decoded, never-shown frames (the defect
+  c3103f996 fixed for LOOP only); the host-copy fallback tagged the file's matrix while decoding with
+  `COLOR_MATRIX`'s. **NotchLC** bumped the seek epoch after clearing its queues (HAP's recorded cause
+  of a stale post-seek frame) and had no epoch on its ready queue; `COLOR_MATRIX LINEAR` switched to
+  BT.601 coefficients and went out tagged SDR. A turnaround could overwrite a concurrent speed write.
+* **`COLOR_MATRIX <typo>` on both CUDA producers logged, used AUTO and answered 202**; refused.
+* **`SPEED` above two source frames per tick plays at that cap** (four for large ProRes). Not fixed
+  -- it needs the decoder to skip packets -- and now said in each `speed` descriptor.
+* **GStreamer consumer**: a 16-bit channel was declared BGRA (garbage on OpenGL, every frame refused
+  on Vulkan). It is **RGBA64_LE on Vulkan and BGRA64_LE on OpenGL**, measured by the new
+  `consumer-16` case byte-identical on both; declared RGBA64 on OpenGL it was 193 LSB off. appsrc
+  was not leaky, so "drop and count" queued without bound and counted nothing; it drops the oldest
+  now and `dropped` includes appsrc's own.
+* **GStreamer producer**: the GPU route dropped captions; the frame number was a tick count, so
+  AUTO and `eof` were wrong after PAUSE or SEEK; `CALL SEEK/PAUSE` answered 202 `false` on a
+  refusal and `SEEK -1` wrapped to frame 4294967295.
+* **Spout producer** busy-looped at about two cores, republished the same picture, and recycled a
+  4-texture ring under up to 5 queued frames -- see `spout.md` §5 for the measurement. The Spout
+  consumer's CPU fallback after a GPU frame sent stale pixels.
+* **FFmpeg**: the network probe options were overwritten by the file defaults (and so was an
+  operator's `probesize`); a demuxer access violation became an endless 50 ms retry under `/EHa`;
+  `CALL VF`/`AF` raced the decode thread's copy of the filter string; the CUDA-Vulkan import cache
+  could hit a recycled handle value.
+
+Argued from code, not measured: the GStreamer producer's CALL and captions changes, the Spout
+consumer fallback, the three FFmpeg items, NotchLC `LINEAR`, and the ProRes host-copy tag. The
+FFmpeg FILE consumer was probed at 16 bits on both mixers because the GStreamer finding implied it
+might exchange red and blue on OpenGL: it does not (mean 0.70 LSB both, FFV1).
+
 ### BEHAVIOUR: twenty-two control-API defects from the audit backlog
 
 The transport, values, events, batches, timelines, graphs and the OpenAPI document, each driven by

@@ -79,7 +79,7 @@ PLAY <channel>-<layer> CUDA_PRORES <filename>
 | `SEEK` (or `IN` or `START`) | `0` | First frame to play (0-based frame index). Seek is applied before the read thread starts — the first delivered frame is exactly this frame. |
 | `OUT` | end of file | Exclusive stop frame. Playback stops (or loops) just *before* this frame. |
 | `LENGTH` | rest of file | Frame count from the `SEEK`/`IN` position. Converted to `OUT = IN + LENGTH` internally. Ignored if `OUT` is also given. |
-| `COLOR_MATRIX` | `AUTO` | Override the colour matrix embedded in the ProRes file. `709` = BT.709, `601` = BT.601, `2020` = BT.2020, `AUTO` = use per-frame metadata (default). Useful when the file has wrong or absent matrix metadata. |
+| `COLOR_MATRIX` | `AUTO` | Override the colour matrix embedded in the ProRes file. `709` = BT.709, `601` = BT.601, `2020` = BT.2020, `AUTO` = use per-frame metadata (default). Useful when the file has wrong or absent matrix metadata. **Any other value is refused** (since 2026-09-25); it used to log a warning, fall back to `AUTO` and answer 202. |
 | `DEVICE` | `0` | CUDA GPU index (0-based). Selects which GPU decodes. |
 | `FILE` | — | Explicit keyword form; equivalent to placing the filename positionally. |
 
@@ -95,9 +95,14 @@ CALL <channel>-<layer> loop [0|1]
 | Target | Meaning |
 |---|---|
 | `<integer>` | Absolute frame number (0-based) |
-| `rel` or `current` | Current frame position (useful with an offset) |
-| `start` or `in` | Frame 0 (rewind to beginning) |
+| `rel` or `current` | The frame ON SCREEN (useful with an offset) -- not the read head, which runs ahead of it |
+| `start` or `in` | The IN point (frame 0 when none is set) |
+| `out` | The last frame before the OUT point |
 | `end` | Last frame of the file |
+
+The same words mean the same frames on `ffmpeg`, `hap`, `cuda_prores` and `cuda_notchlc`. Until
+2026-09-25 `start`/`in` sought frame 0 whatever the IN point, `rel` counted from the read head,
+and `out` was refused.
 
 **Optional offset** (third parameter): a signed integer added to the resolved target.
 

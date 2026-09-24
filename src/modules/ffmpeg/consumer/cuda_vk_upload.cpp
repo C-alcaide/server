@@ -32,6 +32,10 @@
 
 #include "../../cuda_gl_interop_lock.h"
 
+#ifdef ENABLE_VULKAN
+#include <accelerator/vulkan/util/texture_wrapper.h>
+#endif
+
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -59,6 +63,13 @@ struct cuda_vk_uploader::impl
         cudaArray_t                 array  = nullptr;
         int                         width  = 0;
         int                         height = 0;
+        /// The ALLOCATION this import is of, when it is known. A handle value alone is not an
+        /// identity: Windows reuses a freed handle's value readily, so after the attachment pool
+        /// replaced a texture at the same raster, the new one could arrive with the old one's
+        /// handle and hit an import of memory that is no longer the picture. Expired means the
+        /// allocation is gone and the slot is stale, whatever its handle says.
+        std::weak_ptr<void>         owner;
+        bool                        has_owner = false;
     };
 
     std::array<slot, kSlots> slots_{};
@@ -134,7 +145,8 @@ struct cuda_vk_uploader::impl
         }
     };
 
-    slot* find_or_import(void* handle, unsigned long long size, int width, int height)
+    slot* find_or_import(void* handle, unsigned long long size, int width, int height,
+                         const std::shared_ptr<void>& owner)
     {
         // SERIALISED for the whole routine, not per call. This evicts (destroy) and then
         // imports, and `cuda_gl_interop_lock.h` covers both halves of that pair -- an
@@ -147,8 +159,20 @@ struct cuda_vk_uploader::impl
         // and is rebuilt on a raster change, so imports and evictions recur for the life of
         // the consumer -- which is what makes the lock load-bearing rather than belt-and-braces.
         std::lock_guard<std::mutex> interop_lk(caspar::cuda_gl_interop_mutex());
+        // A slot whose allocation has gone is stale whatever its handle says: release it
+        // before looking, so a recycled handle value cannot match it.
         for (auto& s : slots_) {
-            if (s.array && s.handle == handle && s.width == width && s.height == height)
+            if (s.array && s.has_owner && s.owner.expired()) {
+                if (s.mipmap)
+                    cudaFreeMipmappedArray(s.mipmap);
+                if (s.ext)
+                    cudaDestroyExternalMemory(s.ext);
+                s = slot{};
+            }
+        }
+        for (auto& s : slots_) {
+            if (s.array && s.handle == handle && s.width == width && s.height == height &&
+                (!owner || !s.has_owner || s.owner.lock() == owner))
                 return &s;
         }
 
@@ -231,9 +255,11 @@ struct cuda_vk_uploader::impl
             return nullptr;
         }
 
-        target->handle = handle;
-        target->width  = width;
-        target->height = height;
+        target->handle    = handle;
+        target->width     = width;
+        target->height    = height;
+        target->owner     = owner;
+        target->has_owner = static_cast<bool>(owner);
         return target;
     }
 };
@@ -283,7 +309,15 @@ bool cuda_vk_uploader::copy_to_device(const std::shared_ptr<core::texture>& tex,
 
     impl::scoped_context ctx(impl_->context_);
 
-    auto* s = impl_->find_or_import(handle, size, w, h);
+    // The allocation behind the per-frame wrapper -- the pooled `vulkan::texture` -- is the
+    // stable identity the cache is keyed on alongside the handle. See `slot::owner`.
+    std::shared_ptr<void> owner;
+#ifdef ENABLE_VULKAN
+    if (auto* wrapper = dynamic_cast<const accelerator::vulkan::texture_wrapper*>(tex.get()))
+        owner = wrapper->vk_texture();
+#endif
+
+    auto* s = impl_->find_or_import(handle, size, w, h, owner);
     if (!s)
         return false;
 

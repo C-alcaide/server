@@ -39,6 +39,7 @@ Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> gr
         set_thread_name(L"[ffmpeg::av_producer::Input]");
 
         int consecutive_enomem = 0;
+        int consecutive_throws = 0;
 
         while (true) {
             try {
@@ -115,16 +116,25 @@ Input::Input(const std::string& filename, std::shared_ptr<diagnostics::graph> gr
                 }
 
                 consecutive_enomem = 0;
+                consecutive_throws = 0;
 
                 buffer_.push(std::move(packet));
                 graph_->set_value("input", (static_cast<double>(buffer_.size()) / buffer_.capacity()));
             } catch (boost::thread_interrupted&) {
                 break;
             } catch (const std::exception& e) {
+                // `std::exception` ONLY. There was a `catch (...)` here too, and under `/EHa` that
+                // also catches an ACCESS VIOLATION: a demuxer fault became an endless 50 ms retry
+                // with a log line each time, instead of the crash that would have named it. And
+                // capped, as the ENOMEM branch is: a read that throws every time is an EOF, not a
+                // reason to spin for the producer's lifetime.
                 CASPAR_LOG(error) << "[ffmpeg::av_producer::Input] Exception in read loop: " << e.what();
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            } catch (...) {
-                CASPAR_LOG(error) << "[ffmpeg::av_producer::Input] Unknown exception in read loop";
+                if (++consecutive_throws >= 20) {
+                    CASPAR_LOG(error) << "av_input[" << filename_ << "] the read loop threw 20 times running; treating as EOF";
+                    eof_ = true;
+                    buffer_.push(nullptr);
+                    break;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         }
@@ -219,8 +229,12 @@ void Input::internal_reset()
 
     // Increase probe size and analyze duration to handle high-bitrate or obscure codecs
     // Default is 5000000 (5MB). We increase to 50MB and 10 seconds.
-    FF(av_dict_set(&options, "probesize", "50000000", 0));
-    FF(av_dict_set(&options, "analyzeduration", "10000000", 0));
+    //
+    // AS DEFAULTS, NOT OVERRIDES (`AV_DICT_DONT_OVERWRITE`). These replaced whatever was already
+    // in the dictionary, so the network branch above -- 15 s, for a live stream joining mid-GOP --
+    // had no effect at all, and neither did a `probesize` or `analyzeduration` an operator passed.
+    FF(av_dict_set(&options, "probesize", "50000000", AV_DICT_DONT_OVERWRITE));
+    FF(av_dict_set(&options, "analyzeduration", "10000000", AV_DICT_DONT_OVERWRITE));
 
     AVFormatContext* ic             = avformat_alloc_context();
     ic->interrupt_callback.callback = Input::interrupt_cb;

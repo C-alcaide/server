@@ -108,12 +108,14 @@ struct RawPacket {
     NotchLCPacket pkt;
     uint64_t      seq     = 0;    // monotonic sequence number (reset on seek)
     uint32_t      epoch   = 0;    // seek epoch when packet was queued
+    int64_t       frame   = -1;   // the SOURCE frame, stamped at read time -- see `queued_frame`
 };
 
 // Item passed from LZ4 workers  GPU thread after CPU decompression.
 struct Lz4DoneItem {
     uint64_t         seq     = 0;    // sequence number for reorder buffer
     uint32_t         epoch   = 0;    // seek epoch
+    int64_t          frame   = -1;   // the source frame, from `RawPacket::frame`
     int              slot    = -1;
     NotchBlockHeader hdr     = {};
     size_t           actual_uncompressed = 0;
@@ -180,7 +182,21 @@ struct notchlc_producer_impl final : public core::frame_producer
     spl::shared_ptr<diagnostics::graph>       graph_;
     core::draw_frame                          cached_frame_;
 
-    std::queue<core::draw_frame>              ready_queue_;
+    //: A decoded frame, the seek epoch it belongs to, and the SOURCE frame it is.
+    //:
+    //: The epoch travels with the frame so a pre-seek frame can be discarded by the CONSUMER --
+    //: `drop_stale_locked` -- as `hap_producer` does, rather than trusting the clear in the seek
+    //: handler to have caught everything. The source frame travels with it so the playhead is
+    //: read off the frame on screen: it used to be derived from `frame_count_`, which the IO
+    //: thread also RESET at every loop wrap while a lap's frames were still queued, and
+    //: `last_frame` showed a frame without advancing it -- the report one behind after a paused seek.
+    struct queued_frame
+    {
+        core::draw_frame df;
+        uint32_t         epoch = 0;
+        int64_t          frame = -1;
+    };
+    std::queue<queued_frame>                  ready_queue_;
     std::mutex                                queue_mutex_;
     std::condition_variable                   queue_cv_;
 
@@ -239,6 +255,9 @@ struct notchlc_producer_impl final : public core::frame_producer
     double                                    fps_display_    = 0.0;
 
     std::atomic<int64_t>                      seek_request_{-1LL};
+    /// Raised by `set_speed` when a clip parked at an end is given a speed; served by the parked
+    /// reader, which alone knows where it stopped. Cleared by any seek the reader takes.
+    std::atomic<bool> resume_request_{false};
     int64_t                                   in_frame_          = 0;
     int64_t                                   out_frame_         = -1;
     int64_t                                   video_frame_start_ = 0;  // initial read position (may differ from in_frame_ for negative speed)
@@ -621,7 +640,17 @@ struct notchlc_producer_impl final : public core::frame_producer
             //  External seek 
             const int64_t seek_target = seek_request_.exchange(-1LL);
             if (seek_target >= 0) {
+                resume_request_.store(false);
                 eof_paused_.store(false, std::memory_order_release);
+                // THE EPOCH IS BUMPED FIRST, before either queue is cleared -- HAP's order, and the
+                // reason is the same: bumped at the END of this block, `read_loop` could finish a
+                // pre-seek frame between the clear and the bump, still see the OLD epoch, and push
+                // it into the queue just emptied. `last_frame` consumes `seek_done_` on its first
+                // pop, so a paused channel then sat on the pre-seek picture for good. HAP measured
+                // it at 5 of 24 Vulkan captures; this producer had the same window. No new-epoch
+                // frame can exist yet to be wrongly discarded: packets take the new epoch only at
+                // the read below.
+                seek_epoch_.fetch_add(1u, std::memory_order_release);
                 {
                     std::lock_guard<std::mutex> lk(raw_mutex_);
                     while (!raw_queue_.empty()) raw_queue_.pop();
@@ -650,7 +679,7 @@ struct notchlc_producer_impl final : public core::frame_producer
                 pkt_seq        = 0;  // reset seq after seek
                 frame_count_.store(seek_target, std::memory_order_release);
                 fps_frame_acc_ = 0;
-                seek_epoch_.fetch_add(1u, std::memory_order_release);
+                // (seek_epoch_ was bumped at the top of this block -- see there for why.)
                 raw_cv_.notify_all();
                 // read_loop watches seek_epoch_ from INSIDE its wait on lz4_done_cv_, and a
                 // condition variable only re-evaluates its predicate when notified. Nothing
@@ -724,6 +753,7 @@ struct notchlc_producer_impl final : public core::frame_producer
                 const int64_t end_excl = out_frame_ >= 0 ? out_frame_ : total_frames_;
                 if (end_excl > 0) {
                     const int64_t target = std::max(in_frame_, end_excl - 1);
+                    seek_epoch_.fetch_add(1u, std::memory_order_release);   // FIRST, as above
                     {
                         std::lock_guard<std::mutex> lk(queue_mutex_);
                         while (!ready_queue_.empty())
@@ -734,7 +764,6 @@ struct notchlc_producer_impl final : public core::frame_producer
                     pkt_seq        = 0;
                     frame_count_.store(target, std::memory_order_release);
                     fps_frame_acc_ = 0;
-                    seek_epoch_.fetch_add(1u, std::memory_order_release);
                     lz4_done_cv_.notify_all();
                     slot_pool_cv_.notify_all();
                     queue_cv_.notify_all();
@@ -748,7 +777,7 @@ struct notchlc_producer_impl final : public core::frame_producer
 
             if (pkt.is_eof) {
                 if (pingpong_.load()) {
-                    speed_.store(-current_speed);
+                    negate_speed();
                     rev_started_ = true;   // this branch positions the head itself
                     // Turn around on the IO clock, not the DISPLAY clock. frame_count_ is what the
                     // consumer has shown, which lags this thread by the queue depth, so seeking to
@@ -760,16 +789,14 @@ struct notchlc_producer_impl final : public core::frame_producer
                     demuxer_->seek_to_frame(io_frame_count);
                     continue;
                 } else if (loop_) {
+                    // No `frame_count_` store: the lap just read is still queued, and the consumer
+                    // takes the position from each frame as it shows it.
                     demuxer_->seek_to_frame(in_frame_);
                     io_frame_count = in_frame_;
-                    frame_count_.store(in_frame_, std::memory_order_release);
                     fps_frame_acc_ = 0;
                     // NOTE: pkt_seq NOT reset on loop; stays monotonic
                 } else {
-                    eof_paused_.store(true, std::memory_order_release);
-                    queue_cv_.notify_all();
-                    std::unique_lock<std::mutex> lk(raw_mutex_);
-                    raw_cv_.wait(lk, [this] { return stop_flag_ || seek_request_ >= 0; });
+                    park_until_seek(current_speed >= 0.0 ? io_frame_count - 1 : io_frame_count + 1);
                 }
                 continue;
             }
@@ -778,7 +805,7 @@ struct notchlc_producer_impl final : public core::frame_producer
             {
                 const uint32_t cur_epoch = seek_epoch_.load(std::memory_order_relaxed);
                 std::lock_guard<std::mutex> lk(raw_mutex_);
-                raw_queue_.push({std::move(pkt), pkt_seq++, cur_epoch});
+                raw_queue_.push({std::move(pkt), pkt_seq++, cur_epoch, io_frame_count});
             }
             raw_cv_.notify_one();
             
@@ -792,7 +819,7 @@ struct notchlc_producer_impl final : public core::frame_producer
 
             if (current_speed >= 0.0 && out_frame_ >= 0 && io_frame_count >= out_frame_) {
                 if (pingpong_.load()) {
-                    speed_.store(-current_speed);
+                    negate_speed();
                     rev_started_ = true;   // this branch positions the head itself
                     // out_frame_ is EXCLUSIVE and the counter advances AFTER a packet is pushed,
                     // so the frame just pushed was out_frame_ - 1 and the reverse sweep must start
@@ -801,20 +828,18 @@ struct notchlc_producer_impl final : public core::frame_producer
                     io_frame_count = std::max(in_frame_, out_frame_ - 2);
                     demuxer_->seek_to_frame(io_frame_count);
                 } else if (loop_) {
+                    // No `frame_count_` store: the lap just read is still queued, and the consumer
+                    // takes the position from each frame as it shows it.
                     demuxer_->seek_to_frame(in_frame_);
                     io_frame_count = in_frame_;
-                    frame_count_.store(in_frame_, std::memory_order_release);
                     fps_frame_acc_ = 0;
                     // NOTE: pkt_seq NOT reset on loop; stays monotonic
                 } else {
-                    eof_paused_.store(true, std::memory_order_release);
-                    queue_cv_.notify_all();
-                    std::unique_lock<std::mutex> lk(raw_mutex_);
-                    raw_cv_.wait(lk, [this] { return stop_flag_ || seek_request_ >= 0; });
+                    park_until_seek(current_speed >= 0.0 ? io_frame_count - 1 : io_frame_count + 1);
                 }
             } else if (current_speed < 0.0 && io_frame_count < in_frame_) {
                 if (pingpong_.load()) {
-                    speed_.store(-current_speed);
+                    negate_speed();
                     // Mirror of the OUT end: the counter drops below in_frame_ only after
                     // in_frame_ itself has been pushed, so forward resumes at in_frame_ + 1.
                     // Resuming at in_frame_ delivered the IN frame twice every sweep. Clamped for
@@ -826,13 +851,9 @@ struct notchlc_producer_impl final : public core::frame_producer
                     int64_t target = (out_frame_ >= 0) ? out_frame_ - 1 : std::max(0LL, total_frames_ - 1);
                     demuxer_->seek_to_frame(target);
                     io_frame_count = target;
-                    frame_count_.store(target, std::memory_order_release);
                     fps_frame_acc_ = 0;
                 } else {
-                    eof_paused_.store(true, std::memory_order_release);
-                    queue_cv_.notify_all();
-                    std::unique_lock<std::mutex> lk(raw_mutex_);
-                    raw_cv_.wait(lk, [this] { return stop_flag_ || seek_request_ >= 0; });
+                    park_until_seek(current_speed >= 0.0 ? io_frame_count - 1 : io_frame_count + 1);
                 }
             }
         }
@@ -948,6 +969,7 @@ struct notchlc_producer_impl final : public core::frame_producer
                 Lz4DoneItem item;
                 item.seq                 = rp.seq;
                 item.epoch               = rp.epoch;
+                item.frame               = rp.frame;
                 item.slot                = slot;
                 item.hdr                 = hdr;
                 item.actual_uncompressed = actual_uncompressed;
@@ -1242,6 +1264,10 @@ struct notchlc_producer_impl final : public core::frame_producer
                 const auto pf = use_vulkan_ ? core::pixel_format::bgra : core::pixel_format::rgba;
                 core::pixel_format_desc pfd(pf);
                 pfd.is_straight_alpha = straight_alpha_;
+                // LINEAR output IS linear light; tagged `sdr` (the default) the mixer read it as
+                // display-encoded, too dark and too contrasty.
+                if (cm == NOTCHLC_CM_LINEAR)
+                    pfd.color_transfer = core::color_transfer::linear;
                 pfd.planes.push_back(core::pixel_format_desc::plane(
                     frame_info_.width, frame_info_.height, 4, common::bit_depth::bit16));
 
@@ -1270,6 +1296,8 @@ struct notchlc_producer_impl final : public core::frame_producer
             } else {
                 core::pixel_format_desc pfd(core::pixel_format::bgra);
                 pfd.is_straight_alpha = straight_alpha_;
+                if (cm == NOTCHLC_CM_LINEAR)   // as the zero-copy route above
+                    pfd.color_transfer = core::color_transfer::linear;
                 pfd.planes.push_back(core::pixel_format_desc::plane(
                     frame_info_.width, frame_info_.height, 4, common::bit_depth::bit16));
                 auto mf = frame_factory_->create_frame(this, pfd);
@@ -1278,7 +1306,7 @@ struct notchlc_producer_impl final : public core::frame_producer
                 df = core::draw_frame(std::move(mf));
             }
 
-            { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push(std::move(df)); }
+            { std::lock_guard<std::mutex> lk(queue_mutex_); ready_queue_.push({std::move(df), item.epoch, item.frame}); }
             queue_cv_.notify_one();
 
             // WGL handles are decoupled from LZ4 slots. 
@@ -1398,14 +1426,23 @@ struct notchlc_producer_impl final : public core::frame_producer
         // ---- speed ---------------------------------------------------------------------
         {
             auto p = core::make_transport_param(transport_param::speed, idx++);
-            // No declared range: these producers play in reverse and at any rate.
+            // No declared range: these producers play in reverse and at any rate the decoder
+            // keeps up with -- BUT A TICK CONSUMES AT MOST WHAT IS QUEUED. The decoder reads every
+            // frame in order and the ready queue holds two (four for large ProRes), so a request
+            // above that many source frames per channel tick (|speed| x file fps / channel fps)
+            // is written off rather than carried: SPEED 4 on a 25p clip in a 25p channel plays at
+            // 2x. Said here because the number is accepted and reads back; making it true needs
+            // the decoder to skip packets, which it does not. See the audit backlog's
+            // `gpu-speed-capped-by-queue`.
+            p.description += ". Effective only up to the frames the ready queue holds per tick "
+                             "(2, or 4 for large ProRes) -- faster requests play at that cap";
             p.default_value.push_back(1.0);
             p.get = [this, scalar] { return scalar(speed_.load()); };
             p.set = [this, one_number](const core::monitor::vector_t& v) {
                 double n = 0;
                 if (!one_number(v, n))
                     return false;
-                speed_.store(n);
+                set_speed(n);
                 return true;
             };
             out.push_back(std::move(p));
@@ -1452,7 +1489,8 @@ struct notchlc_producer_impl final : public core::frame_producer
                 p.max = static_cast<double>(total);
             p.description += ". Write a value at or past the end to play to EOF, which is the "
                              "default";
-            p.default_value.push_back(static_cast<int64_t>(0));
+            // The DEFAULT IS THE END; it was declared 0, the empty range.
+            p.default_value.push_back(static_cast<int64_t>(total > 0 ? total : 0));
             p.get = [this, scalar] {
                 // The EFFECTIVE end. The member holds -1 for "play to EOF" and a client that
                 // read a literal -1 back would draw a negative range; `receive_impl` resolves
@@ -1464,6 +1502,9 @@ struct notchlc_producer_impl final : public core::frame_producer
                 if (!one_number(v, n) || n < 0)
                     return false;
                 const int64_t target = static_cast<int64_t>(n);
+                // An OUT at or before the IN is an empty range, refused as ffmpeg's `out` refuses it.
+                if (target <= in_frame_)
+                    return false;
                 // At or past the material is "no bound", stored as the -1 the rest of this
                 // producer already tests for -- so there is one representation of EOF rather
                 // than two that have to agree.
@@ -1525,20 +1566,20 @@ struct notchlc_producer_impl final : public core::frame_producer
                 double spd = speed_.load();
                 if (!val.empty())
                     spd = boost::lexical_cast<double>(val);
-                speed_.store(spd);
+                set_speed(spd);
                 result = boost::lexical_cast<std::wstring>(spd);
-                if (eof_paused_.load() && spd != 0.0) {
-                    const int64_t resume_at = frame_count_.load();
-                    seek_request_ = resume_at;
-                    raw_cv_.notify_one();
-                }
 
             } else if (boost::iequals(cmd, L"seek") && !val.empty()) {
                 int64_t target;
+                // THE SAME WORDS AS `ffmpeg_producer::call`: IN/START are the IN point, not frame 0;
+                // REL/CURRENT the frame on SCREEN, not the read head; and OUT exists (it was refused).
+                const int64_t end_excl = out_frame_ >= 0 ? out_frame_ : total_frames_;
                 if      (boost::iequals(val, L"rel")   || boost::iequals(val, L"current"))
-                    target = frame_count_.load();
+                    target = display_frame_.load();
                 else if (boost::iequals(val, L"start") || boost::iequals(val, L"in"))
-                    target = 0;
+                    target = in_frame_;
+                else if (boost::iequals(val, L"out"))
+                    target = std::max<int64_t>(0, end_excl - 1);
                 else if (boost::iequals(val, L"end"))
                     target = std::max(0LL, total_frames_ - 1);
                 else
@@ -1566,6 +1607,68 @@ struct notchlc_producer_impl final : public core::frame_producer
         std::promise<std::wstring> p;
         p.set_value(result);
         return p.get_future();
+    }
+
+    //: THE TURNAROUND NEGATES THE SPEED AS IT IS NOW, atomically. It stored the negation of the
+    //: speed this thread loaded at the top of the iteration, so a `CALL SPEED` or parameter write
+    //: landing in between was overwritten with the old value's negation: SPEED 2 at the very end
+    //: of a ping-pong clip turned round at -1, and the parameter then read back -1.
+    void negate_speed()
+    {
+        double s = speed_.load();
+        while (!speed_.compare_exchange_weak(s, -s)) {
+        }
+    }
+
+    //: PARKED AT AN END until a seek, a stop, or a speed write that asks to resume. `last_read`
+    //: is the frame this reader read last, which is what a resume steps from -- see `set_speed`.
+    //: A resume with nowhere to go (forward at the end, backward at the IN point) stays parked
+    //: rather than falling through: at the OUT bound that would read one frame past OUT.
+    void park_until_seek(int64_t last_read)
+    {
+        eof_paused_.store(true, std::memory_order_release);
+        queue_cv_.notify_all();
+        std::unique_lock<std::mutex> lk(raw_mutex_);
+        while (true) {
+            raw_cv_.wait(lk, [this] { return stop_flag_ || seek_request_ >= 0 || resume_request_.load(); });
+            if (stop_flag_ || seek_request_ >= 0)
+                return;
+            resume_request_.store(false);
+            const double s = speed_.load();
+            if (s == 0.0)
+                continue;
+            const int64_t next     = last_read + (s > 0.0 ? 1 : -1);
+            const int64_t end_excl = out_frame_ >= 0 ? out_frame_ : total_frames_;
+            if (next >= in_frame_ && (end_excl <= 0 || next < end_excl)) {
+                int64_t none = -1;
+                seek_request_.compare_exchange_strong(none, next);   // a seek landing meanwhile wins
+                return;
+            }
+        }
+    }
+
+    //: THE ONE SPEED WRITE, for `CALL SPEED` and the `speed` parameter alike. The parameter used to
+    //: store the number and nothing else, while CALL also resumed a clip parked at its end -- so
+    //: `PUT .../params/speed` on a clip that had played out was stored and moved nothing.
+    //:
+    //: A RESUME IS ONLY ASKED FOR HERE; the parked reader decides where it goes (`resume_request_`).
+    //: Computing the target in this thread raced the reader twice over, both measured on the
+    //: `producer-params` arm: a `position` write followed at once by this one was overwritten
+    //: (fixed with a compare-exchange), and then a seek the reader had ALREADY TAKEN but not yet
+    //: shown left `eof_paused_` true and `seek_request_` empty, so a resume from the stale frame
+    //: on screen was queued behind it and played from there -- 37 frames past the old OUT point
+    //: on NotchLC and HAP. The reader knows the frame it last read; nothing else does.
+    void set_speed(double spd)
+    {
+        speed_.store(spd);
+        if (eof_paused_.load() && spd != 0.0) {
+            {
+                std::lock_guard<std::mutex> lk(raw_mutex_);   // no lost wakeup against the park's wait
+                resume_request_.store(true);
+            }
+            queue_cv_.notify_all();
+            raw_cv_.notify_all();
+        }
     }
 
     core::draw_frame receive_impl(const core::video_field field, int) override
@@ -1638,6 +1741,9 @@ struct notchlc_producer_impl final : public core::frame_producer
 
         // Non-blocking queue check (no 40ms stall).
         std::unique_lock<std::mutex> lk(queue_mutex_);
+        // Stale frames go first, and BEFORE the empty test: a queue holding only pre-seek frames
+        // has to read as an underrun, not as a frame to serve.
+        drop_stale_locked();
         if (ready_queue_.empty()) {
             lk.unlock();
                 // Put the one-shot seek flag BACK. It was taken with exchange(false) above, but
@@ -1668,7 +1774,8 @@ struct notchlc_producer_impl final : public core::frame_producer
             ++actually_consumed;
         }
 
-        cached_frame_ = std::move(ready_queue_.front());
+        const int64_t shown = ready_queue_.front().frame;
+        cached_frame_       = std::move(ready_queue_.front().df);
         ready_queue_.pop();
         lk.unlock();
         queue_cv_.notify_all();
@@ -1677,13 +1784,17 @@ struct notchlc_producer_impl final : public core::frame_producer
         // so the accumulator stays correct even when queue is partially drained.
         speed_accum_ -= static_cast<double>(accum_advance);
 
-        auto fc = (frame_count_ += (spd >= 0.0) ? actually_consumed : -actually_consumed);
-
-        // The frame now in `cached_frame_` is the LAST one this tick consumed, and `fc` names
-        // the NEXT one to consume -- so the visible frame is one behind, or one ahead playing
-        // in reverse. Derived from `fc` rather than counted separately so a batch pop
-        // (`actually_consumed` > 1, the catch-up skip) cannot drift the two apart.
-        display_frame_.store((spd >= 0.0) ? fc - 1 : fc + 1, std::memory_order_relaxed);
+        // THE FRAME SAYS WHICH IT IS -- see `queued_frame`. `display_frame_` is the frame just
+        // made visible and `frame_count_` the next to consume.
+        int64_t fc = 0;
+        if (shown >= 0) {
+            display_frame_.store(shown, std::memory_order_relaxed);
+            fc = shown + ((spd >= 0.0) ? 1 : -1);
+            frame_count_.store(fc, std::memory_order_relaxed);
+        } else {
+            fc = (frame_count_ += (spd >= 0.0) ? actually_consumed : -actually_consumed);
+            display_frame_.store((spd >= 0.0) ? fc - 1 : fc + 1, std::memory_order_relaxed);
+        }
 
         // Accumulate file frames consumed (not channel ticks) so fps_display_
         // reflects the real decode throughput at any speed.
@@ -1717,7 +1828,22 @@ struct notchlc_producer_impl final : public core::frame_producer
         return cached_frame_;
     }
 
-    bool is_ready() override { return !ready_queue_.empty(); }
+    //: Discard stale-epoch frames at the front. MUST be called with `queue_mutex_` held, and only
+    //: from a CONSUMER thread -- popping releases the frame, which on the Vulkan path destroys a
+    //: texture; HAP measured that off the mixer thread as `vk::DeviceLostError`.
+    int drop_stale_locked()
+    {
+        const uint32_t cur = seek_epoch_.load(std::memory_order_acquire);
+        int dropped = 0;
+        while (!ready_queue_.empty() && ready_queue_.front().epoch != cur) {
+            ready_queue_.pop();
+            ++dropped;
+        }
+        return dropped;
+    }
+
+    // Under the lock: `std::queue::empty` read while the decode thread pushes is a data race.
+    bool is_ready() override { std::lock_guard<std::mutex> lk(queue_mutex_); return !ready_queue_.empty(); }
 
     // Called by the layer on every tick when the layer is paused
     // (paused_=true in layer.cpp).  In that state, receive_impl() is NEVER
@@ -1733,14 +1859,20 @@ struct notchlc_producer_impl final : public core::frame_producer
     {
         if (seek_done_.load(std::memory_order_relaxed) || !cached_frame_) {
             std::unique_lock<std::mutex> lk(queue_mutex_);
+            // Stale frames first: `seek_done_` is consumed by the first pop that succeeds, so
+            // taking a pre-seek frame here would leave a paused channel on it for good.
+            drop_stale_locked();
             if (!ready_queue_.empty()) {
                 seek_done_.store(false, std::memory_order_relaxed);
-                cached_frame_ = std::move(ready_queue_.front());
+                const int64_t shown = ready_queue_.front().frame;
+                cached_frame_       = std::move(ready_queue_.front().df);
                 ready_queue_.pop();
-                // No advance happens on this path, so the frame just made visible is the one
-                // `frame_count_` already names -- not one behind it as in `receive_impl`.
-                display_frame_.store(frame_count_.load(std::memory_order_relaxed),
-                                     std::memory_order_relaxed);
+                // The frame shown is the one it says it is, and the next to consume is PAST it.
+                // This path used to leave `frame_count_` naming the frame just shown, so on resume
+                // the report was one behind the picture.
+                const int64_t here = shown >= 0 ? shown : frame_count_.load(std::memory_order_relaxed);
+                display_frame_.store(here, std::memory_order_relaxed);
+                frame_count_.store(here + ((speed_.load() >= 0.0) ? 1 : -1), std::memory_order_relaxed);
                 lk.unlock();
                 queue_cv_.notify_all();
 
@@ -1891,8 +2023,10 @@ create_notchlc_producer(const core::frame_producer_dependencies& deps,
             else if (boost::iequals(val, L"601")    || boost::iequals(val, L"BT601"))   color_matrix_override = NOTCHLC_CM_601;
             else if (boost::iequals(val, L"LINEAR"))                                    color_matrix_override = NOTCHLC_CM_LINEAR;
             else if (boost::iequals(val, L"AUTO"))                                      color_matrix_override = NOTCHLC_CM_AUTO;
-            else CASPAR_LOG(warning) << L"[notchlc_producer] Unknown COLOR_MATRIX value '" << val
-                                     << L"' -- valid: 709, 601, 2020, LINEAR, AUTO. Using AUTO.";
+            // REFUSED: this logged, fell back to AUTO and PLAYed, answering 202 -- the house defect.
+            else
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info(u8(
+                    L"[notchlc_producer] COLOR_MATRIX takes 709, 2020, 601, LINEAR or AUTO, not '" + val + L"'")));
         }
         else if (path.empty() && !p.empty() && p[0] != L'-')                    path = p;
     }

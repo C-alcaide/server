@@ -49,7 +49,7 @@ All three resolve to the same receiver. The `[SPOUT]` and bare `SPOUT` forms tak
 Publish channel 1 under a name another application can find:
 
 ```
-ADD 1 SPOUT NAME "Programme Out"
+ADD 1 SPOUT "Programme Out"
 ```
 
 Receive another application's sender as a layer:
@@ -58,7 +58,10 @@ Receive another application's sender as a layer:
 PLAY 1-1 "spout://Resolume - Composition"
 ```
 
-Omit the name on the consumer and it publishes as `CasparCG Spout`.
+Omit the name on the consumer and it publishes as `CasparCG Spout`. **The name is POSITIONAL.**
+This section used to show `ADD 1 SPOUT NAME "Programme Out"`, which publishes a sender called
+`NAME` -- the log even says so (`SPOUT Consumer: NAME Initialized.`) -- and a receiver asking for
+`Programme Out` then shows black. Found 2026-09-25 by following it.
 
 ### Preview-sized senders
 
@@ -374,6 +377,19 @@ favours Spout.
    used to propose — consumer on channel 1, producer on channel 2 — was never needed: the receiver
    lives in the harness process. What remains uncovered is **alpha** and **two receivers at once**.
 2. **The `eUndefined` layout fix is unverified here**, only on the ProRes path.
+2a. **The PRODUCER is driven by no battery**, and its receive loop had three defects fixed
+   2026-09-25 from reading it. `ReceiveTexture` answers true whenever a sender exists, new frame or
+   not, so the loop never slept, spun a core on `glFinish` plus a copy per iteration, published the
+   same picture repeatedly, and advanced its texture ring past slots it had not written; and the ring
+   held 4 slots under a queue of up to 5, so a queued frame's texture could be rewritten under it.
+   Now a frame-counting sender is asked `IsFrameNew`, a sender that does not count is paced to the
+   channel's rate, the ring advances only on a write, and it is 6 slots under a queue of 2.
+   **Measured by hand, not by a battery**: one server's Spout consumer feeding a SECOND server's
+   producer (a server receiving its own sender shows black, before and after this change), reading
+   the burnt-in frame marker and the receiving process's CPU time. Before: 58 frames in 2.43 s and
+   **14.77 CPU-seconds per 5 s against 5.00 idle** -- about two cores spinning. After: 63 frames in
+   2.40 s (the channel's full rate) and **5.00 against 4.97** on OpenGL, 5.12 against 4.89 on
+   Vulkan. A loopback battery is still owed; the probe is the shape of it.
 3. **Windows-only**, with no message explaining that on other platforms.
 4. **No documented canonical syntax** — three forms work and none is marked preferred.
 5. **Measured end to end, and it found a real defect.** `cli.py spout-signalling` gates the

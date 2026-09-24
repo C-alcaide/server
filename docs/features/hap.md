@@ -53,6 +53,21 @@ PLAY 1-1 HAP "clip_hapq.mov" PINGPONG SPEED 0.5
 
 Also accepted after the file: `LOOP`, `PINGPONG`, `SPEED`, `SEEK`, `LENGTH`, `IN`/`OUT`.
 
+`CALL ... SEEK` takes a frame or a word, and the words mean what `ffmpeg_producer`'s do: `IN`/`START`
+the IN point, `OUT` the last frame before the OUT point, `REL`/`CURRENT` the frame on screen, `END`
+the last frame of the file. Since 2026-09-25, on `hap`, `cuda_prores` and `cuda_notchlc` alike.
+
+**The reported position is read off the frame on screen.** Each queued frame carries its source
+index, so `params/position`, `file/time` and the layer's frame number stay on the picture across
+loop wraps and ping-pong turns -- before, the IO thread reset the counter at a wrap while a lap's
+frames were still queued, and the report ran ahead of the picture by the queue depth from the second
+lap on. The `speed` parameter and `CALL SPEED` are one write, so either resumes a clip parked at its
+end; the parameter used to store the number and move nothing.
+
+**`SPEED` above two source frames per channel tick plays at that cap** (four for large ProRes):
+the decoder reads every frame in order and a tick consumes at most what is queued. It is accepted
+and reads back; the descriptor says so.
+
 No config elements.
 
 **Why the error is worth recording rather than just correcting.** Both routes play the file and

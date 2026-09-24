@@ -1223,14 +1223,27 @@ struct gst_producer : public core::frame_producer
         const auto  value = params.size() > 1 ? params.at(1) : std::wstring();
         std::wstring result;
 
+        // A REFUSAL IS AN ERROR, as `PUT .../params/position` already treats it. These answered
+        // `202` with the body `false`, so the two facades disagreed about one pipeline refusing
+        // one seek -- and `lexical_cast<uint32_t>` accepts a leading minus and wraps, so `SEEK -1`
+        // asked for frame 4294967295.
         if (boost::iequals(cmd, L"pause")) {
-            result = set_paused(true) ? L"true" : L"false";
+            if (!set_paused(true))
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info("The GStreamer pipeline refused to pause."));
+            result = L"true";
         } else if (boost::iequals(cmd, L"resume") || boost::iequals(cmd, L"play")) {
-            result = set_paused(false) ? L"true" : L"false";
+            if (!set_paused(false))
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info("The GStreamer pipeline refused to resume."));
+            result = L"true";
         } else if (boost::iequals(cmd, L"seek")) {
             if (value.empty())
                 CASPAR_THROW_EXCEPTION(user_error() << msg_info("SEEK needs a frame number."));
-            result = seek_to_frame(boost::lexical_cast<uint32_t>(value)) ? L"true" : L"false";
+            const auto frame = boost::lexical_cast<int64_t>(value);
+            if (frame < 0 || frame > static_cast<int64_t>(std::numeric_limits<uint32_t>::max()))
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info(u8(L"SEEK takes a frame number from 0, not " + value + L".")));
+            if (!seek_to_frame(static_cast<uint32_t>(frame)))
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info("The GStreamer pipeline refused the seek."));
+            result = L"true";
         } else if (boost::iequals(cmd, L"length")) {
             result = std::to_wstring(query_duration_frames());
         } else if (boost::iequals(cmd, L"position") || boost::iequals(cmd, L"time")) {
@@ -1242,6 +1255,19 @@ struct gst_producer : public core::frame_producer
         }
 
         return make_ready_future(std::move(result));
+    }
+
+    /// THE PIPELINE'S POSITION, in the unit `nb_frames()` answers in. The base class counts
+    /// `receive()` calls, which kept counting through `CALL PAUSE` and after EOS (this producer
+    /// serves its last frame on every tick) and never moved on a seek -- and `layer` computes an
+    /// AUTO transition and `eof` from these two numbers, so both were wrong after either. It also
+    /// disagreed with the published `position`, which is this query. A live source has no
+    /// duration and keeps the base count: nothing is computed from it against `nb_frames()`.
+    uint32_t frame_number() const override
+    {
+        if (query_duration_frames() == 0)
+            return core::frame_producer::frame_number();
+        return query_position_frames();
     }
 
     uint32_t nb_frames() const override

@@ -156,8 +156,14 @@ struct spout_producer : public core::frame_producer
     vk_device_handle                          vk_device_;
     void*                                     mixer_hglrc_ = nullptr;
     // Enough textures that one being read by the mixer is never the one being
-    // written by the next receive. The mixer holds at most a couple of frames.
-    static constexpr int                                          TEX_SLOTS = 4;
+    // written by the next receive: MAX_QUEUED waiting, one being written, and the
+    // couple the mixer holds. It was 4 slots under a queue of up to 5, so a slot
+    // was rewritten while a frame naming it was still queued -- a torn picture.
+    static constexpr int                                          TEX_SLOTS  = 6;
+    static constexpr size_t                                       MAX_QUEUED = 2;
+    static_assert(TEX_SLOTS >= static_cast<int>(MAX_QUEUED) + 4, "the ring must outlast the queue and the mixer");
+    double                                                        channel_fps_ = 50.0;
+    std::chrono::steady_clock::time_point                         last_push_{};
     std::vector<std::shared_ptr<core::texture>>                    tex_ring_;
     int                                                            tex_next_ = 0;
     std::atomic<bool>                                             gpu_path_active_{false};
@@ -182,6 +188,8 @@ struct spout_producer : public core::frame_producer
         , name_(name)
         , running_(true)
     {
+        if (dependencies.format_desc.fps > 0.0)
+            channel_fps_ = dependencies.format_desc.fps;
         // sender_name_ascii_ = std::string(name.begin(), name.end());
         sender_name_ascii_.reserve(name.length());
         for(wchar_t c : name) {
@@ -235,6 +243,29 @@ struct spout_producer : public core::frame_producer
             ss << std::fixed << std::setprecision(2) << print() << L" Fps: " << current_fps_;
             graph_->set_text(ss.str());
         }
+    }
+
+    /// Whether what the receive call just returned is a NEW frame, worth publishing.
+    ///
+    /// `ReceiveTexture` answers true whenever a sender EXISTS, new frame or not, and for a sender
+    /// that counts frames it does not even copy when the frame is not new. This loop took `true`
+    /// as "a frame": it never slept, spun a core on `glFinish` plus a full copy per iteration,
+    /// published the same picture over and over, and advanced the ring past slots that had not
+    /// been written. Now: a counting sender is asked (`IsFrameNew`), and a sender that does not
+    /// count -- for which Spout says every call is new -- is paced to the channel's rate.
+    bool take_new_frame(Spout& receiver)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (receiver.GetSenderFrame() > 0) {
+            if (!receiver.IsFrameNew())
+                return false;
+        } else {
+            const auto period = std::chrono::duration<double>(1.0 / channel_fps_);
+            if (now - last_push_ < period)
+                return false;
+        }
+        last_push_ = now;
+        return true;
     }
 
     void worker_loop()
@@ -352,12 +383,14 @@ struct spout_producer : public core::frame_producer
                     cur_w = cur_h = 0;
                     tex_ring_.clear();
                 } else {
+                    // The slot advances only when it was WRITTEN -- see `take_new_frame`.
                     auto& tex = tex_ring_[tex_next_];
-                    tex_next_ = (tex_next_ + 1) % static_cast<int>(tex_ring_.size());
 
                     // Dimensions come from the connect phase above; this overload
                     // takes the destination texture and the invert flag only.
-                    if (receiver->ReceiveTexture(texture_gl_id(tex), GL_TEXTURE_2D, false, 0)) {
+                    if (receiver->ReceiveTexture(texture_gl_id(tex), GL_TEXTURE_2D, false, 0) &&
+                        take_new_frame(*receiver)) {
+                        tex_next_ = (tex_next_ + 1) % static_cast<int>(tex_ring_.size());
                         // The mixer reads this texture on its own context, so the
                         // copy has to have landed before the frame is published.
                         glFinish();
@@ -376,7 +409,7 @@ struct spout_producer : public core::frame_producer
                             std::lock_guard<std::mutex> lock(frames_mutex_);
                             frames_.push(core::draw_frame(core::const_frame(
                                 this, std::move(img), std::move(audio), pfd, tex)));
-                            if (frames_.size() > 5) frames_.pop();
+                            if (frames_.size() > MAX_QUEUED) frames_.pop();
                         }
                         frame_received = true;
                         gpu_path_active_ = true;
@@ -407,9 +440,10 @@ struct spout_producer : public core::frame_producer
                     vk_slots.clear();
                 } else {
                     auto& slot = vk_slots[vk_next];
-                    vk_next    = (vk_next + 1) % static_cast<int>(vk_slots.size());
 
-                    if (receiver->ReceiveTexture(slot.gl_id, GL_TEXTURE_2D, false, 0)) {
+                    if (receiver->ReceiveTexture(slot.gl_id, GL_TEXTURE_2D, false, 0) &&
+                        take_new_frame(*receiver)) {
+                        vk_next = (vk_next + 1) % static_cast<int>(vk_slots.size());
                         // Nothing else orders this write against the mixer's read.
                         glFinish();
 
@@ -430,7 +464,7 @@ struct spout_producer : public core::frame_producer
                             std::lock_guard<std::mutex> lock(frames_mutex_);
                             frames_.push(core::draw_frame(core::const_frame(
                                 this, std::move(img), std::move(audio), pfd, slot.frame_texture)));
-                            if (frames_.size() > 5)
+                            if (frames_.size() > MAX_QUEUED)
                                 frames_.pop();
                         }
                         frame_received   = true;
@@ -461,7 +495,7 @@ struct spout_producer : public core::frame_producer
             // same orientation, and receiving with true then turned the picture
             // upside down. Demonstrated with this server's own Spout consumer
             // feeding this producer: identical content, inverted.
-            if (receiver->ReceiveImage(pixel_buf.data(), GL_BGRA_EXT, false, 0)) {
+            if (receiver->ReceiveImage(pixel_buf.data(), GL_BGRA_EXT, false, 0) && take_new_frame(*receiver)) {
                 // Detect sender resolution change — will reconnect next iteration.
                 unsigned int new_w = receiver->GetSenderWidth();
                 unsigned int new_h = receiver->GetSenderHeight();
@@ -485,7 +519,7 @@ struct spout_producer : public core::frame_producer
 
                         std::lock_guard<std::mutex> lock(frames_mutex_);
                         frames_.push(core::draw_frame(std::move(mframe)));
-                        if (frames_.size() > 5) frames_.pop();
+                        if (frames_.size() > MAX_QUEUED) frames_.pop();
                         frame_received = true;
 
                         // FPS counter — updated here, inside worker thread.

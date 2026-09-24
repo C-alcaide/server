@@ -224,8 +224,12 @@ without them both branches run on one thread and the pipeline can deadlock.
 CALL 1-10 PAUSE | RESUME | SEEK <frame> | LENGTH | POSITION
 ```
 
-`SEEK` is flushing and frame-accurate. `LENGTH` answers 0 on a live source rather than inventing
-a duration. **`LOOP`, `IN` and `OUT` are deliberately absent** — they belong to a producer that
+`SEEK` is flushing and frame-accurate, and takes a frame from 0 -- `SEEK -1` is refused (it used
+to wrap to frame 4294967295). **A refusal is an error**: a pipeline that will not pause, resume or
+seek answers 4xx, as `PUT .../params/position` does; it used to answer 202 with the body `false`.
+`LENGTH` answers 0 on a live source rather than inventing a duration. The layer's frame number is
+the pipeline's position, so `LOADBG ... AUTO` and `eof` follow a `PAUSE` or a seek rather than
+counting ticks. **`LOOP`, `IN` and `OUT` are deliberately absent** — they belong to a producer that
 owns its reader, and this one owns a pipeline whose source may be a socket. If you need a file
 to loop, use the FFmpeg producer.
 
@@ -288,8 +292,18 @@ ADD 1 GSTREAMER "videoconvert ! x264enc ! mpegtsmux ! srtsink uri=srt://:9020?mo
 Here you give **everything except the source**; CasparCG prepends `appsrc name=caspar_video
 is-live=true format=time !`.
 
-The channel arrives as BGRA, so start with `videoconvert` unless your encoder takes BGRA
-directly. Only **one** GStreamer consumer per channel: the consumer uses a fixed index, so
+The channel arrives as BGRA on an 8-bit channel. On a 16-bit one (`<color-depth>16</color-depth>`)
+it is **`RGBA64_LE` on the Vulkan mixer and `BGRA64_LE` on the OpenGL one** -- the two mixers
+lay 16-bit pixels out differently, measured byte-identical against the channel's own capture by
+`gstreamer`'s `consumer-16` case. Start with `videoconvert` unless your encoder takes that format
+directly. Until 2026-09-25 a 16-bit channel was described as BGRA regardless -- garbage on
+OpenGL, every frame refused on Vulkan -- and the CUDA egress (`GPU`) still carries 8-bit only, so a
+16-bit channel goes through host memory.
+
+**A consumer that cannot keep up DROPS, and says so.** appsrc holds four frames (one second of
+audio) and drops the OLDEST past that; `gstreamer/dropped` counts both what the consumer refused
+and what appsrc discarded. Before 2026-09-25 the limit only signalled: frames kept queueing behind a
+slow encoder, without bound, and `dropped` read 0. Only **one** GStreamer consumer per channel: the consumer uses a fixed index, so
 adding a second replaces the first.
 
 ### Pre-configuring the consumer in `casparcg.config`
@@ -784,7 +798,8 @@ analytics metadata.
 
 * **No `LOOP`, `IN` or `OUT`.** Deliberate — see §5.
 * **One GStreamer consumer per channel.** A second replaces the first.
-* **The consumer takes BGRA only**, and reads the frame back to host memory.
+* **The consumer takes BGRA (8-bit), or RGBA64_LE / BGRA64_LE (16-bit, Vulkan / OpenGL)**, and on
+  a 16-bit channel reads the frame back to host memory.
 * **The GPU route is Windows only**, and only helps a `d3d11*dec` source.
 * **Audio on the GPU path is carried, not converted** — 16 channels, the source's mapped into
   the first of them.

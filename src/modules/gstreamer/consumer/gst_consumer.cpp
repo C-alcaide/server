@@ -30,6 +30,7 @@
 #include <core/monitor/monitor.h>
 #include <core/video_format.h>
 
+#include <common/bit_depth.h>
 #include <common/diagnostics/graph.h>
 #include <common/except.h>
 #include <common/future.h>
@@ -108,6 +109,11 @@ struct gst_consumer : public core::frame_consumer
     /// the Vulkan mixer has one.
     bool               use_vulkan_ = false;
     int                channel_index_ = -1;
+    /// The channel's depth. A 16-bit channel hands over 8 bytes a pixel, and this consumer used to
+    /// declare BGRA for it regardless: on OpenGL the pipeline got a w x h x 8 buffer described as
+    /// w x h x 4 BGRA (garbage), and on Vulkan every frame was refused with a warning, 50 lines a
+    /// second. See `host_format` for what it declares now, which differs by mixer.
+    common::bit_depth  depth_ = common::bit_depth::bit8;
 
     core::video_format_desc format_desc_;
 
@@ -138,6 +144,10 @@ struct gst_consumer : public core::frame_consumer
     std::unique_ptr<gst_cuda_egress> egress_;
 #endif
     std::atomic<uint64_t> frames_dropped_{0};
+    /// What appsrc itself threw away at its limit -- see `configure_video_src`. Read under
+    /// `mutex_` in `send`, published from here.
+    std::atomic<uint64_t> appsrc_dropped_{0};
+    bool                  warned_format_ = false;
     std::atomic<bool>     is_failed_{false};
     mutable std::mutex    mutex_;
 
@@ -255,6 +265,7 @@ struct gst_consumer : public core::frame_consumer
         format_desc_   = format_desc;
         channel_index_ = channel_info.index;
         use_vulkan_    = channel_info.use_vulkan;
+        depth_         = channel_info.depth;
 
         runtime::ensure_initialized();
         build_pipeline();
@@ -333,6 +344,11 @@ struct gst_consumer : public core::frame_consumer
                              << L" GPU was requested but this channel uses the OpenGL mixer, "
                                 L"whose textures are not exportable; frames go through host "
                                 L"memory.";
+        } else if (want_gpu_ && depth_ != common::bit_depth::bit8) {
+            // The egress negotiates BGRA CUDA memory; a 16-bit texture is not that.
+            CASPAR_LOG(info) << print() << L" GPU was requested on a 16-bit channel; the CUDA "
+                                           L"egress carries 8-bit BGRA only, so frames go through "
+                                           L"host memory.";
         } else if (want_gpu_ && gst_cuda_egress::available()) {
             auto         candidate = std::make_unique<gst_cuda_egress>();
             std::wstring reason;
@@ -375,7 +391,8 @@ struct gst_consumer : public core::frame_consumer
         // BGRA because that is what a channel frame carries; converting here rather than in
         // the pipeline would be this module deciding something the operator wrote a pipeline
         // to decide.
-        const auto caps_text = std::string("video/x-raw, format=(string)BGRA, width=(int)") +
+        const auto caps_text = std::string("video/x-raw, format=(string)") + host_format() +
+                               ", width=(int)" +
                                std::to_string(format_desc_.width) + ", height=(int)" +
                                std::to_string(format_desc_.height) + ", framerate=(fraction)" +
                                std::to_string(buffer_rate_num()) + "/" +
@@ -403,8 +420,15 @@ struct gst_consumer : public core::frame_consumer
                      "block",
                      FALSE,
                      "max-bytes",
-                     static_cast<guint64>(format_desc_.size) * 4,
+                     video_limit_bytes(),
                      nullptr);
+        // **AND LEAKY, which is what makes `max-bytes` a limit.** With `block=FALSE` and the
+        // default leaky type (NONE), appsrc only EMITS enough-data at the limit and enqueues
+        // anyway: the push still returns OK, `frames_dropped_` never moved, and host frames --
+        // each holding a whole `const_frame` -- piled up without bound behind an encoder slower
+        // than real time. DOWNSTREAM drops the OLDEST, so a live output stays current; appsrc
+        // counts it in its `dropped` property, which `send` publishes.
+        gst_app_src_set_leaky_type(GST_APP_SRC(video_src_), GST_APP_LEAKY_TYPE_DOWNSTREAM);
         gst_caps_unref(caps);
     }
 
@@ -416,13 +440,39 @@ struct gst_consumer : public core::frame_consumer
                                std::to_string(format_desc_.audio_channels);
 
         auto* caps = gst_caps_from_string(caps_text.c_str());
+        // BOUNDED, as the video is: one second of audio, leaky. It had no limit at all.
+        const auto second = static_cast<guint64>(format_desc_.audio_sample_rate) *
+                            static_cast<guint64>(std::max(1, format_desc_.audio_channels)) * 4;
         g_object_set(G_OBJECT(audio_src_),
                      "caps", caps,
                      "is-live", TRUE,
                      "format", GST_FORMAT_TIME,
                      "block", FALSE,
+                     "max-bytes", second,
                      nullptr);
+        gst_app_src_set_leaky_type(GST_APP_SRC(audio_src_), GST_APP_LEAKY_TYPE_DOWNSTREAM);
         gst_caps_unref(caps);
+    }
+
+    /// The caps format for a HOST buffer at this channel's depth -- and, at 16 bits, this MIXER's
+    /// byte order, which is not the same on both. MEASURED 2026-09-25 by `gstreamer`'s
+    /// `consumer-16` case against the IMAGE consumer's capture of the same frame: Vulkan's 16-bit
+    /// frame is RGBA64_LE (byte-identical), and OpenGL's is BGRA64_LE -- declared RGBA64 it came
+    /// out 193 LSB away, red and blue exchanged. The mixer says so itself: the frame's format is
+    /// `rgba` on Vulkan and `bgra` on OpenGL, which is what `send` checks.
+    const char* host_format() const
+    {
+        if (depth_ == common::bit_depth::bit8)
+            return "BGRA";
+        return use_vulkan_ ? "RGBA64_LE" : "BGRA64_LE";
+    }
+    int bytes_per_pixel() const { return depth_ == common::bit_depth::bit8 ? 4 : 8; }
+
+    /// Four frames, at the channel's real size -- `format_desc_.size` is 4 bytes a pixel.
+    guint64 video_limit_bytes() const
+    {
+        return static_cast<guint64>(format_desc_.width) * static_cast<guint64>(format_desc_.height) *
+               static_cast<guint64>(bytes_per_pixel()) * 4;
     }
 
     void destroy_pipeline()
@@ -469,7 +519,7 @@ struct gst_consumer : public core::frame_consumer
     {
         if (video_src_ == nullptr)
             return 0.0;
-        const auto limit = static_cast<guint64>(format_desc_.size) * 4;
+        const auto limit = video_limit_bytes();
         if (limit == 0)
             return 0.0;
         const auto level = gst_app_src_get_current_level_bytes(GST_APP_SRC(video_src_));
@@ -547,8 +597,22 @@ struct gst_consumer : public core::frame_consumer
         poll_bus();
         frame_timer_.restart();
 
-        if (frame.pixel_format_desc().format != core::pixel_format::bgra) {
-            CASPAR_LOG(warning) << print() << L" received a frame that is not BGRA; dropping it.";
+        // What the caps promised: 8-bit BGRA, or on a 16-bit channel 8 bytes a pixel in the order
+        // the format names -- `bgra` on OpenGL, `rgba` on Vulkan (see `host_format`). Anything
+        // else would be described wrongly by the caps.
+        const auto& desc  = frame.pixel_format_desc();
+        const bool  deep  = depth_ != common::bit_depth::bit8;
+        const bool  shape = !desc.planes.empty() &&
+                           (deep ? desc.planes[0].depth == common::bit_depth::bit16 &&
+                                       desc.format == (use_vulkan_ ? core::pixel_format::rgba
+                                                                   : core::pixel_format::bgra)
+                                 : desc.format == core::pixel_format::bgra);
+        if (!shape) {
+            if (!warned_format_) {   // once: this used to log 50 lines a second
+                CASPAR_LOG(warning) << print() << L" received a frame that is not " << host_format()
+                                    << L"; dropping it (and every one like it, counted in dropped).";
+                warned_format_ = true;
+            }
             ++frames_dropped_;
             return make_ready_future(true);
         }
@@ -614,6 +678,13 @@ struct gst_consumer : public core::frame_consumer
             graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
         } else {
             ++frames_sent_;
+        }
+        {
+            guint64 leaked = 0;
+            g_object_get(G_OBJECT(video_src_), "dropped", &leaked, nullptr);
+            if (leaked > appsrc_dropped_.load())
+                graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+            appsrc_dropped_ = leaked;
         }
 
         if (audio_src_ != nullptr)
@@ -715,7 +786,9 @@ struct gst_consumer : public core::frame_consumer
         // against 200 frames received, a count larger than the frames it was supposedly
         // counting.
         state["gstreamer/egress-frames"] = static_cast<int64_t>(frames_on_gpu_.load());
-        state["gstreamer/dropped"]  = static_cast<int64_t>(frames_dropped_.load());
+        // Both kinds of drop: the frames this consumer refused, and the ones appsrc discarded at
+        // its limit. The second was invisible -- see `configure_video_src`.
+        state["gstreamer/dropped"]  = static_cast<int64_t>(frames_dropped_.load() + appsrc_dropped_.load());
         state["gstreamer/failed"]   = is_failed_.load();
         return state;
     }

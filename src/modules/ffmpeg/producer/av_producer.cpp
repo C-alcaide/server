@@ -3462,6 +3462,10 @@ struct AVProducer::Impl
 
     std::string afilter_;
     std::string vfilter_;
+    /// Guards the two strings above. `CALL VF`/`AF` assign them on the AMCP thread while `reset()`
+    /// copies them on the decode thread -- at every explicit seek, loop wrap and initial start --
+    /// so a CALL landing on a wrap was a concurrent read and write of one `std::string`.
+    mutable std::mutex          filter_text_mutex_;
 
     // Per-parameter animation state for VFPARAM / AFPARAM CALL commands.
     // Keyed by [filter_type_name][param_name].  Accessed from the AMCP thread
@@ -5729,10 +5733,16 @@ struct AVProducer::Impl
             audio_param_tweens_.clear();
         }
 
+        std::string vfilter, afilter;
+        {
+            std::lock_guard<std::mutex> lock(filter_text_mutex_);
+            vfilter = vfilter_;
+            afilter = afilter_;
+        }
         video_filter_ =
-            Filter(vfilter_, input_, decoders_, start_time, AVMEDIA_TYPE_VIDEO, format_desc_, decode_adapter_,
+            Filter(vfilter, input_, decoders_, start_time, AVMEDIA_TYPE_VIDEO, format_desc_, decode_adapter_,
                    vk_mixer_device_, vk_compute_decode_, vk_video_decode_);
-        audio_filter_ = Filter(afilter_, input_, decoders_, start_time, AVMEDIA_TYPE_AUDIO, format_desc_);
+        audio_filter_ = Filter(afilter, input_, decoders_, start_time, AVMEDIA_TYPE_AUDIO, format_desc_);
 
         sources_.clear();
 #ifdef _WIN32
@@ -5833,13 +5843,19 @@ struct AVProducer::Impl
     
     void set_vfilter(const std::string& filter)
     {
-        vfilter_ = filter;
+        {
+            std::lock_guard<std::mutex> lock(filter_text_mutex_);
+            vfilter_ = filter;
+        }
         seek(time());
     }
 
     void set_afilter(const std::string& filter)
     {
-        afilter_ = filter;
+        {
+            std::lock_guard<std::mutex> lock(filter_text_mutex_);
+            afilter_ = filter;
+        }
         seek(time());
     }
 

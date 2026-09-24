@@ -983,6 +983,17 @@ struct spout_consumer_impl : public core::frame_consumer
             published_depth_      = 8;
             gpu_downscale_active_ = false;
 
+            // NO HOST PIXELS, when the GPU path ran before this frame: `needs_cpu_frame_data()`
+            // answered false, so the channel skipped the readback, and `image_data` is empty.
+            // `sws_scale` refused the null pointers and `SendImage` then published `out_buf_`'s
+            // previous contents (zeros at the start), counted as sent. The frame is SKIPPED;
+            // `gpu_path_active_` is already false above, so the next one arrives read back.
+            // `gst_consumer::wrap` checks for exactly this.
+            if (frame.image_data(0).size() == 0 || frame.image_data(0).data() == nullptr) {
+                busy_ = false;
+                return;
+            }
+
             // Rebuild swscale contexts when format or output dimensions change.
             if (src_fmt != src_av_fmt_ || !sws_ctxs_[0]) {
                 src_av_fmt_ = src_fmt;

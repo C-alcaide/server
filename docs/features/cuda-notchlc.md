@@ -53,6 +53,17 @@ PLAY 1-1 CUDA_NOTCHLC FILE "clip.mov" DEVICE 0 LOOP
 The long form takes `FILE`, an optional `DEVICE <index>` to pin the CUDA device, and the usual
 `LOOP`.
 
+**`COLOR_MATRIX 709|601|2020|LINEAR|AUTO`** overrides the matrix (`AUTO`, the default, is 709 --
+NotchLC carries no in-band matrix). Anything else is **refused** since 2026-09-25; it used to log,
+use `AUTO` and answer 202. **`LINEAR` selects the TRANSFER, not the matrix**: it decodes with 709,
+as `AUTO` does, then applies the inverse BT.709 OETF and tags the frame `color_transfer::linear`.
+Until 2026-09-25 it fell into the kernel's 601 branch -- so choosing LINEAR also shifted the hue --
+and the frame went out tagged SDR, so the mixer showed linear light as display-encoded, too dark
+and too contrasty. Argued from the code: no battery drives `LINEAR`.
+
+`CALL ... SEEK` words, the playhead and the `speed` parameter behave as on `hap` -- see
+[`hap.md`](hap.md) §2.
+
 **`DEVICE` must name the GPU the mixer runs on, and is now refused when it does not.** The
 decode target is a texture *exported by the mixer's device*, and CUDA can only import it on the
 GPU that owns it — so pointing `DEVICE` elsewhere does not move the decode to the other card, it
@@ -141,8 +152,11 @@ because it is the difference between "the two agree" and "the two are right".
 
 ## 5. Known gaps
 
-1. **No picture verification of any kind**, and no reference decoder to build one against. §4
-   describes the partial substitute and what it cannot catch.
+1. ~~**No picture verification of any kind**~~ -- stale. `producer-params` drives this producer to
+   the PICTURE through `notchlc_none_sdr.mov`, which carries the burnt-in frame marker (it was
+   transcoded from a marked source): seeks, read-back, `file/time`, `LOADBG ... AUTO`, and since
+   2026-09-25 loop wraps, `CALL SEEK IN`/`OUT`, an empty `out` refused and the `speed` parameter's
+   resume. What stays unmeasured is COLOUR -- the matrix, `LINEAR`, alpha.
 2. **The mid-frame host sync (step 3) is unmeasured** — it is the obvious candidate for why this
    route would scale differently from ProRes, and no battery has isolated it.
 3. **No channel-count ceiling.** `playback-scaling` has no `notchlc` route, so the figure that
