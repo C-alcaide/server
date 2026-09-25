@@ -288,7 +288,11 @@ spl::shared_ptr<format_strategy> create_format_strategy(const configuration& con
     }
 
     bool is_hdr     = config.hdr;
-    bool use_bt2020 = config.color_space == core::color_space::bt2020;
+    // THE SAME RULE AS THE OPENGL BRANCH ABOVE and the CPU strategy: an HDR channel packs with
+    // BT.2020 whatever its gamut says. This read the gamut alone, so a P3 HDR channel went out
+    // with the BT.709 matrix on the Vulkan GPU readbacks and with BT.2020 everywhere else -- one
+    // config, two Y'CbCr encodings on the wire, by mixer and readback mode.
+    bool use_bt2020 = config.hdr || config.color_space == core::color_space::bt2020;
     // `maybe_unused` on both of these: every reader is inside a `DECKLINK_CUDA_VK_ENABLED`
     // or DVP guard, so a build without CUDA initialises them and never refers to them --
     // C4189, which is an error under /WX and is why `-DENABLE_VULKAN=OFF` did not compile.
@@ -862,8 +866,12 @@ struct decklink_secondary_port final : public IDeckLinkVideoOutputCallback
                     CASPAR_LOG(error) << print() << L" DisplayVideoFrameSync failed.";
                 }
             }
-        } catch (...) {
-            CASPAR_LOG(error) << print() << L" Exception in synchronous-display loop.";
+        } catch (const std::exception& e) {
+            // `std::exception`, not `...`: under `/EHa` that also caught an access violation, and
+            // the port went dark with one log line while the channel kept running. A fault should
+            // crash where it happened.
+            CASPAR_LOG(error) << print() << L" Exception in synchronous-display loop: " << e.what()
+                              << L" -- this port stops outputting.";
         }
     }
 
@@ -1050,26 +1058,12 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
                 CASPAR_LOG(warning) << print() << L" Device does not support colorspace metadata.";
         }
 
-        // Decide whether the experimental synchronous-display path can be used.
-        // It is a single-device, video-only path: fall back to scheduled playback
-        // when embedded audio or secondary ports are configured.
-        if (config.latency == configuration::latency_t::sync_display) {
-            if (config.embedded_audio) {
-                CASPAR_LOG(warning) << print()
-                                    << L" sync-display latency does not support embedded audio; using scheduled "
-                                       L"playback.";
-            } else if (!config.secondaries.empty()) {
-                CASPAR_LOG(warning) << print()
-                                    << L" sync-display latency does not support secondary ports; using scheduled "
-                                       L"playback.";
-            } else {
-                use_sync_display_ = true;
-            }
-        }
-
-        if (config.embedded_audio) {
-            output_->BeginAudioPreroll();
-        }
+        // (A block here used to warn that sync-display "does not support embedded audio /
+        // secondary ports; using scheduled playback". Both have been supported since c5cce66f4,
+        // and the block never cleared `use_sync_display_`, so the sync path ran anyway and the
+        // warning described behaviour that did not happen. Removed, with the unconditional
+        // `BeginAudioPreroll` that followed it: preroll is a SCHEDULED-mode call, and scheduled
+        // mode made it again below, twice per start.)
 
         // Decide whether the experimental synchronous-display path can be used.
         // (use_sync_display_ was computed above from config.latency == sync_display.)

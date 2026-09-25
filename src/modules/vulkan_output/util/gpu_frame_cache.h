@@ -32,6 +32,8 @@
 #include "platform_handles.h"
 #include <vulkan/vulkan.h>
 
+#include <core/frame/frame.h>
+
 namespace caspar { namespace accelerator { namespace ogl {
 class device;
 }}} // namespace caspar::accelerator::ogl
@@ -92,7 +94,6 @@ class gpu_frame_cache
     gpu_affinity_context* affinity_ctx() const { return affinity_ctx_.get(); }
 
 #ifdef CASPAR_CUDA_PEER_ENABLED
-    cuda_peer_transfer* cuda_peer() const { return cuda_peer_.get(); }
 #endif
 
     // Is this a cross-GPU cache?
@@ -105,6 +106,15 @@ class gpu_frame_cache
     // semaphore to the timeline semaphore.
     // Returns the timeline value that will be signaled when the frame is ready.
     uint64_t submit_frame(uint64_t generation, const std::function<void()>& transfer_fn);
+
+    // THE GENERATION OF A FRAME, handed out by the cache so every consumer sharing it agrees.
+    // Each consumer used to count its own, and `submit_frame` dedupes on `generation <= current`:
+    // a consumer added while another was running started at 0 against a shared counter at N, so
+    // it never won a transfer, and once its sibling was removed it presented the stale pool image
+    // until its own count passed N. Keyed on the frame itself -- one composited frame is one
+    // `const_frame` for every consumer on the channel -- and the last frame is HELD, so its
+    // address cannot be reused by the next one while it is being compared against.
+    uint64_t generation_for(const core::const_frame& frame);
 
     // Non-blocking: posts transfer work to the pump thread.
     // The pump executes the transfer in the background and signals the timeline
@@ -160,15 +170,17 @@ class gpu_frame_cache
     std::unique_ptr<shared_texture_pool>     pool_;
     std::unique_ptr<interop_context>         interop_ctx_;
     std::unique_ptr<gpu_affinity_context>    affinity_ctx_;
-#ifdef CASPAR_CUDA_PEER_ENABLED
-    std::unique_ptr<cuda_peer_transfer>      cuda_peer_;
-#endif
     bool                                     cross_gpu_ = false;
 
     // Frame generation tracking (first-caller-wins for blocking submit_frame)
     std::mutex              frame_mutex_;
     std::condition_variable frame_cv_;
     std::atomic<uint64_t>   current_generation_{0};
+
+    // `generation_for`'s state.
+    std::mutex              generation_mutex_;
+    core::const_frame       generation_frame_;
+    uint64_t                generation_last_ = 0;
     bool                    transfer_in_progress_ = false;
 
     // Shutdown flag — when set, submit_frame() exits the cv wait promptly

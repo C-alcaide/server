@@ -106,9 +106,15 @@ void main()
         vec4 pixel;
         // Inside the frame AND inside the destination rectangle. Anything else stays at
         // the initialised value, which is black -- that is what fills the surround.
+        // AND INSIDE THE SOURCE: an origin-only subregion is allowed on this path, and
+        // `src_x + region_w` can run past the texture. texelFetch outside the image is
+        // undefined without robustImageAccess, which this device does not enable -- the CUDA
+        // kernel and the CPU packers already write black there.
+        const ivec2 src_size = textureSize(src_tex, 0);
         if (ox < pc.dst_w
             && rx >= 0 && rx < pc.region_w
-            && ry >= 0 && ry < pc.region_h) {
+            && ry >= 0 && ry < pc.region_h
+            && sx >= 0 && sy >= 0 && sx < src_size.x && sy < src_size.y) {
             pixel = texelFetch(src_tex, ivec2(sx, sy), 0);
         } else {
             pixel = vec4(0.0);

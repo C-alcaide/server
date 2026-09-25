@@ -877,6 +877,9 @@ anywhere. The greps are a cheap first pass and they have never once been the who
 | `CALL … <verb>` on a GENERATIVE `[ISF]` layer | an **empty 202** -- the SOURCED form forwards correctly, so only the configuration with nothing to forward to was wrong |
 | `PLAY … CUDA_PRORES` / `CUDA_NOTCHLC … COLOR_MATRIX <typo>` | **AUTO's matrix**, a warning in the log, and 202 -- a colour override that silently was not one (2026-09-25; `refusals` drives both) |
 | `CALL … SEEK -1` on a `[GSTREAMER]` layer | a seek to frame **4294967295** (`lexical_cast<uint32_t>` accepts the minus and wraps), and a pipeline that refused a seek or pause answered **202 `false`** (2026-09-25; argued from code -- no battery drives the GStreamer producer's CALL) |
+| DeckLink `<gpu-readback-mode>` / `<gpu-transfer>` / `<gpu-pack>`, and AMCP `COLOR_SPACE` / `COLOR_TRANSFER` | **`auto`**, or the channel's space -- a colour signalling request that silently did not apply (2026-09-25; `refusals` drives the AMCP pair) |
+| Vulkan output `<transfer>` / `<gamut>` / `<eotf>` / `<on-disconnect>` / `<gsync><reference>` / `<auto-tone-map>` | the default each branch fell to -- SDR from `PQ `, internal sync from `hous` (2026-09-25; argued from code, a config refusal is not reachable from AMCP) |
+| Vulkan output `<video-mode>` / AMCP `MODE` | **nothing at all**: parsed, stored and read by no code, so the output kept the display's mode while the config said otherwise. Refused (2026-09-25; `refusals` drives `MODE`) |
 
 **The shape is always the same**: a variable initialised to one of the valid values, an
 `if/else if` chain over the others, and no `else`. The initialiser is then indistinguishable from
@@ -1094,6 +1097,15 @@ src/accelerator/vulkan/util/pipeline.cpp
 Then confirm `build/shell/casparcg.exe` is newer than
 `build/accelerator/ogl_image_fragment.h` and `vk_image_fragment.h`, not just newer than
 `src/`.
+
+**The DeckLink readback shaders are the opposite case: their SPIR-V is COMMITTED, not built.**
+`vk_readback_v210.spv`/`_spv.h` and `vk_readback_bgra.spv`/`_spv.h` sit beside their `.comp` in
+`modules/decklink/consumer`, and the build compiles the header -- so editing the `.comp` alone
+changes nothing in the binary. Regenerate with **`glslc -fshader-stage=compute`, unoptimised**:
+the committed files are shaderc output (generator id 13, GL_GOOGLE source extensions), and
+`glslangValidator -V` produces a different, equally valid module that would put an unexplained
+diff in every header. Measured 2026-09-25: `glslc` on HEAD's `.comp` reproduces HEAD's `.spv` and
+`_spv.h` byte for byte, which is the check to run before trusting a regeneration.
 
 **GLSL errors also do not surface at C++ compile time**. Syntax-check before building:
 

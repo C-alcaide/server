@@ -115,11 +115,14 @@ ADD 1 DECKLINK 1 COLOR_SPACE bt2020 COLOR_TRANSFER pq
 | `COLOR_SPACE` | `bt709`, `bt601`, `bt2020` | the channel's |
 | `COLOR_TRANSFER` | `sdr`, `pq`, `hlg` | the channel's |
 
-**Anything SDI cannot signal is silently dropped, not refused.** `COLOR_SPACE p3-d65` or
-`COLOR_TRANSFER linear` leaves the channel default in place and says nothing — the code drops
-P3/Adobe and linear/gamma24/gamma26 deliberately, because there is no SDI signalling for them. So a
-value that looks accepted may simply not have applied; read the `signalling` battery or the card's
-own status rather than the reply.
+**Anything SDI cannot signal is REFUSED, and so is a word that names nothing** (since 2026-09-25).
+`COLOR_SPACE p3-d65`, `COLOR_TRANSFER linear` and `COLOR_SPACE BT2O2O` all used to leave the channel
+default in place and answer 202; the AMCP parser now uses the same refusals as `<color-space>` and
+`<color-transfer>` in the config, which always refused them. `refusals` drives both keywords.
+
+**A 16-bit channel gets YUV from AMCP too.** The config path defaults `pixel-format` to `yuv` on a
+deep channel and refuses `rgba` there; `ADD n DECKLINK` never applied that rule and packed the
+channel's 8-byte pixels as 4-byte BGRA.
 
 `color-transfer` sets what the output **signals**. It does not convert the picture — the channel's
 colour space and transfer determine the pixels, exactly as elsewhere in this fork.

@@ -1,6 +1,47 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: output-module defects from the audit backlog -- DeckLink and Vulkan output
+
+Measured on the SDI loopback: `sdi-output` on OpenGL and on Vulkan with every readback mode
+(`auto`, `cuda`, `vulkan`, `vulkan-dma`, `cpu`) reads **37.46 / 48.28 / 52.53 dB** for
+rgba@8 / yuv@8 / yuv@16, the recorded baseline (Vulkan compute at 16 bits read 52.51, inside its
+own history of 52.41-52.53); an origin-only subregion that runs past the source reads **53.61 dB
+on `vulkan-dma` and 53.55 on `vulkan`** against the battery's model. `refusals` **49/49** on both
+mixers (six new checks), `vulkan-output-signalling` 3/3 consistent, `signalling` all PASS.
+
+* **Refused, where a typo used to select a default**: DeckLink `<gpu-readback-mode>`,
+  `<gpu-transfer>`, `<gpu-pack>`, and AMCP `COLOR_SPACE`/`COLOR_TRANSFER` (which now use the config
+  path's own refusals, so P3 and linear are refused as SDI cannot signal them); Vulkan output
+  `<transfer>`, `<gamut>`, `<eotf>`, `<hdr-metadata><transfer>`, `<on-disconnect>`,
+  `<gsync><reference>` and `<auto-tone-map>`. **`<video-mode>` and AMCP `MODE` are refused**: they
+  were parsed, stored and read by nothing.
+* **DeckLink**: `ADD n DECKLINK` on a 16-bit channel packed 8-byte pixels as BGRA (the config path's
+  depth rule now applies); the `vulkan-dma` placement coercion checks every `<port>`, not only the
+  primary; a P3 HDR channel packed BT.709 on the Vulkan GPU readbacks and BT.2020 everywhere else;
+  the Vulkan readback shaders bounded their fetch by the DESTINATION only (out-of-image
+  `texelFetch`) and the DMA path issued an out-of-image copy -- both black the part the source
+  cannot fill now, as CUDA and the CPU do; the CPU v210 pack wrote the other field's lines in bands
+  on NTSC (486/6 rows per thread is odd); `key_only` was logged every frame; `<latency>sync</latency>`
+  published no latency leaf, warned it fell back to scheduled playback while it did not, and
+  prerolled audio twice; the secondary sync worker's `catch (...)` ate access violations.
+* **Vulkan output**: HDR metadata sent MaxCLL as the mastering-display maximum and 0.001 as its
+  minimum (the NvAPI route sends `<min-dml>`/`<max-dml>`); a subregion off the display edge was
+  SCALED rather than cropped; the cross-GPU CUDA path dropped `dest-x`/`dest-y`; a 16-bit channel's
+  CPU upload copied RGBA16 into a BGRA8 image byte for byte; the pacer truncated its interval to
+  microseconds (59.94 ran a frame early every ~14 minutes); Quadro Sync compared the output index
+  with NvAPI display ids, so no display became master; a display reporting no modes read `modes[0]`
+  of an empty list; hardware HDR's double transfer is now warned about.
+* **Import caches** in the DeckLink `vulkan`/`cuda` readbacks and both Vulkan-output routes were
+  keyed on a Win32 handle value, which the attachment pool's ceiling makes recyclable -- they check
+  the allocation's identity now (as ffmpeg's did in 5707f4094). The frame cache deduplicated on a
+  per-consumer counter, so a consumer added later froze once its sibling was removed; generations
+  come from the cache now, keyed on the frame. Its CUDA peer transfer was allocated and never used.
+
+Not measured, argued from code: every Vulkan-output item that needs a display, HDR or NvAPI (this
+box has no `VK_KHR_display` HDR surface), the NTSC field split, the sync-display items, the import
+caches (a recycled handle cannot be forced), and the frame-cache generations.
+
 ### BEHAVIOUR: twenty-four media-module defects from the audit backlog
 
 The GPU-direct producers (`hap`, `cuda_prores`, `cuda_notchlc`), GStreamer both ways, Spout, and

@@ -511,6 +511,10 @@ VkSurfaceKHR vulkan_device::create_display_surface(const display_info& info, uin
 
     uint32_t mode_count = 0;
     get_display_mode_props(physical_device_, info.display_handle, &mode_count, nullptr);
+    // A display that reports NO modes is refused here; `modes[0]` below read past an empty vector.
+    if (mode_count == 0)
+        CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(
+            "[vulkan_output] the display reports no modes; it cannot be driven through VK_KHR_display"));
     std::vector<VkDisplayModePropertiesKHR> modes(mode_count);
     get_display_mode_props(physical_device_, info.display_handle, &mode_count, modes.data());
 

@@ -188,6 +188,9 @@ struct vk_readback_strategy::impl
         VkImageView    view     = VK_NULL_HANDLE;
         int            w        = 0;
         int            h        = 0;
+        /// The allocation this import is of. A handle value is not an identity: the attachment pool destroys textures past its ceiling (2026-09-13) and Windows reuses a freed handle's value readily, so a new texture could arrive with an evicted one's handle and hit an import of memory that is no longer the picture.
+        std::weak_ptr<void> owner;
+        bool                has_owner = false;
     };
     static constexpr int MAX_TEX_CACHE = 8;
     imported_texture tex_cache_[MAX_TEX_CACHE] = {};
@@ -824,12 +827,32 @@ struct vk_readback_strategy::impl
     // ─── Texture import ────────────────────────────────────────────────────
 
     imported_texture* ensure_texture_import(void* win32_handle, unsigned long long alloc_size,
-                                            int width, int height, bool is_16bit)
+                                            int width, int height, bool is_16bit,
+                                            const std::shared_ptr<void>& owner)
     {
+        // An entry whose allocation has gone is stale whatever its handle says: release it first,
+        // so a recycled handle value cannot match it.
+        for (int i = 0; i < num_cached_tex_;) {
+            auto& t = tex_cache_[i];
+            if (t.has_owner && t.owner.expired()) {
+                wait_all_slot_fences();
+                invalidate_sem_for_handle(t.handle);
+                if (t.view)  vkDestroyImageView(device_, t.view, nullptr);
+                if (t.image) vkDestroyImage(device_, t.image, nullptr);
+                if (t.mem)   vkFreeMemory(device_, t.mem, nullptr);
+                for (int j = i + 1; j < num_cached_tex_; ++j)
+                    tex_cache_[j - 1] = tex_cache_[j];
+                tex_cache_[--num_cached_tex_] = {};
+                continue;
+            }
+            ++i;
+        }
+
         // Check cache
         for (int i = 0; i < num_cached_tex_; ++i) {
             auto& t = tex_cache_[i];
-            if (t.handle == win32_handle && t.w == width && t.h == height)
+            if (t.handle == win32_handle && t.w == width && t.h == height &&
+                (!owner || !t.has_owner || t.owner.lock() == owner))
                 return &t;
         }
 
@@ -984,9 +1007,11 @@ struct vk_readback_strategy::impl
 
         VK_CHECK(vkCreateImageView(device_, &view_ci, nullptr, &t.view), "vkCreateImageView (import)");
 
-        t.handle = win32_handle;
-        t.w      = width;
-        t.h      = height;
+        t.handle    = win32_handle;
+        t.w         = width;
+        t.h         = height;
+        t.owner     = owner;
+        t.has_owner = static_cast<bool>(owner);
         num_cached_tex_++;
 
         CASPAR_LOG(debug) << L"[vk_readback] Imported VK texture " << num_cached_tex_
@@ -1150,7 +1175,7 @@ struct vk_readback_strategy::impl
 
         // Import texture (cached)
         step_timer = caspar::timer();
-        auto* imported = ensure_texture_import(mem_handle, vk_tex->alloc_size(), src_w, src_h, is_16bit);
+        auto* imported = ensure_texture_import(mem_handle, vk_tex->alloc_size(), src_w, src_h, is_16bit, vk_tex);
         double import_ms = step_timer.elapsed() * 1000.0;
 
         int src_x = config.src_x;
@@ -1219,10 +1244,24 @@ struct vk_readback_strategy::impl
         region.imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.imageOffset       = {src_x, src_y, 0};
         region.imageExtent       = {(uint32_t)dst_w, (uint32_t)dst_h, 1};
+        // CLAMPED TO THE SOURCE. An origin-only subregion is allowed on this path, and a copy of
+        // dst_w x dst_h at (src_x, src_y) that runs past the image is an invalid region (a VUID
+        // that one driver tolerates and the next corrupts on). The rows keep dst_w's stride, and
+        // the part the source cannot fill is BLACK -- as the compute packers and the CPU write it.
+        {
+            const int copy_w = (std::min)(dst_w, (std::max)(0, src_w - src_x));
+            const int copy_h = (std::min)(dst_h, (std::max)(0, src_h - src_y));
+            if (copy_w < dst_w || copy_h < dst_h) {
+                std::memset(slot.mapped, 0, static_cast<size_t>(dst_w) * dst_h * (is_16bit ? 8 : 4));
+                region.bufferRowLength = static_cast<uint32_t>(dst_w);
+                region.imageExtent     = {(uint32_t)copy_w, (uint32_t)copy_h, 1};
+            }
+        }
 
-        vkCmdCopyImageToBuffer(slot.cmd, imported->image,
-                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               slot.stage_buf, 1, &region);
+        if (region.imageExtent.width > 0 && region.imageExtent.height > 0)
+            vkCmdCopyImageToBuffer(slot.cmd, imported->image,
+                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   slot.stage_buf, 1, &region);
 
         // Transition image back to GENERAL and release to external queue
         VkImageMemoryBarrier release_barrier{};
@@ -1338,7 +1377,7 @@ struct vk_readback_strategy::impl
 
         // Import texture (cached)
         step_timer = caspar::timer();
-        auto* imported = ensure_texture_import(mem_handle, vk_tex->alloc_size(), src_w, src_h, is_16bit);
+        auto* imported = ensure_texture_import(mem_handle, vk_tex->alloc_size(), src_w, src_h, is_16bit, vk_tex);
         double import_ms = step_timer.elapsed() * 1000.0;
 
         int src_x = config.src_x;

@@ -31,6 +31,7 @@
 #include <simde/x86/avx2.h>
 #endif
 
+#include <atomic>
 #include <type_traits>
 
 #include "format_strategy.h"
@@ -290,6 +291,9 @@ class v210_strategy
 
     std::vector<int32_t> color_matrix;
     std::vector<int32_t> color_matrix_rgba;
+    /// `key_only` is not implemented by this packer; said ONCE per strategy. It was logged on
+    /// every frame -- 50 lines a second -- and named HDR, which it is not specific to.
+    std::atomic<bool>    warned_key_only_{false};
     __m128i              black_batch;
     uint8_t              bpc;
 
@@ -511,8 +515,9 @@ class v210_strategy
             convert_frame<T>(channel_format_desc, decklink_format_desc, config, image_data, true, frame1);
         }
 
-        if (config.key_only) {
-            CASPAR_LOG(warning) << L"key_only is not supported for HDR v210 frames, outputting full-color frame";
+        if (config.key_only && !warned_key_only_.exchange(true)) {
+            CASPAR_LOG(warning) << L"key_only is not supported by the v210 packer; outputting the full-colour "
+                                   L"frame (logged once)";
         }
 
         if (use_rgba)
@@ -556,6 +561,11 @@ class v210_strategy
 
         const int NUM_THREADS     = 6;
         auto      rows_per_thread = decklink_format_desc.height / NUM_THREADS;
+        // A MULTIPLE OF THE FIELD COUNT, so every thread starts on this field's parity. For NTSC
+        // 486 / 6 = 81 is odd, and threads 1, 3 and 5 stepped by two from an odd offset -- writing
+        // the OTHER field's lines, in bands. Upstream shape.
+        if (decklink_format_desc.field_count > 1)
+            rows_per_thread -= rows_per_thread % decklink_format_desc.field_count;
 
         tbb::parallel_for(0, NUM_THREADS, [&](int thread_index) {
             auto start_y = firstLine + thread_index * rows_per_thread;

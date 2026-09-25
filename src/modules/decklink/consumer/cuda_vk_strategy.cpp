@@ -160,6 +160,9 @@ struct cuda_vk_strategy::impl
         cudaSurfaceObject_t    surf    = 0;
         int                    w       = 0;
         int                    h       = 0;
+        /// The allocation this import is of. A handle value is not an identity: the attachment pool destroys textures past its ceiling (2026-09-13) and Windows reuses a freed handle's value readily, so a new texture could arrive with an evicted one's handle and hit an import of memory that is no longer the picture.
+        std::weak_ptr<void>    owner;
+        bool                   has_owner = false;
 
         void cleanup()
         {
@@ -173,6 +176,8 @@ struct cuda_vk_strategy::impl
             if (ext_mem) { cudaDestroyExternalMemory(ext_mem); ext_mem = nullptr; }
             handle = nullptr;
             w = h = 0;
+            owner.reset();
+            has_owner = false;
         }
     };
     static constexpr int MAX_CACHED_SLOTS = 8;
@@ -389,12 +394,29 @@ struct cuda_vk_strategy::impl
     // Returns the CUDA surface object for the given VK texture handle.
     // Caches imports so repeated calls with the same handle are free.
     cudaSurfaceObject_t ensure_import(void* win32_handle, unsigned long long alloc_size,
-                                      int width, int height, bool is_16bit)
+                                      int width, int height, bool is_16bit,
+                                      const std::shared_ptr<void>& owner)
     {
+        // A slot whose allocation has gone is stale whatever its handle says: release it first.
+        for (int i = 0; i < num_cached_;) {
+            auto& s = cached_slots_[i];
+            if (s.has_owner && s.owner.expired()) {
+                if (stream_) cudaStreamSynchronize(stream_);
+                invalidate_sem_for_handle(s.handle);
+                s.cleanup();
+                for (int j = i + 1; j < num_cached_; ++j)
+                    cached_slots_[j - 1] = cached_slots_[j];
+                cached_slots_[--num_cached_] = {};
+                continue;
+            }
+            ++i;
+        }
+
         // Check if already cached
         for (int i = 0; i < num_cached_; ++i) {
             auto& s = cached_slots_[i];
-            if (s.handle == win32_handle && s.w == width && s.h == height)
+            if (s.handle == win32_handle && s.w == width && s.h == height &&
+                (!owner || !s.has_owner || s.owner.lock() == owner))
                 return s.surf;
         }
 
@@ -460,9 +482,11 @@ struct cuda_vk_strategy::impl
         resDesc.res.array.array = slot.array;
         cuda_check(cudaCreateSurfaceObject(&slot.surf, &resDesc), "cudaCreateSurfaceObject");
 
-        slot.handle = win32_handle;
-        slot.w      = width;
-        slot.h      = height;
+        slot.handle    = win32_handle;
+        slot.w         = width;
+        slot.h         = height;
+        slot.owner     = owner;
+        slot.has_owner = static_cast<bool>(owner);
         num_cached_++;
 
         CASPAR_LOG(debug) << L"[cuda_vk_strategy] Imported VK texture slot "
@@ -711,7 +735,7 @@ struct cuda_vk_strategy::impl
         step_timer = caspar::timer();
         ensure_cuda_device(vk_tex->device_luid());
         cudaSetDevice(cuda_device_);
-        auto surf = ensure_import(handle, vk_tex->alloc_size(), src_w, src_h, is_16bit);
+        auto surf = ensure_import(handle, vk_tex->alloc_size(), src_w, src_h, is_16bit, vk_tex);
 
         // Ensure output buffers (both ping-pong)
         size_t v210_row = (size_t)((dst_w + 47) / 48) * 128;
@@ -854,7 +878,7 @@ struct cuda_vk_strategy::impl
         step_timer = caspar::timer();
         ensure_cuda_device(vk_tex->device_luid());
         cudaSetDevice(cuda_device_);
-        auto surf = ensure_import(handle, vk_tex->alloc_size(), src_w, src_h, false);
+        auto surf = ensure_import(handle, vk_tex->alloc_size(), src_w, src_h, false, vk_tex);
 
         size_t bgra_sz = (size_t)dst_w * dst_h * 4;
         ensure_output_buffers(dst_w, dst_h, false);

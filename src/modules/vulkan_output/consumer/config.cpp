@@ -19,9 +19,26 @@
 
 #include "config.h"
 
+#include <common/except.h>
+#include <common/utf.h>
+
 #include <boost/property_tree/ptree.hpp>
 
 namespace caspar { namespace vulkan_output {
+
+namespace {
+
+/// Every word below either names a value or is refused. They used to fall through to a default,
+/// which is the tree's most repeated defect: the consumer starts, says nothing, and outputs the
+/// value nobody chose -- an SDR signal from `<transfer>PQ </transfer>`, a hold from a misspelled
+/// `on-disconnect`, internal sync from `<reference>hous</reference>`.
+[[noreturn]] void refuse(const wchar_t* key, const std::wstring& value, const wchar_t* valid)
+{
+    CASPAR_THROW_EXCEPTION(user_error() << msg_info(u8(std::wstring(L"vulkan-output <") + key + L"> must be " +
+                                                       valid + L", not '" + value + L"'")));
+}
+
+} // namespace
 
 configuration parse_config(const boost::property_tree::wptree& ptree)
 {
@@ -32,6 +49,13 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
     config.buffer_depth = ptree.get(L"buffer-depth", 3);
     config.sync_group   = ptree.get(L"sync-group", 0);
     config.video_mode   = ptree.get(L"video-mode", L"");
+    // PARSED, STORED AND READ BY NOTHING -- the `MIXER EXPOSURE` class in a config element. The
+    // output always takes the display's current mode, so an operator who set this believed they
+    // had forced a mode they had not. Refused until something implements it.
+    if (!config.video_mode.empty())
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+            "vulkan-output <video-mode> is not implemented: the output uses the display's current mode. "
+            "Remove the element, or set the mode on the display."));
     config.identify_on_start = ptree.get(L"identify-on-start", false);
 
     // HDR
@@ -40,8 +64,10 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
         config.transfer = hdr_transfer::pq;
     else if (transfer_str == L"hlg")
         config.transfer = hdr_transfer::hlg;
-    else
+    else if (transfer_str == L"sdr")
         config.transfer = hdr_transfer::sdr;
+    else
+        refuse(L"transfer", transfer_str, L"sdr, pq or hlg");
 
     // Color gamut (output primaries)
     auto gamut_str = ptree.get(L"gamut", L"");
@@ -53,8 +79,10 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
         config.gamut = output_gamut::p3_dci;
     else if (gamut_str == L"adobe-rgb" || gamut_str == L"adobergb")
         config.gamut = output_gamut::adobe_rgb;
-    else
+    else if (gamut_str.empty() || gamut_str == L"bt709" || gamut_str == L"709")
         config.gamut = output_gamut::bt709;
+    else
+        refuse(L"gamut", gamut_str, L"bt709, bt2020, p3-d65, p3-dci or adobe-rgb");
 
     // Transfer function (EOTF) — if not explicitly set, infer from hdr_transfer
     auto eotf_str = ptree.get(L"eotf", L"");
@@ -70,6 +98,8 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
         config.eotf = output_eotf::gamma26;
     else if (eotf_str == L"srgb")
         config.eotf = output_eotf::srgb;
+    else if (!eotf_str.empty())
+        refuse(L"eotf", eotf_str, L"linear, pq, hlg, gamma24, gamma26 or srgb");
     else {
         // Infer from legacy transfer setting
         if (config.transfer == hdr_transfer::pq)
@@ -97,7 +127,8 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
 
         auto t = hdr_meta->get(L"transfer", L"");
         if (t == L"pq")  config.transfer = hdr_transfer::pq;
-        if (t == L"hlg") config.transfer = hdr_transfer::hlg;
+        else if (t == L"hlg") config.transfer = hdr_transfer::hlg;
+        else if (!t.empty()) refuse(L"hdr-metadata/transfer", t, L"pq or hlg");
     }
 
     // Subregion
@@ -117,8 +148,10 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
         config.on_disconnect = disconnect_behavior::hold;
     else if (disconnect_str == L"black")
         config.on_disconnect = disconnect_behavior::black;
-    else
+    else if (disconnect_str == L"retry")
         config.on_disconnect = disconnect_behavior::retry;
+    else
+        refuse(L"on-disconnect", disconnect_str, L"retry, hold or black");
 
     // Presentation delay
     config.delay_frames = ptree.get(L"delay", 0);
@@ -132,8 +165,10 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
         auto ref_str         = gsync->get(L"reference", L"internal");
         if (ref_str == L"external" || ref_str == L"house")
             config.gsync_source = gsync_reference::external;
-        else
+        else if (ref_str == L"internal")
             config.gsync_source = gsync_reference::internal;
+        else
+            refuse(L"gsync/reference", ref_str, L"internal, external or house");
     }
 
     // EDID auto-detection
@@ -164,6 +199,8 @@ configuration parse_config(const boost::property_tree::wptree& ptree)
             config.tone_map_op = 3;
         else if (tone_map_str == L"hlg_ootf")
             config.tone_map_op = 7;
+        else
+            refuse(L"auto-tone-map", tone_map_str, L"none, reinhard, aces_filmic, aces_rrt or hlg_ootf");
     }
     config.display_peak_luminance = ptree.get(L"display-peak-luminance", config.display_peak_luminance);
 

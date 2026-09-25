@@ -42,6 +42,7 @@
 #include <accelerator/vulkan/util/texture.h>
 
 #include <common/diagnostics/graph.h>
+#include <cmath>
 #include <common/except.h>
 #include <common/executor.h>
 #include <common/future.h>
@@ -307,6 +308,21 @@ class vulkan_output_consumer : public core::frame_consumer
                    L"until the per-consumer conversion is enabled.";
         }
 
+        // 3. ...and the TRANSFER twice, which the warning above did not say. scRGB is LINEAR, and
+        //    with the conversion pass disabled the framebuffer holds the channel's already-ENCODED
+        //    values -- so the display engine reads a PQ or sRGB code value as linear light and
+        //    encodes it again: a PQ code of 0.58 (about 203 nits) arrives as 0.58 x 80 = 46 nits.
+        //    Correct only when the channel itself is linear.
+        if ((config_.transfer == hdr_transfer::pq || config_.transfer == hdr_transfer::hlg) &&
+            channel_color_transfer_ != core::color_transfer::linear) {
+            CASPAR_LOG(warning)
+                << print()
+                << L" hardware HDR presents the framebuffer as LINEAR scRGB, but this channel's "
+                   L"transfer is not linear -- its encoded values will be read as linear light and "
+                   L"encoded a second time (far too dark). Use a linear channel, or leave hardware "
+                   L"HDR off until the per-consumer conversion is enabled.";
+        }
+
         // buffer-depth=0 (or negative, from a hand-edited config) makes
         // send()'s `buffer_.size() >= buffer_depth` check always true, so
         // buffer_.pop() below runs on an empty queue — UB. Clamp before the
@@ -394,7 +410,8 @@ class vulkan_output_consumer : public core::frame_consumer
             auto ogl_tex = std::dynamic_pointer_cast<accelerator::ogl::texture>(frame.texture());
             if (ogl_tex) {
                 auto* cache = frame_cache_.get();
-                ++frame_generation_;
+                // FROM THE CACHE, keyed on this frame -- see `gpu_frame_cache::generation_for`.
+                frame_generation_ = cache->generation_for(frame);
                 // Synchronous transfer: blit + GL signal + coordinator submit all
                 // happen HERE, so the timeline semaphore is guaranteed signaled
                 // before the frame enters the buffer.  Eliminates the pump thread
@@ -1232,9 +1249,11 @@ class vulkan_output_consumer : public core::frame_consumer
         hdr.displayPrimaryGreen = {0.170f, 0.797f};
         hdr.displayPrimaryBlue  = {0.131f, 0.046f};
         hdr.whitePoint          = {0.3127f, 0.3290f};
-        // Luminance range
-        hdr.maxLuminance        = static_cast<float>(config_.max_cll);
-        hdr.minLuminance        = 0.001f;
+        // THE MASTERING DISPLAY'S range, `<min-dml>`/`<max-dml>`, as the NvAPI path sends it.
+        // This sent MaxCLL as the display maximum and a hardcoded 0.001 minimum, so the two
+        // metadata routes described one mastering display two different ways.
+        hdr.maxLuminance        = static_cast<float>(config_.max_dml);
+        hdr.minLuminance        = static_cast<float>(config_.min_dml);
         hdr.maxContentLightLevel      = static_cast<float>(config_.max_cll);
         hdr.maxFrameAverageLightLevel = static_cast<float>(config_.max_fall);
 
@@ -1298,7 +1317,14 @@ class vulkan_output_consumer : public core::frame_consumer
                               : sync_source::vsync;
 
             if (config_.gsync_master) {
-                nvapi_->configure_sync(config_.gpu_index, config_.output_index, source);
+                // AN NvAPI DISPLAY ID. This passed the 1-based output index, which no display id
+                // ever equals, so every display in the topology was set SLAVE and none master.
+                const auto master_id = nvapi_->resolve_display_id(config_.gpu_index, config_.output_index);
+                if (master_id == 0)
+                    CASPAR_LOG(warning) << print() << L" Quadro Sync: output " << config_.output_index
+                                        << L" resolves to no NvAPI display id; not configuring a master.";
+                else
+                    nvapi_->configure_sync(config_.gpu_index, static_cast<int>(master_id), source);
             }
 
             auto status = nvapi_->get_sync_status(config_.gpu_index);
@@ -1362,8 +1388,10 @@ class vulkan_output_consumer : public core::frame_consumer
         // Frame pacer interval: used by the phase-aligned pacer (MAILBOX mode)
         // to sleep until the next frame tick. Not used in FIFO mode (present
         // barrier) where hardware provides the timing.
-        const auto frame_interval_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::microseconds(static_cast<int64_t>(1'000'000.0 / format_desc_.fps)));
+        // NANOSECONDS, rounded. Truncating to whole microseconds made 59.94 run 0.33 us a frame
+        // fast -- one frame early every fourteen minutes against a genlocked reference.
+        const auto frame_interval_ns = std::chrono::nanoseconds(
+            static_cast<int64_t>(std::llround(1'000'000'000.0 / format_desc_.fps)));
 
         while (running_) {
             core::const_frame frame;
@@ -1526,6 +1554,11 @@ class vulkan_output_consumer : public core::frame_consumer
             // Clamp destination end to swapchain bounds
             int dw = (std::min)(sw, dw_max - dx);
             int dh = (std::min)(sh, dh_max - dy);
+            // AND THE SOURCE WITH IT. Only the destination was clamped, so a region running off
+            // the display's edge was blitted from its full source extent into a smaller one --
+            // SCALED, where every other path (and the no-subregion branch below) crops 1:1.
+            sw = dw;
+            sh = dh;
 
             // Degenerate region — skip blit entirely (returns zero-extent region)
             if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
@@ -1728,7 +1761,7 @@ class vulkan_output_consumer : public core::frame_consumer
                     early_d2h_kicked = begin_cuda_d2h(handle,
                         static_cast<uint32_t>(vk_tex->width()),
                         static_cast<uint32_t>(vk_tex->height()),
-                        use_16bit, alloc_sz, vk_tex->device_luid());
+                        use_16bit, alloc_sz, vk_tex->device_luid(), vk_tex);
                 }
             }
         }
@@ -1933,7 +1966,7 @@ class vulkan_output_consumer : public core::frame_consumer
                 VkFormat fmt = (vk_tex->depth() == common::bit_depth::bit8)
                                    ? VK_FORMAT_B8G8R8A8_UNORM
                                    : VK_FORMAT_R16G16B16A16_UNORM;
-                auto* imported = import_vk_texture(handle, w, h, fmt);
+                auto* imported = import_vk_texture(handle, w, h, fmt, vk_tex);
                 if (imported) {
                     // Memory barrier to make the mixer's writes visible on this
                     // device.  We use GENERAL→TRANSFER_SRC_OPTIMAL instead of
@@ -1985,7 +2018,8 @@ class vulkan_output_consumer : public core::frame_consumer
                             bool use_16bit = (vk_tex->depth() != common::bit_depth::bit8);
                             auto alloc_sz  = static_cast<unsigned long long>(vk_tex->alloc_size());
                             cuda_ok = cross_gpu_cuda_transfer(handle, w, h, use_16bit, alloc_sz,
-                                                              vk_tex->device_luid(), blit_dest_image, cmd);
+                                                              vk_tex->device_luid(), blit_dest_image, cmd,
+                                                              vk_tex);
                         }
                     }
                     if (cuda_ok) {
@@ -2522,18 +2556,40 @@ class vulkan_output_consumer : public core::frame_consumer
         uint32_t       height       = 0;
         platform::native_handle_t src_handle   = platform::kInvalidHandle; // Cache key — the mixer texture's exported handle (NOT owned)
         platform::native_handle_t owned_handle = platform::kInvalidHandle; // Duplicated handle — owned by this cache entry, must be closed
+        /// The allocation this import is of. A handle value is not an identity: the attachment pool destroys textures past its ceiling (2026-09-13) and Windows reuses a freed handle's value readily, so a new texture could arrive with an evicted one's handle and hit an import of memory that is no longer the picture. The duplicated handle kept the OLD
+        /// memory alive, so a stale hit showed an old picture rather than faulting.
+        std::weak_ptr<void>       owner;
+        bool                      has_owner = false;
     };
 
     // ─── VK-native import: import mixer's exportable VkImage memory ─────────
     // Returns a pointer to a cached vk_imported_image, or nullptr on failure.
     // The returned image is in VK_IMAGE_LAYOUT_UNDEFINED and needs a transition
     // to TRANSFER_SRC before blitting.
-    vk_imported_image* import_vk_texture(platform::native_handle_t src_handle, uint32_t width, uint32_t height, VkFormat format)
+    vk_imported_image* import_vk_texture(platform::native_handle_t src_handle, uint32_t width, uint32_t height, VkFormat format,
+                                         const std::shared_ptr<void>& owner)
     {
+        // An entry whose allocation has gone is stale whatever its handle says. Nothing in flight
+        // can still read it: the frame that referenced it held the texture alive.
+        for (auto it = vk_import_cache_.begin(); it != vk_import_cache_.end();) {
+            if (it->has_owner && it->owner.expired()) {
+                auto dev = device_->device();
+                vkDeviceWaitIdle(dev);
+                if (it->view != VK_NULL_HANDLE)   vkDestroyImageView(dev, it->view, nullptr);
+                if (it->image != VK_NULL_HANDLE)  vkDestroyImage(dev, it->image, nullptr);
+                if (it->memory != VK_NULL_HANDLE) vkFreeMemory(dev, it->memory, nullptr);
+                platform::close_handle(it->owned_handle);
+                it = vk_import_cache_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
         // Check cache first — the mixer pools render attachments, so we'll see
         // the same handle repeatedly.
         for (auto& imp : vk_import_cache_) {
-            if (imp.src_handle == src_handle && imp.width == width && imp.height == height)
+            if (imp.src_handle == src_handle && imp.width == width && imp.height == height &&
+                (!owner || !imp.has_owner || imp.owner.lock() == owner))
                 return &imp;
         }
 
@@ -2673,7 +2729,8 @@ class vulkan_output_consumer : public core::frame_consumer
             return nullptr;
         }
 
-        vk_import_cache_.push_back({image, importedMem, VK_NULL_HANDLE, width, height, src_handle, dup_handle});
+        vk_import_cache_.push_back({image, importedMem, VK_NULL_HANDLE, width, height, src_handle, dup_handle,
+                                    owner, static_cast<bool>(owner)});
 
         if (!vk_mixer_logged_) {
             CASPAR_LOG(info) << print() << L" VK mixer detected \u2014 using VK-native zero-copy path"
@@ -2781,7 +2838,7 @@ class vulkan_output_consumer : public core::frame_consumer
     // before fence wait to overlap D2H (~4ms) with VK sync (~2-3ms).
     bool begin_cuda_d2h(HANDLE src_handle, uint32_t width, uint32_t height,
                         bool use_16bit, unsigned long long vk_alloc_size,
-                        const uint8_t* src_luid)
+                        const uint8_t* src_luid, const std::shared_ptr<void>& owner = {})
     {
         try {
             size_t pixel_size = use_16bit ? 8 : 4;
@@ -2859,8 +2916,10 @@ class vulkan_output_consumer : public core::frame_consumer
             // ── Look up or import VK texture into CUDA (cached) ─────────────
             cudaArray_t src_array = nullptr;
             for (int i = 0; i < cuda_vk_import_count_; ++i) {
-                if (cuda_vk_imports_[i].handle == src_handle) {
-                    src_array = cuda_vk_imports_[i].array;
+                const auto& e = cuda_vk_imports_[i];
+                if (e.handle == src_handle && !(e.has_owner && e.owner.expired()) &&
+                    (!owner || !e.has_owner || e.owner.lock() == owner)) {
+                    src_array = e.array;
                     break;
                 }
             }
@@ -2880,14 +2939,17 @@ class vulkan_output_consumer : public core::frame_consumer
                     auto& oldest = cuda_vk_imports_[0];
                     if (oldest.mipmap) cudaFreeMipmappedArray(oldest.mipmap);
                     if (oldest.ext_mem) cudaDestroyExternalMemory(oldest.ext_mem);
-                    memmove(&cuda_vk_imports_[0], &cuda_vk_imports_[1],
-                            sizeof(cuda_vk_import_entry) * (kMaxCudaVkImports - 1));
+                    // Element-wise now the entry holds a weak_ptr: memmove would not be a copy.
+                    for (int j = 1; j < kMaxCudaVkImports; ++j)
+                        cuda_vk_imports_[j - 1] = std::move(cuda_vk_imports_[j]);
                     cuda_vk_imports_[kMaxCudaVkImports - 1] = {};
                     --cuda_vk_import_count_;
                 }
 
                 auto& entry = cuda_vk_imports_[cuda_vk_import_count_];
-                entry.handle = src_handle;
+                entry.handle    = src_handle;
+                entry.owner     = owner;
+                entry.has_owner = static_cast<bool>(owner);
 
                 cudaExternalMemoryHandleDesc extMemDesc{};
                 extMemDesc.type                = cudaExternalMemoryHandleTypeOpaqueWin32;
@@ -3134,12 +3196,21 @@ class vulkan_output_consumer : public core::frame_consumer
             VkImageBlit blit{};
             blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            int32_t copy_w = static_cast<int32_t>((std::min)(sub_w, swapchain_.width));
-            int32_t copy_h = static_cast<int32_t>((std::min)(sub_h, swapchain_.height));
+            // AT dest-x/dest-y, as `compute_blit_region` places the same-GPU paths. This always
+            // drew at (0,0): the cross-GPU route honoured the source crop and dropped the
+            // placement, the shape the DeckLink GPU packers had until 2026-08-27.
+            const int32_t dx = has_subregion()
+                ? (std::clamp)(config_.dest_x, 0, static_cast<int32_t>(swapchain_.width)) : 0;
+            const int32_t dy = has_subregion()
+                ? (std::clamp)(config_.dest_y, 0, static_cast<int32_t>(swapchain_.height)) : 0;
+            int32_t copy_w = (std::min)(static_cast<int32_t>(sub_w), static_cast<int32_t>(swapchain_.width) - dx);
+            int32_t copy_h = (std::min)(static_cast<int32_t>(sub_h), static_cast<int32_t>(swapchain_.height) - dy);
+            if (copy_w <= 0 || copy_h <= 0)
+                return true;
             blit.srcOffsets[0] = {0, 0, 0};
             blit.srcOffsets[1] = {copy_w, copy_h, 1};
-            blit.dstOffsets[0] = {0, 0, 0};
-            blit.dstOffsets[1] = {copy_w, copy_h, 1};
+            blit.dstOffsets[0] = {dx, dy, 0};
+            blit.dstOffsets[1] = {dx + copy_w, dy + copy_h, 1};
             vkCmdBlitImage(cmd, cuda_staging_image_,
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -3155,9 +3226,10 @@ class vulkan_output_consumer : public core::frame_consumer
     // Combined: begin + complete in one call (for first-frame fallback).
     bool cross_gpu_cuda_transfer(HANDLE src_handle, uint32_t width, uint32_t height,
                                  bool use_16bit, unsigned long long vk_alloc_size,
-                                 const uint8_t* src_luid, VkImage dst_image, VkCommandBuffer cmd)
+                                 const uint8_t* src_luid, VkImage dst_image, VkCommandBuffer cmd,
+                                 const std::shared_ptr<void>& owner = {})
     {
-        if (!begin_cuda_d2h(src_handle, width, height, use_16bit, vk_alloc_size, src_luid))
+        if (!begin_cuda_d2h(src_handle, width, height, use_16bit, vk_alloc_size, src_luid, owner))
             return false;
         return complete_cuda_d2h(dst_image, cmd);
     }
@@ -3286,6 +3358,29 @@ class vulkan_output_consumer : public core::frame_consumer
             return;
         }
 
+        // A 16-BIT CHANNEL IS CONVERTED to the swapchain's BGRA8 here. The size check above knew
+        // the pixels were 8 bytes, and the copy below still moved them byte for byte into a
+        // 4-byte-per-pixel image -- the top half of every sample read as a whole pixel. The
+        // mixer names the 16-bit layout `rgba` (Vulkan) or `bgra` (OpenGL); the high byte of each
+        // component is the 8-bit value.
+        size_t bytes_per_pixel_out = bytes_per_pixel;
+        if (cpu_is_16bit) {
+            const size_t npx      = static_cast<size_t>(format_desc_.width) * format_desc_.height;
+            const bool   src_rgba = frame.pixel_format_desc().format == core::pixel_format::rgba;
+            cpu_convert_buf_.resize(npx * 4);
+            const auto* s = reinterpret_cast<const uint16_t*>(pixels);
+            auto*       d = cpu_convert_buf_.data();
+            for (size_t i = 0; i < npx; ++i, s += 4, d += 4) {
+                d[0] = static_cast<uint8_t>((src_rgba ? s[2] : s[0]) >> 8);
+                d[1] = static_cast<uint8_t>(s[1] >> 8);
+                d[2] = static_cast<uint8_t>((src_rgba ? s[0] : s[2]) >> 8);
+                d[3] = static_cast<uint8_t>(s[3] >> 8);
+            }
+            pixels              = cpu_convert_buf_.data();
+            size                = cpu_convert_buf_.size();
+            bytes_per_pixel_out = 4;
+        }
+
         auto        dev       = device_->device();
         auto        phys_dev  = device_->physical_device();
 
@@ -3397,7 +3492,7 @@ class vulkan_output_consumer : public core::frame_consumer
 
             if (sw <= 0 || sh <= 0) return;
 
-            region.bufferOffset    = (static_cast<VkDeviceSize>(sy) * fw + sx) * bytes_per_pixel;
+            region.bufferOffset    = (static_cast<VkDeviceSize>(sy) * fw + sx) * bytes_per_pixel_out;
             region.bufferRowLength = static_cast<uint32_t>(fw);
             region.imageOffset     = {dx, dy, 0};
             region.imageExtent     = {static_cast<uint32_t>(sw), static_cast<uint32_t>(sh), 1};
@@ -4585,6 +4680,8 @@ class vulkan_output_consumer : public core::frame_consumer
 
     // ─── VK-native import cache ─────────────────────────────────────────────
     std::vector<vk_imported_image>   vk_import_cache_;
+    /// A 16-bit channel's host frame converted to BGRA8 for the CPU upload -- see `upload_frame_cpu`.
+    std::vector<uint8_t>             cpu_convert_buf_;
     bool                             vk_mixer_logged_ = false; // Log once when VK mixer detected
     bool                             vk_import_fail_logged_ = false; // Log VK import failure once (cross-GPU)
     uint64_t                         present_path_counter_ = 0;    // Log present path every N frames
@@ -4620,6 +4717,9 @@ class vulkan_output_consumer : public core::frame_consumer
         cudaExternalMemory_t ext_mem = nullptr;
         cudaMipmappedArray_t mipmap  = nullptr;
         cudaArray_t          array   = nullptr;
+        /// The allocation this import is of -- see `vk_imported_image::owner`.
+        std::weak_ptr<void>  owner;
+        bool                 has_owner = false;
     };
     cuda_vk_import_entry   cuda_vk_imports_[kMaxCudaVkImports] = {};
     int                    cuda_vk_import_count_ = 0;
@@ -4672,7 +4772,9 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
             CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(
                 "VULKAN_OUTPUT: " + u8(key) + " needs a value"));
         if (boost::iequals(key, L"MODE"))
-            config.video_mode = params[++i];
+            // Refused as `<video-mode>` is: stored and read by nothing. See `parse_config`.
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                "VULKAN_OUTPUT MODE is not implemented: the output uses the display's current mode"));
         else if (boost::iequals(key, L"DELAY"))
             config.delay_frames = std::stoi(params[++i]);
         else

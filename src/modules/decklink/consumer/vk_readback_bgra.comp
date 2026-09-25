@@ -52,8 +52,13 @@ void main()
     int ry = y - pc.dest_y;
 
     vec4 pixel = vec4(0.0, 0.0, 0.0, 0.0);
-    if (rx >= 0 && rx < pc.region_w && ry >= 0 && ry < pc.region_h)
-        pixel = texelFetch(src_tex, ivec2(pc.src_x + rx, pc.src_y + ry), 0);
+    // Bounded by the SOURCE as well -- see vk_readback_v210.comp: an out-of-image texelFetch is
+    // undefined here, where the CUDA kernel and the CPU packers write black.
+    const ivec2 src_size = textureSize(src_tex, 0);
+    const ivec2 s        = ivec2(pc.src_x + rx, pc.src_y + ry);
+    if (rx >= 0 && rx < pc.region_w && ry >= 0 && ry < pc.region_h &&
+        s.x >= 0 && s.y >= 0 && s.x < src_size.x && s.y < src_size.y)
+        pixel = texelFetch(src_tex, s, 0);
 
     // The attachment ALREADY holds BGRA, so this is a straight copy: channel 0 -> byte 0.
     //

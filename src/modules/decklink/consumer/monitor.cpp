@@ -70,6 +70,9 @@ core::monitor::state get_state_for_config(const configuration& config, const cor
         state["decklink/latency"] = std::wstring(L"low");
     } else if (config.latency == configuration::latency_t::normal_latency) {
         state["decklink/latency"] = std::wstring(L"normal");
+    } else if (config.latency == configuration::latency_t::sync_display) {
+        // Was missing: `<latency>sync</latency>` published no latency leaf at all.
+        state["decklink/latency"] = std::wstring(L"sync");
     }
 
     int index = 0;

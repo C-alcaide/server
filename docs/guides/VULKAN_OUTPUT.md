@@ -181,8 +181,12 @@ server accepts and no check confirms took effect.
 | value | on cable pull or display power-off |
 | :--- | :--- |
 | `retry` | **default** — keep trying to re-acquire |
-| `hold` | keep presenting the last frame |
-| `black` | present black |
+| `hold` | stop presenting and **do not** re-acquire: a display that comes back stays dark until the consumer is added again |
+| `black` | as `retry`, without tagging the missing frames as dropped |
+
+*Corrected 2026-09-25.* This table said `hold` keeps presenting the last frame and `black` presents
+black. Neither can happen: nothing can be presented to a display that is gone. The rows now say what
+the code does. Any other word is refused (it used to select `retry`).
 
 For a show, `retry` is almost always right: a display that comes back should resume without an
 operator touching anything. `hold` is for cases where a frozen frame is less alarming than a flash.
@@ -251,7 +255,7 @@ implementation notes in [`../architecture/VULKAN_OUTPUT.md`](../architecture/VUL
 
 | setting | meaning |
 | :--- | :--- |
-| `video-mode` | force a mode rather than taking the channel's |
+| ~~`video-mode`~~ | **refused since 2026-09-25**, with AMCP `MODE`: it was parsed, stored and read by nothing, so the output always took the display's current mode while the config said otherwise |
 | `delay`, `delay-ms` | present N frames or milliseconds late, for lip-sync against another path |
 | `buffer-depth` | presentation queue depth |
 | `display-name` | select the output by name instead of index |

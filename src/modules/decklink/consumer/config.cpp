@@ -189,8 +189,14 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
             config.gpu_readback_mode = configuration::gpu_readback_mode_t::vulkan_dma;
         else if (gpu_readback_mode == L"cpu")
             config.gpu_readback_mode = configuration::gpu_readback_mode_t::cpu;
-        else
+        else if (gpu_readback_mode == L"auto")
             config.gpu_readback_mode = configuration::gpu_readback_mode_t::auto_select;
+        else
+            // REFUSED, with `auto` written out: a misspelled mode used to select `auto` -- the
+            // readback an operator is least likely to notice they did not choose.
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                L"decklink gpu-readback-mode must be auto, cuda, vulkan, vulkan-dma or cpu, not '" +
+                gpu_readback_mode + L"'"));
     }
 
     {
@@ -200,8 +206,11 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
             config.gpu_transfer = configuration::gpu_transfer_t::dvp;
         else if (gpu_transfer == L"copy")
             config.gpu_transfer = configuration::gpu_transfer_t::copy;
-        else
+        else if (gpu_transfer == L"auto")
             config.gpu_transfer = configuration::gpu_transfer_t::auto_select;
+        else
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                L"decklink gpu-transfer must be auto, dvp or copy, not '" + gpu_transfer + L"'"));
     }
 
     {
@@ -211,8 +220,11 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
             config.gpu_pack = configuration::gpu_pack_t::gpu;
         else if (gpu_pack == L"cpu")
             config.gpu_pack = configuration::gpu_pack_t::cpu;
-        else
+        else if (gpu_pack == L"auto")
             config.gpu_pack = configuration::gpu_pack_t::auto_select;
+        else
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                L"decklink gpu-pack must be auto, gpu or cpu, not '" + gpu_pack + L"'"));
     }
 
     config.primary = parse_output_config(ptree, format_repository);
@@ -279,17 +291,10 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
         // destination x inverts the luma/chroma phase against the frame grid and costs about
         // 20 dB -- measured identically on cpu and vulkan, so it is a wire-format property and
         // not something a readback mode can fix.
-        const bool mode_can_place =
-            config.gpu_readback_mode != configuration::gpu_readback_mode_t::vulkan_dma;
-        if (needs_cpu_geometry(config.primary) && !mode_can_place) {
-            CASPAR_LOG(warning)
-                << L"[decklink] <subregion> sets dest-x/dest-y/width/height, which "
-                   L"gpu-readback-mode=vulkan-dma cannot place -- its image-to-buffer copy "
-                   L"carries one offset and cannot express a rectangle inside a larger frame. "
-                   L"Falling back to gpu-readback-mode=cpu so the geometry is honoured; "
-                   L"`vulkan` and `cuda` both place it on the GPU.";
-            config.gpu_readback_mode = configuration::gpu_readback_mode_t::cpu;
-        }
+        // EVERY PORT, not the primary alone: this ran before `<ports>` was parsed, so a
+        // secondary port's placement under vulkan-dma was dropped with no warning. Applied
+        // after the ports, below.
+        (void)needs_cpu_geometry;
     }
 
     auto keyer = ptree.get(L"keyer", L"default");
@@ -321,6 +326,27 @@ configuration parse_xml_config(const boost::property_tree::wptree&  ptree,
             port_configuration port_config = parse_output_config(xml_port.second, format_repository);
 
             config.secondaries.push_back(port_config);
+        }
+    }
+
+    // ONLY `vulkan-dma` CANNOT PLACE A DESTINATION RECTANGLE (see the history above): its
+    // image-to-buffer copy carries one offset. Checked over the primary AND every `<port>`, after
+    // they are parsed -- it used to run before `<ports>`, so a secondary's placement was dropped.
+    if (config.gpu_readback_mode == configuration::gpu_readback_mode_t::vulkan_dma) {
+        auto needs_cpu_geometry = [](const port_configuration& p) {
+            return p.dest_x != 0 || p.dest_y != 0 || p.region_w != 0 || p.region_h != 0;
+        };
+        bool any = needs_cpu_geometry(config.primary);
+        for (const auto& port : config.secondaries)
+            any = any || needs_cpu_geometry(port);
+        if (any) {
+            CASPAR_LOG(warning)
+                << L"[decklink] a <subregion> sets dest-x/dest-y/width/height, which "
+                   L"gpu-readback-mode=vulkan-dma cannot place -- its image-to-buffer copy "
+                   L"carries one offset and cannot express a rectangle inside a larger frame. "
+                   L"Falling back to gpu-readback-mode=cpu so the geometry is honoured; "
+                   L"`vulkan` and `cuda` both place it on the GPU.";
+            config.gpu_readback_mode = configuration::gpu_readback_mode_t::cpu;
         }
     }
 
@@ -388,28 +414,31 @@ configuration parse_amcp_config(const std::vector<std::wstring>&     params,
     config.color_space    = channel_info.default_color_space;
     config.color_transfer = channel_info.default_color_transfer;
 
+    // THE XML PATH'S PARSERS, which refuse what SDI cannot signal and what names nothing. These
+    // silently kept the channel default for either, so `COLOR_SPACE BT2O2O` -- or P3, which SDI
+    // cannot signal -- answered 202 and put the channel's space on the wire.
     auto color_space_str = get_param(L"COLOR_SPACE", params);
-    if (!color_space_str.empty()) {
-        auto cs = boost::to_lower_copy(color_space_str);
-        if (cs == L"bt2020")
-            config.color_space = core::color_space::bt2020;
-        else if (cs == L"bt601")
-            config.color_space = core::color_space::bt601;
-        else if (cs == L"bt709")
-            config.color_space = core::color_space::bt709;
-        // P3/Adobe ignored — SDI cannot signal them; channel default is used instead
-    }
+    if (!color_space_str.empty())
+        config.color_space = get_color_space(color_space_str);
 
     auto color_transfer_str = get_param(L"COLOR_TRANSFER", params);
-    if (!color_transfer_str.empty()) {
-        auto ct = boost::to_lower_copy(color_transfer_str);
-        if (ct == L"pq")
-            config.color_transfer = core::color_transfer::pq;
-        else if (ct == L"hlg")
-            config.color_transfer = core::color_transfer::hlg;
-        else if (ct == L"sdr")
-            config.color_transfer = core::color_transfer::sdr;
-        // linear/gamma24/gamma26 ignored — SDI cannot signal them
+    if (!color_transfer_str.empty())
+        config.color_transfer = get_color_transfer(color_transfer_str);
+
+    // THE DEPTH RULE the XML path applies (`pixel-format` defaults to yuv on a deep channel,
+    // and rgba there is refused). AMCP never applied it, so `ADD n DECKLINK` on a 16-bit channel
+    // packed 8-byte pixels as 4-byte BGRA. Upstream shape; there is no AMCP `pixel-format`.
+    if (channel_info.depth != common::bit_depth::bit8) {
+        config.pixel_format = configuration::pixel_format_t::yuv;
+#ifdef WIN32
+        if (!CHECK_INSTRUCTION_SUPPORT(__IA_SUPPORT_VECTOR256, 0))
+#elif defined(__x86_64__) || defined(__i386__)
+        if (!__builtin_cpu_supports("avx2"))
+#else
+        if (false)
+#endif
+            CASPAR_THROW_EXCEPTION(user_error()
+                                   << msg_info(L"Your cpu does not support the features needed for yuv output"));
     }
 
     // Note: config.hdr is set by the caller based on both channel bit-depth and color settings.

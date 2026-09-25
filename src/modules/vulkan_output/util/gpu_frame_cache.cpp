@@ -256,28 +256,9 @@ void gpu_frame_cache::init_cross_gpu(
         pool_ = std::make_unique<shared_texture_pool>(*device_, width, height, use_16bit);
     });
 
-#ifdef CASPAR_CUDA_PEER_ENABLED
-    try {
-        int src_cuda_dev = -1;
-        ogl_device->dispatch_sync([&] {
-            src_cuda_dev = cuda_peer_transfer::cuda_device_for_current_gl_context();
-        });
-        int dst_cuda_dev = -1;
-        affinity_ctx_->dispatch_sync([&] {
-            dst_cuda_dev = cuda_peer_transfer::cuda_device_for_current_gl_context();
-        });
-
-        if (src_cuda_dev >= 0 && dst_cuda_dev >= 0 && src_cuda_dev != dst_cuda_dev) {
-            cuda_peer_ = std::make_unique<cuda_peer_transfer>(
-                src_cuda_dev, dst_cuda_dev, width, height, use_16bit);
-            CASPAR_LOG(info) << L"[vulkan] Frame cache: CUDA peer DMA (device "
-                             << src_cuda_dev << L" -> " << dst_cuda_dev << L")";
-        }
-    } catch (const std::exception& e) {
-        CASPAR_LOG(warning) << L"[vulkan] Frame cache: CUDA peer unavailable: " << e.what();
-        cuda_peer_.reset();
-    }
-#endif
+    // (A CUDA peer transfer used to be allocated here -- two full-frame VRAM buffers and peer
+    // access enabled -- and nothing ever used it: no caller read `cuda_peer()`. The consumer
+    // runs its own cross-GPU CUDA path. Removed rather than kept for a caller that does not exist.)
 
     CASPAR_LOG(info) << L"[vulkan] Frame cache: cross-GPU bridge (GPU " << gpu_index_ << L")"
                      << (use_16bit ? L" 16-bit" : L" 8-bit");
@@ -340,6 +321,15 @@ gpu_frame_cache::~gpu_frame_cache()
             // Don't destroy timeline_sem_ — device may be lost.
         }
     }
+}
+
+uint64_t gpu_frame_cache::generation_for(const core::const_frame& frame)
+{
+    std::lock_guard<std::mutex> lock(generation_mutex_);
+    if (generation_frame_ && generation_frame_ == frame)
+        return generation_last_;
+    generation_frame_ = frame;
+    return ++generation_last_;
 }
 
 uint64_t gpu_frame_cache::submit_frame(uint64_t generation, const std::function<void()>& transfer_fn)
