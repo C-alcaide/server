@@ -56,7 +56,7 @@ void command_scheduler::stop()
 void command_scheduler::schedule(int64_t target_frame, std::wstring command_text, int priority)
 {
     std::lock_guard<std::mutex> lock(queue_mutex_);
-    queue_.push({target_frame, std::move(command_text), priority});
+    queue_.push({target_frame, std::move(command_text), priority, next_seq_++});
 }
 
 void command_scheduler::schedule_now(std::wstring command_text, int sync_margin)
@@ -87,6 +87,10 @@ void command_scheduler::dispatch_loop()
                 cmd = queue_.top();
                 queue_.pop();
             }
+
+            // THE FRAME NOW, not the one read before the batch: a command before this one may
+            // have taken frames, and every later command recorded the stale value as its own.
+            now_frame = clock_->current_frame();
 
             // Check if command is late
             int64_t lateness = now_frame - cmd.target_frame;

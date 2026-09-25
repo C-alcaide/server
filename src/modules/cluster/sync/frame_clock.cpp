@@ -36,7 +36,11 @@ int64_t frame_clock::frame_to_ptp_ns(int64_t frame) const
     int64_t whole_sec_frames = frame / num;          // How many whole "seconds worth" of frames
     int64_t remainder_frames = frame % num;          // Leftover frames within the second
     int64_t whole_ns = whole_sec_frames * den * 1'000'000'000LL; // safe: whole_sec_frames * den fits for centuries
-    int64_t frac_ns  = (remainder_frames * den * 1'000'000'000LL) / num; // safe: remainder < num, so remainder*den*1e9 < num*den*1e9 ≈ 6e13
+    // ROUNDED UP, so the instant returned is the first nanosecond AT OR AFTER the frame's exact
+    // start. Floored, at a 1001-denominator rate it fell up to a nanosecond BEFORE it -- an
+    // instant at which `ptp_ns_to_frame` still reports the previous frame, so "schedule at the
+    // start of frame N" fired on N-1's last nanosecond. The self-test samples those instants now.
+    int64_t frac_ns  = (remainder_frames * den * 1'000'000'000LL + num - 1) / num; // safe: remainder < num, so remainder*den*1e9 < num*den*1e9 ≈ 6e13
     return epoch_origin_ns_ + whole_ns + frac_ns;
 }
 
@@ -152,6 +156,17 @@ void frame_clock_self_test()
                                                "1001-denominator off-by-one, if this is 29.97, "
                                                "59.94 or 23.976");
             }
+        }
+
+        // 1b. THE BOUNDARY ITSELF, which (1) never sampled: its phases are fixed, and a frame
+        //     start at a 1001-denominator rate falls on none of them. frame_to_ptp_ns(f) must be
+        //     an instant frame f has STARTED at, and the nanosecond before it one it has not.
+        for (int64_t f = 1; f < 5000; f += 7) {
+            const int64_t start = fc.frame_to_ptp_ns(f);
+            if (fc.ptp_ns_to_frame(start) != f)
+                fail(std::string(r.name) + ": frame_to_ptp_ns(f) is an instant before frame f starts");
+            if (fc.ptp_ns_to_frame(start - 1) != f - 1)
+                fail(std::string(r.name) + ": the nanosecond before frame f's start is not frame f-1");
         }
 
         // 2. Monotonic: time never runs backwards, and the frame number never does either.

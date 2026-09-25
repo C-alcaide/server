@@ -1,6 +1,46 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: cluster defects from the audit backlog
+
+Measured: `cluster` **11/11 on both mixers** (two new checks), and the frame clock's boot
+self-test gained a boundary check. **Mutation-verified**: flooring `frame_to_ptp_ns` again stops the
+server at boot (`frame_clock self-test: 60p: frame_to_ptp_ns(f) is an instant before frame f
+starts`), and the old `AT` handling turns both new checks red.
+
+* **The frame clock floored a frame's start**, so `frame_to_ptp_ns(f)` could be an instant at which
+  `ptp_ns_to_frame` still reported `f-1` -- at every rate whose frame length is not a whole number
+  of nanoseconds, **60p, 30p and 24p as well as the 1001 rates**. It rounds up now; the self-test,
+  which sampled fixed sub-second phases and so never a frame start, samples the boundaries.
+* **A relayed frame number carried no rate**, and each node read it in its own; the rate rides on
+  the wire now and the receiver converts through PTP time. **A command for a member that is not
+  connected answered 202** and was dropped; it is `503` now.
+* **`CLUSTER SCHEDULE ... at N`** (lowercase) became part of the command and ran at the sync
+  margin; `AT` with no frame answered 202; `AT 500x` read 500. **`CLUSTER TRACK`** ignored an
+  unknown flag and read `250frames` as 250. All refused or honoured as documented.
+* **Same-frame commands ran in an unspecified order** (`std::priority_queue` is not stable); they run
+  in schedule order. The dispatch thread waited on each command's reply, so a slow one delayed every
+  later one due on the same frame; the reply is awaited elsewhere now -- a command whose `Execute`
+  does its work inline still runs inline, which keeps the order. Every command after the first on
+  a frame recorded a stale frame as its own.
+* **Config**: an unknown `<mode>` started the node standalone, a parse error part-way left a
+  half-configured master, and `<ptp-domain>`/`<relay-port>` were narrowed before validation (256
+  became domain 0, 70000 port 4464) -- all refused at startup now. `<log-ptp-status>` logs every
+  10 s instead of being read by nothing; `<master>` is unused, and a client that sets it is told.
+* **PTP**: a one-step grandmaster's Sync is honoured and the `correctionField` applied (external
+  mode could not lock to most hardware grandmasters); the Announce's clockClass is 248, as its
+  comment always said (it sent 96); the scheduler's executor read `internal_client` unlocked while
+  shutdown reset it.
+
+Not measured, argued from code: the rate conversion (the battery runs both nodes at 59.94), the 503,
+`TRACK`'s flags (the battery has no watchdog), the config refusals (startup, not AMCP), the
+PTP items (no one-step grandmaster here). **Deferred**, each a design change: PTP "locked" means
+the wall clocks agree within 1 ms rather than the servo converged; PTP time is built on the
+non-monotonic system clock; and the content-sync watchdog almost never observes a producer
+(`wait_for(0)`) -- making it observe would activate three latent defects (a relative/absolute seek
+mismatch, a zero loop duration, the first channel's rate for every channel), so the four are one
+piece of work with its own battery.
+
 ### BEHAVIOUR: persistence and concurrency defects from the audit backlog
 
 Measured on both mixers: `refusals` **55/55** (six new checks), `api-stage` **24/24** (two new:

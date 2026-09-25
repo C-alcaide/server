@@ -66,20 +66,30 @@ std::wstring widen(const std::string& s)
     return u16(s);
 }
 
-// Wire protocol: "FRAME:target_frame COMMAND_TEXT\r\n"
+// Wire protocol: "FRAME:target_frame[@num/den] COMMAND_TEXT\r\n"
+//
+// THE RATE RIDES WITH THE FRAME NUMBER. A frame number means nothing without the rate it counts
+// at, and each node read a relayed one in its OWN first channel's rate -- so a master at 50p and
+// a client at 59.94 acted on one number at two different instants (or, far enough apart, ran the
+// command on arrival or never). The receiver converts through PTP time, which both share. The
+// suffix is optional so an older sender's message still parses; it is then read at the local rate.
 // Simple text protocol for easy debugging and interop
 // Protocol version handshake: master sends "CASPAR_CLUSTER/1\r\n" immediately after connect
 
 static constexpr const char* PROTOCOL_HANDSHAKE = "CASPAR_CLUSTER/1\r\n";
 static constexpr int         PROTOCOL_VERSION   = 1;
 
-std::string encode_relay_message(int64_t target_frame, const std::wstring& command)
+std::string encode_relay_message(int64_t target_frame, int rate_num, int rate_den, const std::wstring& command)
 {
     std::string cmd_utf8 = narrow(command);
-    return "FRAME:" + std::to_string(target_frame) + " " + cmd_utf8 + "\r\n";
+    std::string rate;
+    if (rate_num > 0 && rate_den > 0)
+        rate = "@" + std::to_string(rate_num) + "/" + std::to_string(rate_den);
+    return "FRAME:" + std::to_string(target_frame) + rate + " " + cmd_utf8 + "\r\n";
 }
 
-bool parse_relay_message(const std::string& line, int64_t& out_frame, std::wstring& out_command)
+bool parse_relay_message(const std::string& line, int64_t& out_frame, int& out_num, int& out_den,
+                         std::wstring& out_command)
 {
     if (line.substr(0, 6) != "FRAME:") {
         return false;
@@ -88,9 +98,24 @@ bool parse_relay_message(const std::string& line, int64_t& out_frame, std::wstri
     if (space_pos == std::string::npos) {
         return false;
     }
+    out_num = out_den = 0;
     try {
-        out_frame = std::stoll(line.substr(6, space_pos - 6));
-    } catch (...) {
+        const auto head = line.substr(6, space_pos - 6);
+        const auto at   = head.find('@');
+        std::size_t used = 0;
+        out_frame = std::stoll(head.substr(0, at), &used);
+        if (used != (at == std::string::npos ? head.size() : at))
+            return false;
+        if (at != std::string::npos) {
+            const auto slash = head.find('/', at);
+            if (slash == std::string::npos)
+                return false;
+            out_num = std::stoi(head.substr(at + 1, slash - at - 1));
+            out_den = std::stoi(head.substr(slash + 1));
+            if (out_num <= 0 || out_den <= 0)
+                return false;
+        }
+    } catch (const std::exception&) {
         return false;
     }
     std::string cmd = line.substr(space_pos + 1);
@@ -145,33 +170,40 @@ void command_relay::connect_members(const std::vector<std::string>& member_addre
     CASPAR_LOG(info) << L"[cluster] Relay connecting to " << member_addresses.size() << L" member(s)";
 }
 
-void command_relay::route_command(int64_t target_frame, int virtual_channel, const std::wstring& command)
+bool command_relay::route_command(int64_t target_frame, int rate_num, int rate_den, int virtual_channel,
+                                  const std::wstring& command)
 {
     std::string host = channel_map_.get_host(virtual_channel);
     if (host == "local") {
-        return; // Local commands go directly to scheduler, not relay
+        return false; // Local commands go directly to scheduler, not relay
     }
 
     // Rewrite channel reference
     std::wstring rewritten = channel_map_.rewrite_command(command, virtual_channel);
-    std::string  msg       = encode_relay_message(target_frame, rewritten);
+    std::string  msg       = encode_relay_message(target_frame, rate_num, rate_den, rewritten);
 
+    // REPORTED, not dropped: a member that is not connected, or not configured, used to lose the
+    // command here with a log line while `CLUSTER SCHEDULE` answered 202 to the operator.
     std::lock_guard<std::mutex> lock(members_mutex_);
     for (auto& member : members_) {
         std::string member_addr = member.host + ":" + std::to_string(member.port);
         if (member_addr == host || member.host == host) {
-            send_to_member(member, msg);
-            return;
+            if (send_to_member(member, msg))
+                return true;
+            CASPAR_LOG(warning) << L"[cluster] Member " << std::wstring(host.begin(), host.end())
+                                << L" is not connected; the command was NOT delivered";
+            return false;
         }
     }
 
     CASPAR_LOG(warning) << L"[cluster] No member found for host: "
                         << std::wstring(host.begin(), host.end());
+    return false;
 }
 
-void command_relay::broadcast_command(int64_t target_frame, const std::wstring& command)
+void command_relay::broadcast_command(int64_t target_frame, int rate_num, int rate_den, const std::wstring& command)
 {
-    std::string msg = encode_relay_message(target_frame, command);
+    std::string msg = encode_relay_message(target_frame, rate_num, rate_den, command);
 
     std::lock_guard<std::mutex> lock(members_mutex_);
     for (auto& member : members_) {
@@ -607,16 +639,17 @@ void command_relay::client_receive_loop(uintptr_t client_socket)
 void command_relay::parse_incoming_command(const std::string& line)
 {
     int64_t      target_frame;
+    int          rate_num = 0, rate_den = 0;
     std::wstring command;
 
-    if (!parse_relay_message(line, target_frame, command)) {
+    if (!parse_relay_message(line, target_frame, rate_num, rate_den, command)) {
         CASPAR_LOG(warning) << L"[cluster] Invalid relay message: "
                             << std::wstring(line.begin(), line.end());
         return;
     }
 
     if (command_handler_) {
-        command_handler_(target_frame, command);
+        command_handler_(target_frame, rate_num, rate_den, command);
     }
 }
 

@@ -69,6 +69,11 @@ class ptp_clock
     /// Get current clock status
     clock_status status() const;
 
+    /// `<log-ptp-status>`: log the status every `seconds` from the network loop (0 = off). The
+    /// element was documented as "periodic PTP offset/delay logging", parsed, stored -- and read
+    /// by nothing until 2026-09-25.
+    void set_status_logging(int seconds) { status_log_s_.store(seconds, std::memory_order_relaxed); }
+
     /// Get the clock mode
     clock_mode mode() const { return mode_; }
 
@@ -110,6 +115,11 @@ class ptp_clock
     // Follow-up correlation
     int64_t  last_sync_recv_time_ns_ = 0;
     uint16_t last_sync_sequence_     = 0;
+    int64_t  last_sync_correction_ns_ = 0;   // the Sync's correctionField, for its Follow_Up
+
+    std::atomic<int>                      status_log_s_{0};
+    std::chrono::steady_clock::time_point last_status_log_{};
+    void maybe_log_status(std::chrono::steady_clock::time_point now);
     // (T2 - T1) from the most recent Sync/Follow-Up pair, retained until the
     // next Delay_Resp so the mean-path-delay formula can use both halves:
     // meanDelay = ((T2-T1) + (T4-T3)) / 2. See handle_delay_resp().

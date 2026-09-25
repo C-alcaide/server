@@ -42,7 +42,9 @@ struct member_info
 };
 
 /// Callback for commands received from master (on client nodes)
-using relay_command_handler = std::function<void(int64_t target_frame, const std::wstring& command)>;
+/// `rate_num`/`rate_den` are the SENDER's frame rate, or 0/0 from a sender that did not say.
+using relay_command_handler =
+    std::function<void(int64_t target_frame, int rate_num, int rate_den, const std::wstring& command)>;
 
 /// Manages TCP connections to cluster members and routes commands.
 /// Master: connects to all members, stamps commands with target frame, forwards.
@@ -66,10 +68,12 @@ class command_relay
 
     /// Route a command to the appropriate member(s) based on virtual channel
     /// Stamps with target_frame and sends over TCP
-    void route_command(int64_t target_frame, int virtual_channel, const std::wstring& command);
+    /// False when the command did NOT leave -- no member for the channel's host, or not connected.
+    bool route_command(int64_t target_frame, int rate_num, int rate_den, int virtual_channel,
+                       const std::wstring& command);
 
     /// Broadcast a command to ALL members (e.g., for BEGIN/COMMIT sync)
-    void broadcast_command(int64_t target_frame, const std::wstring& command);
+    void broadcast_command(int64_t target_frame, int rate_num, int rate_den, const std::wstring& command);
 
     // ─── Client mode ─────────────────────────────────────────────────────
 

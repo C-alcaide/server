@@ -27,12 +27,17 @@ struct scheduled_command
     int64_t      target_frame;
     std::wstring command_text;    // Raw AMCP command text
     int          priority = 0;   // Higher = execute first at same frame
+    uint64_t     seq      = 0;   // insertion order -- the tie-break, see below
 
     bool operator>(const scheduled_command& other) const
     {
         if (target_frame != other.target_frame)
             return target_frame > other.target_frame; // Min-heap by frame
-        return priority < other.priority;             // Higher priority first
+        if (priority != other.priority)
+            return priority < other.priority;         // Higher priority first
+        // THEN IN THE ORDER THEY WERE SCHEDULED. `std::priority_queue` is not stable, so two
+        // commands for one frame -- LOADBG then PLAY, say -- ran in an order nobody chose.
+        return seq > other.seq;
     }
 };
 
@@ -88,6 +93,7 @@ class command_scheduler
     command_executor             executor_;
 
     mutable std::mutex                                                              queue_mutex_;
+    uint64_t next_seq_ = 0;   // under queue_mutex_
     std::priority_queue<scheduled_command, std::vector<scheduled_command>,
                         std::greater<scheduled_command>>                             queue_;
 

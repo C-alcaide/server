@@ -109,7 +109,12 @@ All messages use the standard PTP wire format with `#pragma pack(push, 1)` for c
 
 ### Two-Step Synchronization
 
-The master uses **two-step** mode (TWO_STEP flag = `0x0200`), which provides the most precise timestamps:
+The master uses **two-step** mode (TWO_STEP flag = `0x0200`), which provides the most precise timestamps.
+A client (and `external` mode) also accepts a **one-step** grandmaster -- a Sync with the flag clear
+carries T1 itself -- and applies the `correctionField` of both messages. Until 2026-09-25 it
+waited for a Follow_Up that a one-step master never sends, and never read the correction, so it
+could not lock to most hardware grandmasters. The master's Announce says clockClass **248** (it
+said 96 while its comment said 248).
 
 ```
 Master                                              Client
@@ -329,13 +334,22 @@ If a command executes more than 1 frame late, a warning is logged with the comma
 Commands are transmitted over TCP using a simple text protocol:
 
 ```
-FRAME:<target_frame> <AMCP_COMMAND_TEXT>\r\n
+FRAME:<target_frame>[@<rate_num>/<rate_den>] <AMCP_COMMAND_TEXT>\r\n
 ```
 
 Example:
 ```
-FRAME:1234567 PLAY 1-10 clip1\r\n
+FRAME:1234567@60000/1001 PLAY 1-10 clip1\r\n
 ```
+
+**The rate rides with the frame number** (since 2026-09-25). A frame number means nothing without
+the rate it counts at, and each node used to read a relayed one in its own first channel's rate --
+so a master at 50p and a client at 59.94 acted on one number at two different instants. The
+receiver converts the sender's frame to the PTP instant both share, and that instant to its own
+frame. The suffix is optional: a message without it is read at the local rate, as before.
+
+**A command for a member that is not connected is refused** with `503 CLUSTER SCHEDULE FAILED -
+MEMBER NOT CONNECTED`. It used to be dropped with a log line while the operator got `202`.
 
 ### Connection Topology
 
@@ -669,7 +683,10 @@ apart: `501` is about the cluster not being up, `400` about what you sent.**
 | `501 CLUSTER TRACK FAILED - NO WATCHDOG` | `TRACK` | cluster **is** active but the drift watchdog is not running, so there is nothing to track with. A distinct message because the fix is different |
 | `501 CLUSTER UNTRACK FAILED` | `UNTRACK` | cluster inactive **or** no watchdog — this one does not distinguish them |
 | `400 CLUSTER SCHEDULE ERROR` | `SCHEDULE` | fewer than two parameters |
-| `400 CLUSTER SCHEDULE ERROR - INVALID FRAME` | `SCHEDULE` | the `AT <frame>` value did not parse |
+| `400 CLUSTER SCHEDULE ERROR - INVALID FRAME` | `SCHEDULE` | the `AT <frame>` value is not a whole number (`500x` used to read as 500), or something follows it |
+| `400 CLUSTER SCHEDULE ERROR - AT NEEDS A FRAME` | `SCHEDULE` | `AT` (in any case -- `at` was case-sensitive and became part of the command) with nothing after it |
+| `503 CLUSTER SCHEDULE FAILED - MEMBER NOT CONNECTED` | `SCHEDULE` | the virtual channel belongs to a member that is not configured or not connected; the command did NOT leave |
+| `400 CLUSTER TRACK ERROR - ...` | `TRACK` | the optional arguments are not `[<duration>] [LOOP]` -- an unknown flag, a non-numeric duration, or too many arguments; they used to be ignored |
 | `400 CLUSTER TRACK ERROR` | `TRACK` | no parameters |
 | `400 CLUSTER TRACK ERROR - INVALID CHANNEL` | `TRACK` | the channel (or `channel-layer`) did not parse, or names no channel |
 | `400 CLUSTER UNTRACK ERROR` | `UNTRACK` | no parameters |
@@ -686,12 +703,12 @@ All options for the `<cluster>` block in `casparcg.config`:
 
 | Element | Type | Default | Description |
 |---------|------|---------|-------------|
-| `<mode>` | enum | `disabled` | `disabled` \| `master` \| `client` \| `external` |
+| `<mode>` | enum | `disabled` | `disabled` \| `master` \| `client` \| `external`. **Any other word is refused at startup**, as is a `<cluster>` block that fails to parse part-way; both used to leave the node standalone or half-configured with one log line |
 | **Sync settings** | | | |
 | `<sync-margin>` | int | `3` | Frames of scheduling margin |
 | `<bind>` | string | `0.0.0.0` | Local interface for PTP multicast |
 | `<multicast-group>` | string | `224.0.1.129` | PTP multicast address |
-| `<ptp-domain>` | int | `0` | PTP domain number (0–127) |
+| `<ptp-domain>` | int | `0` | PTP domain number (0–127); outside that range it is refused (256 used to wrap to domain 0) |
 | `<sync-interval-ms>` | int | `125` | PTP Sync message interval (ms) |
 | `<epoch-origin>` | string | *(none)* | ISO-8601 datetime for frame numbering epoch |
 | **Content sync** | | | |
@@ -702,10 +719,10 @@ All options for the `<cluster>` block in `casparcg.config`:
 | `<channels>` | block | | Virtual-to-physical channel mappings |
 | `<members>` | block | | List of `host:port` cluster members |
 | **Client settings** | | | |
-| `<master>` | string | | `host:port` of the cluster master |
-| `<relay-port>` | int | `5250` | TCP port for relay listener |
+| ~~`<master>`~~ | string | | **Not used**: the master reaches a client through its own `<members>`. A client that sets it gets a startup warning saying so |
+| `<relay-port>` | int | `5252` | TCP port for relay listener (1–65535, refused outside; 70000 used to become 4464) |
 | **Diagnostics** | | | |
-| `<log-ptp-status>` | bool | `false` | Periodic PTP offset/delay logging |
+| `<log-ptp-status>` | bool | `false` | Logs the PTP state, offset, delay and sequence every 10 s. Parsed and read by nothing until 2026-09-25 |
 
 ### Channel Mapping Attributes
 

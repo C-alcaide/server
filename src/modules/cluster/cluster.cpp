@@ -25,11 +25,13 @@
 #include <protocol/util/ClientInfo.h>
 #include <protocol/util/tokenize.h>
 
+#include <boost/algorithm/string.hpp>
 #include <boost/rational.hpp>
 
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <thread>
 
 namespace caspar { namespace cluster {
 
@@ -250,12 +252,20 @@ std::wstring cluster_schedule_command(protocol::amcp::command_context& ctx)
     int64_t      target_frame = -1;
     std::wstring command_text;
 
-    auto at_it = std::find(ctx.parameters.begin(), ctx.parameters.end(), L"AT");
-    if (at_it != ctx.parameters.end() && (at_it + 1) != ctx.parameters.end()) {
-        // Explicit frame target
+    // `AT` IN ANY CASE, and `AT` with no frame after it REFUSED. The match was case-sensitive, so
+    // `at 500` became part of the command and the command ran at the sync margin instead.
+    auto at_it = std::find_if(ctx.parameters.begin(), ctx.parameters.end(),
+                              [](const std::wstring& p) { return boost::iequals(p, L"AT"); });
+    if (at_it != ctx.parameters.end() && (at_it + 1) == ctx.parameters.end())
+        return L"400 CLUSTER SCHEDULE ERROR - AT NEEDS A FRAME\r\n";
+    if (at_it != ctx.parameters.end()) {
+        // Explicit frame target, as a WHOLE number (`stoll` accepted `500x`)
         try {
-            target_frame = std::stoll(*(at_it + 1));
-        } catch (...) {
+            std::size_t used = 0;
+            target_frame     = std::stoll(*(at_it + 1), &used);
+            if (used != (at_it + 1)->size() || (at_it + 2) != ctx.parameters.end())
+                return L"400 CLUSTER SCHEDULE ERROR - INVALID FRAME\r\n";
+        } catch (const std::exception&) {
             return L"400 CLUSTER SCHEDULE ERROR - INVALID FRAME\r\n";
         }
         // Command is everything before "AT"
@@ -294,8 +304,10 @@ std::wstring cluster_schedule_command(protocol::amcp::command_context& ctx)
 
     // Route: local or remote?
     if (channel_map && virtual_channel > 0 && !channel_map->is_local(virtual_channel)) {
-        // Forward to remote member
-        relay->route_command(target_frame, virtual_channel, command_text);
+        // Forward to remote member, with the rate this frame number counts at
+        const auto rate = frame_clock->framerate();
+        if (!relay->route_command(target_frame, rate.first, rate.second, virtual_channel, command_text))
+            return L"503 CLUSTER SCHEDULE FAILED - MEMBER NOT CONNECTED\r\n";
     } else {
         // Schedule locally -- THROUGH THE MAP. Only the remote branch used to rewrite the
         // channel (inside `route_command`), so a virtual channel mapped to `host="local"`
@@ -445,19 +457,31 @@ std::wstring cluster_track_command(protocol::amcp::command_context& ctx)
     bool    looping  = false;
     bool    auto_query = true;
 
+    // `[duration] [LOOP]`, and NOTHING ELSE. An unrecognised flag was ignored (and `Loop` was not
+    // LOOP), and `std::stoll` read `250frames` as 250 -- a track configured wrong with a 202.
+    if (ctx.parameters.size() > 3)
+        return L"400 CLUSTER TRACK ERROR - TOO MANY ARGUMENTS\r\n";
     if (ctx.parameters.size() >= 2) {
-        try {
-            duration = std::stoll(ctx.parameters[1]);
-            auto_query = false;
-        } catch (...) {
-            // Not a number — might be "LOOP" flag directly
-            if (ctx.parameters[1] == L"LOOP" || ctx.parameters[1] == L"loop") {
-                looping = true;
-                auto_query = true;
+        const auto& a = ctx.parameters[1];
+        if (boost::iequals(a, L"LOOP")) {
+            looping = true;
+            if (ctx.parameters.size() > 2)
+                return L"400 CLUSTER TRACK ERROR - LOOP COMES AFTER THE DURATION\r\n";
+        } else {
+            try {
+                std::size_t used = 0;
+                duration         = std::stoll(a, &used);
+                if (used != a.size() || duration < 0)
+                    return L"400 CLUSTER TRACK ERROR - INVALID DURATION\r\n";
+                auto_query = false;
+            } catch (const std::exception&) {
+                return L"400 CLUSTER TRACK ERROR - EXPECTED A DURATION OR LOOP\r\n";
             }
         }
     }
-    if (ctx.parameters.size() > 2 && (ctx.parameters[2] == L"LOOP" || ctx.parameters[2] == L"loop")) {
+    if (ctx.parameters.size() > 2) {
+        if (!boost::iequals(ctx.parameters[2], L"LOOP"))
+            return L"400 CLUSTER TRACK ERROR - EXPECTED LOOP\r\n";
         looping = true;
     }
 
@@ -565,6 +589,8 @@ void start_cluster(const cluster_config& config,
     g_state.ptp = std::make_shared<ptp::ptp_clock>(
         ptp_mode, config.bind_address, config.multicast_group,
         config.ptp_domain, config.sync_interval_ms);
+    if (config.log_ptp_status)
+        g_state.ptp->set_status_logging(10);   // every ten seconds, from the network loop
     g_state.ptp->start();
 
     // 2. Create frame clock (default 50fps, will be updated from channel config)
@@ -575,10 +601,16 @@ void start_cluster(const cluster_config& config,
     // The executor feeds commands through the AMCP parser for full execution
     sync::command_executor executor = [](const std::wstring& cmd) {
         std::shared_ptr<protocol::amcp::amcp_command_repository> repo;
+        std::shared_ptr<IO::ConsoleClientInfo>                   client;
         {
+            // BOTH under the lock: `uninit()` resets `internal_client` under it, and this read it
+            // bare below -- a shutdown racing a scheduled command read a pointer being destroyed.
             std::lock_guard<std::mutex> lock(g_state_mutex);
-            repo = g_state.command_repo.lock();
+            repo   = g_state.command_repo.lock();
+            client = g_state.internal_client;
         }
+        if (!client)
+            return;
         if (!repo) {
             CASPAR_LOG(warning) << L"[cluster] Cannot execute command - repository expired: " << cmd;
             return;
@@ -590,12 +622,24 @@ void start_cluster(const cluster_config& config,
 
             auto command = repo->parse_command(
                 spl::shared_ptr<IO::client_connection<wchar_t>>(
-                    std::static_pointer_cast<IO::client_connection<wchar_t>>(g_state.internal_client)),
+                    std::static_pointer_cast<IO::client_connection<wchar_t>>(client)),
                 std::move(tokens), L"");
             if (command) {
-                auto result = command->Execute(repo->channels()).get();
-                CASPAR_LOG(debug) << L"[cluster] Executed@frame: " << cmd.substr(0, 60)
-                                  << L" -> " << result.substr(0, 40);
+                // The command is ISSUED here, in schedule order; its reply is waited for ELSEWHERE.
+                // `.get()` on the dispatch thread held every later command -- including others due
+                // on the same frame -- behind a deferred one's completion. A command whose
+                // `Execute` itself does its work inline still runs inline: ordering is kept.
+                auto future = command->Execute(repo->channels());
+                std::thread([f = std::move(future), cmd]() mutable {
+                    try {
+                        auto result = f.get();
+                        CASPAR_LOG(debug) << L"[cluster] Executed@frame: " << cmd.substr(0, 60)
+                                          << L" -> " << result.substr(0, 40);
+                    } catch (const std::exception& e) {
+                        CASPAR_LOG(error) << L"[cluster] Command execution error: " << e.what()
+                                          << L" cmd=" << cmd.substr(0, 60);
+                    }
+                }).detach();
             } else {
                 CASPAR_LOG(warning) << L"[cluster] Failed to parse command: " << cmd;
             }
@@ -624,7 +668,7 @@ void start_cluster(const cluster_config& config,
     } else if (config.mode == cluster_mode::client) {
         // Client: listen for master connection and feed commands to scheduler
         g_state.relay->set_command_handler(
-            [](int64_t target_frame, const std::wstring& command) {
+            [](int64_t target_frame, int rate_num, int rate_den, const std::wstring& command) {
                 std::lock_guard<std::mutex> lock(g_state_mutex);
                 // ── THE CLIENT'S FRAME RATE, BEFORE IT ACTS ON A RELAYED FRAME NUMBER ──
                 //
@@ -636,6 +680,17 @@ void start_cluster(const cluster_config& config,
                 // the hardcoded 50: the two nodes acted on the same frame number at different
                 // real times, which is the precise failure this module exists to prevent.
                 sync_framerate_from_channels();
+                // The sender's frame number, in the SENDER's rate, re-expressed in this node's --
+                // through the PTP instant both share. Equal rates convert to the same number.
+                if (rate_num > 0 && rate_den > 0 && g_state.frame_clock) {
+                    const auto local = g_state.frame_clock->framerate();
+                    if (local.first != rate_num || local.second != rate_den) {
+                        sync::frame_clock sender(nullptr, g_state.frame_clock->epoch_origin_ns(), rate_num,
+                                                 rate_den);
+                        target_frame =
+                            g_state.frame_clock->ptp_ns_to_frame(sender.frame_to_ptp_ns(target_frame));
+                    }
+                }
                 if (g_state.scheduler) {
                     g_state.scheduler->schedule(target_frame, std::wstring(command));
                 }

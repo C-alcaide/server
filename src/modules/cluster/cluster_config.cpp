@@ -9,6 +9,7 @@
 
 #include "cluster_config.h"
 
+#include <common/except.h>
 #include <common/log.h>
 #include <common/utf.h>
 
@@ -67,11 +68,17 @@ cluster_config parse_cluster_config(const boost::property_tree::wptree& properti
         auto& node = *cluster_node;
 
         // Mode
+        // A WORD THAT NAMES NO MODE IS REFUSED. It used to fall to `disabled`, so a node whose
+        // config said `<mode>Master</mode>` or `<mode>clinet</mode>` started standalone and said
+        // nothing -- a cluster member quietly not in the cluster.
         auto mode_str = node.get<std::wstring>(L"mode", L"disabled");
         if (mode_str == L"master") cfg.mode = cluster_mode::master;
         else if (mode_str == L"client") cfg.mode = cluster_mode::client;
         else if (mode_str == L"external") cfg.mode = cluster_mode::external;
-        else cfg.mode = cluster_mode::disabled;
+        else if (mode_str == L"disabled") cfg.mode = cluster_mode::disabled;
+        else
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                L"<cluster><mode> must be master, client, external or disabled, not '" + mode_str + L"'"));
 
         if (cfg.mode == cluster_mode::disabled) {
             return cfg;
@@ -85,7 +92,13 @@ cluster_config parse_cluster_config(const boost::property_tree::wptree& properti
         auto mcast_w = node.get<std::wstring>(L"multicast-group", L"224.0.1.129");
         cfg.multicast_group = narrow(mcast_w);
 
-        cfg.ptp_domain = static_cast<uint8_t>(node.get<int>(L"ptp-domain", 0));
+        // VALIDATED BEFORE IT IS NARROWED. `static_cast<uint8_t>` ran first, so 256 became
+        // domain 0 -- the default domain, every other PTP device's -- and passed the range check.
+        const int ptp_domain = node.get<int>(L"ptp-domain", 0);
+        if (ptp_domain < 0 || ptp_domain > 127)
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                "<cluster><ptp-domain> must be 0..127, not " + std::to_string(ptp_domain)));
+        cfg.ptp_domain = static_cast<uint8_t>(ptp_domain);
         cfg.sync_interval_ms = node.get<int>(L"sync-interval-ms", 125);
         cfg.log_ptp_status = node.get<bool>(L"log-ptp-status", false);
 
@@ -133,10 +146,26 @@ cluster_config parse_cluster_config(const boost::property_tree::wptree& properti
         // set this explicitly asked its relay to bind the port AMCP already had -- which on
         // Windows succeeded, silently, and left the relay eating AMCP's clients. 5253 is the
         // config's own second AMCP listener, so 5252 is the first free neighbour.
-        cfg.relay_port = static_cast<uint16_t>(node.get<int>(L"relay-port", 5252));
+        const int relay_port = node.get<int>(L"relay-port", 5252);
+        if (relay_port < 1 || relay_port > 65535)   // 70000 became port 4464
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                "<cluster><relay-port> must be 1..65535, not " + std::to_string(relay_port)));
+        cfg.relay_port = static_cast<uint16_t>(relay_port);
 
+        // `<master>` IS NOT READ BY ANYTHING: a client is reached by its master through the
+        // master's `<members>`, never the other way round. Said, because CLUSTER_SYNC.md
+        // documented it as the client's master address.
+        if (!cfg.master_address.empty() && cfg.mode == cluster_mode::client)
+            CASPAR_LOG(warning) << L"[cluster] <master> is not used: a client is reached by the master "
+                                   L"through the master's <members> list. Remove it, or list this node there.";
+
+    } catch (const user_error&) {
+        throw;
     } catch (const std::exception& e) {
-        CASPAR_LOG(error) << L"[cluster] Config parse error: " << e.what();
+        // A PARSE ERROR PART-WAY THROUGH is refused too. It was logged and the half-filled config
+        // RETURNED -- a master running with some of its channels and none of its members.
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+            std::string("[cluster] <cluster> could not be parsed: ") + e.what()));
     }
 
     // Validate ranges
@@ -158,11 +187,6 @@ cluster_config parse_cluster_config(const boost::property_tree::wptree& properti
         CASPAR_LOG(warning) << L"[cluster] content-sync-max-layer " << cfg.content_sync_max_layer
                             << L" out of range [1..10000], clamping";
         cfg.content_sync_max_layer = std::clamp(cfg.content_sync_max_layer, 1, 10000);
-    }
-    if (cfg.ptp_domain > 127) {
-        CASPAR_LOG(warning) << L"[cluster] ptp-domain " << static_cast<int>(cfg.ptp_domain)
-                            << L" out of range [0..127], clamping";
-        cfg.ptp_domain = 127;
     }
 
     return cfg;

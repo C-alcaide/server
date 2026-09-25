@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <utility>
 
 namespace caspar { namespace cluster { namespace sync {
 
@@ -40,6 +41,9 @@ class frame_clock
 
     /// Update framerate (e.g., on channel format change)
     void set_framerate(int fps_num, int fps_den);
+
+    /// The rate this clock numbers frames at, as {num, den}.
+    std::pair<int, int> framerate() const { return unpack_fps(fps_packed_.load(std::memory_order_relaxed)); }
 
     /// Get epoch origin
     int64_t epoch_origin_ns() const { return epoch_origin_ns_; }

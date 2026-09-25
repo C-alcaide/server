@@ -158,6 +158,18 @@ uint32_t host_to_net32(uint32_t v)
     return htonl(v);
 }
 
+/// The correctionField in NANOSECONDS: IEEE 1588 carries it big-endian, scaled by 2^16. A
+/// transparent clock or a one-step grandmaster puts the residence time here, and it was never
+/// read -- so every offset through such a network was off by exactly that much.
+int64_t correction_ns(int64_t wire)
+{
+    uint64_t v = 0;
+    const auto* b = reinterpret_cast<const uint8_t*>(&wire);
+    for (int i = 0; i < 8; ++i)
+        v = (v << 8) | b[i];
+    return static_cast<int64_t>(v) / 65536;
+}
+
 } // anonymous namespace
 
 ptp_clock::ptp_clock(clock_mode         mode,
@@ -264,6 +276,21 @@ int64_t ptp_clock::now_ns() const
     return system_clock_ns() + offset_ns_.load(std::memory_order_relaxed);
 }
 
+void ptp_clock::maybe_log_status(std::chrono::steady_clock::time_point now)
+{
+    const int every = status_log_s_.load(std::memory_order_relaxed);
+    if (every <= 0 || now - last_status_log_ < std::chrono::seconds(every))
+        return;
+    last_status_log_ = now;
+    const auto s     = status();
+    CASPAR_LOG(info) << L"[cluster] PTP "
+                     << (s.state == clock_state::locked         ? L"locked"
+                         : s.state == clock_state::free_running ? L"free-running"
+                                                                : L"initializing")
+                     << L" offset=" << s.offset_ns << L"ns delay=" << s.delay_ns << L"ns seq="
+                     << s.sequence_id;
+}
+
 clock_status ptp_clock::status() const
 {
     clock_status s;
@@ -297,6 +324,7 @@ void ptp_clock::master_loop()
 
     while (running_) {
         auto now = std::chrono::steady_clock::now();
+        maybe_log_status(now);
 
         // Send Sync + Follow_Up at configured interval
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sync).count() >= sync_interval_ms_) {
@@ -405,7 +433,9 @@ void ptp_clock::send_announce()
 
     ann.grandmaster_priority1 = 128;
     ann.grandmaster_priority2 = 128;
-    ann.grandmaster_clock_quality = host_to_net32(0x60FE00FF); // class 248, accuracy 0xFE, variance 0x00FF
+    // class 248 (0xF8), accuracy 0xFE, variance 0x00FF. The first byte IS the class, and it was
+    // 0x60 = 96 -- a value this comment always said was 248.
+    ann.grandmaster_clock_quality = host_to_net32(0xF8FE00FF);
     ann.grandmaster_identity  = identity_.clock_identity;
     ann.steps_removed         = 0;
     ann.time_source           = 0xA0; // Internal oscillator
@@ -488,6 +518,7 @@ void ptp_clock::client_loop()
 
         // Send Delay_Req periodically (every ~1 second)
         auto now = std::chrono::steady_clock::now();
+        maybe_log_status(now);
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_delay_req).count() >= 1000) {
             send_delay_req();
             last_delay_req = now;
@@ -529,8 +560,19 @@ bool ptp_clock::accept_master(const port_identity& source)
 void ptp_clock::handle_sync(const sync_message& msg, int64_t recv_time_ns)
 {
     // Store T2 (receive timestamp) and sequence for correlation with Follow_Up
-    last_sync_recv_time_ns_ = recv_time_ns;
-    last_sync_sequence_     = net_to_host16(msg.header.sequence_id);
+    last_sync_recv_time_ns_  = recv_time_ns;
+    last_sync_sequence_      = net_to_host16(msg.header.sequence_id);
+    last_sync_correction_ns_ = correction_ns(msg.header.correction_field);
+
+    // A ONE-STEP Sync (TWO_STEP flag clear) carries T1 itself and no Follow_Up will come. This
+    // waited for one regardless, so external mode could never lock to a one-step grandmaster --
+    // which is most hardware grandmasters.
+    const bool two_step = (net_to_host16(msg.header.flags) & 0x0200) != 0;
+    if (!two_step) {
+        const int64_t t1       = msg.origin_timestamp.to_nanoseconds() + last_sync_correction_ns_;
+        last_sync_interval_ns_ = recv_time_ns - t1;
+        update_offset(t1 - recv_time_ns + delay_ns_.load(std::memory_order_relaxed));
+    }
 }
 
 void ptp_clock::handle_follow_up(const follow_up_message& msg)
@@ -540,8 +582,10 @@ void ptp_clock::handle_follow_up(const follow_up_message& msg)
         return; // Not correlated with last Sync
     }
 
-    // T1 = precise origin timestamp from Follow_Up
-    int64_t t1 = msg.precise_origin_timestamp.to_nanoseconds();
+    // T1 = precise origin timestamp from Follow_Up, corrected by BOTH messages' correctionField
+    // (IEEE 1588 11.2: the Sync's and the Follow_Up's corrections add).
+    int64_t t1 = msg.precise_origin_timestamp.to_nanoseconds() + last_sync_correction_ns_ +
+                 correction_ns(msg.header.correction_field);
     // T2 = local receive time of Sync
     int64_t t2 = last_sync_recv_time_ns_;
 
