@@ -2576,12 +2576,16 @@ struct image_mixer::impl
         // When previz is active: (1) do normal VK compositing, (2) post the
         // VK output texture to the VK→GL bridge, (3) render the previz 3D
         // scene on the OGL thread, (4) return the previz output.
-        if (previz_renderer_ && previz_renderer_->active() && previz_bridge_ && channel_tex_store_) {
+        // Through `previz_ready_`, as `stage_state()` and the other reader do: `previz_renderer_`
+        // is written inside a `call_once` on whichever thread asked first, and a plain read of it
+        // here raced that write.
+        auto* const ready_previz = previz_ready_.load(std::memory_order_acquire);
+        if (ready_previz && ready_previz->active() && previz_bridge_ && channel_tex_store_) {
             auto bridge = previz_bridge_.get();
             auto store  = channel_tex_store_;
             auto ch_id  = channel_id_;
             auto ogl    = previz_ogl_device_;
-            auto previz = previz_renderer_.get();
+            auto previz = ready_previz;
             auto depth  = renderer_.depth();
 
             // Normal VK compositing first

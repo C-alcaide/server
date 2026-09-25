@@ -718,11 +718,29 @@ std::wstring set_command(command_context& ctx)
     CASPAR_THROW_EXCEPTION(user_error() << msg_info(L"Invalid channel variable"));
 }
 
+/// The `.ftd` file a DATA command names, or nothing when the name escapes the data folder. The
+/// name is an AMCP parameter joined straight onto the folder, so `DATA REMOVE "../../x"` deleted a
+/// `.ftd` anywhere the process could reach, and STORE wrote one there -- the containment PRINT RAW
+/// and PREVIZ SCENE already apply. Upstream shape.
+boost::optional<std::wstring> contained_data_file(const std::wstring& name)
+{
+    boost::system::error_code ec;
+    const auto base = boost::filesystem::weakly_canonical(boost::filesystem::path(env::data_folder()), ec);
+    if (ec)
+        return boost::none;
+    const auto resolved =
+        boost::filesystem::weakly_canonical(boost::filesystem::path(env::data_folder()) / (name + L".ftd"), ec);
+    if (ec || !is_within_base(resolved, base))
+        return boost::none;
+    return resolved.wstring();
+}
+
 std::wstring data_store_command(command_context& ctx)
 {
-    std::wstring filename = env::data_folder();
-    filename.append(ctx.parameters[0]);
-    filename.append(L".ftd");
+    const auto contained = contained_data_file(ctx.parameters[0]);
+    if (!contained)
+        return L"403 DATA STORE FORBIDDEN\r\n";
+    std::wstring filename = *contained;
 
     auto data_path       = boost::filesystem::path(filename).parent_path().wstring();
     auto found_data_path = find_case_insensitive(data_path);
@@ -751,9 +769,10 @@ std::wstring data_store_command(command_context& ctx)
 
 std::wstring data_retrieve_command(command_context& ctx)
 {
-    std::wstring filename = env::data_folder();
-    filename.append(ctx.parameters[0]);
-    filename.append(L".ftd");
+    const auto contained = contained_data_file(ctx.parameters[0]);
+    if (!contained)
+        return L"403 DATA RETRIEVE FORBIDDEN\r\n";
+    std::wstring filename = *contained;
 
     std::wstring file_contents;
 
@@ -819,10 +838,16 @@ std::wstring data_list_command(command_context& ctx)
 
 std::wstring data_remove_command(command_context& ctx)
 {
-    std::wstring filename = env::data_folder();
-    filename.append(ctx.parameters[0]);
-    filename.append(L".ftd");
+    const auto contained = contained_data_file(ctx.parameters[0]);
+    if (!contained)
+        return L"403 DATA REMOVE FORBIDDEN\r\n";
+    std::wstring filename = *contained;
 
+    // CASE-INSENSITIVE, as STORE and RETRIEVE already are. DATA LIST upper-cases every name it
+    // prints (upstream, kept for the clients that parse it), so a name taken from LIST did not
+    // match its file on a case-sensitive filesystem and REMOVE answered "not found".
+    if (const auto found = find_case_insensitive(filename))
+        filename = *found;
     if (!boost::filesystem::exists(filename))
         CASPAR_THROW_EXCEPTION(file_not_found() << msg_info(filename + L" not found"));
 
@@ -3882,6 +3907,23 @@ static std::shared_ptr<const core::lut3d_data> parse_cube_file(const std::wstrin
             continue;
         }
 
+        // THE SAME PROPERTY UNDER RESOLVE'S KEYWORD: `LUT_3D_INPUT_RANGE min max` is one range for
+        // all three channels. It was not recognised, and its line matched none of the branches
+        // below, so a Resolve LUT over a log range was applied as if its domain were [0,1] -- the
+        // exact misapplication the DOMAIN_MIN/MAX refusal above exists to prevent.
+        if (line.rfind("LUT_3D_INPUT_RANGE", 0) == 0) {
+            float lo = 0.0f, hi = 1.0f;
+            if (sscanf(line.c_str(), "LUT_3D_INPUT_RANGE %f %f", &lo, &hi) != 2) {
+                CASPAR_LOG(warning) << L"[lut3d] " << path << L": malformed LUT_3D_INPUT_RANGE";
+                return nullptr;
+            }
+            for (int i = 0; i < 3; ++i) {
+                domain_min[i] = lo;
+                domain_max[i] = hi;
+            }
+            continue;
+        }
+
         if (line.rfind("LUT_3D_SIZE", 0) == 0) {
             if (lut->size != 0) {
                 CASPAR_LOG(warning) << L"[lut3d] " << path << L": more than one LUT_3D_SIZE";
@@ -4242,39 +4284,79 @@ std::future<std::wstring> amf_command(command_context& ctx)
     }
 
     // The AMF namespace prefix is `aces:` by convention but is not guaranteed, and
-    // property_tree does not resolve namespaces -- it keeps the prefix in the key. So walk
-    // for a node whose LOCAL name matches rather than assuming `aces:`. A file using a
-    // different prefix is still a valid AMF and would otherwise be rejected as malformed.
-    std::function<std::wstring(const pt::wptree&, const std::wstring&)> find_id =
-        [&](const pt::wptree& node, const std::wstring& local) -> std::wstring {
-        for (const auto& child : node) {
-            const auto  key   = child.first;
-            const auto  colon = key.find_last_of(L':');
-            const auto  name  = colon == std::wstring::npos ? key : key.substr(colon + 1);
-            if (name == local) {
-                // The id may be this node's own text or a child <transformId>.
-                auto tid = child.second.get_optional<std::wstring>(L"aces:transformId");
-                if (!tid) {
-                    for (const auto& g : child.second) {
-                        const auto k = g.first;
-                        const auto c = k.find_last_of(L':');
-                        if ((c == std::wstring::npos ? k : k.substr(c + 1)) == L"transformId")
-                            tid = g.second.get_value<std::wstring>();
-                    }
-                }
-                if (tid && !tid->empty())
-                    return *tid;
-            }
-            auto deeper = find_id(child.second, local);
-            if (!deeper.empty())
-                return deeper;
-        }
-        return {};
+    // property_tree does not resolve namespaces -- it keeps the prefix in the key. So match on
+    // the LOCAL name rather than assuming `aces:`. A file using a different prefix is still a
+    // valid AMF and would otherwise be rejected as malformed.
+    const auto local_name = [](const std::wstring& key) {
+        const auto colon = key.find_last_of(L':');
+        return colon == std::wstring::npos ? key : key.substr(colon + 1);
     };
 
-    const auto in_id   = find_id(amf, L"inputTransform");
-    const auto look_id = find_id(amf, L"lookTransform");
-    const auto out_id  = find_id(amf, L"outputTransform");
+    // WHICH transforms count, per SMPTE ST 2136-1 (AMF v2). This took the first node of each
+    // name ANYWHERE in the file, and three things in the format made that wrong:
+    //   * `archivedPipeline` is HISTORY -- earlier grades kept for provenance. The first
+    //     lookTransform in document order could be an archived one.
+    //   * `applied="true"` marks a transform ALREADY BAKED INTO THE IMAGE. Applying it again
+    //     doubles it -- an input transform on footage that is already ACES, most commonly.
+    //   * a pipeline may stack several looks, and one slot cannot hold them; taking the first
+    //     silently dropped the rest.
+    // So: the current `pipeline` only (the whole file when it has none -- a bare AMF fragment),
+    // `applied="true"` skipped, and more than one unapplied look REFUSED.
+    struct found_transform
+    {
+        std::wstring id;
+    };
+    std::function<void(const pt::wptree&, const std::wstring&, std::vector<found_transform>&)> collect =
+        [&](const pt::wptree& node, const std::wstring& local, std::vector<found_transform>& out) {
+            for (const auto& child : node) {
+                const auto name = local_name(child.first);
+                if (name == L"archivedPipeline" || child.first == L"<xmlattr>")
+                    continue;
+                if (name == local) {
+                    const auto applied = child.second.get_optional<std::wstring>(L"<xmlattr>.applied");
+                    if (applied && boost::iequals(*applied, L"true"))
+                        continue;
+                    // The id may be a child <transformId> under any prefix.
+                    boost::optional<std::wstring> tid;
+                    for (const auto& g : child.second)
+                        if (local_name(g.first) == L"transformId")
+                            tid = g.second.get_value<std::wstring>();
+                    if (tid && !tid->empty())
+                        out.push_back({*tid});
+                    continue;
+                }
+                collect(child.second, local, out);
+            }
+        };
+    std::function<const pt::wptree*(const pt::wptree&)> find_pipeline = [&](const pt::wptree& node) -> const pt::wptree* {
+        for (const auto& child : node) {
+            const auto name = local_name(child.first);
+            if (name == L"archivedPipeline")
+                continue;
+            if (name == L"pipeline")
+                return &child.second;
+            if (auto deeper = find_pipeline(child.second))
+                return deeper;
+        }
+        return nullptr;
+    };
+    const pt::wptree* pipeline = find_pipeline(amf);
+    const pt::wptree& scope    = pipeline ? *pipeline : amf;
+
+    std::vector<found_transform> ins, looks, outs;
+    collect(scope, L"inputTransform", ins);
+    collect(scope, L"lookTransform", looks);
+    collect(scope, L"outputTransform", outs);
+    if (ins.size() > 1 || looks.size() > 1 || outs.size() > 1) {
+        CASPAR_LOG(warning) << L"[ocio] AMF refused: " << path << L" carries " << ins.size()
+                            << L" input, " << looks.size() << L" look and " << outs.size()
+                            << L" output transforms not yet applied -- one of each is supported, and "
+                               L"applying the first would silently drop the rest";
+        return make_ready_future<std::wstring>(L"400 AMF FAILED\r\n");
+    }
+    const auto in_id   = ins.empty() ? std::wstring() : ins.front().id;
+    const auto look_id = looks.empty() ? std::wstring() : looks.front().id;
+    const auto out_id  = outs.empty() ? std::wstring() : outs.front().id;
 
     if (in_id.empty() && look_id.empty() && out_id.empty()) {
         CASPAR_LOG(warning) << L"[ocio] AMF refused: " << path
@@ -7241,7 +7323,28 @@ std::wstring previz_autoprojection_command(command_context& ctx)
                                 // blocking the previz renderer (which could deadlock
                                 // with the stage executor).
                                 std::thread([video_channels, source_channel, source_layer, target_layer,
-                                             channel, stage, producer_registry, cg_registry, format_repository]() {
+                                             channel, stage, producer_registry, cg_registry, format_repository,
+                                             routed_channels, routed_mutex]() {
+                                    // A ROUTE THAT DID NOT LOAD IS FORGOTTEN, so the next frame asks
+                                    // again. The channel was marked routed BEFORE this ran, and any
+                                    // failure below -- a channel not up yet, a producer that threw --
+                                    // left it marked for the server's lifetime: projected onto a layer
+                                    // nothing would ever fill.
+                                    bool routed = false;
+                                    struct forget_on_failure
+                                    {
+                                        bool&                          ok;
+                                        int                            ch;
+                                        std::shared_ptr<std::set<int>> set;
+                                        std::shared_ptr<std::mutex>    mtx;
+                                        ~forget_on_failure()
+                                        {
+                                            if (ok)
+                                                return;
+                                            std::lock_guard<std::mutex> lock(*mtx);
+                                            set->erase(ch);
+                                        }
+                                    } forget{routed, channel, routed_channels, routed_mutex};
                                     try {
                                         auto src_it = video_channels.find(source_channel);
                                         auto dst_it = video_channels.find(channel);
@@ -7277,17 +7380,17 @@ std::wstring previz_autoprojection_command(command_context& ctx)
                                         auto producer = producer_registry->create_producer(deps, route_params);
                                         stage->load(target_layer, producer, false, false).get();
                                         stage->play(target_layer).get();
+                                        routed = true;
 
                                         CASPAR_LOG(info) << L"[previz] Auto-routed route://"
                                             << source_channel << L"-" << source_layer
                                             << L" PREMIX to channel " << channel
                                             << L" layer " << target_layer;
                                     } catch (const std::exception& e) {
+                                        // `std::exception` only: under `/EHa` a `catch (...)` here
+                                        // also caught an access violation and logged "unknown error".
                                         CASPAR_LOG(error) << L"[previz] Failed to create route for channel "
-                                            << channel << L": " << e.what();
-                                    } catch (...) {
-                                        CASPAR_LOG(error) << L"[previz] Route creation unknown error for channel "
-                                            << channel;
+                                            << channel << L": " << e.what() << L" -- will retry";
                                     }
                                 }).detach();
                             }

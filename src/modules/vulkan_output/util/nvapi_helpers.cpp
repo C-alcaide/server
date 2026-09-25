@@ -399,7 +399,10 @@ gsync_status nvapi_helpers::get_sync_status(int gpu_index)
 
 bool nvapi_helpers::configure_sync(int gpu_index, int master_display_id, sync_source source)
 {
-    if (!available_ || !impl_ || impl_->gsync_count == 0)
+    // Bounds-checked as `resolve_display_id` and `get_sync_status` are: `impl_->gpus[gpu_index]`
+    // below read past the array for a `<gpu>` the machine does not have.
+    if (!available_ || !impl_ || impl_->gsync_count == 0 || gpu_index < 0 ||
+        gpu_index >= static_cast<int>(impl_->gpu_count))
         return false;
 
     // Find the GSync device for this GPU
@@ -778,32 +781,12 @@ bool nvapi_helpers::persist_edid(int gpu_index, int output_index)
         return false;
     }
 
-    // Get the display ID for this output using GetAllDisplayIds (includes disconnected)
-    NvU32 count = 0;
-    auto status = NvAPI_GPU_GetAllDisplayIds(impl_->gpus[gpu_index], nullptr, &count);
-    if (status != NVAPI_OK || count == 0)
-        return false;
-
-    std::vector<NV_GPU_DISPLAYIDS> all_ids(count);
-    for (auto& d : all_ids)
-        d.version = NV_GPU_DISPLAYIDS_VER;
-
-    status = NvAPI_GPU_GetAllDisplayIds(impl_->gpus[gpu_index], all_ids.data(), &count);
-    if (status != NVAPI_OK)
-        return false;
-
-    int current = 0;
-    NvU32 target_display_id = 0;
-    for (NvU32 i = 0; i < count; ++i) {
-        if (all_ids[i].isDynamic)
-            continue;
-        current++;
-        if (current == output_index) {
-            target_display_id = all_ids[i].displayId;
-            break;
-        }
-    }
-
+    // THE DISPLAY THE EDID WAS READ FROM. This walked GetAllDisplayIds skipping dynamic entries
+    // and took the output_index-th, while `read_edid` above counts CONNECTED displays -- two
+    // different enumerations, so with an unconnected port ahead of the connected one the monitor's
+    // EDID was locked onto a DIFFERENT port. `resolve_display_id` is the connected-display lookup
+    // the HDR path already uses; the write goes where the read came from.
+    const NvU32 target_display_id = resolve_display_id(gpu_index, output_index);
     if (target_display_id == 0)
         return false;
 
@@ -813,7 +796,7 @@ bool nvapi_helpers::persist_edid(int gpu_index, int output_index)
     nv_edid.sizeofEDID = static_cast<NvU32>((std::min)(info.raw_edid.size(), size_t(NV_EDID_DATA_SIZE)));
     memcpy(nv_edid.EDID_Data, info.raw_edid.data(), nv_edid.sizeofEDID);
 
-    status = NvAPI_GPU_SetEDID(impl_->gpus[gpu_index], target_display_id, &nv_edid);
+    const auto status = NvAPI_GPU_SetEDID(impl_->gpus[gpu_index], target_display_id, &nv_edid);
     if (status != NVAPI_OK) {
         NvAPI_ShortString err;
         NvAPI_GetErrorMessage(status, err);

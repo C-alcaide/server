@@ -269,6 +269,13 @@ One detail worth knowing, because it looks like it should be a problem and is no
 ID appears on exactly one colour space — whose name is also the display — and on one view
 transform. The pair is determined, not guessed.
 
+**It reads the CURRENT pipeline, as SMPTE ST 2136-1 defines it** (since 2026-09-25). An
+`archivedPipeline` is history and is ignored; a transform marked `applied="true"` is already in
+the image and is not applied again (an input transform on footage that is already ACES, most
+often); and more than one unapplied look is **refused**, because one slot cannot hold a stack and
+applying the first would drop the rest. It used to take the first node of each name anywhere in
+the file. `amf` drives all three.
+
 **It resolves everything before it applies anything.** Three settings from one file must not
 leave a channel half configured because the third ID was unknown; the operator would be
 looking at a picture that is neither the old look nor the new one. Display is applied before

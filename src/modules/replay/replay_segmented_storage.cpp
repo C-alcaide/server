@@ -413,7 +413,10 @@ bool ReplaySegmentedReader::Open(const boost::filesystem::path& base_path)
             }
             
             seg.global_start_frame = total_frames_;
-            total_frames_ += entry_count;
+            // What was READ, not what the file size promised: after a short read above the
+            // tail was truncated away, and counting `entry_count` put frames on the timeline
+            // that no index entry backs -- a seek there read past the segment's indices.
+            total_frames_ += seg.indices.size();
             segments_.push_back(seg);
         }
         fclose(f);

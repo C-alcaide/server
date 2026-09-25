@@ -108,8 +108,15 @@ Append query parameters to the filename to configure segmentation and buffering:
 
 | Parameter | Format | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `segment` | seconds | `60` | Duration of each segment file. |
+| `segment` (or `segment_duration`) | seconds | `60` | Duration of each segment file. |
 | `max_duration` | `HH:MM` or seconds | `86400` (24 h) | Maximum total buffer duration. Older segments are deleted. |
+| `duration` | `HH:MM` or minutes | -- | The older spelling of `max_duration`, in MINUTES; `max_duration` wins when both are given. |
+
+**Every option is parsed exactly, and anything else is refused** (since 2026-09-25). Keys were
+found by substring -- `segment_duration=N` also matched `duration=` and set the RETENTION to N
+minutes -- values were read with `std::stoi`, which stops at the first non-digit (`max_duration=1h`
+was a one-second buffer), and a malformed option was swallowed, recording with the 24-hour default.
+A whole number, `HH:MM` with minutes below 60, and the four keys above are what is accepted.
 
 ### Quality Profiles
 
@@ -289,7 +296,10 @@ CALL 1-10 LOOP 1     # Enable
 CALL 1-10 LOOP 0     # Disable
 ```
 
-Called without an argument, `LOOP` toggles the current state.
+Called without an argument, `LOOP` **answers the current state** (`1` or `0`), as it does on
+`ffmpeg_producer` -- changed 2026-09-25. It used to TOGGLE, and the cluster watchdog and
+`CLUSTER TRACK` send exactly that to read the state, so every poll flipped the replay layer's loop.
+A value other than `1`/`0`/`TRUE`/`FALSE`/`ON`/`OFF` is refused; it used to toggle as well.
 
 ### EXPORT
 Export clips to an external file in the background. The export uses FFmpeg and does not interrupt playback.

@@ -1,6 +1,43 @@
 CasparVP — Unreleased
 ==========================================
 
+### BEHAVIOUR: persistence and concurrency defects from the audit backlog
+
+Measured on both mixers: `refusals` **55/55** (six new checks), `api-stage` **24/24** (two new:
+a SCENE SAVE/LOAD round trip, and a layout with a missing model refused), `amf` every case at
+**0.00 LSB** plus four refusals (two new cases, one new refusal), `replay` **14/14**,
+`previz-picture` passing. **Mutation-verified**: the replay, AMCP and previz sources reverted turn
+every new arm red -- the archived AMF pipeline renders 68 LSB off, the applied input 226 LSB off,
+two looks are accepted, both layout arms fail, and three refusals pass their bad value. The
+pre-fix `DATA STORE "../x"` wrote its file into `build/shell`, outside the data folder.
+
+* **Replay options** (`?max_duration=` etc.) were found by substring and read with `stoi`:
+  `segment_duration=N` set the retention to N minutes, `max_duration=1h` was a one-second buffer,
+  and a malformed value recorded with the 24-hour default. Exact keys, strict values, refused
+  otherwise. **A bare `CALL LOOP` on a replay layer is a QUERY** now, as on `ffmpeg_producer`; it
+  toggled, so the cluster watchdog's query flipped the loop. The reader counted a short index read
+  by the file size rather than what was read.
+* **AMF** reads the current `pipeline` only, skips `applied="true"` transforms and refuses more than
+  one unapplied look (ST 2136-1). **`.cube`**: `LUT_3D_INPUT_RANGE` is honoured as a domain, so a
+  Resolve log-range LUT is refused like a non-unit `DOMAIN_MIN/MAX` instead of applied over [0,1].
+* **Previz layouts** persist the view flags, snap, camera presets, and a venue mesh's `MAP`, pose,
+  parent and visibility (a mapped mesh was skipped: `is_screen` is overloaded); a missing or failing
+  venue model is refused before anything changes; the selection is cleared by Esc and by removing
+  the screen it names.
+* **`DATA STORE/RETRIEVE/REMOVE`** are contained in the data folder (upstream shape) and REMOVE
+  matches case-insensitively, so the upper-cased names `DATA LIST` prints actually remove.
+* **Concurrency**: `output::add` read the channel format bare while the tick rewrote it, and a
+  consumer added during a format change kept the old one (upstream shape); the Vulkan mixer read
+  `previz_renderer_` outside its acquire publication; a PREVIZ auto-route that failed was never
+  retried; the EDID lock was written by a different display enumeration from the one it was read
+  by, so it could land on another port; Quadro Sync's `configure_sync` had no GPU-index bound.
+
+Not measured, argued from code: the replay `LOOP` query (no battery CALLs it), the reader's short
+read, the EDID and Quadro Sync items (no hardware), the three concurrency items. **Deferred**: the
+previz VK->GL bridge is single-buffered, so a channel's next blit can overlap the render sampling the
+previous one; double-buffering alone does not close it without a GL-side fence, and that is a design
+change rather than a fix.
+
 ### BEHAVIOUR: output-module defects from the audit backlog -- DeckLink and Vulkan output
 
 Measured on the SDI loopback: `sdi-output` on OpenGL and on Vulkan with every readback mode

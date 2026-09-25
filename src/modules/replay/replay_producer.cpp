@@ -537,14 +537,21 @@ std::future<std::wstring> replay_producer::call(const std::vector<std::wstring>&
          return caspar::make_ready_future(std::wstring(L"OK"));
     }
     else if (boost::iequals(command, L"LOOP")) {
+         // A BARE `LOOP` IS A QUERY, as it is on `ffmpeg_producer` -- and the cluster watchdog and
+         // `CLUSTER TRACK` send exactly that to read it. Here it TOGGLED, so every watchdog poll
+         // flipped the replay layer's loop; and a value that did not parse toggled as well, which is
+         // the accept-a-typo defect with a coin flip in it.
          if (params.size() > 1) {
-            try {
-                loop_ = boost::lexical_cast<bool>(params[1]);
-            } catch(...) { loop_ = !loop_; }
-         } else {
-            loop_ = !loop_;
+            const auto& v = params[1];
+            if (v == L"1" || boost::iequals(v, L"TRUE") || boost::iequals(v, L"ON"))
+                loop_ = true;
+            else if (v == L"0" || boost::iequals(v, L"FALSE") || boost::iequals(v, L"OFF"))
+                loop_ = false;
+            else
+                CASPAR_THROW_EXCEPTION(caspar::invalid_argument()
+                                       << caspar::msg_info(L"[replay] CALL LOOP takes 1 or 0, not '" + v + L"'"));
          }
-         return caspar::make_ready_future(std::wstring(L"OK"));
+         return caspar::make_ready_future(std::wstring(loop_ ? L"1" : L"0"));
     }
      else if (boost::iequals(command, L"SPEED")) {
          if (params.size() > 1) {

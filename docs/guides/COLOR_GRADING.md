@@ -882,7 +882,7 @@ All color grading runs on the GPU in a single fragment shader pass. The processi
 | 6 | **Exposure** | `MIXER EXPOSURE` × `MIXER COLORSPACE` exposure / auto luminance scaling |
 | 7 | **Gamut Compression** | `MIXER GAMUTCOMPRESS` |
 | 8 | **ASC CDL** | `MIXER CDL` |
-| 9 | **3D LUT** | `MIXER LUT3D` |
+| 9 | **3D LUT** | `MIXER LUT3D` -- a `.cube` whose domain is not [0,1] is refused, by `DOMAIN_MIN`/`DOMAIN_MAX` or by Resolve's `LUT_3D_INPUT_RANGE` (recognised since 2026-09-25; it was ignored, so a log-range LUT was applied over [0,1]) |
 | 10 | **Linear Saturation** | `MIXER LINEARSATURATION` |
 | 11 | **White Balance** | `MIXER WHITEBALANCE` |
 | 12 | **Lift / Midtone / Gain** | `MIXER LIFT`, `MIXER MIDTONE`, `MIXER GAIN` |

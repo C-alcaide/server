@@ -55,66 +55,71 @@ replay_consumer::replay_consumer(std::string path, VMX_PROFILE quality)
         std::string query = path.substr(q_pos + 1);
         path = path.substr(0, q_pos);
         
-        // Parse "max_duration=HH:MM" (preferred) or seconds
-        if (query.find("max_duration=") != std::string::npos) {
+        // EXACT KEYS, STRICT VALUES, and anything else REFUSED. This used to search the query
+        // string for substrings -- so `segment_duration=N` also matched `duration=` and set the
+        // RETENTION window to N minutes -- read numbers with `std::stoi`, which stops at the first
+        // non-digit (`max_duration=1h` became a ONE-SECOND buffer), and swallowed every failure in
+        // a `catch (...)`, so a malformed option recorded with the 24-hour default and said nothing.
+        // A replay buffer is a promise about how far back an operator can go; a typo must not
+        // quietly change it.
+        const auto whole_number = [](const std::string& key, const std::string& s) -> int {
+            std::size_t used = 0;
+            long        v    = 0;
             try {
-                size_t val_start = query.find("max_duration=") + 13;
-                size_t val_end = query.find('&', val_start);
-                std::string val = query.substr(val_start, val_end - val_start);
-                
-                if (val.find(':') != std::string::npos) {
-                    std::vector<std::string> parts;
-                    boost::split(parts, val, boost::is_any_of(":"));
-                    if (parts.size() >= 2) {
-                        int h = std::stoi(parts[0]);
-                        int m = std::stoi(parts[1]);
-                        max_duration_sec_ = (h * 60 + m) * 60;
-                    }
-                } else {
-                    int s = std::stoi(val);
-                    max_duration_sec_ = s;
-                }
-            } catch (...) {}
-        } else if (query.find("duration=") != std::string::npos) {
-            try {
-                size_t val_start = query.find("duration=") + 9;
-                size_t val_end = query.find('&', val_start);
-                std::string val = query.substr(val_start, val_end - val_start);
-                
-                // Check if contains ':'
-                if (val.find(':') != std::string::npos) {
-                    // HH:MM format
-                    std::vector<std::string> parts;
-                    boost::split(parts, val, boost::is_any_of(":"));
-                    if (parts.size() >= 2) {
-                        int h = std::stoi(parts[0]);
-                        int m = std::stoi(parts[1]);
-                        max_duration_sec_ = (h * 60 + m) * 60;
-                    }
-                } else {
-                    // Plain minutes
-                    int m = std::stoi(val);
-                    max_duration_sec_ = m * 60;
-                }
-            } catch (...) {}
-        }
-        
-        if (query.find("segment_duration=") != std::string::npos) {
-            try {
-                size_t val_start = query.find("segment_duration=") + 17;
-                size_t val_end = query.find('&', val_start);
-                std::string val = query.substr(val_start, val_end - val_start);
-                segment_duration_sec_ = std::stoi(val);
-            } catch (...) {}
-        } else if (query.find("segment=") != std::string::npos) {
-            try {
-                size_t val_start = query.find("segment=") + 8;
-                size_t val_end = query.find('&', val_start);
-                std::string val = query.substr(val_start, val_end - val_start);
-                segment_duration_sec_ = std::stoi(val);
-            } catch (...) {}
+                v = std::stol(s, &used);
+            } catch (const std::exception&) {
+                used = 0;
+            }
+            if (s.empty() || used != s.size() || v <= 0 || v > 10L * 24 * 3600)
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                    "REPLAY ?" + key + "= takes a positive whole number, not '" + s + "'"));
+            return static_cast<int>(v);
+        };
+        // HH:MM, or a single whole number in `unit` seconds.
+        const auto duration = [&](const std::string& key, const std::string& s, int unit) -> int {
+            const auto colon = s.find(':');
+            if (colon == std::string::npos)
+                return whole_number(key, s) * unit;
+            const auto h = s.substr(0, colon);
+            const auto m = s.substr(colon + 1);
+            if (m.find(':') != std::string::npos)
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                    "REPLAY ?" + key + "= takes HH:MM or a whole number, not '" + s + "'"));
+            const int hours   = h == "0" || h == "00" ? 0 : whole_number(key, h);
+            const int minutes = m == "0" || m == "00" ? 0 : whole_number(key, m);
+            if (minutes >= 60 || hours * 60 + minutes <= 0)
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                    "REPLAY ?" + key + "= takes HH:MM with minutes below 60 and a length above zero, not '" +
+                    s + "'"));
+            return (hours * 60 + minutes) * 60;
+        };
+
+        std::vector<std::string> pairs;
+        boost::split(pairs, query, boost::is_any_of("&"));
+        bool have_max = false;
+        for (const auto& kv : pairs) {
+            if (kv.empty())
+                continue;
+            const auto eq = kv.find('=');
+            if (eq == std::string::npos)
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info("REPLAY option '" + kv + "' has no value"));
+            const auto key = kv.substr(0, eq);
+            const auto val = kv.substr(eq + 1);
+            if (key == "max_duration") {            // seconds, or HH:MM -- preferred
+                max_duration_sec_ = duration(key, val, 1);
+                have_max          = true;
+            } else if (key == "duration") {         // minutes, or HH:MM
+                if (!have_max)
+                    max_duration_sec_ = duration(key, val, 60);
+            } else if (key == "segment_duration" || key == "segment") {
+                segment_duration_sec_ = whole_number(key, val);
+            } else {
+                CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                    "REPLAY option '" + key + "' is not one of max_duration, duration, segment_duration, segment"));
+            }
         }
     }
+
 
     // Trim trailing separators from path
     boost::trim_right_if(path, boost::is_any_of("/\\"));

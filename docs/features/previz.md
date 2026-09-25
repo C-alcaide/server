@@ -1011,6 +1011,13 @@ boundaries says why.
 They are drawn for **every** screen that has them, not only the selected one — they describe the
 wall rather than the operator's current focus.
 
+**And the rest of the stage survives since 2026-09-25**: the grid, wireframe, gizmo and
+camera-frustum flags, the snap, the camera PRESETS, and a venue mesh's `PREVIZ MAP` together
+with its pose, parent and visibility -- a mapped mesh was skipped outright, because `map_mesh` sets
+the same `is_screen` flag screens carry. A layout whose venue model is missing or fails to load is
+**refused** before anything on stage changes; it was skipped (or its exception swallowed) and the
+previous venue stayed on stage under the new screens. `api-stage` drives the round trip.
+
 **They survive `SCENE SAVE`/`LOAD` since 2026-09-23, and did not before.** `save_layout` never
 wrote them, and `load_layout` would have lost them anyway: its rebuild loop goes through
 `add_screen_flat`, which assigns a **default-constructed** `screen_meta` over the map entry, and it

@@ -2199,7 +2199,10 @@ bool previz_renderer::input(const core::input_event& event, double aspect)
 
             if (event.key == 0x1B) { // VK_ESCAPE
                 std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
+                // BOTH: `selection` is every selected screen, `selected` included. Clearing one
+                // left the rings and outlines on screens the operator had just deselected.
                 impl_->scene_.selected.clear();
+                impl_->scene_.selection.clear();
                 return true;
             }
 
@@ -2291,6 +2294,24 @@ void previz_renderer::save_layout(const std::string& path) const
         root.put("auto_projection", sc.auto_projection);
         if (!sc.scene_path.empty())
             root.put("model_path", sc.scene_path);
+        // The operator's view state and camera presets. None of these were in the layout, so a
+        // reloaded stage came back with the defaults -- and `previz.md` said `show_gizmo` WAS
+        // persisted, which it had never been.
+        root.put("show_grid", sc.show_grid);
+        root.put("show_wireframe", sc.show_wireframe);
+        root.put("show_gizmo", sc.show_gizmo);
+        root.put("show_camera", sc.show_camera);
+        root.put("snap_m", sc.snap_m);
+        root.put("snap_deg", sc.snap_deg);
+        if (!sc.camera_presets.empty()) {
+            pt::ptree presets;
+            for (const auto& [pname, cam] : sc.camera_presets) {
+                auto n = write_cam(cam);
+                n.put("name", pname);
+                presets.push_back(std::make_pair("", n));
+            }
+            root.put_child("camera_presets", presets);
+        }
 
         pt::ptree screens;
         for (const auto& [name, m] : sc.screens) {
@@ -2333,13 +2354,20 @@ void previz_renderer::save_layout(const std::string& path) const
         // `screens` block above and would otherwise be written twice and disagree, and for one
         // sitting at its model-given defaults -- which is most of a venue, and writing those
         // rows would make the file grow with the model rather than with the edits.
+        //
+        // A SCREEN IS KNOWN BY NAME, not by `is_screen` -- which `map_mesh` also sets on a venue
+        // mesh it maps a channel onto. Testing the flag skipped every MAPPED venue mesh, so its
+        // `PREVIZ MAP`, pose, parent and visibility were all lost on the next LOAD. The mapping is
+        // written here too: nothing else in the file carried it.
         pt::ptree meshes;
         for (const auto& mesh : sc.meshes) {
-            if (mesh.is_screen)
+            if (sc.screens.count(mesh.name))
                 continue;
+            const auto map_it = sc.mesh_to_channel.find(mesh.name);
+            const bool mapped = map_it != sc.mesh_to_channel.end();
             const bool moved = mesh.pos != std::array<float, 3>{0.0f, 0.0f, 0.0f} ||
                                mesh.rot != std::array<float, 3>{0.0f, 0.0f, 0.0f};
-            if (!moved && mesh.parent.empty() && mesh.visible)
+            if (!moved && mesh.parent.empty() && mesh.visible && !mapped)
                 continue;
             pt::ptree n;
             n.put("name", mesh.name);
@@ -2347,6 +2375,7 @@ void previz_renderer::save_layout(const std::string& path) const
             n.put("rot_yaw", mesh.rot[0]); n.put("rot_pitch", mesh.rot[1]); n.put("rot_roll", mesh.rot[2]);
             n.put("parent", mesh.parent);
             n.put("visible", mesh.visible);
+            n.put("channel", mapped ? map_it->second : -1);
             meshes.push_back(std::make_pair("", n));
         }
         if (!meshes.empty())
@@ -2372,9 +2401,16 @@ void previz_renderer::load_layout(const std::string& path)
     };
 
     // Optionally (re)load the venue model first (outside the scene lock).
+    // A LAYOUT WHOSE VENUE CANNOT BE LOADED IS REFUSED, before anything on stage changes. A
+    // missing model was skipped and a failing one swallowed by `catch (...)` -- under `/EHa` that
+    // also caught an access violation -- so the PREVIOUS venue stayed on stage with this layout's
+    // screens laid over it, and the log said "Loaded stage layout".
     auto model_path = root.get<std::string>("model_path", "");
-    if (!model_path.empty() && boost::filesystem::exists(model_path)) {
-        try { load_scene(model_path); } catch (...) {}
+    if (!model_path.empty()) {
+        if (!boost::filesystem::exists(model_path))
+            CASPAR_THROW_EXCEPTION(user_error() << msg_info(
+                "[previz] the layout's venue model is missing: " + model_path));
+        load_scene(model_path);   // throws with its own reason; nothing below has run yet
     }
 
     {
@@ -2388,7 +2424,25 @@ void previz_renderer::load_layout(const std::string& path)
         sc.has_view_override = root.get("has_view_override", false);
         sc.camera_locked     = root.get("camera_locked", false);
         sc.auto_projection   = root.get("auto_projection", sc.auto_projection);
+        // Absent in a layout written before 2026-09-25: the current value is kept.
+        sc.show_grid      = root.get("show_grid", sc.show_grid);
+        sc.show_wireframe = root.get("show_wireframe", sc.show_wireframe);
+        sc.show_gizmo     = root.get("show_gizmo", sc.show_gizmo);
+        sc.show_camera    = root.get("show_camera", sc.show_camera);
+        sc.snap_m         = root.get("snap_m", sc.snap_m);
+        sc.snap_deg       = root.get("snap_deg", sc.snap_deg);
+        if (auto presets = root.get_child_optional("camera_presets")) {
+            sc.camera_presets.clear();
+            for (const auto& [_, n] : *presets) {
+                const auto pname = n.get("name", std::string());
+                if (!pname.empty())
+                    sc.camera_presets[pname] = read_cam(n);
+            }
+        }
 
+        // The selection names screens that are about to be replaced.
+        sc.selected.clear();
+        sc.selection.clear();
         sc.screens.clear();
         if (auto screens = root.get_child_optional("screens")) {
             for (const auto& [_, s] : *screens) {
@@ -2485,6 +2539,9 @@ void previz_renderer::load_layout(const std::string& path)
             if (!parent.empty())
                 set_mesh_parent(name, parent);
             set_mesh_visible(name, n.get("visible", true));
+            const int channel = n.get("channel", -1);
+            if (channel >= 0)
+                map_mesh(name, channel);
         }
     }
 
@@ -3154,6 +3211,11 @@ void previz_renderer::remove_screen(const std::string& name)
         std::lock_guard<std::mutex> lock(impl_->scene_mutex_);
         impl_->scene_.screens.erase(name);
         impl_->scene_.mesh_to_channel.erase(name);
+        // A removed screen cannot stay selected: both fields used to go on naming it.
+        auto& selection = impl_->scene_.selection;
+        selection.erase(std::remove(selection.begin(), selection.end(), name), selection.end());
+        if (impl_->scene_.selected == name)
+            impl_->scene_.selected = selection.empty() ? std::string() : selection.back();
 
         auto& meshes = impl_->scene_.meshes;
         for (auto it = meshes.begin(); it != meshes.end(); ++it) {

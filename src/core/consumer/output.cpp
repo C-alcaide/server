@@ -170,10 +170,24 @@ struct output::impl
             old.reset();
         }
 
-        consumer->initialize(format_desc_, channel_info_, index);
+        // THE FORMAT IS READ UNDER THE LOCK the tick writes it under. This read `format_desc_`
+        // bare on the AMCP thread while a format change assigned it on the channel thread -- a
+        // struct holding a wstring and a vector, torn by a concurrent write. And if the format
+        // changes while this consumer is initialising (initialise can take a device open's worth
+        // of time, so it is not done under the lock), the tick's re-initialisation loop has
+        // already run without it: it is re-initialised here instead, and one that cannot follow a
+        // format change throws, which is the same answer the tick would have given. Upstream shape.
+        video_format_desc initial_format;
+        {
+            std::lock_guard<std::mutex> lock(consumers_mutex_);
+            initial_format = format_desc_;
+        }
+        consumer->initialize(initial_format, channel_info_, index);
 
         {
             std::lock_guard<std::mutex> lock(consumers_mutex_);
+            if (format_desc_ != initial_format)
+                consumer->initialize(format_desc_, channel_info_, index);
             consumers_.emplace(index, std::move(consumer));
         }
 
