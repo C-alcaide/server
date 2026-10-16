@@ -95,11 +95,11 @@ how far apart two *decoders* are — never how lossy the *codec* is.
 
 **This section used to say the opposite**: that the gate varies by codec "because a lossy codec
 cannot physically reach the score a PNG can". That describes a different measurement — a
-decode compared against the original master before encoding — which the harness does not make
-today. Corrected 2026-10-16.
+decode compared against the original master before encoding — which the harness makes only where
+a master can be regenerated (`output.decode_vs_master`, below). Corrected 2026-10-16.
 
 The gates as they stand (`parallel.py::_get_decoder_psnr_threshold`), next to what was
-measured on this box (`data/results.db`, runs up to 2026-08-21):
+measured on this box (`data/results.db`; runs up to 2026-08-21 unless stated):
 
 | source | gate | measured mean (runs) |
 | :--- | ---: | :--- |
@@ -108,25 +108,50 @@ measured on this box (`data/results.db`, runs up to 2026-08-21):
 | ProRes 4444 | 40 dB | 49.9 dB (140) |
 | ProRes 422 | 35 dB | 47.5 dB (209) |
 | H.264, H.265, VP9, AV1, DNxHD, XDCAM | 30 dB | 37.5–51.0 dB depending on codec |
-| HAP | 25 dB | **nothing recorded** |
-| NotchLC | 25 dB | **27.5 dB** (105, CUDA decoder) / **28.2 dB** (114, CasparCG's FFmpeg route) |
+| HAP | 25 dB | **nothing recorded** — a placeholder with nothing behind it |
+| NotchLC | **40 dB** (was 25) | **53.5 dB** CUDA decoder / **58.7 dB** FFmpeg route, every case on both mixers (2026-10-16). Before the fix: 27.5 / 28.2 dB |
 
 Read the gates as **"how well two decoders are expected to agree"**. The spread between codecs
 comes from things like bit depth, chroma subsampling and which YCbCr → RGB conversion each side
 applies.
 
-**HAP and NotchLC are an open question, not an expected value.** Their 25 dB gate does not mean
-those codecs are lossy (HAP is lossy by design, but that loss cancels here like any other; NotchLC
-is designed as a high-quality, ProRes-class codec). NotchLC's ~28 dB is suspicious for a specific
-reason: CasparCG's FFmpeg route uses **the same decoder** as the reference and still lands ~28 dB
-away, so the difference is almost certainly in the conversion to RGB, not in the decode. A
-candidate is already visible: NotchLC is missing from the high-bit-depth list in
-`_ensure_source_reference`, so its reference is extracted at 8 bits. Until that is investigated,
-treat the 25 dB as a gate fitted to an unexplained result, not as a property of the codec.
+**NotchLC's 25 dB gate was hiding a server defect — found 2026-10-16, fixed the same day.**
+The ~28 dB looked like the codec's loss and was not. FFmpeg tags NotchLC `colorspace=RGB`, which
+names no YUV matrix: FFmpeg's own converter reads that as BT.601, and **both CasparCG routes read it
+as BT.709**. Each decode was internally consistent — they simply used different matrices, and the
+25 dB gate had been set to fit the result. The tell, in hindsight: CasparCG's FFmpeg route uses
+*the same decoder* as the reference and still landed 28 dB away, so the difference had to be in the
+conversion to RGB. (This section's first correction guessed the 8-bit reference was to blame; it was
+not — the reference was right.)
 
-**Measuring how lossy a codec is** would need a different check: each fixture's decode
-compared against the master it was encoded from. That is the number to quote for "NotchLC vs
-ProRes", and nothing here produces it yet.
+Which matrix is right was settled against the **master**: `notchlc_none_sdr.mov` is FFmpeg's
+`smptehdbars` colour bars under the frame marker, which regenerates exactly. The decoded planes land
+**48.0 dB** from the master through BT.601 full range and **29.0 dB** through BT.709 — about 5 LSB of
+error on every saturated colour and none on greys, which is why a grey ramp would never have shown it.
+Both routes now use BT.601; the gate is 40 dB.
+
+**HAP's 25 dB is still an open question**: no HAP decode has ever been recorded against it. HAP *is*
+lossy by design (GPU texture compression), but that loss cancels in this check like any other codec's,
+so 25 dB is not evidence of anything until someone measures it.
+
+#### `output.decode_vs_master` — how lossy the codec actually is
+
+Where a fixture's master can be regenerated, every case also compares CasparCG's decoded frame
+against **the picture before encoding** (`codec_master.py`). This one *does* include the codec's own
+loss, so it answers "NotchLC vs ProRes"-style questions. Gate 45 dB. Measured 2026-10-16, both
+mixers, 8/8 each:
+
+| route | decode vs master | mean error |
+| :--- | ---: | :--- |
+| CasparCG FFmpeg route | 50.4 dB | under 1 LSB |
+| CasparCG CUDA decoder | 48.0 dB | 0.77 LSB |
+| the same planes through BT.709 (the old behaviour) | 29.0 dB | ~5 LSB on saturated colour |
+
+So **NotchLC decoded correctly is "very close" territory**, not "heavily compressed". Two limits:
+only NotchLC has a regenerable master today (no other fixture's source is kept), and the check
+**confirms the master first** — it must match FFmpeg's decode of the fixture at 40 dB or more, or the
+check skips, so a replaced fixture cannot fail every decoder for a reason that has nothing to do with
+them. The master is opaque while the fixture carries an alpha ramp; the check compares colour only.
 
 ### SSIM — "does it look like the same picture?"
 
