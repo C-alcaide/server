@@ -247,7 +247,7 @@ When a comparison fails, these say *what kind* of wrong it is.
   frame-accuracy checks into exact comparisons — "the frame that came back IS frame 42" —
   rather than "the picture changed" (`frame_number.py::marker_bits`).
 * **Flaky tests.** Failure rates carry a **Wilson score interval**, so "15 of 15 passed" reads
-  honestly as "the failure rate is below about 18%" rather than "never fails". Two builds run
+  honestly as "the failure rate is below about 20%" rather than "never fails". Two builds run
   interleaved are compared with **Fisher's exact test**, to decide whether a change in flake
   rate is real (`flake_rate.py::wilson_interval`, `fisher_exact_two_sided`).
 * **Testing the tests.** A known bug is planted and the check must go red; a check that stays
@@ -291,3 +291,186 @@ no reference file, and therefore nothing upstream that could explain a differenc
    so that a red/blue swap cannot hide in it.
 4. **A test that cannot fail proves nothing** — which is why almost every check here comes
    with a control that must move.
+
+---
+
+## Appendix — more depth, with worked examples
+
+For readers who want to see the arithmetic. Nothing above depends on it. The code is quoted
+from the harness itself, trimmed of comments; the numbers were produced by running it.
+
+### A.1 What the harness is built on
+
+| library | what it is used for |
+| :--- | :--- |
+| **NumPy** | almost everything: 3×3 gamut matrices and their inverses, transfer curves, image differences and PSNR, LUT interpolation, the diagnostics |
+| Python's `math`, `statistics`, `fractions` | scalar arithmetic: projection identities, fp16 step sizes, exact frame-rate maths |
+| **scikit-image** | SSIM only (`skimage.metrics.structural_similarity`) |
+| **PyOpenColorIO** | the official OpenColorIO library, as the independent reference for the OCIO checks — pinned to the version the server links, so a library difference cannot read as an integration bug |
+| **Pillow**, **imageio**, **pypng** | reading and writing PNGs; imageio and pypng because they keep 16-bit precision |
+| **FFmpeg** (external program) | renders the reference frames for picture tests, and generates the test media |
+
+There is no SciPy: the two statistical tests in A.4 are a few lines of plain Python each.
+**None of the harness imports or reuses the server's code.** That is the point — a model that
+shares code with what it checks agrees with it by construction.
+
+### A.2 Worked example: deriving a gamut matrix
+
+Converting a colour from BT.709 (HD) to BT.2020 (UHD) is a 3×3 matrix. The server has its own
+copy of that matrix; the harness *derives* it from first principles instead, using only the
+numbers the standards publish:
+
+* each colour space's **primaries** — the chromaticity (x, y) of its pure red, green and blue;
+* its **white point** — both of these are D65, (0.3127, 0.3290).
+
+The recipe, in three steps:
+
+1. **RGB → XYZ for each space.** XYZ is the CIE's device-independent colour space. Put each
+   primary's chromaticity in a column, then scale the columns so that RGB (1, 1, 1) lands
+   exactly on the white point.
+2. **Adapt the white point** with the **Bradford** transform, if the two whites differ. It
+   converts to a cone-response space, scales each channel by the ratio of the two whites,
+   and converts back. For BT.709 → BT.2020 the whites are the same and this step is the
+   identity; for ACES (D60) → BT.709 (D65) it is not.
+3. **Chain them:** `M = (RGB→XYZ of the target)⁻¹ · Bradford · (RGB→XYZ of the source)`.
+
+```python
+# core/gamut_reference.py
+_BRADFORD = np.array([[ 0.8951, 0.2664, -0.1614],
+                      [-0.7502, 1.7135,  0.0367],
+                      [ 0.0389, -0.0685, 1.0296]])
+
+def _rgb_to_xyz(prim, wp):
+    (xr, yr), (xg, yg), (xb, yb) = prim
+    M = np.array([[xr / yr, xg / yg, xb / yb],
+                  [1.0, 1.0, 1.0],
+                  [(1 - xr - yr) / yr, (1 - xg - yg) / yg, (1 - xb - yb) / yb]])
+    xw, yw = wp
+    # scale each column so that RGB (1,1,1) maps onto the white point
+    return M * np.linalg.solve(M, np.array([xw / yw, 1.0, (1 - xw - yw) / yw]))
+
+def _adapt(src_wp, dst_wp):
+    f = lambda wp: np.array([wp[0] / wp[1], 1.0, (1 - wp[0] - wp[1]) / wp[1]])
+    a, b = _BRADFORD @ f(src_wp), _BRADFORD @ f(dst_wp)
+    return np.linalg.inv(_BRADFORD) @ np.diag(b / a) @ _BRADFORD
+
+def derived_matrix(src, dst):
+    pa, wa = PRIMARIES[src]
+    pb, wb = PRIMARIES[dst]
+    return np.linalg.inv(_rgb_to_xyz(pb, wb)) @ _adapt(wa, wb) @ _rgb_to_xyz(pa, wa)
+```
+
+Running it for BT.709 → BT.2020 gives:
+
+```
+[[0.627404  0.329283  0.043313]
+ [0.069097  0.919540  0.011362]
+ [0.016391  0.088013  0.895595]]
+```
+
+That is the matrix ITU-R publishes in **BT.2087** (0.6274 0.3293 0.0433 / 0.0691 0.9195 0.0114 /
+0.0164 0.0880 0.8956), reached without copying it. Two sanity checks anyone can do by eye:
+each row sums to 1.000 (white stays white), and the diagonal dominates (red stays mostly red).
+
+This is how four wrong matrices in the server were found: the derivation and OpenColorIO
+agreed with each other, and the server's constants agreed with neither. Note the limit,
+though — the server's wrong matrices **round-tripped perfectly** (converting there and back
+returned the original colour), because they were consistent inverses of each other. A round
+trip proves self-consistency; only an external reference proves correctness.
+
+### A.3 Worked example: one 1 LSB check
+
+A conformance battery plays a flat patch and asks the model what must come out. Here, an
+8-bit patch of RGB (200, 60, 30) — deliberately unequal channels, see §5 — on a BT.709
+source, converted to a BT.2020 output, both using the BT.709 transfer function:
+
+```python
+from core import color_math as cm
+
+signal   = (200/255, 60/255, 30/255)
+expected = cm.compute_expected_rgb(signal,
+                                   source_transfer="bt709", target_transfer="bt709",
+                                   source_gamut="bt709",    target_gamut="bt2020")
+[round(v * 255, 3) for v in expected]      # -> [166.728, 82.77, 46.858]
+```
+
+Inside `compute_expected_rgb` the steps are: decode the signal to linear light with the
+BT.709 transfer function, apply the A.2 matrix, re-encode with the target's transfer
+function, and scale to code values.
+
+The expected answer is a fraction, but a pixel can only hold a whole number, so the gate is
+`|captured − expected| ≤ 1` for each channel. For red that admits **166 or 167 and nothing
+else**. To illustrate the verdict (these captures are made up, not measured):
+
+| captured | red error | verdict |
+| :--- | ---: | :--- |
+| (167, 83, 47) | 0.27 | PASS — the nearest whole numbers to the model |
+| (166, 82, 46) | 0.73 | PASS — still adjacent to the exact answer |
+| (168, 83, 47) | 1.27 | **FAIL** — a value exists between this and the right answer |
+| (47, 83, 167) | 119.7 | **FAIL** — red and blue exchanged; a grey patch would have passed this |
+
+The real batteries run dozens of patches like this across every supported combination of
+colour space and transfer, on both mixers.
+
+### A.4 Why a Wilson interval, and not "k out of n"
+
+Some failures are intermittent, so the harness reruns a check and reports a failure *rate*.
+The obvious estimate — failures ÷ runs, plus or minus the textbook normal approximation —
+collapses at the edges: 15 passes out of 15 gives a failure rate of 0% **with zero
+uncertainty**, which claims far more than 15 runs can show.
+
+The **Wilson score interval** keeps an honest width at the edges:
+
+```python
+# core/flake_rate.py
+def wilson_interval(k, n, z=1.96):          # z = 1.96 -> a 95% interval
+    if n <= 0:
+        return (0.0, 1.0)
+    p = k / n
+    d = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / d
+    half = (z / d) * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return (max(0.0, centre - half), min(1.0, centre + half))
+```
+
+`wilson_interval(15, 15)` returns **(0.796, 1.000)**: the pass rate is at least about 80%, so
+the honest reading of "15 out of 15 passed" is **"the failure rate is below about 20%"** —
+not "it never fails". To get that bound under 5% takes 73 clean runs in a row.
+
+When two builds are compared ("did this fix make the flake rarer?"), the runs are
+interleaved — A, B, A, B — so that both see the same machine conditions, and the two counts
+go through **Fisher's exact test** (`fisher_exact_two_sided`). It is exact rather than
+approximate, which matters at the small counts these runs produce.
+
+### A.5 How PSNR and LSB relate
+
+PSNR and LSB are introduced separately in §2, but they are the same quantity seen two ways.
+PSNR is computed from the **mean squared error** (MSE):
+
+```python
+# core/comparator.py, compute_psnr
+mse = np.mean((a - b) ** 2)                 # a, b as float64
+if mse == 0:
+    return float('inf')
+max_val = 255.0 if img_a.dtype == np.uint8 else 65535.0
+return 10.0 * np.log10((max_val ** 2) / mse)
+```
+
+If **every** pixel is off by the same `e` LSB, then MSE = `e²` and PSNR = `20 · log10(255 / e)`:
+
+| uniform error | PSNR (8-bit) |
+| ---: | ---: |
+| 0.5 LSB | 54.2 dB |
+| **1 LSB** | **48.1 dB** |
+| 2 LSB | 42.1 dB |
+| 4 LSB | 36.1 dB |
+
+The same arithmetic gives the "+6 dB is twice as accurate" rule from §2: halving `e` adds
+`20 · log10(2) ≈ 6.02 dB`. On a 16-bit scale one step is 96.3 dB, because 65535 is 257 times
+255.
+
+**And this is why PSNR alone can mislead.** An MSE of 1 is also what you get when **one
+pixel in a thousand is off by 32 LSB** and the rest are exact (`0.001 × 31.6² = 1`). Both
+pictures score 48.1 dB, and only one of them has a visible fault. That is why result lines
+also print `max_diff` (§7), and why the diagnostics in §6.3 split a frame into regions
+instead of trusting one average.
