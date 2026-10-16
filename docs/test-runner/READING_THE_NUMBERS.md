@@ -76,32 +76,57 @@ Two things to know:
 * **It is a logarithmic scale**, so the steps are not linear. **Every +6 dB means the error
   halved.** A jump from 30 dB to 36 dB is not a 20% improvement — it is twice as accurate.
 
-A rough reading guide, for this pipeline:
+A rough reading guide, for two pictures that are meant to be the same:
 
-| PSNR | what it usually means here |
+| PSNR | what it usually means |
 | :--- | :--- |
 | `inf` | byte-for-byte identical |
 | 50 dB and up | effectively exact; differences are rounding only |
-| 40–50 dB | very close — a lossless or near-lossless codec round trip |
-| 30–40 dB | normal for a lossy codec (H.264, H.265, ProRes 422) |
-| 25–30 dB | expected only for heavily compressed or texture-compressed sources (HAP, NotchLC) |
-| below 25 dB | something is wrong, or the two images are not the same picture at all |
+| 40–50 dB | very close — rounding plus small differences in how chroma is upsampled or how YCbCr is converted to RGB |
+| 30–40 dB | a visible-on-inspection difference: worth explaining |
+| below 30 dB | the two were processed differently in some way that matters, or are not the same picture at all |
 
-This is why the pass mark is **not one number**. The tool picks the threshold from the codec,
-because a lossy codec cannot physically reach the score a PNG can
-(`parallel.py::_get_decoder_psnr_threshold`):
+#### What the per-codec decode gate measures — and what it does not
 
-| source | gate |
-| :--- | ---: |
-| PNG, TGA, TIFF | 50 dB |
-| QuickTime RLE, EXR | 45 dB |
-| ProRes 4444 | 40 dB |
-| ProRes 422 | 35 dB |
-| H.264, H.265, VP9, AV1, DNxHD, XDCAM | 30 dB |
-| HAP, NotchLC | 25 dB |
+The decode check compares **CasparCG's decode of a test file** against **FFmpeg's decode of
+the same file** (`parallel.py::_ensure_source_reference`). Both start from the same compressed
+bytes, so **the codec's compression loss is in both pictures and cancels out**. The score is
+how far apart two *decoders* are — never how lossy the *codec* is.
 
-Holding HAP to a PNG's standard would fail it forever for doing exactly what it is designed
-to do.
+**This section used to say the opposite**: that the gate varies by codec "because a lossy codec
+cannot physically reach the score a PNG can". That describes a different measurement — a
+decode compared against the original master before encoding — which the harness does not make
+today. Corrected 2026-10-16.
+
+The gates as they stand (`parallel.py::_get_decoder_psnr_threshold`), next to what was
+measured on this box (`data/results.db`, runs up to 2026-08-21):
+
+| source | gate | measured mean (runs) |
+| :--- | ---: | :--- |
+| PNG, TGA, TIFF | 50 dB | — |
+| QuickTime RLE, EXR | 45 dB | — |
+| ProRes 4444 | 40 dB | 49.9 dB (140) |
+| ProRes 422 | 35 dB | 47.5 dB (209) |
+| H.264, H.265, VP9, AV1, DNxHD, XDCAM | 30 dB | 37.5–51.0 dB depending on codec |
+| HAP | 25 dB | **nothing recorded** |
+| NotchLC | 25 dB | **27.5 dB** (105, CUDA decoder) / **28.2 dB** (114, CasparCG's FFmpeg route) |
+
+Read the gates as **"how well two decoders are expected to agree"**. The spread between codecs
+comes from things like bit depth, chroma subsampling and which YCbCr → RGB conversion each side
+applies.
+
+**HAP and NotchLC are an open question, not an expected value.** Their 25 dB gate does not mean
+those codecs are lossy (HAP is lossy by design, but that loss cancels here like any other; NotchLC
+is designed as a high-quality, ProRes-class codec). NotchLC's ~28 dB is suspicious for a specific
+reason: CasparCG's FFmpeg route uses **the same decoder** as the reference and still lands ~28 dB
+away, so the difference is almost certainly in the conversion to RGB, not in the decode. A
+candidate is already visible: NotchLC is missing from the high-bit-depth list in
+`_ensure_source_reference`, so its reference is extracted at 8 bits. Until that is investigated,
+treat the 25 dB as a gate fitted to an unexplained result, not as a property of the codec.
+
+**Measuring how lossy a codec is** would need a different check: each fixture's decode
+compared against the master it was encoded from. That is the number to quote for "NotchLC vs
+ProRes", and nothing here produces it yet.
 
 ### SSIM — "does it look like the same picture?"
 
@@ -285,8 +310,9 @@ no reference file, and therefore nothing upstream that could explain a differenc
 ## 8. If you remember four things
 
 1. **1 LSB = one step out of 255.** It means "exact", not "close enough".
-2. **dB is logarithmic and higher is better; +6 dB is twice as accurate.** The pass mark
-   depends on the codec, because lossy codecs cannot reach a lossless score.
+2. **dB is logarithmic and higher is better; +6 dB is twice as accurate.** The decode gate
+   compares two decoders of the same file, so it measures their agreement, not how lossy the
+   codec is.
 3. **SSIM is reported but never gates**, and it is the worst channel rather than the average
    so that a red/blue swap cannot hide in it.
 4. **A test that cannot fail proves nothing** — which is why almost every check here comes
